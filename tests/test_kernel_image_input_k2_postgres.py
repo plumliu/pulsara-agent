@@ -611,103 +611,32 @@ def test_typed_tool_results_commit_confirm_reuse_and_rollback_atomically(
         )
 
 
-def test_compaction_headroom_counts_one_snapshot_with_repeated_image_refs_once(
+def test_compaction_headroom_counts_summary_and_original_repeated_images_once_per_occurrence(
     stage2_migrated_postgres_database,
 ) -> None:
+    from tests.test_conversation_fork import compact
+
     repository = _repository(stage2_migrated_postgres_database)
     lease, runtime, _binding = _bound_session(repository)
-    intent, _accepted = _direct_intent(
-        repository,
-        lease,
-        runtime,
-        FrozenPromptContent((LLMTextPart("request"),)),
-    )
-    session_id = lease.guard.session_id
-    workspace_id = str(
-        _rows(
-            repository,
-            "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s",
-            (session_id,),
-        )[0]["workspace_id"]
-    )
-    snapshot_id = _id("snapshot")
-    revision_id = _id("binding")
-    body = InlineContent.from_bytes(
-        b"{}",
-        media_type="application/vnd.pulsara.context-snapshot+json",
-        codec="utf-8",
-    )
-    with repository.connection_provider.connection(
-        lane=PostgresConnectionLane.HOST_CONTROL,
-        row_factory=dict_row,
-        deadline_monotonic=monotonic() + 30,
-    ) as connection:
-        blob = PostgresCanonicalBlobStore.publish_in_connection(
-            connection,
-            validated_image=_image(_png(), workspace_id=workspace_id),
-            workspace_id=workspace_id,
-            content=_png(),
-            media_type="image/png",
-            codec="binary",
-        )
-        connection.execute(
-            """INSERT INTO pulsara_v3.context_snapshots (
-                 id, session_id, workspace_id, source_through_sequence,
-                 source_digest, compiler_contract, prompt_contract, model_contract,
-                 inline_content, blob_id, content_digest, content_size,
-                 content_media_type, content_codec
-               ) VALUES (%s,%s,%s,0,%s,'compiler','prompt','model',%s,NULL,%s,%s,%s,%s)""",
-            (
-                snapshot_id,
-                session_id,
-                workspace_id,
-                "sha256:" + "7" * 64,
-                body.canonical_bytes,
-                body.digest,
-                body.size,
-                body.media_type,
-                body.codec,
-            ),
-        )
-        insert_canonical_prompt_refs(
-            connection,
-            session_id=session_id,
-            workspace_id=workspace_id,
-            image_blob_ids=(blob.blob_id, blob.blob_id),
-            context_snapshot_id=snapshot_id,
-        )
-        connection.execute(
-            """INSERT INTO pulsara_v3.turn_context_binding_revisions (
-                 id, session_id, turn_id, revision_ordinal, base_kind,
-                 context_snapshot_id, source_through_sequence
-               ) VALUES (%s,%s,%s,1,'SNAPSHOT',%s,0)""",
-            (revision_id, session_id, intent.turn_id, snapshot_id),
-        )
-        connection.execute(
-            """UPDATE pulsara_v3.turns
-               SET current_context_binding_revision_id=%s
-               WHERE session_id=%s AND id=%s""",
-            (revision_id, session_id, intent.turn_id),
-        )
-
+    image = _image(_png(), workspace_id=_workspace(repository, lease))
+    content = FrozenPromptContent((LLMTextPart("request"), image, image))
+    intent, accepted = _direct_intent(repository, lease, runtime, content)
+    carrier = compact(repository, lease.guard, intent.turn_id, 1)
+    assert carrier.retained_entry_ids == (intent.entry_id,)
+    assert _rows(repository, "SELECT 1 FROM information_schema.columns WHERE table_schema='pulsara_v3' AND table_name='canonical_image_refs' AND column_name='context_snapshot_id'") == []
+    refs = _rows(repository, "SELECT ref_ordinal,blob_id FROM pulsara_v3.canonical_image_refs WHERE session_id=%s AND transcript_entry_id=%s ORDER BY ref_ordinal", (lease.guard.session_id, intent.entry_id))
+    assert [ref["ref_ordinal"] for ref in refs] == [0, 1]
+    assert refs[0]["blob_id"] == refs[1]["blob_id"]
     cut = repository.prepare_provider_input_cut(
-        lease.guard,
-        turn_id=intent.turn_id,
-        deadline_monotonic=monotonic() + 30,
+        lease.guard, turn_id=intent.turn_id, deadline_monotonic=monotonic() + 30,
     )
-    quote = CanonicalProviderInputReader(
-        repository.connection_provider
-    ).read_compaction_headroom_preflight(
-        cut,
-        deadline_monotonic=monotonic() + 30,
-    )
-
-    # One snapshot base plus one USER entry. Repeated image occurrences charge
-    # bytes twice, but they never multiply the snapshot's item cardinality.
+    reader = CanonicalProviderInputReader(repository.connection_provider)
+    quote = reader.read_compaction_headroom_preflight(cut, deadline_monotonic=monotonic() + 30)
+    frozen = reader.read_frozen_snapshot(cut, deadline_monotonic=monotonic() + 30)
     assert quote.selected_item_count == 2
-    assert quote.selected_canonical_expanded_bytes >= (
-        body.size + 2 * blob.size
-    )
+    assert quote.selected_canonical_expanded_bytes == len(carrier.body) + freeze_canonical_prompt(content).resource_quote.canonical_expanded_bytes
+    assert [item.source_entry_id for item in frozen.items] == [None, intent.entry_id]
+    assert frozen.items[1].content == content.parts
 
 
 def test_full_confirmation_reads_body_blob_but_not_image_payload(
@@ -1037,31 +966,45 @@ def test_direct_publication_rolls_back_body_image_refs_and_command_together(
     assert tuple(counts.values()) == (0, 0, 0, 0)
 
 
+def _insert_gc_queue_owner(connection, *, owner_id, session_id, workspace_id, turn_id, image):
+    prompt = freeze_canonical_prompt(FrozenPromptContent((image,)))
+    body = InlineContent.from_bytes(prompt.body, media_type="application/vnd.pulsara.prompt+json", codec="utf-8")
+    connection.execute(
+        """INSERT INTO pulsara_v3.prompt_queue_items (
+            id, session_id, workspace_id, queue_sequence, delivery_mode, input_origin,
+            source_session_id, target_turn_id, status, inline_content, content_digest,
+            content_size, content_media_type, content_codec
+        ) VALUES (%s,%s,%s,(SELECT COALESCE(MAX(queue_sequence),0)+1 FROM pulsara_v3.prompt_queue_items WHERE session_id=%s),
+            'STEER_ACTIVE_TURN','AGENT_MESSAGE',%s,%s,'PENDING',%s,%s,%s,%s,%s)""",
+        (owner_id, session_id, workspace_id, session_id, session_id, turn_id,
+            body.canonical_bytes, body.digest, body.size, body.media_type, body.codec),
+    )
+
+
 def test_image_ref_fk_gc_commit_orders_cascade_scope_and_runtime_grants(
     stage2_migrated_postgres_database,
 ) -> None:
     repository = _repository(stage2_migrated_postgres_database)
-    lease, _runtime, _binding = _bound_session(repository)
+    lease, runtime, _binding = _bound_session(repository)
     session_id = lease.guard.session_id
     workspace_id = _rows(
         repository,
         "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s",
         (session_id,),
     )[0]["workspace_id"]
-    child_lease, _child_runtime, _child_binding = _bound_session(
+    child_lease, child_runtime, _child_binding = _bound_session(
         repository, workspace_id=str(workspace_id)
     )
+    root_intent, _ = _direct_intent(repository, lease, runtime, FrozenPromptContent.text("queue owner target"))
+    child_intent, _ = _direct_intent(repository, child_lease, child_runtime, FrozenPromptContent.text("queue owner target"))
     provider = repository.connection_provider
     store = PostgresCanonicalBlobStore(provider)
     payload = _png()
 
     # Attach commits first on one caller-owned connection; GC on another
     # connection must retain the blob until deleting the real owner cascades.
-    snapshot_id = _id("snapshot")
-    child_snapshot_id = _id("snapshot")
-    body = InlineContent.from_bytes(
-        b"{}", media_type="application/vnd.pulsara.context-snapshot+json", codec="utf-8"
-    )
+    owner_id = _id("queue")
+    child_owner_id = _id("queue")
     with provider.connection(
         lane=PostgresConnectionLane.HOST_CONTROL,
         row_factory=dict_row,
@@ -1075,57 +1018,21 @@ def test_image_ref_fk_gc_commit_orders_cascade_scope_and_runtime_grants(
             media_type="image/png",
             codec="binary",
         )
-        attach.execute(
-            """INSERT INTO pulsara_v3.context_snapshots (
-                 id, session_id, workspace_id, source_through_sequence,
-                 source_digest, compiler_contract, prompt_contract, model_contract,
-                 inline_content, blob_id, content_digest, content_size,
-                 content_media_type, content_codec
-               ) VALUES (%s,%s,%s,0,%s,'compiler','prompt','model',%s,NULL,%s,%s,%s,%s)""",
-            (
-                snapshot_id,
-                session_id,
-                workspace_id,
-                "sha256:" + "1" * 64,
-                body.canonical_bytes,
-                body.digest,
-                body.size,
-                body.media_type,
-                body.codec,
-            ),
-        )
+        _insert_gc_queue_owner(attach, owner_id=owner_id, session_id=session_id, workspace_id=workspace_id, turn_id=root_intent.turn_id, image=_image(payload, workspace_id=str(workspace_id)))
         insert_canonical_prompt_refs(
             attach,
             session_id=session_id,
             workspace_id=str(workspace_id),
             image_blob_ids=(blob.blob_id,),
-            context_snapshot_id=snapshot_id,
+            queue_item_id=owner_id,
         )
-        attach.execute(
-            """INSERT INTO pulsara_v3.context_snapshots (
-                 id, session_id, workspace_id, source_through_sequence,
-                 source_digest, compiler_contract, prompt_contract, model_contract,
-                 inline_content, blob_id, content_digest, content_size,
-                 content_media_type, content_codec
-               ) VALUES (%s,%s,%s,0,%s,'compiler','prompt','model',%s,NULL,%s,%s,%s,%s)""",
-            (
-                child_snapshot_id,
-                child_lease.guard.session_id,
-                workspace_id,
-                "sha256:" + "3" * 64,
-                body.canonical_bytes,
-                body.digest,
-                body.size,
-                body.media_type,
-                body.codec,
-            ),
-        )
+        _insert_gc_queue_owner(attach, owner_id=child_owner_id, session_id=child_lease.guard.session_id, workspace_id=workspace_id, turn_id=child_intent.turn_id, image=_image(payload, workspace_id=str(workspace_id)))
         insert_canonical_prompt_refs(
             attach,
             session_id=child_lease.guard.session_id,
             workspace_id=str(workspace_id),
             image_blob_ids=(blob.blob_id,),
-            context_snapshot_id=child_snapshot_id,
+            queue_item_id=child_owner_id,
         )
     with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as admin:
         admin.execute(
@@ -1137,11 +1044,11 @@ def test_image_ref_fk_gc_commit_orders_cascade_scope_and_runtime_grants(
         deadline_monotonic=monotonic() + 30,
     )
     with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as admin:
-        admin.execute("DELETE FROM pulsara_v3.context_snapshots WHERE id=%s", (snapshot_id,))
+        admin.execute("DELETE FROM pulsara_v3.prompt_queue_items WHERE id=%s", (owner_id,))
     assert _rows(
         repository,
-        "SELECT 1 FROM pulsara_v3.canonical_image_refs WHERE context_snapshot_id=%s",
-        (snapshot_id,),
+        "SELECT 1 FROM pulsara_v3.canonical_image_refs WHERE queue_item_id=%s",
+        (owner_id,),
     ) == []
     assert blob.blob_id not in store.delete_orphans(
         grace_seconds=1,
@@ -1149,13 +1056,13 @@ def test_image_ref_fk_gc_commit_orders_cascade_scope_and_runtime_grants(
     )
     assert _rows(
         repository,
-        "SELECT blob_id FROM pulsara_v3.canonical_image_refs WHERE context_snapshot_id=%s",
-        (child_snapshot_id,),
+        "SELECT blob_id FROM pulsara_v3.canonical_image_refs WHERE queue_item_id=%s",
+        (child_owner_id,),
     ) == [{"blob_id": blob.blob_id}]
     with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as admin:
         admin.execute(
-            "DELETE FROM pulsara_v3.context_snapshots WHERE id=%s",
-            (child_snapshot_id,),
+            "DELETE FROM pulsara_v3.prompt_queue_items WHERE id=%s",
+            (child_owner_id,),
         )
     assert blob.blob_id in store.delete_orphans(
         grace_seconds=1,
@@ -1185,42 +1092,24 @@ def test_image_ref_fk_gc_commit_orders_cascade_scope_and_runtime_grants(
         grace_seconds=1,
         deadline_monotonic=monotonic() + 30,
     )
-    failed_owner = _id("snapshot")
+    failed_owner = _id("queue")
     with pytest.raises(psycopg.errors.ForeignKeyViolation):
         with provider.connection(
             lane=PostgresConnectionLane.HOST_CONTROL,
             row_factory=dict_row,
             deadline_monotonic=monotonic() + 30,
         ) as stale_attach:
-            stale_attach.execute(
-                """INSERT INTO pulsara_v3.context_snapshots (
-                     id, session_id, workspace_id, source_through_sequence,
-                     source_digest, compiler_contract, prompt_contract, model_contract,
-                     inline_content, blob_id, content_digest, content_size,
-                     content_media_type, content_codec
-                   ) VALUES (%s,%s,%s,0,%s,'compiler','prompt','model',%s,NULL,%s,%s,%s,%s)""",
-                (
-                    failed_owner,
-                    session_id,
-                    workspace_id,
-                    "sha256:" + "2" * 64,
-                    body.canonical_bytes,
-                    body.digest,
-                    body.size,
-                    body.media_type,
-                    body.codec,
-                ),
-            )
+            _insert_gc_queue_owner(stale_attach, owner_id=failed_owner, session_id=session_id, workspace_id=workspace_id, turn_id=root_intent.turn_id, image=_image(payload, workspace_id=str(workspace_id)))
             insert_canonical_prompt_refs(
                 stale_attach,
                 session_id=session_id,
                 workspace_id=str(workspace_id),
                 image_blob_ids=(deleted.blob_id,),
-                context_snapshot_id=failed_owner,
+                queue_item_id=failed_owner,
             )
     assert _rows(
         repository,
-        "SELECT 1 FROM pulsara_v3.context_snapshots WHERE id=%s",
+        "SELECT 1 FROM pulsara_v3.prompt_queue_items WHERE id=%s",
         (failed_owner,),
     ) == []
 
@@ -1244,7 +1133,7 @@ def test_image_ref_gc_and_old_blob_attach_overlap_in_both_commit_orders(
     stage2_migrated_postgres_database,
 ) -> None:
     repository = _repository(stage2_migrated_postgres_database)
-    lease, _runtime, _binding = _bound_session(repository)
+    lease, runtime, _binding = _bound_session(repository)
     session_id = lease.guard.session_id
     workspace_id = str(
         _rows(
@@ -1253,34 +1142,13 @@ def test_image_ref_gc_and_old_blob_attach_overlap_in_both_commit_orders(
             (session_id,),
         )[0]["workspace_id"]
     )
+    root_intent, _ = _direct_intent(repository, lease, runtime, FrozenPromptContent.text("queue owner target"))
     runtime_dsn = stage2_migrated_postgres_database.runtime_dsn
     admin_dsn = stage2_migrated_postgres_database.admin_dsn
-    body = InlineContent.from_bytes(
-        b"{}",
-        media_type="application/vnd.pulsara.context-snapshot+json",
-        codec="utf-8",
-    )
-
-    def insert_snapshot(connection, snapshot_id: str, source_digest: str) -> None:
-        connection.execute(
-            """INSERT INTO pulsara_v3.context_snapshots (
-                 id, session_id, workspace_id, source_through_sequence,
-                 source_digest, compiler_contract, prompt_contract, model_contract,
-                 inline_content, blob_id, content_digest, content_size,
-                 content_media_type, content_codec
-               ) VALUES (%s,%s,%s,0,%s,'compiler','prompt','model',%s,NULL,%s,%s,%s,%s)""",
-            (
-                snapshot_id,
-                session_id,
-                workspace_id,
-                source_digest,
-                body.canonical_bytes,
-                body.digest,
-                body.size,
-                body.media_type,
-                body.codec,
-            ),
-        )
+    def insert_owner(connection, owner_id, payload):
+        _insert_gc_queue_owner(connection, owner_id=owner_id, session_id=session_id,
+            workspace_id=workspace_id, turn_id=root_intent.turn_id,
+            image=_image(payload, workspace_id=workspace_id))
 
     def age(blob_id: str) -> None:
         with psycopg.connect(admin_dsn) as connection:
@@ -1310,7 +1178,7 @@ def test_image_ref_gc_and_old_blob_attach_overlap_in_both_commit_orders(
 
     # The attach transaction exact-reuses an already committed orphan blob and
     # publishes its owner ref before commit. A concurrent GC statement sees the
-    # old snapshot, blocks on the FK lock, and cannot commit the deletion after
+    # old row, blocks on the FK lock, and cannot commit the deletion after
     # attach wins.
     attach_first_payload = _png() + b"attach-first"
     with psycopg.connect(runtime_dsn, row_factory=dict_row) as publication:
@@ -1323,7 +1191,7 @@ def test_image_ref_gc_and_old_blob_attach_overlap_in_both_commit_orders(
             codec="binary",
         )
     age(attach_first_blob.blob_id)
-    attach_first_owner = _id("snapshot")
+    attach_first_owner = _id("queue")
 
     def competing_gc() -> tuple[str, ...]:
         with psycopg.connect(
@@ -1347,13 +1215,13 @@ def test_image_ref_gc_and_old_blob_attach_overlap_in_both_commit_orders(
             codec="binary",
         )
         assert reused.blob_id == attach_first_blob.blob_id
-        insert_snapshot(attach, attach_first_owner, "sha256:" + "4" * 64)
+        insert_owner(attach, attach_first_owner, attach_first_payload)
         insert_canonical_prompt_refs(
             attach,
             session_id=session_id,
             workspace_id=workspace_id,
             image_blob_ids=(reused.blob_id,),
-            context_snapshot_id=attach_first_owner,
+            queue_item_id=attach_first_owner,
         )
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(competing_gc)
@@ -1366,7 +1234,7 @@ def test_image_ref_gc_and_old_blob_attach_overlap_in_both_commit_orders(
         """SELECT r.blob_id, b.body
            FROM pulsara_v3.canonical_image_refs r
            JOIN pulsara_v3.blobs b ON b.id=r.blob_id
-           WHERE r.context_snapshot_id=%s""",
+           WHERE r.queue_item_id=%s""",
         (attach_first_owner,),
     ) == [{"blob_id": attach_first_blob.blob_id, "body": attach_first_payload}]
 
@@ -1386,7 +1254,7 @@ def test_image_ref_gc_and_old_blob_attach_overlap_in_both_commit_orders(
     age(delete_first_blob.blob_id)
     gc_deleted = Event()
     allow_gc_commit = Event()
-    delete_first_owner = _id("snapshot")
+    delete_first_owner = _id("queue")
 
     def held_gc() -> tuple[str, ...]:
         with psycopg.connect(
@@ -1410,13 +1278,13 @@ def test_image_ref_gc_and_old_blob_attach_overlap_in_both_commit_orders(
             row_factory=dict_row,
             application_name="k2-stale-attach-delete-first",
         ) as connection:
-            insert_snapshot(connection, delete_first_owner, "sha256:" + "5" * 64)
+            insert_owner(connection, delete_first_owner, delete_first_payload)
             insert_canonical_prompt_refs(
                 connection,
                 session_id=session_id,
                 workspace_id=workspace_id,
                 image_blob_ids=(delete_first_blob.blob_id,),
-                context_snapshot_id=delete_first_owner,
+                queue_item_id=delete_first_owner,
             )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -1430,7 +1298,7 @@ def test_image_ref_gc_and_old_blob_attach_overlap_in_both_commit_orders(
             attach_future.result(timeout=10)
     assert _rows(
         repository,
-        "SELECT 1 FROM pulsara_v3.context_snapshots WHERE id=%s",
+        "SELECT 1 FROM pulsara_v3.prompt_queue_items WHERE id=%s",
         (delete_first_owner,),
     ) == []
     assert _rows(

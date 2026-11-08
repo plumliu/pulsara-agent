@@ -36,7 +36,6 @@ from pulsara_agent.conversation_kernel.prompt_storage import (
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from pulsara_agent.model_input.contracts import (
-    FrozenRetainedHistoricalRequest,
     FrozenProviderInputItemKind,
     CanonicalInputOriginKind,
 )
@@ -140,20 +139,9 @@ def test_compacted_fork_preserves_quote_with_absent_source(repo):
         "SELECT entry_sequence FROM pulsara_v3.transcript_entries WHERE id=%s",
         (anchor,),
     )[0]["entry_sequence"]
-    retained = FrozenRetainedHistoricalRequest(
-        FrozenProviderInputItemKind.USER,
-        CanonicalInputOriginKind.HUMAN_MESSAGE,
-        content,
-    )
-    compact(
-        repo,
-        guard,
-        turn_id,
-        sequence,
-        idle=True,
-        retained_historical_requests=(retained,),
-    )
-    # A final after the compacted base is the fork anchor; earlier originals aren't imported.
+    original_entry = read_content(repo, guard.session_id)[-1][0]["id"]
+    compact(repo, guard, turn_id, sequence, idle=True, retained_entry_ids=(original_entry,))
+    # The retained USER row is imported; its excluded annotation source is not.
     _, _, anchor = turn(repo, guard, "继续")
     result = fork(repo, guard.session_id, anchor)
     assert result.created, result
@@ -169,7 +157,9 @@ def test_compacted_fork_preserves_quote_with_absent_source(repo):
         carrier = hydrate_canonical_snapshot_owner(
             connection, row=snapshot, context_snapshot_id=snapshot["id"]
         )
-        part = carrier.retained_historical_requests[0].content.parts[0]
+        assert len(carrier.retained_entry_ids) == 1
+        copied = next(content for row, content in read_content(repo, result.child_session_id) if row["id"] == carrier.retained_entry_ids[0])
+        part = copied.parts[0]
         assert part.source is None and part.quote == "旧回复"
 
 

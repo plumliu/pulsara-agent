@@ -354,11 +354,25 @@ def test_css_author_pause_and_running_still_work_after_host_resume(page: Page) -
     assert frame.evaluate("document.querySelector('#box').getAnimations()[0].playState") == "paused"
     page.wait_for_timeout(160)
     assert frame.evaluate("document.querySelector('#box').getAnimations()[0].currentTime") == pytest.approx(stopped, abs=2)
-    frame.locator("#box").evaluate("el=>el.style.animationPlayState='running'")
+    running = frame.locator("#box").evaluate("""el => {
+        el.style.animationPlayState = 'running';
+        const animation = el.getAnimations()[0];
+        return {time: animation.currentTime, timeline: document.timeline.currentTime};
+    }""")
+    assert running["time"] == pytest.approx(stopped, abs=2)
     page.wait_for_timeout(120)
-    resumed = frame.evaluate("document.querySelector('#box').getAnimations()[0].currentTime")
-    assert 40 < resumed - stopped < 220
-    assert frame.evaluate("document.querySelector('#box').getAnimations()[0].playState") == "running"
+    resumed = frame.evaluate("""() => {
+        const animation = document.querySelector('#box').getAnimations()[0];
+        return {time: animation.currentTime, timeline: document.timeline.currentTime,
+            state: animation.playState, rate: animation.playbackRate};
+    }""")
+    # Both samples use the animation's document clock: a busy browser can take
+    # longer than the host's requested wait to execute the observation.
+    elapsed = resumed["timeline"] - running["timeline"]
+    advancement = resumed["time"] - running["time"]
+    assert advancement > 40
+    assert advancement == pytest.approx(elapsed, abs=100)
+    assert resumed["state"] == "running" and resumed["rate"] == 1
 
 
 def test_css_hidden_rate_reverse_and_author_pause_intents_survive_resume(page: Page) -> None:

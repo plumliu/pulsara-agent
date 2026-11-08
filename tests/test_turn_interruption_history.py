@@ -478,7 +478,7 @@ def test_actual_summary_candidates_quote_selected_endings_and_repair_reuses_them
     )
     owner = HostCompactionRuntimeOwner(
         policy=ResolvedCompactionPolicy(
-            automatic_enabled=False, manual_enabled=False, minimum_reclaim_tokens=1
+            automatic_enabled=False, manual_enabled=False
         )
     )
     runner = ConversationKernelRunner(
@@ -498,9 +498,16 @@ def test_actual_summary_candidates_quote_selected_endings_and_repair_reuses_them
         workspace_id=workspace_id,
     )
     prepared = []
+    frozen_reads = []
+    select_summary = runner.compaction._select_summary
+
+    async def record_frozen_source(**kwargs):
+        frozen_reads.append(kwargs["compaction_read"])
+        return await select_summary(**kwargs)
+
+    monkeypatch.setattr(runner.compaction, "_select_summary", record_frozen_source)
     for name in (
         "prepare_compaction_summary_semantic",
-        "prepare_destination_projection_summary_semantic",
     ):
         original = getattr(coordinator, name)
 
@@ -541,7 +548,7 @@ def test_actual_summary_candidates_quote_selected_endings_and_repair_reuses_them
                 owner.policy,
                 automatic_enabled=True,
                 auto_trigger_ratio=0.10,
-                post_compaction_target_ratio=0.08,
+
             )
         else:
             active[0] = destination
@@ -585,13 +592,12 @@ def test_actual_summary_candidates_quote_selected_endings_and_repair_reuses_them
         == ("source-notice" if route != "destination" else "destination-notice")
         for call in model.summary_transport.calls
     )
-    # Same-target history keeps the imported ending. A destination projection
-    # omits the old group that cannot fit, while selected executed history keeps
-    # its own ending without pretending it belongs to the new RUNNING turn.
+    # Lifecycle notices follow the material actually selected for H/R, including
+    # full sources and projected sources; repair reuses that exact source.
     initial = join_text_content(contexts[-2].messages[-1].content)
     repair_messages = contexts[-1].messages
     assert "USER_STOPPED" in initial
-    assert ("OLD_IMPORTED_END" in initial) == (route != "destination")
+    assert "OLD_IMPORTED_END" in initial
     assert tuple(repair_messages[: len(contexts[-2].messages)]) == tuple(
         contexts[-2].messages
     )
@@ -613,32 +619,40 @@ def test_actual_summary_candidates_quote_selected_endings_and_repair_reuses_them
             )[1].split("\nPreserve necessary")[0]
         )
         proof = semantic.source_proof
-        if hasattr(proof, "projection"):
+        canonical = proof.source_view.canonical_dispatch_read.compile_snapshot.canonical_input
+        mapping = {item.source_entry_id: item.source_entry_sequence for item in canonical.items}
+        if proof.projection is not None:
             sequences = {
                 seq
                 for unit in proof.projection.units
                 for seq in unit.source_entry_sequences
             }
+            sequences.update(mapping.get(proof.source_projection.message_placements[index].origin_entry_id) for index in proof.reference_message_indices)
         else:
-            placements = proof.source_projection.message_placements[
-                : proof.prefix_proof.summary_prefix_message_count
-            ]
+            placements = tuple(proof.source_projection.message_placements[index] for index in proof.source_message_indices)
             canonical = proof.source_view.canonical_dispatch_read.compile_snapshot.canonical_input
             mapping = {
                 i.source_entry_id: i.source_entry_sequence for i in canonical.items
             }
             sequences = {mapping.get(p.origin_entry_id) for p in placements}
-        assert all(
-            n["display_after_entry_sequence"] in sequences
-            for n in (
-                *payload["selected_imported_history"],
-                *payload["selected_executed_history"],
-            )
-        )
+        from dataclasses import asdict
+        frozen = next(read for read in frozen_reads if read.dispatch_read == proof.source_view.canonical_dispatch_read)
+        if proof.projection is None:
+            expected_imported = [asdict(notice) for notice in frozen.imported_interruptions if notice.display_after_entry_sequence in sequences]
+            expected_executed = [asdict(notice) for notice in frozen.executed_history_interruptions if notice.display_after_entry_sequence in sequences]
+        else:
+            # P(H) may preserve a canonical lifecycle fact while omitting its old body.
+            # Its exact owner, H boundary and read scope still govern that metadata.
+            history_ceiling = min(proof.prefix_proof.source_through_sequence, proof.read_through_sequence)
+            reference_sequences = {mapping.get(proof.source_projection.message_placements[index].origin_entry_id) for index in proof.reference_message_indices}
+            def included(notice):
+                return notice.display_after_entry_sequence <= proof.read_through_sequence and (notice.display_after_entry_sequence <= history_ceiling or notice.display_after_entry_sequence in reference_sequences)
+            expected_imported = [asdict(notice) for notice in frozen.imported_interruptions if included(notice)]
+            expected_executed = [asdict(notice) for notice in frozen.executed_history_interruptions if included(notice)]
+        assert payload["selected_imported_history"] == expected_imported
+        assert payload["selected_executed_history"] == expected_executed
         assert payload["current_source_turn"] is None
-        assert any(
-            n["reason"] == "USER_STOPPED" for n in payload["selected_executed_history"]
-        )
+        assert all(notice["display_after_entry_sequence"] <= proof.read_through_sequence for notice in (*expected_imported, *expected_executed))
     assert (
         len(
             snapshot(

@@ -21,13 +21,10 @@ from pulsara_agent.conversation_kernel.vocabulary import (
 )
 from pulsara_agent.model_input.contracts import (
     CanonicalInputOriginKind,
-    CompactionActiveRequestLocation,
     CompactionContinuationMode,
     CompactionSnapshotCarrier,
-    FrozenCompactionActiveRequest,
     FrozenProviderInputItemKind,
     FrozenProviderInputItem,
-    FrozenRetainedHistoricalRequest,
     LateToolOutcomeObservation,
     ModelInputCompileBinding,
     ModelInputScopeKind,
@@ -37,6 +34,7 @@ from pulsara_agent.model_input.contracts import (
     provider_input_item_fingerprint,
     provider_input_item_logical_utf8_bytes,
     provider_tool_result_closure_leaf,
+    validate_compaction_request_shape,
 )
 from pulsara_agent.model_input.continuity import (
     FrozenProviderInputEpochView,
@@ -69,10 +67,10 @@ from pulsara_agent.primitives.context import (
 COMPACTION_SOURCE_LINEAGE_CONTRACT = "pulsara.compaction-source-lineage.v1"
 COMPACTION_CANONICAL_RANGE_CONTRACT = "pulsara.compaction-canonical-range.v1"
 COMPACTION_SNAPSHOT_COMPILER_CONTRACT = (
-    "pulsara.context-snapshot-carrier.v4-typed-content"
+    "pulsara.context-snapshot-carrier.v5-canonical-refs"
 )
 COMPACTION_SUMMARY_PROMPT_CONTRACT = (
-    "pulsara.context-compaction-summary.v6-optional-retention"
+    "pulsara.context-compaction-summary.v7-unified-history-retention"
 )
 COMPACTION_MODEL_CONTRACT = "pulsara.primary-model-compaction.v1"
 CONTEXT_SNAPSHOT_MEDIA_TYPE = "application/vnd.pulsara.context-snapshot+json"
@@ -100,6 +98,7 @@ class CompactionTrigger(StrEnum):
     AUTO_ACTIVE_CONTEXT = "AUTO_ACTIVE_CONTEXT"
     MID_TURN_FOLLOWUP = "MID_TURN_FOLLOWUP"
     MODEL_SWITCH_HANDOVER = "MODEL_SWITCH_HANDOVER"
+    HTTP_413_RECOVERY = "HTTP_413_RECOVERY"
 
 
 class CompactionTargetBranch(StrEnum):
@@ -230,6 +229,7 @@ def manual_compaction_snapshot_id(*, session_id: str, command_id: str) -> str:
 class CompactionSourceCompatibility(StrEnum):
     EMPTY_COLD = "EMPTY_COLD"
     COMPATIBLE_APPEND = "COMPATIBLE_APPEND"
+    INDEPENDENT_AUXILIARY = "INDEPENDENT_AUXILIARY"
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,10 +238,7 @@ class ResolvedCompactionPolicy:
     automatic_enabled: bool = True
     manual_enabled: bool = True
     auto_trigger_ratio: float = 0.85
-    post_compaction_target_ratio: float = 0.55
-    minimum_reclaim_tokens: int = 16_384
     maximum_retained_tool_groups: int = 3
-    maximum_retained_tail_utf8_bytes: int = 2 << 20
     maximum_recent_human_messages: int = 3
     maximum_recent_human_text_utf8_bytes: int = 65_536
     planning_attempt_seconds: float = 120.0
@@ -250,16 +247,10 @@ class ResolvedCompactionPolicy:
     def __post_init__(self) -> None:
         if not 0 < self.auto_trigger_ratio < 1:
             raise ValueError("compaction trigger ratio must be between zero and one")
-        if not 0 < self.post_compaction_target_ratio < self.auto_trigger_ratio:
-            raise ValueError("compaction target must be below its trigger")
-        if self.minimum_reclaim_tokens < 1:
-            raise ValueError("compaction minimum reclaim must be positive")
         if self.maximum_retained_tool_groups < 1:
             raise ValueError("retained tool-group policy must be positive")
         if self.maximum_recent_human_messages < 1:
             raise ValueError("recent human-message policy must be positive")
-        if self.maximum_retained_tail_utf8_bytes < 1:
-            raise ValueError("retained-tail byte bound is invalid")
         if self.planning_attempt_seconds <= 0:
             raise ValueError("compaction planning watchdog must be positive")
         if self.maximum_consecutive_auto_failures != 3:
@@ -598,6 +589,7 @@ class FrozenCompactionCanonicalRange:
     closures: tuple[ProviderToolResultClosure, ...] = field(repr=False)
     late_outcomes: tuple[LateToolOutcomeObservation, ...] = field(repr=False)
     canonical_utf8_bytes: int
+    retained_entry_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -607,14 +599,38 @@ class FrozenCompactionCanonicalRange:
             or self.canonical_utf8_bytes < 0
         ):
             raise ValueError("compaction canonical range coordinate is invalid")
+        if not isinstance(self.retained_entry_ids, tuple) or len(
+            set(self.retained_entry_ids)
+        ) != len(self.retained_entry_ids):
+            raise ValueError("compaction retained references must be unique and ordered")
+        retained_ids = set(self.retained_entry_ids)
+        found_retained: list[str] = []
+        previous_retained_sequence = -1
         for item in self.ordered_items:
             sequence = item.source_entry_sequence
-            if sequence is None or not (
-                self.effective_materialization_lineage_floor
-                < sequence
-                <= self.source_through_sequence
+            if (
+                sequence is None
+                or sequence > self.source_through_sequence
+                or item.item_kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT
             ):
                 raise ValueError("compaction range contains an out-of-cut item")
+            if sequence <= self.effective_materialization_lineage_floor:
+                if item.source_entry_id not in retained_ids:
+                    raise ValueError("compaction prefix item lacks an explicit reference")
+                if sequence <= previous_retained_sequence:
+                    raise ValueError("compaction retained rows are not in source order")
+                previous_retained_sequence = sequence
+                validate_compaction_request_shape(
+                    item_kind=item.item_kind,
+                    input_origin=item.input_origin,
+                    active=False,
+                    has_image=any(isinstance(part, LLMImagePart) for part in item.content),
+                )
+                found_retained.append(item.source_entry_id)
+            elif item.source_entry_id in retained_ids:
+                raise ValueError("compaction retained reference points into suffix")
+        if tuple(found_retained) != self.retained_entry_ids:
+            raise ValueError("compaction retained references do not exact-join original rows")
 
 
 @dataclass(frozen=True, slots=True)
@@ -657,6 +673,11 @@ class FrozenCompactionCanonicalRead:
             for n in self.executed_history_interruptions
         ):
             raise ValueError("compaction executed history interruption is out of cut")
+        carrier = self.snapshot_carrier
+        if self.safe_head_range.retained_entry_ids != (
+            () if carrier is None else carrier.retained_entry_ids
+        ):
+            raise ValueError("compaction range retained references differ from its base")
         identity = self.dispatch_read.compile_snapshot.canonical_input.identity
         consumed = self.latest_assistant_input_through_sequence
         if consumed is not None and (
@@ -744,13 +765,19 @@ def freeze_compaction_canonical_range(
     closures: tuple[ProviderToolResultClosure, ...],
     late_outcomes: tuple[LateToolOutcomeObservation, ...],
 ) -> FrozenCompactionCanonicalRange:
+    carrier = _canonical_snapshot_carrier(ordered_items)
+    retained_entry_ids = () if carrier is None else carrier.retained_entry_ids
+    retained_ids = set(retained_entry_ids)
     selected = tuple(
         item
         for item in ordered_items
-        if item.source_entry_sequence is not None
-        and effective_materialization_lineage_floor
-        < item.source_entry_sequence
-        <= source_through_sequence
+        if item.item_kind is not FrozenProviderInputItemKind.CONTEXT_SNAPSHOT
+        and item.source_entry_sequence is not None
+        and item.source_entry_sequence <= source_through_sequence
+        and (
+            effective_materialization_lineage_floor < item.source_entry_sequence
+            or item.source_entry_id in retained_ids
+        )
     )
     selected_closures = tuple(
         item
@@ -781,6 +808,7 @@ def freeze_compaction_canonical_range(
         ),
         "source_through_sequence": source_through_sequence,
         "ordered_items": selected,
+        "retained_entry_ids": retained_entry_ids,
         "closures": selected_closures,
         "late_outcomes": selected_late,
         "canonical_utf8_bytes": canonical_bytes,
@@ -836,6 +864,7 @@ def _compaction_canonical_range_identity_digest(
             "scope": canonical_range.scope.fingerprint,
             "floor": canonical_range.effective_materialization_lineage_floor,
             "through": canonical_range.source_through_sequence,
+            "retained_entry_ids": canonical_range.retained_entry_ids,
             "items": tuple(
                 provider_input_item_fingerprint(item)
                 for item in canonical_range.ordered_items
@@ -1276,7 +1305,6 @@ __all__ = [
     "ColdRebuildCompactionProjection",
     "CompactionAdoptionConfirmation",
     "CompactionAttemptPhase",
-    "CompactionActiveRequestLocation",
     "CompactionCanonicalAdoptionFactoryInput",
     "CompactionCanonicalWritePreconditions",
     "CompactionConfirmationKind",
@@ -1297,11 +1325,9 @@ __all__ = [
     "ExpectedCompactionPredecessorRevision",
     "FrozenCompactionCanonicalRange",
     "FrozenCompactionCanonicalRead",
-    "FrozenCompactionActiveRequest",
     "FrozenCompactionHeadroomPreflight",
     "FrozenCompactionProviderProjection",
     "FrozenCompactionSourceView",
-    "FrozenRetainedHistoricalRequest",
     "PreparedCompactionCanonicalAdoption",
     "PreparedManualCompactionCommand",
     "ProtectedTailSelectionFact",

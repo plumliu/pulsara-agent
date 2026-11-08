@@ -55,7 +55,7 @@ def test_plan_approval_starts_atomic_successor_before_summary_and_delivers_steer
             ratio = usage["input_tokens"] / usage["input_budget_tokens"]
             root._compaction.policy = replace(root._compaction.policy,
                 automatic_enabled=True, auto_trigger_ratio=ratio * 0.95,
-                post_compaction_target_ratio=ratio * 0.85, minimum_reclaim_tokens=1)
+                )
             interaction = _rows(root,
                 "SELECT w.workflow_revision FROM pulsara_v3.plan_interactions i "
                 "JOIN pulsara_v3.plan_workflows w ON w.session_id=i.session_id AND w.id=i.plan_workflow_id "

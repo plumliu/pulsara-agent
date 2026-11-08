@@ -12,7 +12,7 @@ import pytest
 from pulsara_agent.identity import derive_id
 from pulsara_agent.llm.input import LLMTextPart
 from pulsara_agent.model_input.contracts import FrozenProviderInputItemKind
-from pulsara_agent.model_input.lowering import lower_canonical_item, lower_retained_request_content
+from pulsara_agent.model_input.lowering import lower_canonical_item
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget, ToolResultPageBoundary
 from pulsara_agent.scheduling.contracts import ScheduledProvenance, ScheduledTaskError, ScheduledTriggerSource
@@ -254,14 +254,13 @@ def test_wrong_identity_or_old_request_is_rejected_before_native_service(argumen
 
 
 @pytest.mark.parametrize("source", list(ScheduledTriggerSource))
-def test_scheduled_header_carries_copyable_identity_in_normal_and_retained_requests(source):
+def test_scheduled_original_header_carries_copyable_identity(source):
     provenance = ScheduledProvenance(SOURCE, 7, "2030-01-01T01:00:00+00:00", source)
     content = (LLMTextPart("Exact saved instruction."),)
     item = NS(item_kind=FrozenProviderInputItemKind.USER, content=content, scheduled_input=provenance)
     lowered = lower_canonical_item(item)
-    retained = lower_retained_request_content(NS(item_kind=item.item_kind, content=NS(parts=content), scheduled_input=provenance))
-    assert lowered.fixed_message.content == retained
-    header = retained[0].text
+    assert lowered.fixed_message is not None
+    header = lowered.fixed_message.content[0].text
     target, _ = json.JSONDecoder().raw_decode(header[header.index('{'):])
     validate_query({"target": target})
     assert target == schedule_target(SOURCE)
@@ -269,5 +268,5 @@ def test_scheduled_header_carries_copyable_identity_in_normal_and_retained_reque
     assert ("Automatic timer" in header) == (source is ScheduledTriggerSource.TIMER)
     assert ("User selected Run once" in header) == (source is ScheduledTriggerSource.RUN_ONCE)
     assert "expected_revision" not in header
-    assert retained[1:] == content
+    assert lowered.fixed_message.content[1:] == content
     assert provenance.task_revision == 7

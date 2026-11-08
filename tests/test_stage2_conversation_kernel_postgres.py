@@ -35,7 +35,6 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     COMPACTION_SUMMARY_PROMPT_CONTRACT,
     CONTEXT_SNAPSHOT_CODEC,
     CONTEXT_SNAPSHOT_MEDIA_TYPE,
-    CompactionActiveRequestLocation,
     CompactionCanonicalAdoptionFactoryInput,
     CompactionCanonicalWritePreconditions,
     CompactionConfirmationKind,
@@ -43,7 +42,6 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionScope,
     CompactionTargetBranch,
     ExpectedCompactionPredecessorRevision,
-    FrozenCompactionActiveRequest,
     build_prepared_manual_compaction_command,
     build_prepared_compaction_canonical_adoption,
     canonical_compaction_range_digest,
@@ -2131,18 +2129,9 @@ def test_round3_1_steer_consume_rejects_canonical_base_drift_without_mutation(
         summary=freeze_compaction_summary_output(
             "summary", maximum_utf8_bytes=100
         ),
-        recent_human_requests=(),
+        retained_entry_ids=(compaction_read.dispatch_read.compile_snapshot.canonical_input.identity.initial_entry_id,),
         continuation_mode=CompactionContinuationMode.RESUME_ACTIVE_TURN,
-        active_request=FrozenCompactionActiveRequest(
-            entry_id=(
-                compaction_read.dispatch_read.compile_snapshot.canonical_input.identity.initial_entry_id
-            ),
-            entry_sequence=compaction_read.safe_head_range.source_through_sequence,
-            location=CompactionActiveRequestLocation.SNAPSHOT_EXACT,
-            item_kind=FrozenProviderInputItemKind.USER,
-            input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
-            content=FrozenPromptContent.text("initial"),
-        ),
+        active_request_entry_id=compaction_read.dispatch_read.compile_snapshot.canonical_input.identity.initial_entry_id,
     )
     compaction_candidate = build_prepared_compaction_canonical_adoption(
         CompactionCanonicalAdoptionFactoryInput(
@@ -2208,9 +2197,9 @@ def test_round3_1_steer_consume_rejects_canonical_base_drift_without_mutation(
         summary=freeze_compaction_summary_output(
             "different summary", maximum_utf8_bytes=100
         ),
-        recent_human_requests=(),
+        retained_entry_ids=snapshot_carrier.retained_entry_ids,
         continuation_mode=CompactionContinuationMode.RESUME_ACTIVE_TURN,
-        active_request=snapshot_carrier.active_request,
+        active_request_entry_id=snapshot_carrier.active_request_entry_id,
     )
     conflicting_compaction = build_prepared_compaction_canonical_adoption(
         CompactionCanonicalAdoptionFactoryInput(
@@ -2392,16 +2381,9 @@ def test_round5b_first_compaction_can_cut_before_turn_genesis_marker(
         summary=freeze_compaction_summary_output(
             "summary", maximum_utf8_bytes=100
         ),
-        recent_human_requests=(),
+        retained_entry_ids=(),
         continuation_mode=CompactionContinuationMode.RESUME_ACTIVE_TURN,
-        active_request=FrozenCompactionActiveRequest(
-            entry_id=canonical.identity.initial_entry_id,
-            entry_sequence=current.entry_sequence,
-            location=CompactionActiveRequestLocation.CANONICAL_SUFFIX,
-            item_kind=FrozenProviderInputItemKind.USER,
-            input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
-            content=None,
-        ),
+        active_request_entry_id=canonical.identity.initial_entry_id,
     )
     candidate = build_prepared_compaction_canonical_adoption(
         CompactionCanonicalAdoptionFactoryInput(
@@ -2583,16 +2565,9 @@ def test_round5b_next_exact_scope_turn_inherits_latest_snapshot_base(
     )
     snapshot_carrier = build_compaction_snapshot_carrier(
         summary=freeze_compaction_summary_output("old summary", maximum_utf8_bytes=100),
-        recent_human_requests=(),
+        retained_entry_ids=(read.dispatch_read.compile_snapshot.canonical_input.identity.initial_entry_id,),
         continuation_mode=CompactionContinuationMode.RESUME_ACTIVE_TURN,
-        active_request=FrozenCompactionActiveRequest(
-            entry_id=read.dispatch_read.compile_snapshot.canonical_input.identity.initial_entry_id,
-            entry_sequence=read.safe_head_range.source_through_sequence,
-            location=CompactionActiveRequestLocation.SNAPSHOT_EXACT,
-            item_kind=FrozenProviderInputItemKind.USER,
-            input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
-            content=FrozenPromptContent.text("old prompt"),
-        ),
+        active_request_entry_id=read.dispatch_read.compile_snapshot.canonical_input.identity.initial_entry_id,
     )
     candidate = build_prepared_compaction_canonical_adoption(
         CompactionCanonicalAdoptionFactoryInput(

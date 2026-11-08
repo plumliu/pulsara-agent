@@ -194,7 +194,7 @@ async def run(args, report, saved):
             )
             await session.update_model_call_binding(_binding(delegate, selected))
             session._compaction.policy = ResolvedCompactionPolicy(
-                automatic_enabled=False, minimum_reclaim_tokens=5000
+                automatic_enabled=False
             )
 
             async def turn(phase, prompt):
@@ -339,9 +339,8 @@ async def run(args, report, saved):
             # canonical adoption and SQL. It is not claimed as natural forgetting.
             session._compaction.policy = ResolvedCompactionPolicy(
                 automatic_enabled=False,
-                minimum_reclaim_tokens=1,
+
                 maximum_recent_human_text_utf8_bytes=1,
-                maximum_retained_tail_utf8_bytes=1,
             )
             await turn(
                 "before_controlled",
@@ -365,7 +364,7 @@ async def run(args, report, saved):
             await core.close_session(session.host_session_id)
             session = await core.resume_session(sid, workspace_input=workspace_input)
             session._compaction.policy = ResolvedCompactionPolicy(
-                automatic_enabled=False, minimum_reclaim_tokens=1
+                automatic_enabled=False
             )
             # Deterministic read/view proof after repeated adoption and a cold Host.
             with session.repository.connection_provider.connection(

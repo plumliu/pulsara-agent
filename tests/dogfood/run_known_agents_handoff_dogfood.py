@@ -322,8 +322,8 @@ async def run(admin_root, runtime_root, selected_wire=None):
                             child._compaction.policy = ResolvedCompactionPolicy(
                                 automatic_enabled=True,
                                 auto_trigger_ratio=ratio * 0.95,
-                                post_compaction_target_ratio=ratio * 0.94,
-                                minimum_reclaim_tokens=1,
+
+
                             )
                             case.update(
                                 root=root.session_id, a=a, b=b, c=c, before_usage=usage

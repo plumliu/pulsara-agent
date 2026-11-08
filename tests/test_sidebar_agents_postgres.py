@@ -6,6 +6,8 @@ from types import SimpleNamespace
 import pytest
 
 from pulsara_agent.desktop_app.session_controller import LocalSessionController
+from pulsara_agent.conversation_kernel.subagents.names import SCIENTIST_NAMES
+from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.test_agent_requests_persistence import deadline, finish, now, request, start
 from tests.test_agent_requests_persistence import source as source
 
@@ -50,6 +52,13 @@ def test_sidebar_projects_current_work_separately_from_queued_and_stopped_titles
     queued = request(agent_id=first.agent_id, create=False, work_title="等待中的复审")
     stopped = request(agent_id=first.agent_id, create=False, work_title="未开始即停止")
     admit(first, queued, stopped)
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=deadline(),
+    ) as connection:
+        agent_title = connection.execute(
+            "SELECT title FROM pulsara_v3.sessions WHERE id=%s", (first.agent_id,),
+        ).fetchone()[0]
+    assert agent_title in SCIENTIST_NAMES
 
     async def resources():
         return repository
@@ -64,7 +73,7 @@ def test_sidebar_projects_current_work_separately_from_queued_and_stopped_titles
     async def scenario():
         page = await controller.sidebar_agents(root.guard.session_id, {})
         assert page["agents"] == [{
-            "agent_id": first.agent_id, "title": None, "current_work": None,
+            "agent_id": first.agent_id, "title": agent_title, "current_work": None,
             "queued_work_count": 3, "has_running_turn": False, "host_session_id": None,
         }]
         child, candidate = start(repository, first)
@@ -73,6 +82,7 @@ def test_sidebar_projects_current_work_separately_from_queued_and_stopped_titles
             "work_id": first.work_id, "work_title": "运行中的调查", "status": "running",
         }
         assert page["agents"][0]["queued_work_count"] == 2
+        assert page["agents"][0]["title"] == agent_title
         assert page["agents"][0]["has_running_turn"] is True
         repository.cancel_agent_requests(root.guard, agent_id=first.agent_id, work_id=stopped.work_id,
                                          occurred_at=now(), actor_id="test", deadline_monotonic=deadline())
@@ -84,6 +94,7 @@ def test_sidebar_projects_current_work_separately_from_queued_and_stopped_titles
         page = await controller.sidebar_agents(root.guard.session_id, {})
         assert page["agents"][0]["current_work"] is None
         assert page["agents"][0]["queued_work_count"] == 1
+        assert page["agents"][0]["title"] == agent_title
         assert page["agents"][0]["has_running_turn"] is False
         assert (await controller.sidebar_work(root.guard.session_id, first.work_id))["work"]["work_title"] == "运行中的调查"
     asyncio.run(scenario())

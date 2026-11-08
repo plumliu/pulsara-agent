@@ -45,7 +45,7 @@ def test_empty_adoption_late_freeze_is_drained_after_repeated_stop(
             usage = await root.read_context_usage()
             ratio = usage["input_tokens"] / usage["input_budget_tokens"]
             root._compaction.policy = replace(root._compaction.policy, automatic_enabled=True,
-                auto_trigger_ratio=ratio * 0.95, post_compaction_target_ratio=ratio * 0.85, minimum_reclaim_tokens=1)
+                auto_trigger_ratio=ratio * 0.95, )
             monkeypatch.setattr(safe, "freeze_compaction_input", held_freeze)
             running = asyncio.create_task(root.run_turn(PromptContent.text("Continue the exact current request."),
                 command_id=random_id("command")))

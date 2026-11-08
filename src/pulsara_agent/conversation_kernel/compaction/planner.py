@@ -1,25 +1,20 @@
 """Pure one-cut planning for Round 5B context compaction."""
 
 from __future__ import annotations
-from pulsara_agent.scheduling.contracts import ScheduledProvenance
 from pulsara_agent.identity import is_valid_id
 
 from dataclasses import dataclass, fields, replace
 from time import monotonic
 
 from pulsara_agent.conversation_kernel.compaction.contracts import (
-    FrozenRetainedHistoricalRequest,
     ColdRebuildCompactionProjection,
-    CompactionActiveRequestLocation,
     CompactionContinuationMode,
     CompactionPhysicalWorkingSetReport,
     CompactionSourceCompatibility,
     CompactionSnapshotCarrier,
     CompactionTargetBranch,
     CompleteToolGroup,
-    FrozenCompactionActiveRequest,
     FrozenCompactionCanonicalRead,
-    FrozenCompactionSummary,
     FrozenCompactionSourceView,
     ProtectedTailSelectionFact,
     ProviderPrefixCutProof,
@@ -28,11 +23,9 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     _compaction_projection_identity_digest,
     _compaction_working_set_identity_digest,
     compaction_summary_message_prefix_fingerprint,
-    freeze_compaction_canonical_range,
     provider_input_item_canonical_expanded_bytes,
 )
 from pulsara_agent.conversation_kernel.compaction.prompt import (
-    build_compaction_snapshot_carrier,
     compaction_snapshot_canonical_expanded_bytes,
     display_json,
 )
@@ -45,19 +38,16 @@ from pulsara_agent.llm.input import (
     LLMMessage,
     LLMTextPart,
     content_has_image,
-    prompt_content_text_utf8_bytes,
-    MAXIMUM_PROMPT_TEXT_UTF8_BYTES,
 )
 from pulsara_agent.model_input.lowering import (
     image_reference_part,
     image_omission_part,
-    lower_retained_request_content,
+    lower_canonical_item,
+    scheduled_request_parts,
 )
 from pulsara_agent.llm.request import FrozenProviderWireInputQuote
 from pulsara_agent.model_input.contracts import (
     ApprovedPlanMaterializationFact,
-    StructuredModelInputCompileError,
-    ModelInputCompileFailureKind,
     CanonicalInputOriginKind,
     CanonicalModelInputIdentity,
     CanonicalModelInputSnapshot,
@@ -103,7 +93,7 @@ class NoSafeCompactionSummaryPrefix(CompactionPlanningError):
 
 
 _DESTINATION_PROJECTION_NOTICE = (
-    "This is a lossy Runtime-authored source for a destination-side compaction "
+    "This is a lossy Runtime-authored historical source for a compaction "
     "call. User and assistant text is quoted exactly. Tool evidence is advisory, "
     "not live replay."
 )
@@ -128,11 +118,14 @@ class DestinationToolEvidence:
 @dataclass(frozen=True, slots=True)
 class DestinationDialogueEntry:
     role: str
-    item_kind: FrozenProviderInputItemKind
-    input_origin: CanonicalInputOriginKind | None
-    content: tuple[FrozenPromptPart, ...]
+    source: FrozenProviderInputItem
     requested_tools: tuple[DestinationToolEvidence, ...] = ()
-    scheduled_input: ScheduledProvenance | None = None
+
+    @property
+    def content(self) -> tuple[FrozenPromptPart, ...]:
+        if not isinstance(self.source.content, tuple):
+            raise TypeError("dialogue source does not carry prompt content")
+        return self.source.content
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,39 +135,20 @@ class RecentDialogueUnit:
     entries: tuple[DestinationDialogueEntry, ...]
 
     def __post_init__(self) -> None:
-        if (
-            not self.turn_id
-            or not self.source_entry_sequences
-            or not self.entries
-            or not any(item.role == "user" for item in self.entries)
-        ):
-            raise ValueError("destination dialogue unit is not a complete turn")
+        if not self.turn_id or not self.source_entry_sequences or not self.entries:
+            raise ValueError("destination dialogue unit is empty")
 
 
 @dataclass(frozen=True, slots=True)
 class DestinationDialogueProjectionPlan:
     units: tuple[RecentDialogueUnit, ...]
-    prior_handoff: (
-        tuple[
-            str,
-            tuple[FrozenRetainedHistoricalRequest, ...],
-            tuple[FrozenRetainedHistoricalRequest, ...],
-        ]
-        | None
-    )
+    prior_handoff: str | None
 
 
 @dataclass(frozen=True, slots=True)
 class DestinationDialogueProjection:
     units: tuple[RecentDialogueUnit, ...]
-    prior_handoff: (
-        tuple[
-            str,
-            tuple[FrozenRetainedHistoricalRequest, ...],
-            tuple[FrozenRetainedHistoricalRequest, ...],
-        ]
-        | None
-    )
+    prior_handoff: str | None
     retained_result_keys: frozenset[tuple[str, str]]
     content: tuple[LLMContentPart, ...]
 
@@ -219,82 +193,11 @@ def provider_dispatch_effective_history_has_image(
             and item.source_entry_sequence > first_call_history_through_sequence
         ):
             continue
-        if item.item_kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT:
-            carrier = item.content
-            if not isinstance(carrier, CompactionSnapshotCarrier):
-                raise TypeError("canonical snapshot item lacks its typed carrier")
-            active = carrier.active_request
-            if (
-                active is not None
-                and active.entry_id != active_entry_id
-                and active.content is not None
-                and content_has_image(active.content.parts)
-            ):
-                return True
-            if any(
-                content_has_image(request.content.parts)
-                for request in (
-                    *carrier.recent_human_requests,
-                    *carrier.retained_historical_requests,
-                )
-            ):
-                return True
-            continue
         if item.source_entry_id == active_entry_id:
             continue
         if isinstance(item.content, tuple) and content_has_image(item.content):
             return True
     return False
-
-
-def recent_human_window_has_image(
-    recent: tuple[RecentHumanMessageProof, ...],
-) -> bool:
-    return any(content_has_image(item.content.parts) for item in recent)
-
-
-def project_prompt_content_for_text_only_handover(
-    content: FrozenPromptContent,
-) -> FrozenPromptContent:
-    """Apply D4's single history projection P while preserving part order."""
-
-    parts = tuple(
-        image_omission_part(part) if isinstance(part, LLMImagePart) else part
-        for part in content.parts
-    )
-    # The original content is validated. Classify only the known resource excess;
-    # codec/descriptor errors must not become retryable image omissions.
-    text_bytes = prompt_content_text_utf8_bytes(content.parts) + sum(
-        len(image_omission_part(part).text.encode("utf-8"))
-        for part in content.parts
-        if isinstance(part, LLMImagePart)
-    )
-    if text_bytes > MAXIMUM_PROMPT_TEXT_UTF8_BYTES:
-        raise StructuredModelInputCompileError(
-            ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
-        )
-    return FrozenPromptContent(parts)
-
-
-def project_retained_request_for_text_only_handover(
-    request: FrozenRetainedHistoricalRequest,
-) -> FrozenRetainedHistoricalRequest:
-    return replace(
-        request,
-        content=project_prompt_content_for_text_only_handover(request.content),
-    )
-
-
-def project_destination_dialogue_for_text_only_handover(
-    projection: DestinationDialogueProjection,
-) -> DestinationDialogueProjection:
-    return replace(
-        projection,
-        content=tuple(
-            image_omission_part(part) if isinstance(part, LLMImagePart) else part
-            for part in projection.content
-        ),
-    )
 
 
 def project_destination_dialogue_plan_for_text_only_handover(
@@ -318,7 +221,9 @@ def project_destination_dialogue_plan_for_text_only_handover(
                 entries=tuple(
                     replace(
                         entry,
-                        content=project_parts(entry.content),
+                        source=replace(
+                            entry.source, content=project_parts(entry.content)
+                        ),
                         requested_tools=tuple(
                             replace(
                                 evidence,
@@ -339,225 +244,28 @@ def project_destination_dialogue_plan_for_text_only_handover(
     )
 
 
-def project_compaction_read_for_text_only_handover(
-    canonical_read: FrozenCompactionCanonicalRead,
-    *,
-    first_call_history_through_sequence: int | None = None,
-) -> FrozenCompactionCanonicalRead:
-    """Build the process-local destination history view of one authoritative canonical cut.
-
-    The exact active request and unconsumed image-tool batch remain untouched.
-    Other historical image occurrences become the ordinary text part required
-    by D4.  A terminal
-    source has no active request, so its initial request is historical too.  The
-    resulting value is used only to compile B's source call; canonical settlement
-    continues to use the unprojected reader value.
-    """
-
-    old_dispatch = canonical_read.dispatch_read
-    old_facts = old_dispatch.compile_snapshot
-    old_input = old_facts.canonical_input
-    pending_image_start = pending_image_evidence_start_sequence(
-        old_input,
-        consumed_through_sequence=canonical_read.latest_assistant_input_through_sequence,
-    )
-    active_entry_id = (
-        old_input.identity.initial_entry_id
-        if canonical_read.turn_status == "RUNNING"
-        else None
-    )
-
-    def project_carrier(
-        carrier: CompactionSnapshotCarrier,
-    ) -> CompactionSnapshotCarrier:
-        active = carrier.active_request
-        if (
-            active is not None
-            and active.entry_id != active_entry_id
-            and active.content is not None
-        ):
-            active = replace(
-                active,
-                content=project_prompt_content_for_text_only_handover(active.content),
-            )
-        summary = FrozenCompactionSummary(
-            body=carrier.earlier_context_summary,
-            body_utf8_bytes=len(carrier.earlier_context_summary.encode("utf-8")),
-            body_digest=context_fingerprint(
-                "pulsara.frozen-compaction-summary.v2-guided-freeform",
-                carrier.earlier_context_summary,
-            ),
-        )
-        return build_compaction_snapshot_carrier(
-            summary=summary,
-            recent_human_requests=tuple(
-                project_retained_request_for_text_only_handover(item)
-                for item in carrier.recent_human_requests
-            ),
-            continuation_mode=carrier.continuation_mode,
-            active_request=active,
-            retained_historical_requests=tuple(
-                project_retained_request_for_text_only_handover(item)
-                for item in carrier.retained_historical_requests
-            ),
-        )
-
-    items: list[FrozenProviderInputItem] = []
-    for item in old_input.items:
-        if item.item_kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT:
-            carrier = item.content
-            if not isinstance(carrier, CompactionSnapshotCarrier):
-                raise TypeError("canonical snapshot item lacks its typed carrier")
-            items.append(replace(item, content=project_carrier(carrier)))
-            continue
-        if item.source_entry_id == active_entry_id or (
-            pending_image_start is not None
-            and item.source_entry_sequence is not None
-            and item.source_entry_sequence >= pending_image_start
-        ) or (
-            first_call_history_through_sequence is not None
-            and item.source_entry_sequence is not None
-            and item.source_entry_sequence > first_call_history_through_sequence
-        ):
-            items.append(item)
-            continue
-        if isinstance(item.content, tuple) and content_has_image(item.content):
-            items.append(
-                replace(
-                    item,
-                    content=project_prompt_content_for_text_only_handover(
-                        FrozenPromptContent(item.content)
-                    ).parts,
-                )
-            )
-            continue
-        items.append(item)
-    projected_items = tuple(items)
-    canonical_bytes = sum(
-        item.content.canonical_expanded_bytes
-        if item.item_kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT
-        else provider_input_item_canonical_expanded_bytes(item)
-        for item in projected_items
-    )
-    projected_input = CanonicalModelInputSnapshot(
-        identity=old_input.identity,
-        items=projected_items,
-        canonical_expanded_bytes=canonical_bytes,
-        snapshot_fingerprint=canonical_model_input_snapshot_fingerprint(
-            identity=old_input.identity,
-            items=projected_items,
-            canonical_expanded_bytes=canonical_bytes,
-            closures=old_input.closures,
-            late_outcomes=old_input.late_outcomes,
-        ),
-        closures=old_input.closures,
-        late_outcomes=old_input.late_outcomes,
-    )
-    fact_values = {
-        "canonical_input": projected_input,
-        "context_binding_fact": old_facts.context_binding_fact,
-        "run_permission_snapshot": old_facts.run_permission_snapshot,
-        "plan_workflow_fact": old_facts.plan_workflow_fact,
-        "plan_handoff_fact": old_facts.plan_handoff_fact,
-        "approved_plan_materialization_fact": (
-            old_facts.approved_plan_materialization_fact
-        ),
-        "previous_turn_outcome_fact": old_facts.previous_turn_outcome_fact,
-        "tool_observation_freshness_fact": (old_facts.tool_observation_freshness_fact),
-    }
-    provisional_facts = FrozenCanonicalCompileSnapshot.__new__(
-        FrozenCanonicalCompileSnapshot
-    )
-    for name, value in fact_values.items():
-        object.__setattr__(provisional_facts, name, value)
-    object.__setattr__(provisional_facts, "canonical_read_cut_fingerprint", "")
-    projected_facts = FrozenCanonicalCompileSnapshot(
-        **fact_values,
-        canonical_read_cut_fingerprint=canonical_compile_snapshot_fingerprint(
-            provisional_facts
-        ),
-    )
-    manifest_cut = old_dispatch.replay_manifest_cut
-    projected_dispatch = FrozenCanonicalProviderDispatchRead(
-        compile_snapshot=projected_facts,
-        replay_manifest_cut=manifest_cut,
-        composite_fingerprint=context_fingerprint(
-            "pulsara.canonical-provider-dispatch-read:v1",
-            {
-                "compile": projected_facts.canonical_read_cut_fingerprint,
-                "replay_manifest_cut": manifest_cut.cut_fingerprint,
-            },
-        ),
-    )
-    projected_range = freeze_compaction_canonical_range(
-        scope=canonical_read.scope,
-        effective_materialization_lineage_floor=(
-            canonical_read.lineage_base.effective_materialization_lineage_floor
-        ),
-        source_through_sequence=(old_input.identity.provider_input_through_sequence),
-        ordered_items=projected_items,
-        closures=old_input.closures,
-        late_outcomes=old_input.late_outcomes,
-    )
-    return FrozenCompactionCanonicalRead(
-        scope=canonical_read.scope,
-        turn_status=canonical_read.turn_status,
-        dispatch_read=projected_dispatch,
-        lineage_base=canonical_read.lineage_base,
-        safe_head_range=projected_range,
-        source_interruption=canonical_read.source_interruption,
-        imported_interruptions=tuple(
-            n
-            for n in canonical_read.imported_interruptions
-            if projected_range.effective_materialization_lineage_floor
-            < n.display_after_entry_sequence
-            <= projected_range.source_through_sequence
-        ),
-        executed_history_interruptions=canonical_read.executed_history_interruptions,
-        latest_assistant_input_through_sequence=canonical_read.latest_assistant_input_through_sequence,
-    )
-
-
 def freeze_destination_dialogue_projection_plan(
     *,
     canonical_read: FrozenCompactionCanonicalRead,
-    active_request: FrozenCompactionActiveRequest | None,
+    active_request_entry_id: str | None,
     source_through_sequence: int | None = None,
+    excluded_entry_ids: tuple[str, ...] = (),
 ) -> DestinationDialogueProjectionPlan:
-    """Freeze exact historical turn units from the current effective lineage."""
+    """Freeze only H; retained canonical requests remain exact references."""
 
     canonical = canonical_read.dispatch_read.compile_snapshot.canonical_input
-    if active_request is None:
-        if canonical_read.turn_status not in {"COMPLETED", "INTERRUPTED"}:
-            raise CompactionPlanningError(
-                "destination projection lacks one exact active request"
-            )
-        active_entry_id = None
-    else:
-        if (
-            canonical_read.turn_status != "RUNNING"
-            or active_request.entry_id != canonical.identity.initial_entry_id
-            or (
-                active_request.location
-                is CompactionActiveRequestLocation.SNAPSHOT_EXACT
-                and active_request.content is None
-            )
-            or (
-                active_request.location
-                is CompactionActiveRequestLocation.CANONICAL_SUFFIX
-                and (
-                    source_through_sequence is None
-                    or active_request.entry_sequence <= source_through_sequence
-                )
-            )
-        ):
-            raise CompactionPlanningError(
-                "destination projection lacks one exact active request"
-            )
-        active_entry_id = active_request.entry_id
+    if active_request_entry_id is not None and (
+        canonical_read.turn_status != "RUNNING"
+        or active_request_entry_id != canonical.identity.initial_entry_id
+    ):
+        raise CompactionPlanningError(
+            "destination projection has another active request"
+        )
+    active_entry_id = active_request_entry_id
+    excluded = frozenset(excluded_entry_ids)
     outcome_by_call: dict[tuple[str, str], DestinationToolEvidence] = {}
     outcome_ordinal = 0
-    for item in canonical_read.safe_head_range.ordered_items:
+    for item in canonical.items:
         if (
             source_through_sequence is not None
             and item.source_entry_sequence is not None
@@ -610,7 +318,7 @@ def freeze_destination_dialogue_projection_plan(
 
     grouped: dict[str, list[FrozenProviderInputItem]] = {}
     turn_order: list[str] = []
-    for item in canonical_read.safe_head_range.ordered_items:
+    for item in canonical.items:
         if source_through_sequence is not None and (
             item.source_entry_sequence is not None
             and item.source_entry_sequence > source_through_sequence
@@ -618,6 +326,7 @@ def freeze_destination_dialogue_projection_plan(
             continue
         if (
             (active_entry_id is not None and item.source_entry_id == active_entry_id)
+            or item.source_entry_id in excluded
             or item.item_kind
             in {
                 FrozenProviderInputItemKind.TOOL_RESULT,
@@ -647,21 +356,9 @@ def freeze_destination_dialogue_projection_plan(
             assert item.source_entry_sequence is not None
             sequences.append(item.source_entry_sequence)
             if item.item_kind in request_kinds:
-                entries.append(
-                    DestinationDialogueEntry(
-                        "user",
-                        item.item_kind,
-                        item.input_origin,
-                        item.content,
-                        scheduled_input=item.scheduled_input,
-                    )
-                )
+                entries.append(DestinationDialogueEntry("user", item))
             elif item.item_kind is FrozenProviderInputItemKind.ASSISTANT:
-                entries.append(
-                    DestinationDialogueEntry(
-                        "assistant", item.item_kind, None, item.content
-                    )
-                )
+                entries.append(DestinationDialogueEntry("assistant", item))
             elif item.item_kind is FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST:
                 assert item.source_entry_id is not None
                 evidence: list[DestinationToolEvidence] = []
@@ -689,25 +386,15 @@ def freeze_destination_dialogue_projection_plan(
                         )
                     evidence.append(outcome)
                 entries.append(
-                    DestinationDialogueEntry(
-                        "assistant",
-                        item.item_kind,
-                        None,
-                        item.content,
-                        tuple(evidence),
-                    )
+                    DestinationDialogueEntry("assistant", item, tuple(evidence))
                 )
-        if entries and any(item.role == "user" for item in entries):
+        if entries:
             units.append(RecentDialogueUnit(turn_id, tuple(sequences), tuple(entries)))
 
     prior_handoff = None
     prior = canonical_read.snapshot_carrier
     if prior is not None:
-        prior_handoff = (
-            prior.earlier_context_summary,
-            prior.recent_human_requests,
-            prior.retained_historical_requests,
-        )
+        prior_handoff = prior.earlier_context_summary
     return DestinationDialogueProjectionPlan(tuple(units), prior_handoff)
 
 
@@ -752,12 +439,7 @@ def retain_destination_tool_evidence(
 def _render_destination_projection(
     *,
     units: tuple[RecentDialogueUnit, ...],
-    prior_handoff: tuple[
-        str,
-        tuple[FrozenRetainedHistoricalRequest, ...],
-        tuple[FrozenRetainedHistoricalRequest, ...],
-    ]
-    | None,
+    prior_handoff: str | None,
     retained_result_keys: frozenset[tuple[str, str]],
 ) -> DestinationDialogueProjection:
     available_keys = {
@@ -777,7 +459,7 @@ def _render_destination_projection(
                     "prior_handoff": (
                         None
                         if prior_handoff is None
-                        else {"earlier_context_summary": prior_handoff[0]}
+                        else {"earlier_context_summary": prior_handoff}
                     ),
                 }
             )
@@ -804,19 +486,6 @@ def _render_destination_projection(
                 rendered_parts.extend((image_reference_part(part), part))
         rendered_parts.append(LLMTextPart("\n[/PULSARA_RETAINED_CONTENT]\n"))
 
-    if prior_handoff is not None:
-        for request in prior_handoff[1]:
-            append_section(
-                section="prior_recent",
-                role="user",
-                content=lower_retained_request_content(request),
-            )
-        for request in prior_handoff[2]:
-            append_section(
-                section="prior_historical",
-                role="user",
-                content=lower_retained_request_content(request),
-            )
     for turn_index, unit in enumerate(units):
         for entry in unit.entries:
             tools: list[dict[str, object]] = []
@@ -831,14 +500,17 @@ def _render_destination_projection(
                 else:
                     tool["result_omitted"] = True
                 tools.append(tool)
-            if entry.role == "user":
-                request = FrozenRetainedHistoricalRequest(
-                    item_kind=entry.item_kind,
-                    input_origin=entry.input_origin,
-                    scheduled_input=entry.scheduled_input,
-                    content=FrozenPromptContent(entry.content),
-                )
-                content = lower_retained_request_content(request)
+            if entry.source.item_kind is FrozenProviderInputItemKind.USER:
+                content = scheduled_request_parts(
+                    entry.source.scheduled_input
+                ) + prompt_provider_parts(entry.content)
+            elif entry.role == "user":
+                lowered = lower_canonical_item(entry.source)
+                if lowered.fixed_message is None:
+                    raise CompactionPlanningError(
+                        "retained request has no fixed provider message"
+                    )
+                content = lowered.fixed_message.content
             else:
                 content = entry.content
             append_section(
@@ -926,7 +598,32 @@ def build_synthetic_compaction_dispatch_read(
         source_turn_id=None,
         content=snapshot_carrier,
     )
-    items = (snapshot_item, *suffix)
+    by_entry = {
+        item.source_entry_id: item
+        for item in old_input.items
+        if item.source_entry_id is not None
+    }
+    prefix = []
+    for entry_id in snapshot_carrier.retained_entry_ids:
+        item = by_entry.get(entry_id)
+        if (
+            item is None
+            or item.source_entry_sequence is None
+            or item.source_entry_sequence > source_through_sequence
+        ):
+            raise CompactionPlanningError(
+                "retained prefix reference has no exact source row"
+            )
+        prefix.append(item)
+    retained_items = (*prefix, *suffix)
+    ids = tuple(
+        item.source_entry_id
+        for item in retained_items
+        if item.source_entry_id is not None
+    )
+    if len(ids) != len(set(ids)):
+        raise CompactionPlanningError("retained canonical row is duplicated")
+    items = (snapshot_item, *retained_items)
     request_ids = frozenset(
         item.source_entry_id
         for item in suffix
@@ -964,7 +661,9 @@ def build_synthetic_compaction_dispatch_read(
     # that reader contract exactly so dry and post-FULL cuts can compare equal.
     canonical_bytes = compaction_snapshot_canonical_expanded_bytes(
         snapshot_carrier.body
-    ) + sum(provider_input_item_canonical_expanded_bytes(item) for item in suffix)
+    ) + sum(
+        provider_input_item_canonical_expanded_bytes(item) for item in retained_items
+    )
     canonical_input = CanonicalModelInputSnapshot(
         identity=identity,
         items=items,
@@ -1190,12 +889,13 @@ def _synthetic_approved_plan_fact(
         ),
         fact_fingerprint="",
     )
-    provisional = ApprovedPlanMaterializationFact.__new__(ApprovedPlanMaterializationFact)
+    provisional = ApprovedPlanMaterializationFact.__new__(
+        ApprovedPlanMaterializationFact
+    )
     for name, value in values.items():
         object.__setattr__(provisional, name, value)
     values["fact_fingerprint"] = approved_plan_materialization_fingerprint(provisional)
     return ApprovedPlanMaterializationFact(**values)
-
 
 
 def freeze_compaction_source_view(
@@ -1232,8 +932,17 @@ def freeze_compaction_source_view(
         )
     if predecessor_epoch_view is None:
         compatibility = CompactionSourceCompatibility.EMPTY_COLD
-    else:
+    elif (
+        predecessor_epoch_view.system_prompt == compiled.system_prompt
+        and predecessor_epoch_view.tools == compiled.tools
+        and compiled.messages[: len(predecessor_epoch_view.messages)]
+        == predecessor_epoch_view.messages
+        and semantic_projection.appended_message_count
+        == len(compiled.messages) - len(predecessor_epoch_view.messages)
+    ):
         compatibility = CompactionSourceCompatibility.COMPATIBLE_APPEND
+    else:
+        compatibility = CompactionSourceCompatibility.INDEPENDENT_AUXILIARY
 
     if compatibility is CompactionSourceCompatibility.COMPATIBLE_APPEND:
         assert predecessor_epoch_view is not None
@@ -1426,19 +1135,57 @@ def pending_image_evidence_start_sequence(
     """
 
     ordinary = pending_image_tool_group_start_sequence(
-        canonical_input, consumed_through_sequence=consumed_through_sequence,
+        canonical_input,
+        consumed_through_sequence=consumed_through_sequence,
     )
-    late = min((
-        item.source_entry_sequence
-        for item in canonical_input.items
-        if item.item_kind is FrozenProviderInputItemKind.LATE_TOOL_OUTCOME
-        and not is_valid_id(item.source_turn_id, "history")
-        and item.source_entry_sequence is not None
-        and (consumed_through_sequence is None or item.source_entry_sequence > consumed_through_sequence)
-        and content_has_image(item.content)
-    ), default=None)
+    late = min(
+        (
+            item.source_entry_sequence
+            for item in canonical_input.items
+            if item.item_kind is FrozenProviderInputItemKind.LATE_TOOL_OUTCOME
+            and not is_valid_id(item.source_turn_id, "history")
+            and item.source_entry_sequence is not None
+            and (
+                consumed_through_sequence is None
+                or item.source_entry_sequence > consumed_through_sequence
+            )
+            and content_has_image(item.content)
+        ),
+        default=None,
+    )
     values = tuple(value for value in (ordinary, late) if value is not None)
     return min(values) if values else None
+
+
+def unconsumed_request_start_sequence(
+    canonical_input: CanonicalModelInputSnapshot,
+    *,
+    consumed_through_sequence: int | None,
+) -> int | None:
+    """Newly accepted request material stays N until a business input consumes it.
+
+    The first call's whole initial group uses the runner's predecessor ceiling.
+    Later steer, agent, Plan and terminal request rows use the existing accepted
+    assistant input cut. Imported settled history is not a new delivery.
+    """
+    if consumed_through_sequence is None:
+        return None
+    request_kinds = {
+        FrozenProviderInputItemKind.USER,
+        FrozenProviderInputItemKind.PLAN_CONTINUATION,
+        FrozenProviderInputItemKind.TERMINAL_OBSERVATION,
+    }
+    return min(
+        (
+            item.source_entry_sequence
+            for item in canonical_input.items
+            if item.item_kind in request_kinds
+            and not is_valid_id(item.source_turn_id, "history")
+            and item.source_entry_sequence is not None
+            and item.source_entry_sequence > consumed_through_sequence
+        ),
+        default=None,
+    )
 
 
 def minimum_pending_image_tool_groups(
@@ -1586,6 +1333,13 @@ def _safe_summary_boundaries(
     }
     placements = source_projection.message_placements
 
+    retained_prefix_ids = frozenset(
+        entry_id
+        for item in canonical.items
+        if item.item_kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT
+        for entry_id in item.content.retained_entry_ids
+    )
+
     def placement_sequences(placement) -> tuple[int, ...]:
         attachment = getattr(placement, "tool_attachment_source", None)
         if attachment is not None:
@@ -1603,20 +1357,11 @@ def _safe_summary_boundaries(
             )
             return () if sequence is None else (sequence,)
         sequence = sequence_by_entry.get(placement.origin_entry_id)
+        if placement.origin_entry_id in retained_prefix_ids:
+            return ()
         return () if sequence is None else (sequence,)
 
     minimum_message_count = 1
-    predecessor = source_view.predecessor_epoch_view
-    if predecessor is not None:
-        minimum_message_count = len(predecessor.messages)
-        if minimum_message_count < 1:
-            raise CompactionPlanningError(
-                "installed provider prefix has no materialized messages"
-            )
-        if minimum_message_count > maximum_message_count:
-            raise CompactionPlanningError(
-                "retained tail would truncate the installed provider prefix"
-            )
     suffix_minimum: list[int | None] = [None] * (len(placements) + 1)
     for index in range(len(placements) - 1, -1, -1):
         placement = placements[index]
@@ -1636,8 +1381,10 @@ def _safe_summary_boundaries(
         previous = prefix_maximum[-1]
         current = None if not sequences else max(sequences)
         prefix_maximum.append(
-            current if previous is None
-            else previous if current is None
+            current
+            if previous is None
+            else previous
+            if current is None
             else max(previous, current)
         )
     safe_by_count: dict[int, int] = {}
@@ -1835,8 +1582,8 @@ def freeze_compaction_continuation(
     source_view: FrozenCompactionSourceView,
     target_branch: CompactionTargetBranch,
     source_through_sequence: int,
-) -> tuple[CompactionContinuationMode, FrozenCompactionActiveRequest | None]:
-    """Classify the successor from canonical ownership, never summary prose."""
+) -> tuple[CompactionContinuationMode, str | None]:
+    """Keep lifecycle attribution; original request bodies belong to canonical rows."""
 
     if target_branch is CompactionTargetBranch.IDLE_BASE_ONLY:
         return CompactionContinuationMode.AWAIT_NEXT_USER, None
@@ -1849,77 +1596,74 @@ def freeze_compaction_continuation(
         <= canonical.identity.provider_input_through_sequence
     ):
         raise ValueError("compaction continuation boundary is out of range")
-    active_entry_id = canonical.identity.initial_entry_id
+    active_id = canonical.identity.initial_entry_id
     matches = tuple(
-        item for item in canonical.items if item.source_entry_id == active_entry_id
+        item for item in canonical.items if item.source_entry_id == active_id
     )
-    if len(matches) > 1:
-        raise CompactionPlanningError("active request attribution is duplicated")
-    if matches:
-        item = matches[0]
-        request_like = (
-            item.item_kind is FrozenProviderInputItemKind.USER
-            and item.input_origin
-            in {
-                CanonicalInputOriginKind.HUMAN_MESSAGE,
-                CanonicalInputOriginKind.SCHEDULED_TASK,
-                CanonicalInputOriginKind.AGENT_INSTRUCTION,
-            }
-        ) or item.item_kind in {
-            FrozenProviderInputItemKind.PLAN_CONTINUATION,
-            FrozenProviderInputItemKind.TERMINAL_OBSERVATION,
+    if len(matches) != 1:
+        raise CompactionPlanningError("active request has no unique canonical row")
+    item = matches[0]
+    request_like = (
+        item.item_kind is FrozenProviderInputItemKind.USER
+        and item.input_origin
+        in {
+            CanonicalInputOriginKind.HUMAN_MESSAGE,
+            CanonicalInputOriginKind.SCHEDULED_TASK,
+            CanonicalInputOriginKind.AGENT_INSTRUCTION,
         }
-        if not request_like or item.source_entry_sequence is None:
-            raise CompactionPlanningError("active request is not a canonical request")
-        location = (
-            CompactionActiveRequestLocation.SNAPSHOT_EXACT
-            if item.source_entry_sequence <= source_through_sequence
-            else CompactionActiveRequestLocation.CANONICAL_SUFFIX
-        )
-        return (
-            CompactionContinuationMode.RESUME_ACTIVE_TURN,
-            FrozenCompactionActiveRequest(
-                entry_id=active_entry_id,
-                entry_sequence=item.source_entry_sequence,
-                location=location,
-                item_kind=item.item_kind,
-                input_origin=item.input_origin,
-                scheduled_input=item.scheduled_input,
-                content=(
-                    FrozenPromptContent(item.content)
-                    if location is CompactionActiveRequestLocation.SNAPSHOT_EXACT
-                    else None
-                ),
-            ),
-        )
+    ) or item.item_kind in {
+        FrozenProviderInputItemKind.PLAN_CONTINUATION,
+        FrozenProviderInputItemKind.TERMINAL_OBSERVATION,
+    }
+    if not request_like or item.source_entry_sequence is None:
+        raise CompactionPlanningError("active request is not a canonical request")
+    return CompactionContinuationMode.RESUME_ACTIVE_TURN, active_id
 
-    predecessor = source_view.snapshot_carrier
-    if predecessor is None:
-        raise CompactionPlanningError("active request is absent without one snapshot")
-    active = predecessor.active_request
-    if (
-        predecessor.continuation_mode
-        is not CompactionContinuationMode.RESUME_ACTIVE_TURN
-        or active is None
-        or active.entry_id != active_entry_id
-        or active.location is not CompactionActiveRequestLocation.SNAPSHOT_EXACT
-        or active.content is None
+
+def select_retained_prefix_entry_ids(
+    *,
+    canonical_read: FrozenCompactionCanonicalRead,
+    source_through_sequence: int,
+    recent: tuple[RecentHumanMessageProof, ...],
+    active_request_entry_id: str | None,
+    inherited_entry_ids: tuple[str, ...] = (),
+) -> tuple[str, ...]:
+    """Select existing prefix rows once, in original canonical order."""
+
+    ids = {proof.entry_id for proof in recent}
+    ids.update(inherited_entry_ids)
+    if active_request_entry_id is not None:
+        ids.add(active_request_entry_id)
+    canonical = canonical_read.dispatch_read.compile_snapshot.canonical_input
+    by_entry = {
+        item.source_entry_id: item
+        for item in canonical.items
+        if item.source_entry_id is not None
+    }
+    if not ids <= by_entry.keys():
+        raise CompactionPlanningError(
+            "retained prefix selection lacks its canonical row"
+        )
+    required_prefix = {proof.entry_id for proof in recent} | set(inherited_entry_ids)
+    if any(
+        by_entry[entry_id].source_entry_sequence is None
+        or by_entry[entry_id].source_entry_sequence > source_through_sequence
+        for entry_id in required_prefix
     ):
         raise CompactionPlanningError(
-            "predecessor snapshot does not carry the active request"
+            "retained prefix selection exceeds its replacement cut"
         )
-    return (
-        CompactionContinuationMode.RESUME_ACTIVE_TURN,
-        FrozenCompactionActiveRequest(
-            entry_id=active.entry_id,
-            entry_sequence=active.entry_sequence,
-            location=CompactionActiveRequestLocation.SNAPSHOT_EXACT,
-            item_kind=active.item_kind,
-            input_origin=active.input_origin,
-            scheduled_input=active.scheduled_input,
-            content=active.content,
+    selected = sorted(
+        (
+            item
+            for item in canonical.items
+            if item.source_entry_id in ids
+            and item.source_entry_sequence is not None
+            and item.source_entry_sequence <= source_through_sequence
         ),
+        key=lambda item: item.source_entry_sequence,
     )
+    return tuple(dict.fromkeys(item.source_entry_id for item in selected))
 
 
 def should_trigger_compaction(
@@ -1936,23 +1680,13 @@ def should_trigger_compaction(
     return token_trigger
 
 
-
-
 def validate_compaction_reclaim(
     *,
     source_tokens: int,
     successor_tokens: int,
     hard_input_budget_tokens: int,
-    policy: ResolvedCompactionPolicy,
-    force: bool,
-    enforce_soft_target: bool,
 ) -> int:
-    """Validate the one closed reclaim rule for active and idle adoption.
-
-    ``force`` bypasses only the proactive post-target ratio.  It never makes a
-    non-reclaiming snapshot useful and never bypasses the minimum reclaim,
-    except when the old exact input already crossed the hard provider boundary.
-    """
+    """Same-estimator positive improvement, without a minimum or landing ratio."""
 
     if min(source_tokens, successor_tokens, hard_input_budget_tokens) < 0:
         raise ValueError("compaction token quote is negative")
@@ -1965,20 +1699,6 @@ def validate_compaction_reclaim(
         raise CompactionReclaimUnavailable(
             "compaction successor does not reclaim context"
         )
-    if (
-        reclaim < policy.minimum_reclaim_tokens
-        and source_tokens <= hard_input_budget_tokens
-    ):
-        raise CompactionReclaimUnavailable(
-            "compaction successor does not reclaim enough context"
-        )
-    if (
-        enforce_soft_target
-        and not force
-        and successor_tokens
-        > int(hard_input_budget_tokens * policy.post_compaction_target_ratio)
-    ):
-        raise CompactionPlanningError("compaction successor exceeds its post target")
     return reclaim
 
 
@@ -2000,11 +1720,13 @@ __all__ = [
     "enumerate_complete_tool_groups",
     "enumerate_safe_summary_prefixes",
     "freeze_compaction_continuation",
+    "select_retained_prefix_entry_ids",
     "freeze_compaction_source_view",
     "freeze_tail_and_prefix",
     "minimum_pending_image_tool_groups",
     "pending_image_tool_group_start_sequence",
     "pending_image_evidence_start_sequence",
+    "unconsumed_request_start_sequence",
     "provider_dispatch_effective_history_has_image",
     "select_recent_human_messages",
     "should_trigger_compaction",

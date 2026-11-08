@@ -24,7 +24,6 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionScope,
     CompactionTrigger,
     RecentHumanMessageProof,
-    ResolvedCompactionPolicy,
     freeze_compaction_canonical_range,
     provider_input_item_canonical_expanded_bytes,
 )
@@ -33,16 +32,18 @@ from pulsara_agent.conversation_kernel.compaction.runtime import (
     HostCompactionRuntimeOwner,
 )
 from pulsara_agent.conversation_kernel.compaction.coordinator import (
-    _can_retry_compaction_with_smaller_recent,
-    _ordinary_recent_suffixes,
+    _can_retry_compaction_with_smaller_tail,
+    CompactionSuccessorHardAdmissionError,
     _target_is_known_text_only,
 )
 from pulsara_agent.conversation_kernel.compaction.planner import (
     CompactionPlanningError,
     CompactionReclaimUnavailable,
     compaction_effective_history_has_image,
-    project_prompt_content_for_text_only_handover,
-    recent_human_window_has_image,
+    DestinationDialogueEntry,
+    DestinationDialogueProjectionPlan,
+    RecentDialogueUnit,
+    project_destination_dialogue_plan_for_text_only_handover,
 )
 from pulsara_agent.conversation_kernel.direct_model import (
     ProviderFollowupWireResourceQuote,
@@ -794,44 +795,30 @@ def _recent(entry_id: str, sequence: int, *parts: LLMTextPart | LLMImagePart):
     )
 
 
-def test_ordinary_compaction_reuses_one_recent_window_then_drops_oldest() -> None:
-    recent = (
-        _recent("entry:2sznqhykjyk6in3xlwrxfuvbze", 1, LLMTextPart("a")),
-        _recent("entry:gkqbzsdabfbxmmujdwcmsrokou", 2, LLMTextPart("b")),
-        _recent("entry:2mvrqznhagxvqzu6l5f5no4ndm", 3, LLMTextPart("c")),
-    )
 
-    assert _ordinary_recent_suffixes(recent) == (
-        recent,
-        recent[1:],
-        recent[2:],
-        (),
+def test_optional_tail_retry_is_limited_to_closed_resource_failures() -> None:
+    assert not _can_retry_compaction_with_smaller_tail(
+        CompactionReclaimUnavailable("no raw-token improvement")
     )
-
-
-def test_ordinary_recent_retry_is_limited_to_closed_resource_failures() -> None:
-    assert _can_retry_compaction_with_smaller_recent(
-        CompactionReclaimUnavailable("not enough reclaim")
-    )
-    assert _can_retry_compaction_with_smaller_recent(
-        CompactionPlanningError(
+    assert _can_retry_compaction_with_smaller_tail(
+        CompactionSuccessorHardAdmissionError(
             "compaction successor lacks executable final-wire admission"
         )
     )
-    assert _can_retry_compaction_with_smaller_recent(
+    assert _can_retry_compaction_with_smaller_tail(
         StructuredModelInputCompileError(
             ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
         )
     )
-    assert not _can_retry_compaction_with_smaller_recent(
+    assert not _can_retry_compaction_with_smaller_tail(
         StructuredModelInputCompileError(
             ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
         )
     )
-    assert not _can_retry_compaction_with_smaller_recent(
+    assert not _can_retry_compaction_with_smaller_tail(
         CompactionPlanningError("destination modality invariant failed")
     )
-    assert not _can_retry_compaction_with_smaller_recent(RuntimeError("drift"))
+    assert not _can_retry_compaction_with_smaller_tail(RuntimeError("drift"))
 
 
 def test_dry_wire_measurement_closes_text_only_target_before_adoption() -> None:
@@ -863,10 +850,10 @@ def test_dry_wire_measurement_closes_text_only_target_before_adoption() -> None:
     mismatch = ModelTargetCapabilityMismatch(
         "model target does not declare image input"
     )
-    assert not _can_retry_compaction_with_smaller_recent(mismatch)
+    assert not _can_retry_compaction_with_smaller_tail(mismatch)
 
 
-def test_large_image_tail_uses_descriptor_budget_then_full_d2_charge() -> None:
+def test_large_image_tail_charges_descriptor_and_full_payload_separately() -> None:
     output = BytesIO()
     Image.new("RGB", (1024, 1024), (11, 23, 41)).save(output, "PNG", compress_level=0)
     payload = output.getvalue()
@@ -889,7 +876,6 @@ def test_large_image_tail_uses_descriptor_budget_then_full_d2_charge() -> None:
             input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
         )
 
-    policy = ResolvedCompactionPolicy()
     admitted = item_with_occurrences(1)
     admitted_tail = freeze_compaction_canonical_range(
         scope=scope,
@@ -901,9 +887,7 @@ def test_large_image_tail_uses_descriptor_budget_then_full_d2_charge() -> None:
     )
     admitted_c = provider_input_item_canonical_expanded_bytes(admitted)
     admitted_l = llm_content_logical_bytes(admitted.content)
-    assert admitted_tail.canonical_utf8_bytes < (
-        policy.maximum_retained_tail_utf8_bytes
-    )
+    assert 0 < admitted_tail.canonical_utf8_bytes < admitted_c
     assert 0 < admitted_c < 16 << 20
     assert 0 < admitted_l < 64 << 20
 
@@ -918,8 +902,10 @@ def test_large_image_tail_uses_descriptor_budget_then_full_d2_charge() -> None:
     )
     overbound_c = provider_input_item_canonical_expanded_bytes(overbound)
     overbound_l = llm_content_logical_bytes(overbound.content)
-    assert overbound_tail.canonical_utf8_bytes < (
-        policy.maximum_retained_tail_utf8_bytes
+    assert (
+        admitted_tail.canonical_utf8_bytes
+        < overbound_tail.canonical_utf8_bytes
+        < overbound_c
     )
     assert overbound_c > 12 << 20
     assert overbound_l > admitted_l
@@ -935,9 +921,14 @@ def test_text_only_projection_p_preserves_order_occurrences_and_is_idempotent() 
         )
     )
 
-    projected = project_prompt_content_for_text_only_handover(source)
-
-    assert projected.parts == (
+    original = FrozenProviderInputItem(
+        FrozenProviderInputItemKind.USER, derive_id("entry", "projection-p"), 1,
+        derive_id("turn", "projection-p"), source.parts,
+        input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
+    )
+    plan = DestinationDialogueProjectionPlan((RecentDialogueUnit(original.source_turn_id, (1,), (DestinationDialogueEntry("user", original),)),), None)
+    projected = project_destination_dialogue_plan_for_text_only_handover(plan)
+    assert projected.units[0].entries[0].content == (
         LLMTextPart("before"),
         LLMTextPart(
             "[历史图片引用；此处未包含图像内容]\n"
@@ -951,7 +942,9 @@ def test_text_only_projection_p_preserves_order_occurrences_and_is_idempotent() 
             "media_type: image/png; width: 512; height: 512"
         ),
     )
-    assert project_prompt_content_for_text_only_handover(projected) == projected
+    assert project_destination_dialogue_plan_for_text_only_handover(projected) == projected
+    assert plan.units[0].entries[0].source is original
+    assert original.content == source.parts
 
 
 def test_history_and_recent_image_checks_exclude_only_the_exact_active_request() -> (
@@ -991,12 +984,6 @@ def test_history_and_recent_image_checks_exclude_only_the_exact_active_request()
     assert (
         compaction_effective_history_has_image(canonical_read(old_image, active_image))
         is True
-    )
-    assert recent_human_window_has_image(
-        (_recent("entry:wfczofkrpmbtqknslywdqqqeri", 3, LLMTextPart("text"), _image()),)
-    )
-    assert not recent_human_window_has_image(
-        (_recent("entry:wfczofkrpmbtqknslywdqqqeri", 3, LLMTextPart("text")),)
     )
 
 
@@ -1525,17 +1512,3 @@ def test_plugin_enable_keeps_epoch_bound_without_phantom_maximum_catalog_tokens(
     runner._require_post_response_resources(
         quote, effective_input_budget_tokens=200_000
     )
-
-
-def test_image_placeholder_text_limit_is_explicit_resource_failure():
-    from pulsara_agent.llm.input import MAXIMUM_PROMPT_TEXT_UTF8_BYTES
-
-    source = FrozenPromptContent(
-        (LLMTextPart("x" * MAXIMUM_PROMPT_TEXT_UTF8_BYTES), _image())
-    )
-    with pytest.raises(StructuredModelInputCompileError) as error:
-        project_prompt_content_for_text_only_handover(source)
-    assert (
-        error.value.kind is ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
-    )
-    assert _can_retry_compaction_with_smaller_recent(error.value)

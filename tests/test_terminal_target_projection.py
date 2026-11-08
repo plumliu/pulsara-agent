@@ -10,11 +10,9 @@ from pulsara_agent.model_input.contracts import (
     CanonicalInputOriginKind,
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
-    FrozenRetainedHistoricalRequest,
 )
 from pulsara_agent.model_input.lowering import (
     lower_canonical_item,
-    lower_retained_request_content,
 )
 from pulsara_agent.ports.terminal import (
     parse_manage_process_input,
@@ -35,7 +33,7 @@ def ident(kind):
 
 @pytest.mark.parametrize("kind", ("log", "error", "tool_result"))
 @pytest.mark.parametrize("text", ("ok", "\ud800", "\udfff", "汉\ud800🙂"))
-def test_cell_normal_and_retained_paths_share_exact_typed_source(kind, text):
+def test_cell_original_projection_preserves_exact_typed_source(kind, text):
     fact = CellOutputContent(
         cell_id=ident("cell"),
         source_turn_id=ident("turn"),
@@ -51,11 +49,7 @@ def test_cell_normal_and_retained_paths_share_exact_typed_source(kind, text):
         input_origin=CanonicalInputOriginKind.CELL_OUTPUT,
     )
     normal = lower_canonical_item(item).fixed_message
-    retained = FrozenRetainedHistoricalRequest(
-        item.item_kind, CanonicalInputOriginKind.CELL_OUTPUT, FrozenPromptContent(parts),
-    )
     assert normal is not None
-    assert normal.content == lower_retained_request_content(retained)
     projected = json.loads(normal.content[0].text)["pulsara_terminal_observation"]
     assert projected == fact.canonical_mapping()
     assert projected["cell_id"] == fact.cell_id

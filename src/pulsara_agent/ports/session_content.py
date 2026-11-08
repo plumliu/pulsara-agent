@@ -168,6 +168,7 @@ def session_content_range(facts):
     carriers=[item.content for item in facts.canonical_input.items if isinstance(item.content,CompactionSnapshotCarrier)]
     if len(carriers)!=1:
         raise RuntimeError('session query lost the installed snapshot carrier')
-    active=carriers[0].active_request
-    excluded=active.entry_id if active is not None and active.location.value=='SNAPSHOT_EXACT' else None
+    carrier=carriers[0]
+    active=carrier.active_request_entry_id
+    excluded=active if active in carrier.retained_entry_ids else None
     return SessionContentRange(binding.source_through_sequence,excluded)

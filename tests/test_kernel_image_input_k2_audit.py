@@ -5,12 +5,6 @@ from hashlib import sha256
 
 import pytest
 
-from pulsara_agent.conversation_kernel.compaction.prompt import (
-    build_compaction_snapshot_carrier,
-    compaction_handoff_instruction,
-    compaction_snapshot_canonical_expanded_bytes,
-    freeze_compaction_summary_output,
-)
 from pulsara_agent.conversation_kernel.blob import PostgresCanonicalBlobStore
 from pulsara_agent.conversation_kernel.repository import ConversationKernelConflict
 from pulsara_agent.llm.input import (
@@ -20,14 +14,11 @@ from pulsara_agent.llm.input import (
 )
 from pulsara_agent.model_input.contracts import (
     CanonicalInputOriginKind,
-    CompactionActiveRequestLocation,
-    CompactionContinuationMode,
-    CompactionSnapshotCarrier,
-    FrozenCompactionActiveRequest,
+    FrozenProviderInputItem,
     FrozenProviderInputItemKind,
-    FrozenRetainedHistoricalRequest,
 )
-from pulsara_agent.primitives.context import canonical_json_bytes
+from pulsara_agent.conversation_kernel.prompt_content import freeze_canonical_prompt
+
 
 
 def _image(payload: bytes = b"validated-image") -> LLMImagePart:
@@ -40,112 +31,41 @@ def _mixed_content() -> FrozenPromptContent:
     )
 
 
-def _idle_carrier(
-    request: FrozenRetainedHistoricalRequest,
-) -> CompactionSnapshotCarrier:
-    return build_compaction_snapshot_carrier(
-        summary=freeze_compaction_summary_output(
-            "earlier summary", maximum_utf8_bytes=1024
-        ),
-        recent_human_requests=(request,),
-        continuation_mode=CompactionContinuationMode.AWAIT_NEXT_USER,
-        active_request=None,
-    )
-
-
 @pytest.mark.parametrize(
-    "active,origin",
+    "origin",
     (
-        (True, CanonicalInputOriginKind.AGENT_INSTRUCTION),
-        (False, CanonicalInputOriginKind.AGENT_INSTRUCTION),
-        (False, CanonicalInputOriginKind.USER_CONTROL_FEEDBACK),
+        CanonicalInputOriginKind.AGENT_INSTRUCTION,
+        CanonicalInputOriginKind.USER_CONTROL_FEEDBACK,
     ),
 )
-def test_compaction_request_images_accept_agent_instruction_and_reject_feedback(
-    active: bool, origin: CanonicalInputOriginKind
-) -> None:
+def test_original_request_images_accept_agent_instruction_and_reject_feedback(origin):
+    def item():
+        return FrozenProviderInputItem(
+            item_kind=FrozenProviderInputItemKind.USER,
+            source_entry_id="entry:2b6xhmrsvzz7q4sgugd5cuq34a",
+            source_entry_sequence=1,
+            source_turn_id="turn:lm5ibydqxua377vt3bxuuqgvvu",
+            input_origin=origin,
+            content=_mixed_content().parts,
+        )
+
     if origin is CanonicalInputOriginKind.AGENT_INSTRUCTION:
-        request = (FrozenCompactionActiveRequest(entry_id='entry:2b6xhmrsvzz7q4sgugd5cuq34a', entry_sequence=1,
-            location=CompactionActiveRequestLocation.SNAPSHOT_EXACT, item_kind=FrozenProviderInputItemKind.USER,
-            input_origin=origin, content=_mixed_content()) if active else FrozenRetainedHistoricalRequest(
-            item_kind=FrozenProviderInputItemKind.USER,input_origin=origin,content=_mixed_content()))
-        assert request.content == _mixed_content()
-        return
-    if active:
-        with pytest.raises(ValueError, match="cannot carry image"):
-            FrozenCompactionActiveRequest(
-                entry_id='entry:2b6xhmrsvzz7q4sgugd5cuq34a',
-                entry_sequence=1,
-                location=CompactionActiveRequestLocation.SNAPSHOT_EXACT,
-                item_kind=FrozenProviderInputItemKind.USER,
-                input_origin=origin,
-                content=_mixed_content(),
-            )
+        assert item().content == _mixed_content().parts
     else:
         with pytest.raises(ValueError, match="cannot carry image"):
-            FrozenRetainedHistoricalRequest(
-                item_kind=FrozenProviderInputItemKind.USER,
-                input_origin=origin,
-                content=_mixed_content(),
-            )
+            item()
 
 
-def test_compaction_metadata_decoder_rejects_nonhuman_image_before_hydration() -> None:
+def test_canonical_expanded_bytes_counts_each_original_image_occurrence():
     image = _image()
-    raw = canonical_json_bytes(
-        {
-            "continuation": {
-                "mode": CompactionContinuationMode.AWAIT_NEXT_USER.value,
-                "instruction": compaction_handoff_instruction(
-                    continuation_mode=CompactionContinuationMode.AWAIT_NEXT_USER,
-                    active_request=None,
-                ),
-                "active_request": None,
-            },
-            "earlier_context_summary": "summary",
-            "recent_human_requests": (),
-            "retained_historical_requests": (
-                {
-                    "item_kind": FrozenProviderInputItemKind.USER.value,
-                    "input_origin": CanonicalInputOriginKind.USER_CONTROL_FEEDBACK.value,
-                    "scheduled_input": None,
-                    "content": {
-                        "schema": "pulsara.prompt/v2",
-                        "parts": (
-                            {
-                                "type": "image",
-                                "digest": image.content_digest,
-                                "image_ref": image.image_ref,
-                                "encoded_bytes": len(image.immutable_bytes),
-                                "media_type": image.media_type,
-                                "width": image.width,
-                                "height": image.height,
-                            },
-                        ),
-                    },
-                },
-            ),
-        }
+    prompt = freeze_canonical_prompt(
+        FrozenPromptContent((image, LLMTextPart("again"), image))
     )
-
-    with pytest.raises(ValueError, match="cannot carry image"):
-        compaction_snapshot_canonical_expanded_bytes(raw)
-
-
-def test_snapshot_canonical_expanded_bytes_counts_each_image_occurrence() -> None:
-    image = _image()
-    request = FrozenRetainedHistoricalRequest(
-        item_kind=FrozenProviderInputItemKind.USER,
-        input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
-        content=FrozenPromptContent((image, LLMTextPart("again"), image)),
+    assert prompt.resource_quote.canonical_expanded_bytes == (
+        len(prompt.body) + 2 * len(image.immutable_bytes)
     )
-    carrier = _idle_carrier(request)
-
-    assert carrier.canonical_expanded_bytes == (
-        len(carrier.body) + 2 * len(image.immutable_bytes)
-    )
-
-
+    assert prompt.resource_quote.image_occurrences == 2
+    assert tuple(part.image for part in prompt.image_occurrences) == (image, image)
 
 
 def test_blob_exact_read_guards_body_projection_with_expected_metadata() -> None:

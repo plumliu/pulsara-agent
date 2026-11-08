@@ -95,6 +95,7 @@ from pulsara_agent.llm.request import (
     MAXIMUM_PROVIDER_WIRE_INPUT_BYTES,
     FrozenProviderWireInputQuote,
     FrozenProviderWireInputPlan,
+    ProviderInputUsageAnchor,
 )
 from pulsara_agent.llm.resolution import ResolvedModelCall, ResolvedModelTarget
 from pulsara_agent.llm.model_connections import ModelCallBinding
@@ -335,6 +336,8 @@ class KernelModelPort(Protocol):
         semantic_input: ProviderWireSemanticInput,
         replay_hydration: FrozenSelectedDurableProviderReplayHydration | None,
         tool_choice: str | None = None,
+        usage_anchor: ProviderInputUsageAnchor | None = None,
+        validate_content_capability: bool = True,
     ) -> ProviderWireMeasurement: ...
 
     def resolve_compaction_summary_call(
@@ -1747,7 +1750,7 @@ class ProviderDispatchCoordinator:
         prepared_target_override: PreparedKernelModelTarget | None = None,
         canonical_read_override: FrozenCanonicalProviderDispatchRead | None = None,
         expected_source_read: FrozenCanonicalProviderDispatchRead | None = None,
-        destination_projection_source: bool = False,
+        independent_auxiliary_source: bool = False,
         read_only_context_preview: bool = False,
     ) -> PreparedCompactionSourceDispatch:
         result = await self.prepare(
@@ -1765,7 +1768,7 @@ class ProviderDispatchCoordinator:
             include_hook_context=False,
             semantic_only=True,
             _compaction_source_projection=True,
-            _destination_projection_source=destination_projection_source,
+            _independent_auxiliary_source=independent_auxiliary_source,
             _read_only_context_preview=read_only_context_preview,
         )
         assert isinstance(result, PreparedCompactionSourceDispatch)
@@ -1983,7 +1986,7 @@ class ProviderDispatchCoordinator:
             FrozenProviderInputAppendPlanningInput | None
         ) = None,
         _noninstallable_preparation: bool = False,
-        _destination_projection_source: bool = False,
+        _independent_auxiliary_source: bool = False,
         _read_only_context_preview: bool = False,
     ) -> (
         PreparedProviderDispatch
@@ -1998,9 +2001,9 @@ class ProviderDispatchCoordinator:
             )
         if _read_only_context_preview and not _compaction_source_projection:
             raise ValueError("context preview requires a non-executable projection")
-        if _destination_projection_source and not _compaction_source_projection:
+        if _independent_auxiliary_source and not _compaction_source_projection:
             raise ValueError(
-                "destination projection source requires compaction projection"
+                "independent auxiliary source requires compaction projection"
             )
         if _compaction_candidate_family and (
             allow_steers
@@ -2135,7 +2138,7 @@ class ProviderDispatchCoordinator:
                 if (
                     current_epoch is None
                     or context_base_changed
-                    or _destination_projection_source
+                    or _independent_auxiliary_source
                 )
                 else len(current_epoch.canonical_frontier.ordered_item_fingerprints)
             )
@@ -2212,7 +2215,7 @@ class ProviderDispatchCoordinator:
                     or context_base_changed
                     or model_switch_requested
                     or force_empty_capability_predecessor
-                    or _destination_projection_source
+                    or _independent_auxiliary_source
                 ):
                     capability_predecessor = EmptyCapabilityEpochPredecessor(0)
                     retained_direct_inputs = ()
@@ -2536,8 +2539,8 @@ class ProviderDispatchCoordinator:
                 )
 
             freeze_planning = (
-                self._continuity.freeze_destination_projection_planning_input
-                if _destination_projection_source
+                self._continuity.freeze_auxiliary_planning_input
+                if _independent_auxiliary_source
                 else self._continuity.freeze_planning_input
             )
             planning = freeze_planning(
@@ -2699,7 +2702,7 @@ class ProviderDispatchCoordinator:
                 )
                 projection_method = (
                     project_structured_new_epoch
-                    if _destination_projection_source
+                    if _independent_auxiliary_source
                     or model_switch_requested
                     or planning.predecessor_view is None
                     or context_base_changed
@@ -2724,8 +2727,7 @@ class ProviderDispatchCoordinator:
                 )
                 source_anchor = None
                 if (
-                    not _destination_projection_source
-                    and not model_switch_requested
+                    not model_switch_requested
                     and planning.predecessor_view is not None
                     and not context_base_changed
                 ):
@@ -2736,6 +2738,7 @@ class ProviderDispatchCoordinator:
                     wire_candidate,
                     deadline=deadline,
                     usage_anchor=source_anchor,
+                    validate_content_capability=not _independent_auxiliary_source,
                 )
                 try:
                     return PreparedCompactionSourceDispatch(
@@ -4409,6 +4412,7 @@ class ProviderDispatchCoordinator:
         *,
         deadline: float,
         usage_anchor=None,
+        validate_content_capability: bool = True,
     ) -> ProviderWireMeasurement:
         replay_target = self._model.replay_target_for_resolved_call(candidate.call)
         try:
@@ -4439,6 +4443,7 @@ class ProviderDispatchCoordinator:
             replay_hydration=replay_hydration,
             tool_choice=candidate.tool_choice,
             usage_anchor=usage_anchor,
+            **({"validate_content_capability": False} if not validate_content_capability else {}),
         )
 
     async def measure_prepared_wire_candidate(

@@ -25,14 +25,12 @@ from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     CONTEXT_SNAPSHOT_CODEC,
     CONTEXT_SNAPSHOT_MEDIA_TYPE,
-    CompactionActiveRequestLocation,
     CompactionCanonicalAdoptionFactoryInput,
     CompactionCanonicalWritePreconditions,
     CompactionContinuationMode,
     CompactionScope,
     CompactionTargetBranch,
     ExpectedCompactionPredecessorRevision,
-    FrozenCompactionActiveRequest,
     build_prepared_compaction_canonical_adoption,
     canonical_compaction_range_digest,
     freeze_compaction_canonical_range,
@@ -1441,18 +1439,9 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
         summary=freeze_compaction_summary_output(
             "bounded adopted summary", maximum_utf8_bytes=100
         ),
-        recent_human_requests=(),
+        retained_entry_ids=(),
         continuation_mode=CompactionContinuationMode.RESUME_ACTIVE_TURN,
-        active_request=FrozenCompactionActiveRequest(
-            entry_id=(
-                compaction_read.dispatch_read.compile_snapshot.canonical_input.identity.initial_entry_id
-            ),
-            entry_sequence=initial_sequence,
-            location=CompactionActiveRequestLocation.CANONICAL_SUFFIX,
-            item_kind=FrozenProviderInputItemKind.USER,
-            input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
-            content=None,
-        ),
+        active_request_entry_id=compaction_read.dispatch_read.compile_snapshot.canonical_input.identity.initial_entry_id,
     )
     adoption = build_prepared_compaction_canonical_adoption(
         CompactionCanonicalAdoptionFactoryInput(

@@ -95,10 +95,8 @@ async def run():
                         return result
 
                     tools.invoke = recorded
-                # Isolate history recovery from the production 16K minimum-reclaim
-                # policy. This is an existing process-local policy injection.
                 for session in sessions:
-                    session._compaction.policy = replace(session._compaction.policy, minimum_reclaim_tokens=1, maximum_recent_human_messages=1)
+                    session._compaction.policy = replace(session._compaction.policy,  maximum_recent_human_messages=1)
                 source, caller = sessions
                 await core.rename_session(
                     source.session_id,

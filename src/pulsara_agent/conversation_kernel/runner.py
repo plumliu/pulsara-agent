@@ -107,6 +107,7 @@ from pulsara_agent.model_input.lowering import (
 )
 from pulsara_agent.llm.request import (
     FrozenProviderWireInputPlan,
+    FrozenProviderWireInputQuote,
     ProviderInputUsageAnchor,
     MAXIMUM_PROVIDER_WIRE_INPUT_BYTES,
     provider_assistant_public_projection_fingerprint,
@@ -185,6 +186,7 @@ from pulsara_agent.conversation_kernel.repository import (
     AssistantToolCallBlock,
     ConversationKernelRepository,
     ConversationKernelConflict,
+    StaleHostWriter,
     build_prepared_root_turn_intent,
 )
 from pulsara_agent.llm.model_target import FrozenModelResolutionSnapshot
@@ -298,9 +300,56 @@ from pulsara_agent.primitives.tool_result_projection import (
 from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 
 
-_MODEL_SWITCH_CONTEXT_REDUCTION_NOTICE = (
-    "模型已切换。由于上下文长度变化，接下来的回答可能不如之前连贯。"
-)
+def _is_http413_failure(error: ProviderModelExecutionFailed) -> bool:
+    summary = error.error.retry_summary
+    return summary is not None and summary.final_status_code == 413
+
+
+def _http413_execution_closed_without_output(
+    error: ProviderModelExecutionFailed,
+    execution: PreparedKernelModelExecution,
+) -> bool:
+    summary = error.error.retry_summary
+    if summary is None or summary.has_semantic_output:
+        return False
+    # An owned SDK client can fail to close after an HTTP rejection. The
+    # normalized generator may have exited, but the adapter's close fact still
+    # forbids replay. These are existing structured decision codes.
+    close_failures = {"physical_close_unconfirmed", "completed_stream_close_failed"}
+    return (
+        execution.state == "PHYSICALLY_CLOSED"
+        and summary.final_reason not in close_failures
+        and summary.skipped_reason not in close_failures
+    )
+
+
+def _http413_recovery_failed(
+    error: ProviderModelExecutionFailed, detail: str,
+) -> KernelProviderModelExecutionFailed:
+    original_detail = (
+        error.public_detail
+        if isinstance(error, KernelProviderModelExecutionFailed)
+        else f"{error.error.code.value}: {error.error.message}"
+    )
+    return KernelProviderModelExecutionFailed(
+        error.error,
+        "服务端拒绝了过大的请求体，压缩恢复未完成。 "
+        + detail + "\n" + original_detail,
+    )
+
+
+def _require_http413_retry_shrink(
+    failed_quote: FrozenProviderWireInputQuote | None,
+    failed_error: ProviderModelExecutionFailed | None,
+    actual_quote: FrozenProviderWireInputQuote,
+) -> None:
+    if failed_quote is not None and (
+        actual_quote.final_wire_utf8_bytes >= failed_quote.final_wire_utf8_bytes
+    ):
+        assert failed_error is not None
+        raise _http413_recovery_failed(
+            failed_error, "最终请求没有减少实际请求字节。",
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1261,6 +1310,7 @@ class ConversationKernelRunner:
             hook_dispatcher=hook_dispatcher,
             hook_root_scope=hook_scope,
             session_kind=self._session_scope_kind,
+            presentation_notice_sink=self._presentation_notice_sink,
         )
         self._tool_batches = ToolBatchExecutor(
             workspace_gate=workspace_gate,
@@ -1673,6 +1723,10 @@ class ConversationKernelRunner:
         completed_tool_batch = False
         stop_continuation_used = False
         input_selection_in_progress = False
+        # One rejected business operation owns this qualification across
+        # successor preparation, steer and transport-generation retries.
+        http413_failed_wire_quote: FrozenProviderWireInputQuote | None = None
+        http413_recovery_source: ProviderModelExecutionFailed | None = None
         try:
             await self._io.run(
                 self._repository.require_provider_safe_turn,
@@ -1850,13 +1904,6 @@ class ConversationKernelRunner:
                             )
                             self._require_active_compaction_continuation(compaction)
                             if compaction.successor_dispatch is not None:
-                                if (
-                                    compaction.context_reduction_notice
-                                    and self._presentation_notice_sink is not None
-                                ):
-                                    self._presentation_notice_sink(
-                                        _MODEL_SWITCH_CONTEXT_REDUCTION_NOTICE
-                                    )
                                 model_call_count -= 1
                                 successor_dispatch = compaction.successor_dispatch
                                 successor_wire_decision = compaction.successor_wire_decision
@@ -2007,13 +2054,6 @@ class ConversationKernelRunner:
                                 raise RuntimeError(
                                     "model switch did not prepare its successor"
                                 )
-                            if (
-                                compaction.context_reduction_notice
-                                and self._presentation_notice_sink is not None
-                            ):
-                                self._presentation_notice_sink(
-                                    _MODEL_SWITCH_CONTEXT_REDUCTION_NOTICE
-                                )
                             model_call_count -= 1
                             successor_dispatch = compaction.successor_dispatch
                             successor_wire_decision = compaction.successor_wire_decision
@@ -2078,6 +2118,9 @@ class ConversationKernelRunner:
                     )
                 provider_replay_reservation = None
                 control_answer_fenced = False
+                pending_http413_failure: ProviderModelExecutionFailed | None = None
+                execution = None
+                business_output_collected = False
                 try:
                     canonical_facts = dispatch.canonical_facts
                     canonical_input = canonical_facts.canonical_input
@@ -2110,6 +2153,13 @@ class ConversationKernelRunner:
                                 deadline=planning_deadline,
                                 direct_switch_admission=direct_switch_admission,
                             )
+                            _require_http413_retry_shrink(
+                                http413_failed_wire_quote,
+                                http413_recovery_source,
+                                prepared_wire.quote,
+                            )
+                            if intent.cause is not None:
+                                raise asyncio.CancelledError
                             provider_open = (
                                 await self._provider_dispatch.install_provider_open(
                                     dispatch=dispatch,
@@ -2124,19 +2174,26 @@ class ConversationKernelRunner:
                     if self._provider_input_installed_observer is not None:
                         self._provider_input_installed_observer(provider_open.request)
                     request = provider_open.request
+                    _require_http413_retry_shrink(
+                        http413_failed_wire_quote,
+                        http413_recovery_source,
+                        request.wire_input_plan.quote,
+                    )
                     input_selection_in_progress = False
                     execution = provider_open.execution
                     permit = provider_open.permit
                     entry_id = random_id("entry")
                     if self._workspace_gate is not None:
                         await self._workspace_gate.wait_available()
+                    if intent.cause is not None:
+                        raise asyncio.CancelledError
                     collected = await self._collect_model(
                         request,
                         execution=execution,
                         permit=permit,
                         proposed_entry_id=entry_id,
                     )
-                    first_call_history_through_sequence = None
+                    business_output_collected = True
                     completed = collected.completed
                     entry_id = completed.draft_identity
                     calls = tuple(
@@ -2321,6 +2378,11 @@ class ConversationKernelRunner:
                             )
                             control_answer_fenced = False
                         raise
+                    # Canonical assistant acceptance, rather than transport
+                    # completion, ends both first-call and 413 recovery scope.
+                    first_call_history_through_sequence = None
+                    http413_failed_wire_quote = None
+                    http413_recovery_source = None
                     if (
                         control_answer_fenced
                         and self._root_control_completion_settlement is not None
@@ -2359,6 +2421,31 @@ class ConversationKernelRunner:
                         generation_id=derive_id("generation", "draft", entry_id),
                         proposed_entry_id=entry_id,
                     )
+                except ProviderModelExecutionFailed as error:
+                    if not _is_http413_failure(error):
+                        raise
+                    if intent.cause is not None:
+                        raise asyncio.CancelledError from error
+                    if (
+                        business_output_collected
+                        or execution is None
+                        or not _http413_execution_closed_without_output(error, execution)
+                    ):
+                        raise
+                    if http413_failed_wire_quote is not None:
+                        raise KernelProviderModelExecutionFailed(
+                            error.error,
+                            "服务端拒绝了过大的请求体；压缩后重试仍失败。"
+                            "请缩小本次输入或媒体读取范围后再试。\n"
+                            + (error.public_detail if isinstance(
+                                error, KernelProviderModelExecutionFailed,
+                            ) else error.error.message),
+                        ) from error
+                    if not self.compaction.automatic_allowed(scope_kind=intent.scope_kind):
+                        raise _http413_recovery_failed(
+                            error, "当前自动上下文压缩不可用。",
+                        ) from error
+                    pending_http413_failure = error
                 finally:
                     if (
                         control_answer_fenced
@@ -2372,6 +2459,62 @@ class ConversationKernelRunner:
                             provider_replay_reservation
                         )
                     active_surface_borrow = dispatch.finish_model_operation()
+                if pending_http413_failure is not None:
+                    # Retire the failed dispatch before taking a new canonical
+                    # compaction fence. Neither handle nor surface may survive.
+                    active_surface_borrow.close()
+                    active_surface_borrow = None
+                    if intent.cause is not None:
+                        raise asyncio.CancelledError
+                    http413_recovery_source = pending_http413_failure
+                    http413_failed_wire_quote = request.wire_input_plan.quote
+                    await self._io.run(
+                        self._repository.require_provider_safe_turn,
+                        self._writer_lease.guard,
+                        turn_id=turn_id,
+                        deadline_monotonic=self._canonical_deadline(),
+                    )
+                    compaction = None
+                    try:
+                        compaction = await self.compaction.execute_active(
+                            turn_id=turn_id,
+                            model_call_index=model_call_count + 1,
+                            inherited_memory_use_policy=current_memory_use_policy,
+                            trigger=CompactionTrigger.HTTP_413_RECOVERY,
+                            force=True,
+                            scope_kind=intent.scope_kind,
+                            hook_scope=self._hook_scope,
+                            session_start_compact_port=self._compact_session_start_port(intent),
+                            session_start_boundary_port=self._compact_session_start_boundary_port(intent),
+                            first_call_history_through_sequence=first_call_history_through_sequence,
+                            failed_wire_quote=http413_failed_wire_quote,
+                        )
+                        self._require_active_compaction_continuation(compaction)
+                        if compaction.successor_dispatch is None:
+                            raise _http413_recovery_failed(
+                                pending_http413_failure,
+                                compaction.outcome.public_code or "未采用可执行后继。",
+                            )
+                    except (asyncio.CancelledError, StaleHostWriter):
+                        if compaction is not None and compaction.successor_dispatch is not None:
+                            compaction.successor_dispatch.close()
+                        raise
+                    except Exception as error:
+                        if compaction is not None and compaction.successor_dispatch is not None:
+                            compaction.successor_dispatch.close()
+                        if intent.cause is not None:
+                            raise asyncio.CancelledError from error
+                        if isinstance(error, KernelProviderModelExecutionFailed) and (
+                            error.error is pending_http413_failure.error
+                        ):
+                            raise
+                        raise _http413_recovery_failed(
+                            pending_http413_failure,
+                            execution.scrub_provider_detail(f"{type(error).__name__}: {error}"),
+                        ) from error
+                    successor_dispatch = compaction.successor_dispatch
+                    successor_wire_decision = compaction.successor_wire_decision
+                    continue
                 if not calls and accepted.turn_completed:
                     active_surface_borrow.close()
                     active_surface_borrow = None
@@ -2839,6 +2982,16 @@ class ConversationKernelRunner:
                 finally:
                     if self._active_execution is execution:
                         self._active_execution = None
+            if cancellation is not None and (
+                collection_error is None
+                or isinstance(collection_error, ProviderModelExecutionFailed)
+                and _is_http413_failure(collection_error)
+            ):
+                # Cancellation while joining the consumer close must not leave
+                # an earlier HTTP rejection eligible for semantic recovery.
+                if collection_error is None:
+                    abort_generation("MODEL_STREAM_CANCELLEDERROR")
+                raise cancellation from close_error or collection_error
             if collection_error is not None:
                 if close_error is not None:
                     if collection_error.__cause__ is None and collection_error.__context__ is None:
@@ -2846,12 +2999,9 @@ class ConversationKernelRunner:
                     collection_error.add_note(execution.scrub_provider_detail(
                         f"Provider cleanup failure: {type(close_error).__name__}: {close_error}"
                     ))
-            elif cancellation is not None or close_error is not None:
-                error = cancellation if cancellation is not None else close_error
-                abort_generation(f"MODEL_STREAM_{type(error).__name__.upper()}")
-                if cancellation is not None and close_error is not None:
-                    raise cancellation from close_error
-                raise error
+            elif close_error is not None:
+                abort_generation(f"MODEL_STREAM_{type(close_error).__name__.upper()}")
+                raise close_error
 
     def _offer_compile_observation(
         self,

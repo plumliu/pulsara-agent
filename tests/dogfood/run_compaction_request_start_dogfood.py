@@ -193,7 +193,7 @@ async def run(destination: Path, selected_cases: tuple[str, ...] = ()):
             case["auto_trigger_reported_input_tokens"] = measured_input
             session._compaction.policy = replace(session._compaction.policy,
                 automatic_enabled=True, auto_trigger_ratio=ratio * 0.95,
-                post_compaction_target_ratio=ratio * 0.85, minimum_reclaim_tokens=1)
+                )
             save()
 
     def observed_open(owner, *, call, context):
@@ -256,7 +256,7 @@ async def run(destination: Path, selected_cases: tuple[str, ...] = ()):
                     active.update(case=case, session=session)
                     binding = ModelCallBinding(connections[wire].id, ReasoningEffortSelection(effort))
                     await session.update_model_call_binding(binding)
-                    session._compaction.policy = ResolvedCompactionPolicy(automatic_enabled=False, minimum_reclaim_tokens=1)
+                    session._compaction.policy = ResolvedCompactionPolicy(automatic_enabled=False)
                     _seed_history(session)
                     try:
                         print(f"{name}: starting", flush=True)
@@ -278,8 +278,7 @@ async def run(destination: Path, selected_cases: tuple[str, ...] = ()):
                                     case["before_usage"] = usage
                                     ratio = usage["input_tokens"] / usage["input_budget_tokens"]
                                     session._compaction.policy = replace(session._compaction.policy,
-                                        automatic_enabled=True, auto_trigger_ratio=ratio * 0.95,
-                                        post_compaction_target_ratio=ratio * 0.85)
+                                        automatic_enabled=True, auto_trigger_ratio=ratio * 0.95)
                                     command = random_id("command")
                                     case["accepted"] = asdict(await session.submit_prompt(command_id=command,
                                         content=PromptContent.text("Continue the current request. Reply briefly; include any later requested marker."),

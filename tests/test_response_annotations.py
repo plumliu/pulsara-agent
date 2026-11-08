@@ -36,11 +36,9 @@ from pulsara_agent.model_input.contracts import (
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
     CanonicalInputOriginKind,
-    FrozenRetainedHistoricalRequest,
 )
 from pulsara_agent.model_input.lowering import (
     lower_canonical_item,
-    lower_retained_request_content,
 )
 
 
@@ -85,10 +83,6 @@ def test_codec_provider_intent_and_protocol_roundtrip():
         lower_canonical_item(item).fixed_message.content
         == parts
     )
-    retained = FrozenRetainedHistoricalRequest(
-        item.item_kind, item.input_origin, content
-    )
-    assert lower_retained_request_content(retained) == parts
     with pytest.raises(TypeError):
         LLMMessage(MessageRole.USER, content.parts)
     with pytest.raises(TypeError):

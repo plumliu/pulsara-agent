@@ -11,7 +11,6 @@ import pytest
 
 from pulsara_agent.identity import derive_id
 from pulsara_agent.conversation_kernel.compaction.contracts import (
-    CompactionActiveRequestLocation,
     CompactionContinuationMode,
     CompactionDisposition,
     CompactionLineageBaseKind,
@@ -28,16 +27,13 @@ from pulsara_agent.conversation_kernel.compaction.coordinator import (
     CompactionExecutionResult,
     _join_compaction_settlement,
 )
-from pulsara_agent.conversation_kernel.compaction.model_call import (
-    _destination_source_messages_and_active_placement,
-)
 from pulsara_agent.conversation_kernel.compaction.planner import (
     build_synthetic_compaction_dispatch_read,
     enumerate_destination_backbone_projections,
     enumerate_safe_summary_prefixes,
     freeze_compaction_continuation,
     freeze_destination_dialogue_projection_plan,
-    project_compaction_read_for_text_only_handover,
+    project_destination_dialogue_plan_for_text_only_handover,
     provider_dispatch_effective_history_has_image,
 )
 from pulsara_agent.conversation_kernel.compaction.prompt import (
@@ -236,7 +232,8 @@ def test_first_call_summary_ceiling_precedes_the_whole_initial_group() -> None:
         source_projection=projection,
         maximum_source_through_sequence=2,
     )
-    assert len(candidates) == 1
+    assert tuple(prefix.source_through_sequence for _, prefix in candidates) == (2, 1)
+    assert all(prefix.source_through_sequence <= 2 for _, prefix in candidates)
     tail, prefix = candidates[0]
     assert prefix.source_through_sequence == 2
     assert prefix.summary_prefix_message_count == 2
@@ -250,9 +247,7 @@ def test_first_call_summary_ceiling_precedes_the_whole_initial_group() -> None:
         target_branch=CompactionTargetBranch.ACTIVE_INSTALLATION,
         source_through_sequence=prefix.source_through_sequence,
     )
-    assert active.entry_sequence == 4
-    assert active.location is CompactionActiveRequestLocation.CANONICAL_SUFFIX
-    assert active.content is None
+    assert active == read.dispatch_read.compile_snapshot.canonical_input.identity.initial_entry_id
 
 
 def test_destination_summary_excludes_context_instruction_and_dependency_material() -> (
@@ -267,7 +262,7 @@ def test_destination_summary_excludes_context_instruction_and_dependency_materia
     )
     plan = freeze_destination_dialogue_projection_plan(
         canonical_read=read,
-        active_request=active,
+        active_request_entry_id=active,
         source_through_sequence=2,
     )
     assert len(plan.units) == 1
@@ -276,14 +271,6 @@ def test_destination_summary_excludes_context_instruction_and_dependency_materia
     assert "history" in text and "old answer" in text
     for item in read.dispatch_read.compile_snapshot.canonical_input.items[2:]:
         assert item.content[0].text not in text
-    current_messages, current_placements, active_placement = (
-        _destination_source_messages_and_active_placement(
-            source_projection=projection,
-            active_request=active,
-        )
-    )
-    assert current_messages == current_placements == ()
-    assert active_placement is None
 
 
 def test_history_image_projection_keeps_every_current_group_image_exact() -> None:
@@ -296,14 +283,18 @@ def test_history_image_projection_keeps_every_current_group_image_exact() -> Non
     assert not provider_dispatch_effective_history_has_image(
         current_only.dispatch_read, first_call_history_through_sequence=2
     )
-    projected = project_compaction_read_for_text_only_handover(
-        read, first_call_history_through_sequence=2
+    plan = freeze_destination_dialogue_projection_plan(
+        canonical_read=read,
+        active_request_entry_id=read.dispatch_read.compile_snapshot.canonical_input.identity.initial_entry_id,
+        source_through_sequence=2,
     )
-    after = projected.dispatch_read.compile_snapshot.canonical_input.items
-    assert after[0].content != original[0].content
-    assert after[2:] == original[2:]
-    assert after[4].content[1] is original[4].content[1]
-    assert projected.safe_head_range.source_through_sequence == 5
+    projected = project_destination_dialogue_plan_for_text_only_handover(plan)
+    assert projected.units[0].entries[0].content != original[0].content
+    assert all(sequence <= 2 for unit in projected.units for sequence in unit.source_entry_sequences)
+    assert read.dispatch_read.compile_snapshot.canonical_input.items == original
+    assert plan.units[0].entries[0].source is original[0]
+    assert read.dispatch_read.compile_snapshot.canonical_input.items[4].content[1] is original[4].content[1]
+    assert read.safe_head_range.source_through_sequence == 5
 
 
 def test_new_turn_adopted_base_keeps_exact_independent_initial_entries() -> None:
@@ -318,9 +309,9 @@ def test_new_turn_adopted_base_keeps_exact_independent_initial_entries() -> None
         summary=freeze_compaction_summary_output(
             "historical summary", maximum_utf8_bytes=200
         ),
-        recent_human_requests=(),
+        retained_entry_ids=(),
         continuation_mode=mode,
-        active_request=active,
+        active_request_entry_id=active,
     )
     rewritten = build_synthetic_compaction_dispatch_read(
         canonical_read=read,
@@ -337,7 +328,7 @@ def test_new_turn_adopted_base_keeps_exact_independent_initial_entries() -> None
     )
     canonical = rewritten.compile_snapshot.canonical_input
     assert canonical.identity.turn_id == read.scope.turn_id
-    assert canonical.identity.initial_entry_id == active.entry_id
+    assert canonical.identity.initial_entry_id == active
     assert canonical.identity.provider_input_through_sequence == 5
     assert (
         canonical.items[1:]
@@ -349,7 +340,8 @@ def test_new_turn_adopted_base_keeps_exact_independent_initial_entries() -> None
         5,
     )
     assert carrier.continuation_mode is CompactionContinuationMode.RESUME_ACTIVE_TURN
-    assert carrier.active_request.content is None
+    assert carrier.active_request_entry_id == active
+    assert carrier.retained_entry_ids == ()
 
     # A previous adopted snapshot alone remains a compressible predecessor;
     # its origin has no entry ID, while the exact current group stays suffix.

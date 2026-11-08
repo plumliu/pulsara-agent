@@ -177,9 +177,10 @@ def test_agent_group_has_independent_ordered_user_messages_and_instruction_compa
         target_branch=CompactionTargetBranch.ACTIVE_INSTALLATION,
         source_through_sequence=3,
     )
-    assert active.entry_id == items[1].source_entry_id
-    assert active.input_origin is Origin.AGENT_INSTRUCTION
-    assert active.content.parts == (LLMTextPart("instruction"),)
+    assert active == items[1].source_entry_id
+    original = next(item for item in snapshot.items if item.source_entry_id == active)
+    assert original.input_origin is Origin.AGENT_INSTRUCTION
+    assert original.content == (LLMTextPart("instruction"),)
 
 
 def test_reused_agent_appends_instruction_and_materials_within_same_epoch():

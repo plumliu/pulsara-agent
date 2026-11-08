@@ -690,8 +690,6 @@ class PreparedKernelModelExecution:
                     completion = await execution.wait_physical_completion()
                     if completion.status is not ProviderPhysicalCompletionStatus.COMPLETED:
                         raise RuntimeError("provider physical operation did not exit")
-                    with self._lock:
-                        self._state = _PreparedExecutionState.PHYSICALLY_CLOSED
                     physically_closed = True
                 except BaseException as exc:
                     cleanup_error = exc
@@ -708,6 +706,12 @@ class PreparedKernelModelExecution:
                             ))
                         else:
                             cleanup_error.__cause__ = exc
+                # The borrow is part of this physical operation. Publishing
+                # CLOSED before releasing it would let a failed release look
+                # safe to a caller considering semantic recovery.
+                if physically_closed:
+                    with self._lock:
+                        self._state = _PreparedExecutionState.PHYSICALLY_CLOSED
                 if self._usage_observer is not None:
                     try:
                         await self._usage_observer(
@@ -751,6 +755,14 @@ class PreparedKernelModelExecution:
                     cleanup_error.__cause__ = exc
         self.clear_retry_observation()
         primary_error = operation_error or semantic_error or cleanup_cancellation
+        if cleanup_cancellation is not None and isinstance(
+            primary_error, ProviderModelExecutionFailed,
+        ):
+            summary = primary_error.error.retry_summary
+            if summary is not None and summary.final_status_code == 413:
+                # A rejection must not hide a cancellation during its close and
+                # subsequently become eligible for compaction recovery.
+                primary_error = cleanup_cancellation
         if primary_error is not None:
             if cleanup_error is not None:
                 if primary_error.__cause__ is None and primary_error.__context__ is None:
@@ -1247,6 +1259,7 @@ class DirectKernelModelPort:
         replay_hydration: FrozenSelectedDurableProviderReplayHydration | None,
         tool_choice: str | None = None,
         usage_anchor: ProviderInputUsageAnchor | None = None,
+        validate_content_capability: bool = True,
     ) -> "ProviderWireMeasurement":
         return freeze_provider_wire_measurement(
             call=call,
@@ -1256,6 +1269,7 @@ class DirectKernelModelPort:
             replay_hydration=replay_hydration,
             tool_choice=tool_choice,
             usage_anchor=usage_anchor,
+            validate_content_capability=validate_content_capability,
         )
 
     @staticmethod
@@ -1577,6 +1591,7 @@ def freeze_provider_wire_measurement(
     replay_hydration: FrozenSelectedDurableProviderReplayHydration | None,
     tool_choice: str | None = None,
     usage_anchor: ProviderInputUsageAnchor | None = None,
+    validate_content_capability: bool = True,
 ) -> ProviderWireMeasurement:
     if (
         semantic_input.compile_binding_fingerprint != binding.binding_fingerprint
@@ -1584,10 +1599,14 @@ def freeze_provider_wire_measurement(
         or call.target.fact != binding.target_fact
     ):
         raise ValueError("provider wire planning input does not join preparation")
-    validate_model_message_content_for_call(
-        call=call,
-        messages=semantic_input.messages,
-    )
+    # An auxiliary compaction source is only a measurement of frozen history.
+    # The selected summary and every executable request validate capabilities
+    # normally; an unsupported historical image can then be projected locally.
+    if validate_content_capability:
+        validate_model_message_content_for_call(
+            call=call,
+            messages=semantic_input.messages,
+        )
     generic_groups, wire_tools = _semantic_wire_groups(
         call=call,
         semantic_input=semantic_input,

@@ -7,6 +7,7 @@ from psycopg.rows import dict_row
 
 from pulsara_agent.conversation_kernel.contracts import PromptDeliveryMode
 from pulsara_agent.conversation_kernel.repository_errors import ConversationKernelConflict
+from pulsara_agent.conversation_kernel.subagents.names import SCIENTIST_NAMES
 from pulsara_agent.identity import random_id
 from pulsara_agent.llm.input import FrozenPromptContent
 from pulsara_agent.llm.model_connections import model_call_binding_from_dict
@@ -44,13 +45,21 @@ def test_work_title_tracks_each_fifo_work_and_survives_stop_and_reuse(source):
     third = request(agent_id=first.agent_id, create=False)
     assert [row['work_title'] for row in admit(second, third)] == ['后续复审', None]
     queued = _state(repository, first.agent_id)
-    assert queued['title'] is None
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR, row_factory=dict_row, deadline_monotonic=deadline(),
+    ) as connection:
+        agent_title = connection.execute(
+            "SELECT title FROM pulsara_v3.sessions WHERE id=%s", (first.agent_id,),
+        ).fetchone()['title']
+    assert agent_title in SCIENTIST_NAMES
+    assert queued['title'] == agent_title
     assert queued['ui_current_work_id'] is None and queued['ui_queued_work_count'] == 3
     lease, candidate = start(repository, first)
     active = _state(repository, first.agent_id)
     assert (active['ui_current_work_id'], active['ui_current_work_title'], active['ui_current_work_status']) == (
         first.work_id, first.work_title, 'running')
     assert active['has_running_turn'] and active['ui_queued_work_count'] == 2
+    assert active['title'] == agent_title
     work = repository.query_agent_work(root_session_id=root.guard.session_id, work_id=first.work_id,
                                        deadline_monotonic=deadline())
     assert work['instruction'] == first.instruction
@@ -61,7 +70,7 @@ def test_work_title_tracks_each_fifo_work_and_survives_stop_and_reuse(source):
     active = _state(repository, first.agent_id)
     assert active['ui_current_work_id'] == second.work_id
     assert active['ui_current_work_title'] == second.work_title
-    assert active['ui_queued_work_count'] == 1 and active['title'] is None
+    assert active['ui_queued_work_count'] == 1 and active['title'] == agent_title
     # A queued Work stopped before any turn still owns its nullable title.
     stopped = repository.cancel_agent_requests(root.guard, agent_id=first.agent_id,
         work_id=third.work_id, occurred_at=now(), actor_id='test', deadline_monotonic=deadline())
@@ -78,7 +87,8 @@ def test_work_title_tracks_each_fifo_work_and_survives_stop_and_reuse(source):
         (first.work_id, '原始调查', 'completed'), (second.work_id, '后续复审', 'completed'),
         (third.work_id, None, 'stopped'), (fourth.work_id, '原始调查', 'queued'),
     ]
-    assert _state(repository, first.agent_id)['ui_current_work_id'] is None
+    terminal = _state(repository, first.agent_id)
+    assert terminal['ui_current_work_id'] is None and terminal['title'] == agent_title
 
 
 def test_confirmation_compares_title_for_creation_and_reuse_without_title_dedup(source):

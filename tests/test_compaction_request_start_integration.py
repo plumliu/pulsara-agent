@@ -172,7 +172,7 @@ async def _history(core, root, model):
     ratio = float(usage["input_tokens"]) / int(usage["input_budget_tokens"])
     root._compaction.policy = replace(root._compaction.policy,
         automatic_enabled=True, auto_trigger_ratio=ratio * 0.95,
-        post_compaction_target_ratio=ratio * 0.85, minimum_reclaim_tokens=1)
+        )
     return child_id, works[0]["work_id"]
 
 
@@ -316,13 +316,12 @@ def test_fresh_host_empty_epoch_adoption_delivers_steer_on_first_responses_wire(
         root = await core.open_session(HostWorkspaceInput(workspace_kind="project", workspace_root=tmp_path))
         try:
             await root.update_model_call_binding(test_model_binding(runtime))
-            root._compaction.policy = ResolvedCompactionPolicy(automatic_enabled=False, minimum_reclaim_tokens=1)
+            root._compaction.policy = ResolvedCompactionPolicy(automatic_enabled=False)
             _seed_history(root)
             usage = await root.read_context_usage()
             ratio = usage["input_tokens"] / usage["input_budget_tokens"]
             root._compaction.policy = replace(root._compaction.policy,
-                automatic_enabled=True, auto_trigger_ratio=ratio * 0.95,
-                post_compaction_target_ratio=ratio * 0.85)
+                automatic_enabled=True, auto_trigger_ratio=ratio * 0.95)
             command = random_id("command")
             original = _INITIAL + ("; don't use saved memory for this answer" if memory_case == "initial_disable_no_steer" else "")
             await root.submit_prompt(command_id=command, content=PromptContent.text(original))
@@ -425,7 +424,7 @@ def test_subagent_first_summary_uses_full_initial_group_and_current_work(
             ratio = usage["input_tokens"] / usage["input_budget_tokens"]
             child._compaction.policy = replace(child._compaction.policy,
                 automatic_enabled=True, auto_trigger_ratio=ratio * 0.95,
-                post_compaction_target_ratio=ratio * 0.85, minimum_reclaim_tokens=1)
+                )
             await root.run_turn(PromptContent.text("Delegate the next Work with the prior final as material."),
                 command_id=random_id("command"), requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
             await asyncio.wait_for(model.summary.started.wait(), 20)
@@ -523,6 +522,7 @@ def test_full_adoption_stop_drains_exact_database_winner_and_unsent_resources(
             return result
 
         try:
+            _seed_history(root)
             await _history(core, root, model)
             baseline_opens = len(model.root_requests)
             monkeypatch.setattr(root.repository, "adopt_context_snapshot", blocked_adoption)

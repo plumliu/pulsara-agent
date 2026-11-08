@@ -1580,8 +1580,8 @@ def test_round9_2_compact_before_resumed_first_open_supersedes_resume_once(
         resumed._compaction.policy = replace(  # noqa: SLF001
             resumed._compaction.policy,  # noqa: SLF001
             auto_trigger_ratio=trigger_ratio,
-            post_compaction_target_ratio=target_ratio,
-            minimum_reclaim_tokens=1,
+
+
         )
         result = await resumed.run_turn(
             PromptContent.text("resume first physical attempt: " + ("context " * 4096)),
@@ -1685,8 +1685,8 @@ def test_round9_2_active_compaction_runs_post_then_root_compact_session_start(
             session._compaction.policy = replace(
                 session._compaction.policy,
                 auto_trigger_ratio=(before_tokens + 128) / budget,
-                post_compaction_target_ratio=(before_tokens - 1) / budget,
-                minimum_reclaim_tokens=1,
+
+
             )
             model.active_provider_release.set()
             result = await asyncio.wait_for(running, timeout=10)

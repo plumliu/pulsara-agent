@@ -18,14 +18,12 @@ from pulsara_agent.conversation_kernel.prompt_content import freeze_canonical_pr
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     CONTEXT_SNAPSHOT_CODEC,
     CONTEXT_SNAPSHOT_MEDIA_TYPE,
-    CompactionActiveRequestLocation,
     CompactionCanonicalAdoptionFactoryInput,
     CompactionCanonicalWritePreconditions,
     CompactionContinuationMode,
     CompactionScope,
     CompactionTargetBranch,
     ExpectedCompactionPredecessorRevision,
-    FrozenCompactionActiveRequest,
     build_prepared_compaction_canonical_adoption,
     canonical_compaction_range_digest,
     freeze_compaction_canonical_range,
@@ -924,16 +922,9 @@ def test_mid_turn_snapshot_revision_keeps_current_user_as_exact_delta(
             summary=freeze_compaction_summary_output(
                 "summary of old history", maximum_utf8_bytes=100
             ),
-            recent_human_requests=(),
+            retained_entry_ids=(),
             continuation_mode=CompactionContinuationMode.RESUME_ACTIVE_TURN,
-            active_request=FrozenCompactionActiveRequest(
-                entry_id=str(active_item.source_entry_id),
-                entry_sequence=active_item.source_entry_sequence,
-                location=CompactionActiveRequestLocation.CANONICAL_SUFFIX,
-                item_kind=FrozenProviderInputItemKind.USER,
-                input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
-                content=None,
-            ),
+            active_request_entry_id=str(active_item.source_entry_id),
         )
         adoption = build_prepared_compaction_canonical_adoption(
             CompactionCanonicalAdoptionFactoryInput(

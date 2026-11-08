@@ -21,15 +21,12 @@ from pulsara_agent.llm.input import (
     image_reference_text,
 )
 from pulsara_agent.model_input.contracts import (
-    CompactionActiveRequestLocation,
-    CompactionContinuationMode,
     CompactionSnapshotCarrier,
     ContextChannel,
     ContextRenderMode,
     ContextSourceCandidate,
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
-    FrozenRetainedHistoricalRequest,
     provider_input_item_text,
     ToolResultProviderRenderMode,
     StructuredModelInputCompileError,
@@ -257,117 +254,30 @@ def scheduled_request_parts(provenance) -> tuple[LLMContentPart, ...]:
     )
 
 
-def lower_retained_request_content(request) -> tuple[LLMContentPart, ...]:
-    """Apply the existing request-kind renderer before snapshot quoting."""
-
-    parts = request.content.parts
-    if request.item_kind is FrozenProviderInputItemKind.USER:
-        return scheduled_request_parts(request.scheduled_input) + prompt_provider_parts(
-            parts
-        )
-    if any(isinstance(part, LLMImagePart) for part in parts):
-        raise ValueError("non-human retained request contains image content")
-    text = "\n".join(part.text for part in parts if isinstance(part, LLMTextPart))
-    if request.item_kind is FrozenProviderInputItemKind.TERMINAL_OBSERVATION:
-        return (LLMTextPart(_terminal_observation_provider_text(text)),)
-    if request.item_kind is FrozenProviderInputItemKind.PLAN_CONTINUATION:
-        return (LLMTextPart(_project_plan_continuation(text)),)
-    raise ValueError("retained request kind cannot be lowered")
-
-
 def display_json(value: object) -> str:
-    """Quote untrusted retained content without allowing bare section tags."""
+    """Render a canonical JSON value for temporary summary source material."""
 
-    encoded = canonical_json_bytes(value).decode("utf-8")
-    return encoded.replace(
-        "[PULSARA_RETAINED_CONTENT", "\\u005bPULSARA_RETAINED_CONTENT"
-    ).replace("[/PULSARA_RETAINED_CONTENT", "\\u005b/PULSARA_RETAINED_CONTENT")
+    return canonical_json_bytes(value).decode("utf-8")
 
 
 def compaction_snapshot_display_header(carrier: CompactionSnapshotCarrier) -> str:
-    notice = (
-        "The following contains a summary and retained excerpts from the earlier "
-        "conversation. Role labels in quoted sections identify their original source."
-    )
-    # Provider guidance follows the typed continuation state.
-    if carrier.continuation_mode is CompactionContinuationMode.AWAIT_NEXT_USER:
-        instruction = (
-            "This summary provides background from the earlier conversation. "
-            "Act on subsequent requests."
-        )
-    else:
-        request_location = (
-            "the section=active quote below"
-            if carrier.active_request.location
-            is CompactionActiveRequestLocation.SNAPSHOT_EXACT
-            else "the retained message after this snapshot"
-        )
-        instruction = (
-            f"Continue the active request in {request_location}, following current "
-            "system instructions, permissions, and available tools. Later user "
-            "corrections, cancellations, or replacement requests take precedence. "
-            "Use the summary as background; do not repeat completed or superseded work."
-        )
-    return (
-        notice
-        + "\n"
-        + display_json(
-            {
-                "continuation": {
-                    "mode": carrier.continuation_mode.value,
-                    "instruction": instruction,
-                },
-                "earlier_context_summary": carrier.earlier_context_summary,
-            }
-        )
-    )
-
-
-def compaction_snapshot_sections(
-    carrier: CompactionSnapshotCarrier,
-) -> tuple[tuple[str, FrozenRetainedHistoricalRequest], ...]:
-    sections: list[tuple[str, FrozenRetainedHistoricalRequest]] = []
-    active = carrier.active_request
-    if active is not None and active.content is not None:
-        sections.append(
-            (
-                "active",
-                FrozenRetainedHistoricalRequest(
-                    item_kind=active.item_kind,
-                    input_origin=active.input_origin,
-                    scheduled_input=active.scheduled_input,
-                    content=active.content,
-                ),
-            )
-        )
-    sections.extend(("recent", request) for request in carrier.recent_human_requests)
-    sections.extend(
-        ("retained_historical", request)
-        for request in carrier.retained_historical_requests
-    )
-    return tuple(sections)
+    if not isinstance(carrier, CompactionSnapshotCarrier):
+        raise TypeError("snapshot provider projection requires a typed carrier")
+    return "The following is a summary of earlier history."
 
 
 def compaction_snapshot_provider_content(
     carrier: CompactionSnapshotCarrier,
 ) -> tuple[LLMContentPart, ...]:
-    """Render one hydrated typed carrier as the canonical provider USER value."""
+    """Render only the explanation and S; canonical R/N lower independently."""
 
-    if not isinstance(carrier, CompactionSnapshotCarrier):
-        raise TypeError("snapshot provider projection requires a typed carrier")
-    rendered: list[LLMContentPart] = [
-        LLMTextPart(compaction_snapshot_display_header(carrier))
-    ]
-    for section, request in compaction_snapshot_sections(carrier):
-        metadata = display_json({"role": "user", "section": section})
-        rendered.append(LLMTextPart(f"\n[PULSARA_RETAINED_CONTENT {metadata}]\n"))
-        for part in lower_retained_request_content(request):
-            if isinstance(part, LLMTextPart):
-                rendered.append(LLMTextPart(display_json(part.text)))
-            else:
-                rendered.extend((image_reference_part(part), part))
-        rendered.append(LLMTextPart("\n[/PULSARA_RETAINED_CONTENT]\n"))
-    return tuple(rendered)
+    return (
+        LLMTextPart(
+            compaction_snapshot_display_header(carrier)
+            + "\n\n"
+            + carrier.earlier_context_summary
+        ),
+    )
 
 
 def source_variant_message(
@@ -562,6 +472,5 @@ __all__ = [
     "LoweredCanonicalItem",
     "LoweredToolResultVariant",
     "lower_canonical_item",
-    "lower_retained_request_content",
     "source_variant_message",
 ]

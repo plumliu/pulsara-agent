@@ -61,7 +61,7 @@ def test_cell_new_turn_first_summary_preserves_entry_and_steer(
             root._compaction.policy = replace(
                 root._compaction.policy, automatic_enabled=True,
                 auto_trigger_ratio=ratio * .95,
-                post_compaction_target_ratio=ratio * .85, minimum_reclaim_tokens=1,
+
             )
             release.touch()
             await asyncio.wait_for(model.summary.started.wait(), 20)

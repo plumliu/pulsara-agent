@@ -129,9 +129,6 @@ async def run(destination: Path) -> None:
                     await session.update_model_call_binding(
                         _binding(native, connections[wire])
                     )
-                    session._compaction.policy = replace(
-                        session._compaction.policy, minimum_reclaim_tokens=1
-                    )
                     start = len(report["calls"])
 
                     async def preview(label):

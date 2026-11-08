@@ -35,9 +35,6 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionSnapshotCarrier,
 )
 from pulsara_agent.conversation_kernel.compaction.prompt import (
-    compaction_snapshot_canonical_expanded_bytes,
-    compaction_snapshot_image_descriptors,
-    compaction_snapshot_image_parts,
     parse_compaction_snapshot_carrier,
 )
 from pulsara_agent.conversation_kernel.repository_errors import (
@@ -150,22 +147,7 @@ def read_image_reference_in_connection(connection, *, session_id: str, workspace
                   'USER_MESSAGE', 'USER_STEER', 'TOOL_RESULT'
               )
             UNION ALL
-            SELECT 1 AS owner_kind_rank,
-                   s.id AS owner_id, s.session_id AS source_session_id,
-                   r.ref_ordinal,
-                   s.content_size,
-                   r.blob_id
-            FROM pulsara_v3.canonical_image_refs AS r
-            JOIN pulsara_v3.blobs AS b
-              ON b.id = r.blob_id AND b.workspace_id = r.workspace_id
-            JOIN pulsara_v3.context_snapshots AS s
-              ON s.session_id = r.session_id
-             AND s.workspace_id = r.workspace_id
-             AND s.id = r.context_snapshot_id
-            WHERE r.workspace_id = %s
-              AND b.id = %s
-            UNION ALL
-            SELECT 2 AS owner_kind_rank, v.assistant_entry_id AS owner_id,
+            SELECT 1 AS owner_kind_rank, v.assistant_entry_id AS owner_id,
                    v.session_id AS source_session_id, v.ordinal AS ref_ordinal,
                    0 AS content_size, v.blob_id
             FROM pulsara_v3.assistant_visualizations v
@@ -184,7 +166,6 @@ def read_image_reference_in_connection(connection, *, session_id: str, workspace
         LIMIT 1
         """,
         (
-            workspace_id, image_ref,
             workspace_id, image_ref,
             workspace_id, image_ref,
         ),
@@ -222,46 +203,9 @@ def read_image_reference_in_connection(connection, *, session_id: str, workspace
             row=row,
             queue_item_id=None,
             transcript_entry_id=owner_id,
-            context_snapshot_id=None,
         )
         descriptors = _image_descriptors(decoded)
     elif owner_kind_rank == 1:
-        row = connection.execute(
-            """SELECT session_id, workspace_id, inline_content, blob_id,
-                              content_digest, content_size,
-                              content_media_type, content_codec
-                 FROM pulsara_v3.context_snapshots
-                WHERE session_id = %s AND workspace_id = %s AND id = %s""",
-            (source_session_id, workspace_id, owner_id),
-        ).fetchone()
-        if row is None:
-            raise ConversationKernelConflict(
-                "canonical image reference owner disappeared"
-            )
-        body = _read_body(
-            connection,
-            row=row,
-            workspace_id=workspace_id,
-            expected_media_type=CONTEXT_SNAPSHOT_MEDIA_TYPE,
-            expected_codec=CONTEXT_SNAPSHOT_CODEC,
-        )
-        compaction_snapshot_canonical_expanded_bytes(body)
-        descriptors = compaction_snapshot_image_descriptors(body)
-        refs = _read_ref_metadata(
-            connection,
-            session_id=source_session_id,
-            expected_count=len(descriptors),
-            queue_item_id=None,
-            transcript_entry_id=None,
-            context_snapshot_id=owner_id,
-        )
-        if not _refs_match_descriptors(
-            refs, descriptors=descriptors, workspace_id=workspace_id
-        ):
-            raise ConversationKernelConflict(
-                "canonical snapshot refs do not exact-join"
-            )
-    elif owner_kind_rank == 2:
         from pulsara_agent.conversation_kernel.visualization import visualization_metadata
         row = connection.execute(
             """SELECT v.*, b.logical_digest, b.logical_size, b.media_type, b.codec
@@ -362,44 +306,18 @@ def materialize_compaction_snapshot(
     publisher: CanonicalContentPublisher,
     workspace_id: str,
     carrier: CompactionSnapshotCarrier,
-) -> CanonicalPromptPublication:
-    """Publish one typed snapshot body and its image occurrences in transaction."""
+) -> CanonicalContent:
+    """Publish the summary and canonical entry references in transaction."""
 
     if not isinstance(carrier, CompactionSnapshotCarrier):
         raise TypeError("snapshot publication requires a typed carrier")
-    body = publisher.materialize_in_connection(
+    return publisher.materialize_in_connection(
         connection,
         workspace_id=workspace_id,
         content=carrier.body,
         media_type=CONTEXT_SNAPSHOT_MEDIA_TYPE,
         codec=CONTEXT_SNAPSHOT_CODEC,
     )
-    descriptors = compaction_snapshot_image_descriptors(carrier.body)
-    images = compaction_snapshot_image_parts(carrier)
-    if len(descriptors) != len(images):
-        raise ValueError("snapshot image traversal differs from its body")
-    blob_ids: list[str] = []
-    for descriptor, image in zip(descriptors, images, strict=True):
-        if (
-            image.image_ref != descriptor.image_ref
-            or image.content_digest != descriptor.digest
-            or len(image.immutable_bytes) != descriptor.encoded_bytes
-            or image.media_type != descriptor.media_type
-            or image.width != descriptor.width
-            or image.height != descriptor.height
-        ):
-            raise ValueError("snapshot image content differs from its descriptor")
-        blob_ids.append(
-            PostgresCanonicalBlobStore.publish_in_connection(
-                connection,
-                workspace_id=workspace_id,
-                content=image.immutable_bytes,
-                media_type=image.media_type,
-                codec=PROMPT_IMAGE_BLOB_CODEC,
-                validated_image=image,
-            ).blob_id
-        )
-    return CanonicalPromptPublication(body=body, image_blob_ids=tuple(blob_ids))
 
 
 def insert_canonical_prompt_refs(
@@ -410,11 +328,10 @@ def insert_canonical_prompt_refs(
     image_blob_ids: tuple[str, ...],
     queue_item_id: str | None = None,
     transcript_entry_id: str | None = None,
-    context_snapshot_id: str | None = None,
 ) -> None:
     if sum(
         value is not None
-        for value in (queue_item_id, transcript_entry_id, context_snapshot_id)
+        for value in (queue_item_id, transcript_entry_id)
     ) != 1:
         raise ValueError("canonical image refs require exactly one owner")
     for ordinal, blob_id in enumerate(image_blob_ids):
@@ -422,15 +339,14 @@ def insert_canonical_prompt_refs(
             """
             INSERT INTO pulsara_v3.canonical_image_refs (
                 session_id, workspace_id, queue_item_id,
-                transcript_entry_id, context_snapshot_id, ref_ordinal, blob_id
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                transcript_entry_id, ref_ordinal, blob_id
+            ) VALUES (%s, %s, %s, %s, %s, %s)
             """,
             (
                 session_id,
                 workspace_id,
                 queue_item_id,
                 transcript_entry_id,
-                context_snapshot_id,
                 ordinal,
                 blob_id,
             ),
@@ -445,15 +361,12 @@ def copy_canonical_prompt_refs(
     target_session_id: str | None = None,
     source_queue_item_id: str | None = None,
     source_transcript_entry_id: str | None = None,
-    source_context_snapshot_id: str | None = None,
     target_queue_item_id: str | None = None,
     target_transcript_entry_id: str | None = None,
-    target_context_snapshot_id: str | None = None,
 ) -> tuple[str, ...]:
     source_column, source_id = _owner_column(
         queue_item_id=source_queue_item_id,
         transcript_entry_id=source_transcript_entry_id,
-        context_snapshot_id=source_context_snapshot_id,
     )
     rows = connection.execute(
         f"""SELECT ref_ordinal, blob_id
@@ -472,7 +385,6 @@ def copy_canonical_prompt_refs(
         image_blob_ids=blob_ids,
         queue_item_id=target_queue_item_id,
         transcript_entry_id=target_transcript_entry_id,
-        context_snapshot_id=target_context_snapshot_id,
     )
     return blob_ids
 
@@ -484,7 +396,6 @@ def canonical_prompt_owner_is_exact(
     expected: FrozenCanonicalPrompt,
     queue_item_id: str | None = None,
     transcript_entry_id: str | None = None,
-    context_snapshot_id: str | None = None,
 ) -> bool:
     """Confirm body and ref metadata without reading image blob payloads."""
 
@@ -494,7 +405,6 @@ def canonical_prompt_owner_is_exact(
             row=row,
             queue_item_id=queue_item_id,
             transcript_entry_id=transcript_entry_id,
-            context_snapshot_id=context_snapshot_id,
         )
         return body == expected.body
     except (KeyError, TypeError, ValueError, ConversationKernelConflict):
@@ -515,7 +425,6 @@ def validate_canonical_prompt_owner_metadata(
         row=row,
         queue_item_id=queue_item_id,
         transcript_entry_id=transcript_entry_id,
-        context_snapshot_id=None,
     )
     return decoded
 
@@ -537,7 +446,6 @@ def resolve_canonical_prompt_image_reference(
         row=row,
         queue_item_id=queue_item_id,
         transcript_entry_id=transcript_entry_id,
-        context_snapshot_id=None,
     )
     descriptors = _image_descriptors(decoded)
     if ref_ordinal >= len(descriptors):
@@ -561,7 +469,6 @@ def hydrate_canonical_prompt_owner(
     row: Mapping[str, object],
     queue_item_id: str | None = None,
     transcript_entry_id: str | None = None,
-    context_snapshot_id: str | None = None,
 ) -> FrozenCanonicalPrompt:
     """Read one body and exact-hydrate its ordered image occurrences."""
 
@@ -571,7 +478,6 @@ def hydrate_canonical_prompt_owner(
         row=row,
         queue_item_id=queue_item_id,
         transcript_entry_id=transcript_entry_id,
-        context_snapshot_id=context_snapshot_id,
     )
     descriptors = _image_descriptors(decoded)
     payload_by_blob: dict[str, bytes] = {}
@@ -606,31 +512,11 @@ def canonical_snapshot_owner_is_exact(
     expected: CompactionSnapshotCarrier,
     context_snapshot_id: str,
 ) -> bool:
-    """Confirm a snapshot body and ref metadata without image payload reads."""
-
+    """Confirm the sole refs carrier, with no duplicated prompt/image content."""
     try:
-        workspace_id = str(row["workspace_id"])
-        body = _read_body(
-            connection,
-            row=row,
-            workspace_id=workspace_id,
-            expected_media_type=CONTEXT_SNAPSHOT_MEDIA_TYPE,
-            expected_codec=CONTEXT_SNAPSHOT_CODEC,
-        )
-        if body != expected.body:
-            return False
-        descriptors = compaction_snapshot_image_descriptors(body)
-        refs = _read_ref_metadata(
-            connection,
-            session_id=str(row["session_id"]),
-            expected_count=len(descriptors),
-            queue_item_id=None,
-            transcript_entry_id=None,
-            context_snapshot_id=context_snapshot_id,
-        )
-        return _refs_match_descriptors(
-            refs, descriptors=descriptors, workspace_id=workspace_id
-        )
+        return hydrate_canonical_snapshot_owner(
+            connection, row=row, context_snapshot_id=context_snapshot_id
+        ) == expected
     except (KeyError, TypeError, ValueError, ConversationKernelConflict):
         return False
 
@@ -641,56 +527,21 @@ def hydrate_canonical_snapshot_owner(
     row: Mapping[str, object],
     context_snapshot_id: str,
 ) -> CompactionSnapshotCarrier:
-    """Read a snapshot body and exact-hydrate its ordered image occurrences."""
-
-    workspace_id = str(row["workspace_id"])
+    """Read the S-only carrier; original prompt/image hydration belongs to rows."""
+    require_id(context_snapshot_id, "snapshot")
+    if str(row["id"]) != context_snapshot_id:
+        raise ConversationKernelConflict("canonical snapshot owner does not exact-join")
     body = _read_body(
         connection,
         row=row,
-        workspace_id=workspace_id,
+        workspace_id=str(row["workspace_id"]),
         expected_media_type=CONTEXT_SNAPSHOT_MEDIA_TYPE,
         expected_codec=CONTEXT_SNAPSHOT_CODEC,
     )
-    compaction_snapshot_canonical_expanded_bytes(body)
-    descriptors = compaction_snapshot_image_descriptors(body)
-    refs = _read_ref_metadata(
-        connection,
-        session_id=str(row["session_id"]),
-        expected_count=len(descriptors),
-        queue_item_id=None,
-        transcript_entry_id=None,
-        context_snapshot_id=context_snapshot_id,
-    )
-    if not _refs_match_descriptors(
-        refs, descriptors=descriptors, workspace_id=workspace_id
-    ):
-        raise ConversationKernelConflict("canonical snapshot refs do not exact-join")
-    payload_by_blob: dict[str, bytes] = {}
-    payloads: list[bytes] = []
-    for row_ref, descriptor in zip(refs, descriptors, strict=True):
-        blob_id = str(row_ref["blob_id"])
-        payload = payload_by_blob.get(blob_id)
-        if payload is None:
-            payload = PostgresCanonicalBlobStore.read_exact_in_connection(
-                connection,
-                blob_id=blob_id,
-                expected_digest=descriptor.digest,
-                expected_size=descriptor.encoded_bytes,
-                expected_workspace_id=workspace_id,
-                expected_media_type=descriptor.media_type,
-                expected_codec=PROMPT_IMAGE_BLOB_CODEC,
-            )
-            payload_by_blob[blob_id] = payload
-        payloads.append(payload)
     try:
-        return parse_compaction_snapshot_carrier(
-            body,
-            image_payloads=tuple(payloads),
-        )
-    except ValueError as exc:
-        raise ConversationKernelConflict(
-            "canonical snapshot image payload integrity mismatch"
-        ) from exc
+        return parse_compaction_snapshot_carrier(body)
+    except (TypeError, ValueError) as exc:
+        raise ConversationKernelConflict("canonical snapshot carrier is invalid") from exc
 
 
 def _read_body(
@@ -738,7 +589,6 @@ def _read_canonical_prompt_metadata(
     row: Mapping[str, object],
     queue_item_id: str | None,
     transcript_entry_id: str | None,
-    context_snapshot_id: str | None,
 ) -> tuple[bytes, CanonicalPromptBody, tuple[Mapping[str, object], ...]]:
     """Read one prompt body and exact refs before optional image hydration."""
 
@@ -760,7 +610,6 @@ def _read_canonical_prompt_metadata(
         expected_count=len(descriptors),
         queue_item_id=queue_item_id,
         transcript_entry_id=transcript_entry_id,
-        context_snapshot_id=context_snapshot_id,
     )
     if not _refs_match_descriptors(
         refs, descriptors=descriptors, workspace_id=workspace_id
@@ -773,12 +622,10 @@ def _owner_column(
     *,
     queue_item_id: str | None,
     transcript_entry_id: str | None,
-    context_snapshot_id: str | None,
 ) -> tuple[str, str]:
     values = (
         ("queue_item_id", queue_item_id),
         ("transcript_entry_id", transcript_entry_id),
-        ("context_snapshot_id", context_snapshot_id),
     )
     selected = tuple((column, value) for column, value in values if value is not None)
     if len(selected) != 1 or not selected[0][1]:
@@ -793,12 +640,10 @@ def _read_ref_metadata(
     expected_count: int,
     queue_item_id: str | None,
     transcript_entry_id: str | None,
-    context_snapshot_id: str | None,
 ) -> tuple[Mapping[str, object], ...]:
     column, owner_id = _owner_column(
         queue_item_id=queue_item_id,
         transcript_entry_id=transcript_entry_id,
-        context_snapshot_id=context_snapshot_id,
     )
     return tuple(
         connection.execute(

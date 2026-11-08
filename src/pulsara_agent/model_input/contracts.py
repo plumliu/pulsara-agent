@@ -30,7 +30,6 @@ from pulsara_agent.llm.input import (
     LLMTextPart,
     MessageRole,
     content_has_image,
-    frozen_prompt_content_canonical_value,
     frozen_tool_result_public_text,
     join_text_content,
     llm_content_identity_value,
@@ -739,136 +738,6 @@ class CompactionContinuationMode(StrEnum):
     AWAIT_NEXT_USER = "AWAIT_NEXT_USER"
 
 
-class CompactionActiveRequestLocation(StrEnum):
-    SNAPSHOT_EXACT = "SNAPSHOT_EXACT"
-    CANONICAL_SUFFIX = "CANONICAL_SUFFIX"
-
-
-@dataclass(frozen=True, slots=True)
-class FrozenCompactionActiveRequest:
-    """Runtime-owned location of the exact request driving one active turn."""
-
-    entry_id: str
-    entry_sequence: int
-    location: CompactionActiveRequestLocation
-    item_kind: FrozenProviderInputItemKind
-    input_origin: CanonicalInputOriginKind | None
-    content: FrozenPromptContent | None = field(default=None, repr=False)
-
-    scheduled_input: ScheduledProvenance | None = None
-
-    def __post_init__(self) -> None:
-        if (self.input_origin is CanonicalInputOriginKind.SCHEDULED_TASK) != (
-            self.scheduled_input is not None
-        ):
-            raise ValueError("scheduled request provenance is incomplete")
-        if not self.entry_id or self.entry_sequence < 0:
-            raise ValueError("compaction active request identity is incomplete")
-        snapshot_exact = self.location is CompactionActiveRequestLocation.SNAPSHOT_EXACT
-        if snapshot_exact != (self.content is not None):
-            raise ValueError(
-                "compaction active request location/content union is invalid"
-            )
-        if self.content is not None and not isinstance(
-            self.content, FrozenPromptContent
-        ):
-            raise TypeError("compaction active request content must be frozen")
-        if (
-            self.content is not None
-            and any(
-                isinstance(part, PromptAnnotationPart) for part in self.content.parts
-            )
-            and (
-                self.item_kind is not FrozenProviderInputItemKind.USER
-                or self.input_origin
-                not in {
-                    CanonicalInputOriginKind.HUMAN_MESSAGE,
-                    CanonicalInputOriginKind.HUMAN_STEER,
-                }
-            )
-        ):
-            raise ValueError("only human requests can contain annotations")
-        validate_compaction_request_shape(
-            item_kind=self.item_kind,
-            input_origin=self.input_origin,
-            active=True,
-            has_image=(
-                self.content is not None and content_has_image(self.content.parts)
-            ),
-        )
-
-    def canonical_value(self) -> dict[str, object]:
-        return {
-            "entry_id": self.entry_id,
-            "entry_sequence": self.entry_sequence,
-            "location": self.location.value,
-            "item_kind": self.item_kind.value,
-            "input_origin": (
-                None if self.input_origin is None else self.input_origin.value
-            ),
-            "scheduled_input": None
-            if self.scheduled_input is None
-            else self.scheduled_input.to_dict(),
-            "content": (
-                None
-                if self.content is None
-                else frozen_prompt_content_canonical_value(self.content)
-            ),
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class FrozenRetainedHistoricalRequest:
-    """Exact historical request, without an execution identity or authority."""
-
-    item_kind: FrozenProviderInputItemKind
-    input_origin: CanonicalInputOriginKind | None
-    content: FrozenPromptContent = field(repr=False)
-
-    scheduled_input: ScheduledProvenance | None = None
-
-    def __post_init__(self) -> None:
-        if (self.input_origin is CanonicalInputOriginKind.SCHEDULED_TASK) != (
-            self.scheduled_input is not None
-        ):
-            raise ValueError("scheduled request provenance is incomplete")
-        if not isinstance(self.content, FrozenPromptContent):
-            raise TypeError("retained historical request content must be frozen")
-        if (
-            self.content is not None
-            and any(
-                isinstance(part, PromptAnnotationPart) for part in self.content.parts
-            )
-            and (
-                self.item_kind is not FrozenProviderInputItemKind.USER
-                or self.input_origin
-                not in {
-                    CanonicalInputOriginKind.HUMAN_MESSAGE,
-                    CanonicalInputOriginKind.HUMAN_STEER,
-                }
-            )
-        ):
-            raise ValueError("only human requests can contain annotations")
-        validate_compaction_request_shape(
-            item_kind=self.item_kind,
-            input_origin=self.input_origin,
-            active=False,
-            has_image=content_has_image(self.content.parts),
-        )
-
-    def canonical_value(self) -> dict[str, object]:
-        return {
-            "item_kind": self.item_kind.value,
-            "input_origin": (
-                None if self.input_origin is None else self.input_origin.value
-            ),
-            "scheduled_input": None
-            if self.scheduled_input is None
-            else self.scheduled_input.to_dict(),
-            "content": frozen_prompt_content_canonical_value(self.content),
-        }
-
-
 def validate_compaction_request_shape(
     *,
     item_kind: FrozenProviderInputItemKind,
@@ -919,89 +788,57 @@ def validate_compaction_request_shape(
 
 @dataclass(frozen=True, slots=True)
 class CompactionSnapshotCarrier:
-    """The sole typed content value of a canonical CONTEXT_SNAPSHOT item."""
+    """Summary and canonical-row selection for one context snapshot.
+
+    Session ownership, row kinds, ordering and prefix cut are checked by the
+    canonical reader against its frozen read. No original content is stored here.
+    """
 
     continuation_mode: CompactionContinuationMode
-    handoff_instruction: str = field(repr=False)
-    active_request: FrozenCompactionActiveRequest | None = field(repr=False)
+    active_request_entry_id: str | None
     earlier_context_summary: str = field(repr=False)
-    recent_human_requests: tuple[FrozenRetainedHistoricalRequest, ...] = field(
-        repr=False
-    )
+    retained_entry_ids: tuple[str, ...]
     body: bytes = field(repr=False)
     content_digest: str
-    retained_historical_requests: tuple[FrozenRetainedHistoricalRequest, ...] = field(
-        default=(), repr=False
-    )
 
     def __post_init__(self) -> None:
-        if not isinstance(self.retained_historical_requests, tuple) or any(
-            not isinstance(request, FrozenRetainedHistoricalRequest)
-            for request in self.retained_historical_requests
-        ):
-            raise ValueError("retained historical requests must be a typed tuple")
-        if not isinstance(self.recent_human_requests, tuple) or any(
-            not isinstance(request, FrozenRetainedHistoricalRequest)
-            or request.item_kind is not FrozenProviderInputItemKind.USER
-            or request.input_origin
-            not in {
-                CanonicalInputOriginKind.HUMAN_MESSAGE,
-                CanonicalInputOriginKind.HUMAN_STEER,
-            }
-            for request in self.recent_human_requests
-        ):
-            raise ValueError("recent human requests must be a typed human tuple")
+        if not isinstance(self.continuation_mode, CompactionContinuationMode):
+            raise TypeError("snapshot continuation mode must be typed")
+        if not isinstance(self.retained_entry_ids, tuple):
+            raise TypeError("snapshot retained entry IDs must be an ordered tuple")
+        for entry_id in self.retained_entry_ids:
+            require_id(entry_id, "entry")
+        if len(set(self.retained_entry_ids)) != len(self.retained_entry_ids):
+            raise ValueError("snapshot retained entry IDs must be unique")
+        if self.active_request_entry_id is not None:
+            require_id(self.active_request_entry_id, "entry")
         resume = self.continuation_mode is CompactionContinuationMode.RESUME_ACTIVE_TURN
-        if resume != (self.active_request is not None):
+        if resume != (self.active_request_entry_id is not None):
             raise ValueError("snapshot continuation/active-request union is invalid")
-        self.handoff_instruction.encode("utf-8")
-        if not self.handoff_instruction:
-            raise ValueError("snapshot handoff instruction is empty")
+        if not isinstance(self.earlier_context_summary, str):
+            raise TypeError("snapshot summary must be text")
+        if not self.earlier_context_summary.strip():
+            raise ValueError("snapshot summary is empty")
         expected = canonical_json_bytes(
             {
                 "continuation": {
                     "mode": self.continuation_mode.value,
-                    "instruction": self.handoff_instruction,
-                    "active_request": (
-                        None
-                        if self.active_request is None
-                        else self.active_request.canonical_value()
-                    ),
+                    "active_request_entry_id": self.active_request_entry_id,
                 },
                 "earlier_context_summary": self.earlier_context_summary,
-                "recent_human_requests": tuple(
-                    request.canonical_value() for request in self.recent_human_requests
-                ),
-                "retained_historical_requests": tuple(
-                    request.canonical_value()
-                    for request in self.retained_historical_requests
-                ),
+                "retained_entry_ids": self.retained_entry_ids,
             }
         )
-        if self.body != expected:
+        if not isinstance(self.body, bytes) or self.body != expected:
             raise ValueError("snapshot carrier is not canonical JSON")
         if self.content_digest != "sha256:" + sha256(self.body).hexdigest():
             raise ValueError("snapshot carrier digest mismatch")
 
     @property
     def canonical_expanded_bytes(self) -> int:
-        """Body bytes plus every ordered image occurrence carried by the snapshot."""
+        """The carrier's charge; selected original rows are charged separately."""
 
-        contents = (
-            (
-                ()
-                if self.active_request is None or self.active_request.content is None
-                else (self.active_request.content,)
-            )
-            + tuple(request.content for request in self.recent_human_requests)
-            + tuple(request.content for request in self.retained_historical_requests)
-        )
-        return len(self.body) + sum(
-            len(part.immutable_bytes)
-            for content in contents
-            for part in content.parts
-            if isinstance(part, LLMImagePart)
-        )
+        return len(self.body)
 
 
 class ProviderToolResultClosureKind(StrEnum):

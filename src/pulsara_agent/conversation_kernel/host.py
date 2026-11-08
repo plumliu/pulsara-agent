@@ -1797,7 +1797,7 @@ class KernelHostSession:
                     deadline=self._canonical_deadline(),
                     allow_terminal_compaction=True,
                     prepared_target_override=target,
-                    destination_projection_source=(switched or cohort is None),
+                    independent_auxiliary_source=(switched or cohort is None),
                     read_only_context_preview=True,
                 )
             )

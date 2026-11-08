@@ -36,7 +36,7 @@ from pulsara_agent.workspace_identity import HostWorkspaceInput
 from tests.support.model_config import test_model_binding, test_model_limits, test_model_runtime
 from tests.support.round3 import CallbackScriptedKernelModel
 from tests.support.model_stream import _text, _tool_call
-from tests.test_stage2_conversation_runner import _CompactionSummaryTransport, _context_snapshot_payload
+from tests.test_stage2_conversation_runner import _CompactionSummaryTransport, _context_snapshot_payload, _snapshot_carrier
 
 
 pytestmark = pytest.mark.postgres
@@ -122,7 +122,7 @@ class _HostCompactionModel(CallbackScriptedKernelModel):
         super().__init__(self._stream)
         self._model_runtime = runtime
         self._preparer = DirectKernelModelPort(model_runtime=runtime)
-        self.summary_transport = _CompactionSummaryTransport("Continue the existing work and its targets.")
+        self.summary_transport = _CompactionSummaryTransport(["Continue the existing work and its targets."] * 2)
         self.variant = variant
         self.session = None
         self.root_calls = []
@@ -253,7 +253,7 @@ class _HostCompactionModel(CallbackScriptedKernelModel):
                 await self._seed(request)
             if self.variant == "todo_only":
                 self._seed_todo(request)
-            events = _text("text:large", "accepted pre-compaction material " + "a" * 920_000)
+            events = _text("text:large", "accepted pre-compaction material " + "a" * 1_000_000)
             events += _tool_call("read_file", "call:trigger", {"target": {"kind": "PATH", "path": "input.txt"}})
         elif index == (3 if self.variant == "large_todo" else 2):
             if self.variant in {"large_todo", "todo_only"}:
@@ -297,9 +297,11 @@ def test_real_host_adopts_midturn_handoff_and_sends_exact_owner_state(tmp_path, 
         try:
             assert await session.attach_controller("handoff-integration")
             await session.update_model_call_binding(test_model_binding(runtime))
-            session._compaction.policy = ResolvedCompactionPolicy(auto_trigger_ratio=.75,
-                post_compaction_target_ratio=.60, minimum_reclaim_tokens=1,
-                maximum_retained_tail_utf8_bytes=1)
+            from tests.test_conversation_fork import turn
+            turn(session.repository, session._lease.guard, "earlier interaction", answer="earlier settled history " + "h" * 60_000)
+            session._compaction.policy = ResolvedCompactionPolicy(auto_trigger_ratio=.85,
+
+            )
             execute = session._runner.compaction.execute_active
             async def record(**kwargs):
                 result = await execute(**kwargs)
@@ -319,12 +321,19 @@ def test_real_host_adopts_midturn_handoff_and_sends_exact_owner_state(tmp_path, 
             result = await asyncio.wait_for(session.run_turn(PromptContent.text("p" * 40_000),
                 command_id=random_id("command"), requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS), 90)
             assert result.final_text == "HOST_HANDOFF_FINISHED"
-            assert len(outcomes) == 1, outcomes
-            assert outcomes[0][0] is CompactionTrigger.MID_TURN_FOLLOWUP
             assert outcomes[0][1].disposition is CompactionDisposition.COMPACTED
+            assert sum(outcome.disposition is CompactionDisposition.COMPACTED for _, outcome in outcomes) == 1
+            assert all(trigger is CompactionTrigger.MID_TURN_FOLLOWUP and outcome.target_turn_id == result.turn_id for trigger, outcome in outcomes)
+            assert all(outcome.disposition is CompactionDisposition.NOT_NEEDED for _, outcome in outcomes[1:])
+            assert len(model.summary_transport.contexts) == len(outcomes)
+            assert any(
+                "earlier settled history" in text
+                for message in model.summary_transport.contexts[0].messages
+                for text in text_part_values(message.content)
+            )
             successor_index = 2 if variant == "large_todo" else 1
             successor = model.root_calls[successor_index]
-            assert _context_snapshot_payload(successor)["continuation"]["mode"] == "RESUME_ACTIVE_TURN"
+            assert _snapshot_carrier(session.repository, successor.session_id).continuation_mode.value == "RESUME_ACTIVE_TURN"
             observations = _observations(successor)
             wire_observations = _wire_observations(successor)
             record_property("wire", wire)
@@ -483,8 +492,8 @@ class _SubagentCompactionModel(_HostCompactionModel):
             if index == 1:
                 target = self.core._live_agent_session(request.session_id)
                 await self._process_for(target, request)
-                target._compaction.policy = ResolvedCompactionPolicy(auto_trigger_ratio=.75,
-                    post_compaction_target_ratio=.60, minimum_reclaim_tokens=1, maximum_retained_tail_utf8_bytes=1)
+                target._compaction.policy = ResolvedCompactionPolicy(auto_trigger_ratio=.75, maximum_retained_tool_groups=1,
+                    )
                 execute = target._runner.compaction.execute_active
                 async def record(**kwargs):
                     result = await execute(**kwargs)
@@ -493,8 +502,8 @@ class _SubagentCompactionModel(_HostCompactionModel):
                 target._runner.compaction.execute_active = record
                 events = _text("text:child-large", "accepted child context " + "a" * 1_080_000)
                 events += _tool_call("read_file", "call:child-trigger", {"target": {"kind": "PATH", "path": "input.txt"}})
-            elif index == 2:
-                events = _tool_call("query_processes", "call:child-query", {})
+            elif index in (2, 3):
+                events = _tool_call("query_processes", f"call:child-query-{index}", {})
             else:
                 self.target_finished.set()
                 events = _text("text:target-finished", "CURRENT_WORK_FINISHED")
@@ -526,12 +535,19 @@ def test_real_subagent_work_compaction_excludes_foreign_session_processes(tmp_pa
             result = await asyncio.wait_for(root.run_turn(PromptContent.text("Delegate two independent investigations"),
                 command_id=random_id("command"), requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS), 90)
             assert result.final_text == "ROOT_SCOPE_FINISHED"
-            assert len(model.compactions) == 1
-            trigger, outcome = model.compactions[0]
+            assert [outcome.disposition for _, outcome in model.compactions] == [CompactionDisposition.NOT_NEEDED, CompactionDisposition.COMPACTED]
+            trigger, outcome = model.compactions[1]
             assert trigger is CompactionTrigger.MID_TURN_FOLLOWUP
             assert outcome.disposition is CompactionDisposition.COMPACTED
-            successor, following = model.target_requests[1:3]
-            assert _context_snapshot_payload(successor)["continuation"]["mode"] == "RESUME_ACTIVE_TURN"
+            assert len(model.summary_transport.contexts) == 2
+            assert model.summary_transport.contexts[0].messages[-1].content != model.summary_transport.contexts[1].messages[-1].content
+            assert any(
+                "accepted child context" in text
+                for message in model.summary_transport.contexts[0].messages
+                for text in text_part_values(message.content)
+            )
+            successor, following = model.target_requests[2:4]
+            assert _snapshot_carrier(core._live_agent_session(model.target_id).repository, successor.session_id).continuation_mode.value == "RESUME_ACTIVE_TURN"
             assert successor.session_id == model.target_id and successor.turn_id == model.target_requests[0].turn_id
             handoff = _observations(successor)["COMPACTION_RUNTIME_HANDOFF"]
             payload = _payload(handoff.body)

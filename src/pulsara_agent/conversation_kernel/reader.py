@@ -56,6 +56,8 @@ from pulsara_agent.model_input.contracts import (
     CanonicalModelInputSnapshot,
     FrozenCanonicalCompileSnapshot,
     ProviderWireSemanticInput,
+    CompactionSnapshotCarrier,
+    validate_compaction_request_shape,
     ContextBindingBaseKind,
     FrozenContextBindingCompileFact,
     FrozenPlanHandoffCompileFact,
@@ -319,7 +321,7 @@ class CanonicalProviderInputReader:
         with manager as connection:
             binding = connection.execute(
                 """
-                SELECT CASE WHEN s.root_session_id IS NULL THEN 'ROOT' ELSE 'SUBAGENT' END AS conversation_scope_kind,
+                SELECT s.workspace_id, CASE WHEN s.root_session_id IS NULL THEN 'ROOT' ELSE 'SUBAGENT' END AS conversation_scope_kind,
                        r.base_kind, r.context_snapshot_id,
                        r.source_through_sequence
                 FROM pulsara_v3.turns AS t
@@ -349,6 +351,29 @@ class CanonicalProviderInputReader:
                 raise ConversationKernelConflict(
                     "compaction headroom floor exceeds its prepared cut"
                 )
+            retained_entry_ids = ()
+            if binding["context_snapshot_id"] is not None:
+                snapshot = connection.execute(
+                    "SELECT id, session_id, workspace_id, blob_id, content_digest, content_size, "
+                    "content_media_type, content_codec, source_through_sequence "
+                    "FROM pulsara_v3.context_snapshots WHERE session_id=%s AND id=%s",
+                    (cut.session_id, binding["context_snapshot_id"]),
+                ).fetchone()
+                if (snapshot is None
+                    or str(snapshot["workspace_id"]) != str(binding["workspace_id"])
+                    or int(snapshot["source_through_sequence"]) != floor):
+                    raise ConversationKernelConflict("compaction headroom snapshot drifted")
+                carrier = self._hydrate_snapshot_carrier(connection, snapshot)
+                retained_entry_ids = carrier.retained_entry_ids
+                _read_retained_prefix_rows(
+                    connection,
+                    session_id=cut.session_id,
+                    workspace_id=str(binding["workspace_id"]),
+                    source_through_sequence=floor,
+                    retained_entry_ids=retained_entry_ids,
+                    provider_input_through_sequence=cut.provider_input_through_sequence,
+                    scope_kind=scope_kind,
+                )
             quote = connection.execute(
                 """
                 WITH selected_entries AS (
@@ -356,7 +381,7 @@ class CanonicalProviderInputReader:
                     FROM pulsara_v3.transcript_entries AS e
                     WHERE e.session_id = %s
                       AND (e.entry_kind <> 'TOOL_RESULT' OR NOT EXISTS (SELECT 1 FROM pulsara_v3.tool_results cr JOIN pulsara_v3.tool_invocations ci ON ci.id=cr.invocation_id WHERE cr.session_id=e.session_id AND cr.result_entry_id=e.id AND ci.source_kind='CODE_MODE_CALL'))
-                      AND e.entry_sequence > %s
+                      AND (e.entry_sequence > %s OR e.id = ANY(%s::text[]))
                       AND e.entry_sequence <= %s
                     ORDER BY e.entry_sequence
 
@@ -400,15 +425,9 @@ class CanonicalProviderInputReader:
                       ON b.id = r.blob_id AND b.workspace_id = r.workspace_id
                 ),
                 base_snapshot_totals AS (
-                    SELECT count(DISTINCT s.id) AS item_count,
-                           coalesce(max(s.content_size), 0)
-                           + coalesce(sum(b.logical_size), 0) AS expanded_bytes
+                    SELECT count(*) AS item_count,
+                           coalesce(max(s.content_size), 0) AS expanded_bytes
                     FROM pulsara_v3.context_snapshots AS s
-                    LEFT JOIN pulsara_v3.canonical_image_refs AS r
-                      ON r.session_id = s.session_id
-                     AND r.context_snapshot_id = s.id
-                    LEFT JOIN pulsara_v3.blobs AS b
-                      ON b.id = r.blob_id AND b.workspace_id = r.workspace_id
                     WHERE s.session_id = %s AND s.id = %s
                 ),
                 block_totals AS (
@@ -446,6 +465,7 @@ class CanonicalProviderInputReader:
                 (
                     cut.session_id,
                     floor,
+                    list(retained_entry_ids),
                     cut.provider_input_through_sequence,
 
 
@@ -805,6 +825,23 @@ class CanonicalProviderInputReader:
                 ),
             )
 
+            carrier = None
+            prefix_entries = ()
+            if snapshot is not None:
+                if str(snapshot["workspace_id"]) != str(binding["workspace_id"]):
+                    raise ConversationKernelConflict("snapshot workspace does not exact-join")
+                if source_floor > cut.provider_input_through_sequence:
+                    raise ConversationKernelConflict("snapshot floor exceeds prepared cut")
+                carrier = self._hydrate_snapshot_carrier(connection, snapshot)
+                prefix_entries = _read_retained_prefix_rows(
+                    connection,
+                    session_id=cut.session_id,
+                    workspace_id=str(binding["workspace_id"]),
+                    source_through_sequence=source_floor,
+                    retained_entry_ids=carrier.retained_entry_ids,
+                    provider_input_through_sequence=cut.provider_input_through_sequence,
+                    scope_kind=scope_kind,
+                )
             stored_through_sequence = cut.provider_input_through_sequence
             entries = connection.execute(
                 """
@@ -847,6 +884,11 @@ class CanonicalProviderInputReader:
                 ),
             ).fetchall()
 
+            entries = (*prefix_entries, *entries)
+            if carrier is not None:
+                _require_snapshot_active_request(
+                    carrier, entries=entries, scope_kind=scope_kind
+                )
             entry_ids = tuple(str(row["id"]) for row in entries)
             snapshot_late_calls = self._load_snapshot_late_calls(
                 connection,
@@ -873,7 +915,6 @@ class CanonicalProviderInputReader:
             self._require_image_ref_metadata(
                 connection=connection,
                 session_id=cut.session_id,
-                snapshot=snapshot,
                 entries=entries,
             )
             entry_payloads = self._load_entry_payloads(
@@ -899,21 +940,7 @@ class CanonicalProviderInputReader:
                 tuple(str(row["id"]) for row in block_metadata),
             )
             blocks_by_entry = self._join_block_payloads(block_metadata, block_payloads)
-            if snapshot is not None:
-                snapshot = dict(snapshot)
-                snapshot["inline_content"] = self._load_snapshot_payload(
-                    connection, cut.session_id, str(snapshot["id"])
-                )
-                try:
-                    carrier = hydrate_canonical_snapshot_owner(
-                        connection,
-                        row=snapshot,
-                        context_snapshot_id=str(snapshot["id"]),
-                    )
-                except (TypeError, ValueError) as error:
-                    raise ConversationKernelConflict(
-                        "context snapshot carrier is invalid"
-                    ) from error
+            if carrier is not None:
                 expanded_bytes = carrier.canonical_expanded_bytes
                 items.append(
                     ProviderInputItem(
@@ -1379,7 +1406,8 @@ class CanonicalProviderInputReader:
                 insert_at = len(items)
                 for index, item in enumerate(items):
                     if (
-                        item.source_entry_sequence is not None
+                        item.item_kind is not ProviderInputItemKind.CONTEXT_SNAPSHOT
+                        and item.source_entry_sequence is not None
                         and item.source_entry_sequence > late_sequence
                     ):
                         insert_at = index
@@ -2428,12 +2456,23 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
             result.setdefault(str(row["assistant_entry_id"]), []).append(joined)
         return {key: tuple(value) for key, value in result.items()}
 
+    def _hydrate_snapshot_carrier(self, connection, snapshot) -> CompactionSnapshotCarrier:
+        row = dict(snapshot)
+        row["inline_content"] = self._load_snapshot_payload(
+            connection, str(snapshot["session_id"]), str(snapshot["id"])
+        )
+        try:
+            return hydrate_canonical_snapshot_owner(
+                connection, row=row, context_snapshot_id=str(snapshot["id"])
+            )
+        except (TypeError, ValueError) as error:
+            raise ConversationKernelConflict("context snapshot carrier is invalid") from error
+
     def _require_image_ref_metadata(
         self,
         *,
         connection,
         session_id: str,
-        snapshot: Mapping[str, object] | None,
         entries: Sequence[Mapping[str, object]],
     ) -> None:
         owner_entry_ids = tuple(
@@ -2441,7 +2480,6 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
             for row in entries
             if row["entry_kind"] in ("USER_MESSAGE", "USER_STEER", "TOOL_RESULT")
         )
-        snapshot_id = None if snapshot is None else str(snapshot["id"])
         image_quote = connection.execute(
             """SELECT COALESCE(sum(b.logical_size), 0) AS logical_size,
                       count(*) AS ref_count, count(b.id) AS blob_count
@@ -2449,10 +2487,8 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
                LEFT JOIN pulsara_v3.blobs AS b
                  ON b.id = r.blob_id AND b.workspace_id = r.workspace_id
                WHERE r.session_id = %s
-                 AND ((r.context_snapshot_id IS NOT DISTINCT FROM %s::text
-                       AND %s::text IS NOT NULL)
-                      OR r.transcript_entry_id = ANY(%s::text[]))""",
-            (session_id, snapshot_id, snapshot_id, list(owner_entry_ids)),
+                 AND r.transcript_entry_id = ANY(%s::text[])""",
+            (session_id, list(owner_entry_ids)),
         ).fetchone()
         if image_quote is None or int(image_quote["ref_count"]) != int(
             image_quote["blob_count"]
@@ -2542,6 +2578,129 @@ def _with_inline_payload(
     result = dict(row)
     result["inline_content"] = inline_content
     return result
+
+
+def _require_retained_request_row(
+    row: Mapping[str, object], *, scope_kind: str, active: bool = False
+) -> None:
+    kind = str(row["entry_kind"])
+    if kind in ("USER_MESSAGE", "USER_STEER"):
+        item_kind = ProviderInputItemKind.USER
+        try:
+            origin = _canonical_input_origin(row, scope_kind=scope_kind)
+        except (TypeError, ValueError) as error:
+            raise ConversationKernelConflict("snapshot retained input origin is invalid") from error
+    elif kind == "USER_CONTROL_FEEDBACK":
+        item_kind = ProviderInputItemKind.USER
+        origin = CanonicalInputOriginKind.USER_CONTROL_FEEDBACK
+    elif kind == "PLAN_CONTINUATION":
+        item_kind = ProviderInputItemKind.PLAN_CONTINUATION
+        origin = CanonicalInputOriginKind.PLAN_CONTINUATION
+    elif kind == "TERMINAL_OBSERVATION":
+        item_kind = ProviderInputItemKind.TERMINAL_OBSERVATION
+        origin = CanonicalInputOriginKind.CELL_OUTPUT
+    else:
+        raise ConversationKernelConflict("snapshot retained entry kind is invalid")
+    try:
+        validate_compaction_request_shape(
+            item_kind=item_kind, input_origin=origin, active=active, has_image=False
+        )
+        if row.get("input_origin") is not None and str(row["input_origin"]) != origin.value:
+            raise ValueError("retained entry kind/origin does not exact-join")
+        if (origin is CanonicalInputOriginKind.SCHEDULED_TASK) != (
+            row.get("scheduled_input") is not None
+        ):
+            raise ValueError("retained scheduled provenance is incomplete")
+        if kind in ("USER_MESSAGE", "USER_STEER") and (
+            (kind == "USER_STEER") != (origin in {
+                CanonicalInputOriginKind.HUMAN_STEER,
+                CanonicalInputOriginKind.AGENT_MATERIAL,
+                CanonicalInputOriginKind.AGENT_MESSAGE,
+            })
+        ):
+            raise ValueError("retained entry kind/origin does not exact-join")
+    except (TypeError, ValueError) as error:
+        raise ConversationKernelConflict("snapshot retained request shape is invalid") from error
+
+
+def _read_retained_prefix_rows(
+    connection,
+    *,
+    session_id: str,
+    workspace_id: str,
+    source_through_sequence: int,
+    retained_entry_ids: tuple[str, ...],
+    provider_input_through_sequence: int,
+    scope_kind: str,
+) -> tuple[Mapping[str, object], ...]:
+    """Exact-select the snapshot's sparse original rows in the caller's RR cut."""
+    try:
+        for entry_id in retained_entry_ids:
+            require_id(entry_id, "entry")
+    except (TypeError, ValueError) as error:
+        raise ConversationKernelConflict("snapshot retained entry identity is invalid") from error
+    if len(set(retained_entry_ids)) != len(retained_entry_ids):
+        raise ConversationKernelConflict("snapshot retained entries are duplicated")
+    if source_through_sequence > provider_input_through_sequence:
+        raise ConversationKernelConflict("snapshot retained floor exceeds prepared cut")
+    if not retained_entry_ids:
+        return ()
+    rows = connection.execute(
+        """
+        SELECT e.id, e.session_id, e.workspace_id,
+               CASE WHEN s.root_session_id IS NULL THEN 'ROOT' ELSE 'SUBAGENT' END AS conversation_scope_kind,
+               e.entry_owner_kind, e.imported_history_group_id,
+               CASE e.entry_owner_kind WHEN 'EXECUTED_TURN' THEN e.turn_id
+                    WHEN 'IMPORTED_HISTORY' THEN e.imported_history_group_id END AS turn_id,
+               e.entry_sequence, e.entry_kind, e.input_origin, e.scheduled_input,
+               e.context_binding_revision_id, e.provider_input_through_sequence,
+               e.source_plan_workflow_id, e.source_plan_interaction_id,
+               e.source_plan_handoff_kind, e.imported_source_plan_workflow_id,
+               e.imported_source_plan_interaction_id, e.imported_source_plan_handoff_kind,
+               e.blob_id, e.content_digest, e.content_size,
+               e.content_media_type, e.content_codec,
+               CASE e.entry_owner_kind WHEN 'EXECUTED_TURN' THEN t.status
+                    WHEN 'IMPORTED_HISTORY' THEN g.status END AS owning_turn_status
+        FROM pulsara_v3.transcript_entries AS e
+        JOIN pulsara_v3.sessions AS s ON s.id=e.session_id AND s.workspace_id=e.workspace_id
+        LEFT JOIN pulsara_v3.turns AS t
+          ON t.session_id=e.session_id AND t.id=e.turn_id
+         AND e.entry_owner_kind='EXECUTED_TURN'
+        LEFT JOIN pulsara_v3.imported_history_groups AS g
+          ON g.session_id=e.session_id AND g.id=e.imported_history_group_id
+         AND e.entry_owner_kind='IMPORTED_HISTORY'
+        WHERE e.session_id=%s AND e.id=ANY(%s::text[])
+        ORDER BY e.entry_sequence
+        """,
+        (session_id, list(retained_entry_ids)),
+    ).fetchall()
+    if tuple(str(row["id"]) for row in rows) != retained_entry_ids:
+        raise ConversationKernelConflict("snapshot retained entries are absent or out of order")
+    for row in rows:
+        if (str(row["session_id"]) != session_id
+            or str(row["workspace_id"]) != workspace_id
+            or str(row["conversation_scope_kind"]) != str(scope_kind)
+            or not 0 < int(row["entry_sequence"]) <= source_through_sequence
+            or int(row["entry_sequence"]) > provider_input_through_sequence
+            or row["owning_turn_status"] is None):
+            raise ConversationKernelConflict("snapshot retained entry source does not exact-join")
+        _require_retained_request_row(row, scope_kind=scope_kind)
+    return tuple(rows)
+
+
+def _require_snapshot_active_request(
+    carrier: CompactionSnapshotCarrier,
+    *,
+    entries: Sequence[Mapping[str, object]],
+    scope_kind: str,
+) -> None:
+    if carrier.active_request_entry_id is None:
+        return
+    row = next((row for row in entries
+                if str(row["id"]) == carrier.active_request_entry_id), None)
+    if row is None:
+        raise ConversationKernelConflict("snapshot active request is absent from effective history")
+    _require_retained_request_row(row, scope_kind=scope_kind, active=True)
 
 
 def _canonical_input_origin(

@@ -23,9 +23,6 @@ from psycopg import Connection, IsolationLevel
 
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionSnapshotCarrier,
-    CompactionActiveRequestLocation,
-    CompactionContinuationMode,
-    FrozenRetainedHistoricalRequest,
 )
 from pulsara_agent.conversation_kernel.prompt_storage import (
     hydrate_canonical_prompt_owner,
@@ -44,10 +41,7 @@ from pulsara_agent.llm.provider_replay import ProviderAssistantReplayFragment
 from pulsara_agent.llm.input import LLMToolCall
 from pulsara_agent.llm.request import provider_assistant_public_projection_fingerprint
 from pulsara_agent.primitives.context import canonical_json_bytes, freeze_json
-from pulsara_agent.model_input.contracts import (
-    CanonicalInputOriginKind,
-    FrozenProviderInputItemKind,
-)
+from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.model_input.provider_replay import (
     decode_provider_replay_fragment,
     freeze_provider_replay_manifest,
@@ -97,7 +91,6 @@ class FrozenForkHistoricalMaterial:
     anchor: FrozenForkAnchor
     snapshot: Mapping[str, object] | None
     snapshot_carrier: CompactionSnapshotCarrier | None
-    retained_historical_requests: tuple[FrozenRetainedHistoricalRequest, ...]
     imported_groups: tuple[FrozenForkGroup, ...]
     entries: tuple[Mapping[str, object], ...]
     blocks: tuple[Mapping[str, object], ...]
@@ -254,6 +247,8 @@ def read_fork_historical_material(
         historical_tool_closure_kind,
         _project_plan_continuation_storage,
         _validate_terminal_observation_content,
+        _read_retained_prefix_rows,
+        _require_snapshot_active_request,
     )
 
     if connection.isolation_level is not IsolationLevel.READ_COMMITTED:
@@ -286,7 +281,7 @@ def read_fork_historical_material(
         raise ConversationKernelConflict("Fork source session is absent")
     snapshot = None
     carrier = None
-    retained: tuple[FrozenRetainedHistoricalRequest, ...] = ()
+    retained_entry_ids: tuple[str, ...] = ()
     if anchor.base_kind == "SNAPSHOT":
         snapshot = connection.execute(
             "SELECT * FROM pulsara_v3.context_snapshots WHERE session_id = %s AND id = %s",
@@ -305,76 +300,16 @@ def read_fork_historical_material(
             row=snapshot,
             context_snapshot_id=str(snapshot["id"]),
         )
-        retained = carrier.retained_historical_requests
-        active = carrier.active_request
-        if (
-            carrier.continuation_mode is CompactionContinuationMode.RESUME_ACTIVE_TURN
-            and active is not None
-            and active.location is CompactionActiveRequestLocation.SNAPSHOT_EXACT
-        ):
-            initial = connection.execute(
-                "SELECT e.* FROM pulsara_v3.transcript_entries AS e JOIN pulsara_v3.turns AS t "
-                "ON t.session_id = e.session_id AND t.id = e.turn_id AND t.initial_entry_id = e.id "
-                "WHERE e.session_id = %s AND e.id = %s "
-                "AND e.entry_sequence = %s AND e.entry_owner_kind = 'EXECUTED_TURN'",
-                (source_session_id, active.entry_id, active.entry_sequence),
-            ).fetchone()
-            if initial is None:
-                raise ConversationKernelConflict(
-                    "Fork snapshot active request has no canonical origin"
-                )
-            kinds = {
-                "USER_MESSAGE": (
-                    FrozenProviderInputItemKind.USER,
-                    CanonicalInputOriginKind.HUMAN_MESSAGE
-                    if initial["scheduled_input"] is None
-                    else CanonicalInputOriginKind.SCHEDULED_TASK,
-                ),
-                "USER_STEER": (
-                    FrozenProviderInputItemKind.USER,
-                    CanonicalInputOriginKind.HUMAN_STEER,
-                ),
-                "PLAN_CONTINUATION": (
-                    FrozenProviderInputItemKind.PLAN_CONTINUATION,
-                    CanonicalInputOriginKind.PLAN_CONTINUATION,
-                ),
-                "TERMINAL_OBSERVATION": (
-                    FrozenProviderInputItemKind.TERMINAL_OBSERVATION,
-                    None,
-                ),
-                "USER_CONTROL_FEEDBACK": (
-                    FrozenProviderInputItemKind.USER,
-                    CanonicalInputOriginKind.USER_CONTROL_FEEDBACK,
-                ),
-            }
-            if initial["entry_kind"] not in kinds:
-                raise ConversationKernelConflict(
-                    "Fork retained request origin is invalid"
-                )
-            kind, origin = kinds[initial["entry_kind"]]
-            if (
-                kind is not active.item_kind
-                or origin is not active.input_origin
-                or initial["scheduled_input"]
-                != (
-                    None
-                    if active.scheduled_input is None
-                    else active.scheduled_input.to_dict()
-                )
-            ):
-                raise ConversationKernelConflict(
-                    "Fork snapshot active request attribution drifted"
-                )
-            # A later exact request follows all retained predecessor requests.
-            # Equal text can be a distinct request; do not deduplicate history.
-            retained += (
-                FrozenRetainedHistoricalRequest(
-                    item_kind=kind,
-                    input_origin=origin,
-                    scheduled_input=active.scheduled_input,
-                    content=active.content,
-                ),
-            )
+        retained_entry_ids = carrier.retained_entry_ids
+        _read_retained_prefix_rows(
+            connection,
+            session_id=source_session_id,
+            workspace_id=str(session["workspace_id"]),
+            source_through_sequence=anchor.source_through_sequence,
+            retained_entry_ids=retained_entry_ids,
+            provider_input_through_sequence=anchor.source_entry_sequence,
+            scope_kind=ModelInputScopeKind.ROOT,
+        )
 
     anchor_event = connection.execute(
         """SELECT event_sequence FROM pulsara_v3.agent_events
@@ -394,7 +329,9 @@ def read_fork_historical_material(
     groups = {}
     block_bodies = {}
     blocks_by_entry = {}
-    last = (anchor.source_through_sequence, "")
+    # Prefix references and the effective suffix share the original row copy
+    # path, so child ownership, image refs and every cut use the same mapping.
+    last = (0, "")
     while True:
         _deadline(deadline_monotonic)
         page = connection.execute(
@@ -410,11 +347,13 @@ def read_fork_historical_material(
                  AND g.session_id = e.session_id AND g.id = e.imported_history_group_id
                WHERE e.session_id = %s
                  AND (e.entry_kind <> 'TOOL_RESULT' OR NOT EXISTS (SELECT 1 FROM pulsara_v3.tool_results cr JOIN pulsara_v3.tool_invocations ci ON ci.id=cr.invocation_id WHERE cr.session_id=e.session_id AND cr.result_entry_id=e.id AND ci.source_kind='CODE_MODE_CALL'))
-                 AND e.entry_sequence > %s AND (e.entry_sequence, e.id) > (%s, %s)
+                 AND (e.entry_sequence > %s OR e.id = ANY(%s))
+                 AND (e.entry_sequence, e.id) > (%s, %s)
                  AND e.entry_sequence <= %s ORDER BY e.entry_sequence, e.id LIMIT 256""",
             (
                 source_session_id,
                 anchor.source_through_sequence,
+                list(retained_entry_ids),
                 *last,
                 anchor.source_entry_sequence,
             ),
@@ -588,6 +527,10 @@ def read_fork_historical_material(
             entries.append(MappingProxyType(entry))
         last = (int(page[-1]["entry_sequence"]), str(page[-1]["id"]))
 
+    if carrier is not None:
+        _require_snapshot_active_request(
+            carrier, entries=entries, scope_kind=ModelInputScopeKind.ROOT
+        )
     entry_ids = {str(row["id"]) for row in entries}
     call_ids = {
         str(b["assistant_entry_id"]) for b in blocks if b["block_kind"] == "TOOL_CALL"
@@ -780,7 +723,6 @@ def read_fork_historical_material(
         anchor=anchor,
         snapshot=None if snapshot is None else MappingProxyType(dict(snapshot)),
         snapshot_carrier=carrier,
-        retained_historical_requests=retained,
         imported_groups=frozen_groups,
         entries=tuple(entries),
         blocks=tuple(

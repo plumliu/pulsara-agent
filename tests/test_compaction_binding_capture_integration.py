@@ -152,7 +152,7 @@ async def _open(tmp_path, monkeypatch, dsn, *, second_connection=False):
     )
     await root.update_model_call_binding(high)
     root._compaction.policy = ResolvedCompactionPolicy(
-        automatic_enabled=False, minimum_reclaim_tokens=1
+        automatic_enabled=False
     )
     return core, root, model, high, other
 
@@ -193,7 +193,7 @@ def test_active_request_settings_edit_keeps_summary_steer_and_first_ordinary_bin
                 root._compaction.policy,
                 automatic_enabled=True,
                 auto_trigger_ratio=ratio * 0.95,
-                post_compaction_target_ratio=ratio * 0.85,
+
             )
             command = random_id("command")
             await root.submit_prompt(

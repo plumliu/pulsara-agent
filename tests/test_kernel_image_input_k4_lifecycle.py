@@ -139,7 +139,7 @@ def test_omitted_images_do_not_return_after_cold_compaction_and_two_forks(
         )
         owner = HostCompactionRuntimeOwner(
             policy=ResolvedCompactionPolicy(
-                automatic_enabled=False, minimum_reclaim_tokens=1
+                automatic_enabled=False
             )
         )
         runner = ConversationKernelRunner(

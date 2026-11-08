@@ -70,7 +70,7 @@ def test_initial_trigger_is_prepared_once_after_summary_without_rebuilding_roots
         try:
             await root.update_model_call_binding(test_model_binding(runtime))
             root._compaction.policy = ResolvedCompactionPolicy(
-                automatic_enabled=False, minimum_reclaim_tokens=1
+                automatic_enabled=False
             )
             _seed_history(root)
             usage = await root.read_context_usage()
@@ -78,7 +78,7 @@ def test_initial_trigger_is_prepared_once_after_summary_without_rebuilding_roots
             root._compaction.policy = replace(
                 root._compaction.policy, automatic_enabled=True,
                 auto_trigger_ratio=ratio * 0.95,
-                post_compaction_target_ratio=ratio * 0.85,
+
             )
             command = random_id("command")
             text = "Use the prior investigation to answer my question about the implementation."

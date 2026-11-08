@@ -13,13 +13,11 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     COMPACTION_SUMMARY_PROMPT_CONTRACT,
     CONTEXT_SNAPSHOT_CODEC,
     CONTEXT_SNAPSHOT_MEDIA_TYPE,
-    CompactionActiveRequestLocation,
     CompactionCanonicalAdoptionFactoryInput,
     CompactionCanonicalWritePreconditions,
     CompactionContinuationMode,
     CompactionTargetBranch,
     ExpectedCompactionPredecessorRevision,
-    FrozenCompactionActiveRequest,
     build_prepared_compaction_canonical_adoption,
     build_prepared_manual_compaction_command,
     canonical_compaction_range_digest,
@@ -151,14 +149,8 @@ def adopt_predecessor(repository, lease, accepted, group):
     )
     carrier = build_compaction_snapshot_carrier(
         summary=freeze_compaction_summary_output("Previous request was stopped.", maximum_utf8_bytes=100),
-        recent_human_requests=(), continuation_mode=CompactionContinuationMode.RESUME_ACTIVE_TURN,
-        active_request=FrozenCompactionActiveRequest(
-            entry_id=group.instruction_entry_id,
-            entry_sequence=accepted.entry_sequence,
-            location=CompactionActiveRequestLocation.CANONICAL_SUFFIX,
-            item_kind=FrozenProviderInputItemKind.USER,
-            input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE, content=None,
-        ),
+        retained_entry_ids=(), continuation_mode=CompactionContinuationMode.RESUME_ACTIVE_TURN,
+        active_request_entry_id=group.instruction_entry_id,
     )
     candidate = build_prepared_compaction_canonical_adoption(CompactionCanonicalAdoptionFactoryInput(
         scope=read.scope, target_branch=CompactionTargetBranch.ACTIVE_INSTALLATION,

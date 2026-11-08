@@ -141,7 +141,7 @@ async def run(model_id, wire_api, report):
                 # acceptance fixture reclaim its intentionally irrelevant padding.
                 parent._compaction.policy = ResolvedCompactionPolicy(
                     automatic_enabled=False,
-                    minimum_reclaim_tokens=1,
+
                     maximum_recent_human_text_utf8_bytes=1024,
                 )
                 prompt = (

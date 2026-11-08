@@ -544,7 +544,7 @@ async def _run(
                     automatic_enabled=False,
                     manual_enabled=False,
                     auto_trigger_ratio=0.85,
-                    minimum_reclaim_tokens=1,
+
                 )
                 source_result = await session.run_turn(
                     PromptContent.text("Call read_file exactly once on marker.txt with offset 1 and "

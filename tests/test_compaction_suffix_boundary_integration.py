@@ -43,12 +43,12 @@ async def _open_root(tmp_path, database, monkeypatch):
     root = await core.open_session(HostWorkspaceInput(workspace_kind="project", workspace_root=tmp_path))
     try:
         await root.update_model_call_binding(test_model_binding(runtime))
-        root._compaction.policy = ResolvedCompactionPolicy(automatic_enabled=False, minimum_reclaim_tokens=1)
+        root._compaction.policy = ResolvedCompactionPolicy(automatic_enabled=False)
         _seed_history(root, repetitions=150)
         usage = await root.read_context_usage()
         ratio = usage["input_tokens"] / usage["input_budget_tokens"]
         root._compaction.policy = replace(root._compaction.policy, automatic_enabled=True,
-            auto_trigger_ratio=ratio * 0.95, post_compaction_target_ratio=ratio * 0.85)
+            auto_trigger_ratio=ratio * 0.95)
     except BaseException:
         await core.shutdown()
         raise

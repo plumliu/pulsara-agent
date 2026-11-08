@@ -153,7 +153,7 @@ def test_pending_image_prefix_preparation_allows_actual_batch_append_before_adop
     tool = Tool(provider, session_id)
     owner = HostCompactionRuntimeOwner(
         policy=ResolvedCompactionPolicy(
-            automatic_enabled=False, minimum_reclaim_tokens=1
+            automatic_enabled=False
         )
     )
     runner = ConversationKernelRunner(

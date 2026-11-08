@@ -381,7 +381,7 @@ async def run(args, report, saved):
             )
             await session.update_model_call_binding(binding)
             session._compaction.policy = ResolvedCompactionPolicy(
-                automatic_enabled=False, minimum_reclaim_tokens=1
+                automatic_enabled=False
             )
             fixtures = report["fixtures"]
 

@@ -515,7 +515,7 @@ class _LimitedCompactionScriptedModel(_CompactionScriptedModel):
     def __init__(
         self,
         calls: list[list[object]],
-        summary: str,
+        summary: str | list[str],
         *,
         total_context_tokens: int = 256_000,
         max_input_tokens: int = 47_192,
@@ -584,66 +584,36 @@ def _record_automatic_compaction(runner):
 
 
 def _context_snapshot_payload(request) -> dict[str, object]:
-    matches = []
-    for message in request.compiled_input.messages:
-        if (
-            message.role is not MessageRole.USER
-            or not message.content
-            or not isinstance(message.content[0], LLMTextPart)
-        ):
-            continue
-        parts = message.content[0].text.split("\n", 1)
-        if len(parts) != 2:
-            continue
-        try:
-            payload = json.loads(parts[1])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict) and set(payload) == {
-            "continuation",
-            "earlier_context_summary",
-        }:
-            matches.append((message, payload))
+    prefix = "The following is a summary of earlier history.\n\n"
+    matches = [
+        (index, message)
+        for index, message in enumerate(request.compiled_input.messages)
+        if message.role is MessageRole.USER
+        and message.content
+        and isinstance(message.content[0], LLMTextPart)
+        and message.content[0].text.startswith(prefix)
+    ]
     assert len(matches) == 1
-    message, value = matches[0]
-    assert isinstance(value, dict)
-    sections: list[dict[str, object]] = []
-    index = 1
-    while index < len(message.content):
-        opener = message.content[index]
-        assert isinstance(opener, LLMTextPart)
-        prefix = "\n[PULSARA_RETAINED_CONTENT "
-        assert opener.text.startswith(prefix) and opener.text.endswith("]\n")
-        metadata = json.loads(opener.text[len(prefix) : -2])
-        index += 1
-        parts: list[object] = []
-        while message.content[index] != LLMTextPart("\n[/PULSARA_RETAINED_CONTENT]\n"):
-            part = message.content[index]
-            parts.append(
-                json.loads(part.text) if isinstance(part, LLMTextPart) else part
-            )
-            index += 1
-        sections.append({"metadata": metadata, "parts": tuple(parts)})
-        index += 1
-    value["sections"] = tuple(sections)
-    active = tuple(
-        section
-        for section in sections
-        if section["metadata"] == {"role": "user", "section": "active"}
-    )
-    assert len(active) <= 1
-    continuation = value["continuation"]
-    assert isinstance(continuation, dict)
-    continuation["active_request"] = (
-        None
-        if not active
-        else {
-            "text": "".join(
-                part for part in active[0]["parts"] if isinstance(part, str)
-            )
-        }
-    )
-    return value
+    index, message = matches[0]
+    assert len(message.content) == 1
+    return {
+        "earlier_context_summary": message.content[0].text[len(prefix):],
+        "original_messages": request.compiled_input.messages[index + 1:],
+    }
+
+
+def _snapshot_carrier(repository, session_id):
+    from pulsara_agent.conversation_kernel.prompt_storage import hydrate_canonical_snapshot_owner
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        row_factory=psycopg.rows.dict_row,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        row = connection.execute(
+            "SELECT * FROM pulsara_v3.context_snapshots WHERE session_id=%s ORDER BY created_at DESC LIMIT 1", (session_id,),
+        ).fetchone()
+        assert row is not None
+        return hydrate_canonical_snapshot_owner(connection, row=row, context_snapshot_id=row["id"])
 
 
 def _hook_context_bodies(request) -> tuple[str, ...]:
@@ -2038,8 +2008,8 @@ def test_k3_active_feedback_compacts_before_atomic_publication(
     owner = HostCompactionRuntimeOwner(
         policy=ResolvedCompactionPolicy(
             auto_trigger_ratio=0.90,
-            post_compaction_target_ratio=0.75,
-            minimum_reclaim_tokens=1,
+
+
         )
     )
     runner = ConversationKernelRunner(
@@ -2505,19 +2475,13 @@ def test_round5b_ordinary_fresh_open_uses_only_neutral_cold_assembler(
 
 
 @pytest.mark.parametrize(
-    ("lose_adoption_ack", "retry_recent", "image_history"),
-    (
-        (False, False, False),
-        (True, False, False),
-        (False, True, False),
-        (False, True, True),
-    ),
+    ("lose_adoption_ack", "image_history"),
+    ((False, False), (True, False), (False, True), (True, True)),
 )
 def test_automatic_compaction_adopts_started_request_and_continues_same_run(
     stage2_migrated_postgres_database,
     monkeypatch: pytest.MonkeyPatch,
     lose_adoption_ack: bool,
-    retry_recent: bool,
     image_history: bool,
 ) -> None:
     from pulsara_agent.conversation_kernel.compaction import (
@@ -2552,8 +2516,8 @@ def test_automatic_compaction_adopts_started_request_and_continues_same_run(
         policy=ResolvedCompactionPolicy(
             automatic_enabled=False,
             auto_trigger_ratio=0.05,
-            post_compaction_target_ratio=0.04,
-            minimum_reclaim_tokens=1,
+
+
         )
     )
     source_collector = StaticContextSourceCollector()
@@ -2570,32 +2534,6 @@ def test_automatic_compaction_adopts_started_request_and_continues_same_run(
         "freeze_non_trigger_sources",
         count_non_trigger_freeze,
     )
-    pre_full_attempts = 0
-    if retry_recent:
-        transition = compaction_coordinator.validate_compaction_wire_transition
-
-        def reject_first_recent(**kwargs):
-            nonlocal pre_full_attempts
-            if kwargs["phase"] == "PRE_FULL":
-                pre_full_attempts += 1
-                if pre_full_attempts == 1:
-                    raise compaction_coordinator.CompactionPlanningError(
-                        "compaction successor exceeds its post target"
-                    )
-            return transition(**kwargs)
-
-        monkeypatch.setattr(
-            compaction_coordinator,
-            "validate_compaction_wire_transition",
-            reject_first_recent,
-        )
-        if not image_history:
-            monkeypatch.setattr(
-                compaction_coordinator,
-                "_ordinary_recent_suffixes",
-                lambda recent: (recent, recent),
-            )
-
     runner = ConversationKernelRunner(
         model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
@@ -2643,31 +2581,28 @@ def test_automatic_compaction_adopts_started_request_and_continues_same_run(
     # source, dry successor and adopted family own six freezes. Candidate
     # shrinking and the common post-adoption safe point reuse those sources.
     assert freeze_non_trigger_calls == 6
-    if retry_recent:
-        assert pre_full_attempts == 2
     summary_context = model.summary_transport.contexts[0]
     assert summary_context.tool_choice == "auto"
-    assert summary_context.messages[-1].content == (
-        LLMTextPart(compaction_summary_request()),
-    )
+    assert len(summary_context.messages[-1].content) == 1
+    instruction = summary_context.messages[-1].content[0].text
+    assert instruction.startswith("Summary scope:")
+    assert "exact retained reference material" in instruction
+    assert instruction.endswith(compaction_summary_request())
     assert len(model.requests) == 2
     if image_history:
         from tests.test_kernel_image_input_k2_postgres import _image
 
-        successor_text = "\n".join(
-            join_text_content(m.content)
-            for m in model.requests[1].compiled_input.messages
-        )
-        assert _image(workspace_id=workspace_id).image_ref in successor_text
-        assert "[历史图片引用；此处未包含图像内容]" in successor_text
-        assert not any(
-            isinstance(p, LLMImagePart)
-            for m in model.requests[1].compiled_input.messages
-            for p in m.content
-        )
+        assert [
+            part
+            for message in model.requests[1].compiled_input.messages
+            for part in message.content
+            if isinstance(part, LLMImagePart)
+        ] == [_image(workspace_id=workspace_id)]
     successor_snapshot = _context_snapshot_payload(model.requests[1])
-    assert successor_snapshot["continuation"]["mode"] == "RESUME_ACTIVE_TURN"
-    assert successor_snapshot["continuation"]["active_request"] is None
+    carrier = _snapshot_carrier(repository, session_id)
+    assert carrier.continuation_mode.value == "RESUME_ACTIVE_TURN"
+    assert carrier.active_request_entry_id == model.requests[1].compiled_input.canonical_input_identity.initial_entry_id
+    assert carrier.active_request_entry_id not in carrier.retained_entry_ids
     second_input = model.requests[1].compiled_input
     exact_current = [
         message
@@ -2793,7 +2728,7 @@ def test_model_switch_uses_direct_or_destination_summary_path(
             automatic_enabled=False,
             manual_enabled=False,
             auto_trigger_ratio=0.85,
-            minimum_reclaim_tokens=1,
+
         )
     )
     presentation_notices: list[str] = []
@@ -2852,7 +2787,7 @@ def test_model_switch_uses_direct_or_destination_summary_path(
     if expected_summary_models:
         assert switch_results[0].outcome.disposition is CompactionDisposition.COMPACTED
     assert presentation_notices == (
-        ["模型已切换。由于上下文长度变化，接下来的回答可能不如之前连贯。"]
+        ["为适配当前模型的输入限制，本次摘要省略了部分较早历史或工具正文；原始记录仍保留。"]
         if expected_summary_models
         else []
     )
@@ -2911,7 +2846,7 @@ def test_text_only_destination_summary_projects_valid_image_history(
         policy=ResolvedCompactionPolicy(
             automatic_enabled=False,
             manual_enabled=False,
-            minimum_reclaim_tokens=1,
+
         )
     )
     runner = ConversationKernelRunner(
@@ -2977,21 +2912,12 @@ def test_text_only_destination_summary_projects_valid_image_history(
         for part in message.content
     )
     successor = _context_snapshot_payload(model.requests[1])
-    recent_sections = [
-        section
-        for section in successor["sections"]
-        if section["metadata"].get("section") == "recent"
-    ]
-    assert recent_sections
-    assert bind_prompt_images(FrozenPromptContent((image,)), workspace_id).parts[
-        0
-    ].image_ref in json.dumps(recent_sections, ensure_ascii=False)
-    assert "[历史图片引用；此处未包含图像内容]" in json.dumps(
-        recent_sections, ensure_ascii=False
-    )
+    assert successor["earlier_context_summary"]
+    assert all(not any(isinstance(part, LLMImagePart) for part in message.content) for message in successor["original_messages"])
 
 
-def test_text_only_destination_projection_keeps_recent_text_and_image_attribution(
+
+def test_text_only_destination_projection_keeps_recent_original_text(
     stage2_migrated_postgres_database,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
@@ -3035,7 +2961,7 @@ def test_text_only_destination_projection_keeps_recent_text_and_image_attributio
         policy=ResolvedCompactionPolicy(
             automatic_enabled=False,
             manual_enabled=False,
-            minimum_reclaim_tokens=1,
+
         )
     )
     runner = ConversationKernelRunner(
@@ -3099,16 +3025,8 @@ def test_text_only_destination_projection_keeps_recent_text_and_image_attributio
         for part in message.content
     )
     successor = _context_snapshot_payload(model.requests[-1])
-    recent_sections = [
-        section
-        for section in successor["sections"]
-        if section["metadata"].get("section") == "recent"
-    ]
-    assert [section["parts"] for section in recent_sections] == [
-        ("recent one",),
-        ("recent two",),
-        ("recent three",),
-    ]
+    originals = successor["original_messages"]
+    assert [join_text_content(message.content) for message in originals if message.role is MessageRole.USER and join_text_content(message.content) in {"recent one", "recent two", "recent three"}] == ["recent one", "recent two", "recent three"]
     assert not any(
         isinstance(part, LLMImagePart)
         for message in model.requests[-1].compiled_input.messages
@@ -3200,7 +3118,7 @@ def test_cold_text_only_handover_uses_one_destination_projection(
         policy=ResolvedCompactionPolicy(
             automatic_enabled=False,
             manual_enabled=False,
-            minimum_reclaim_tokens=1,
+
         )
     )
     notices: list[str] = []
@@ -3264,19 +3182,9 @@ def test_cold_text_only_handover_uses_one_destination_projection(
         for part in message.content
     )
     successor = _context_snapshot_payload(destination_model.requests[0])
-    recent_sections = [
-        section
-        for section in successor["sections"]
-        if section["metadata"].get("section") == "recent"
-    ]
-    assert recent_sections
-    assert bind_prompt_images(FrozenPromptContent((image,)), workspace_id).parts[
-        0
-    ].image_ref in json.dumps(recent_sections, ensure_ascii=False)
-    assert "[历史图片引用；此处未包含图像内容]" in json.dumps(
-        recent_sections, ensure_ascii=False
-    )
-    assert notices == ["模型已切换。由于上下文长度变化，接下来的回答可能不如之前连贯。"]
+    assert successor["earlier_context_summary"]
+    assert all(not any(isinstance(part, LLMImagePart) for part in message.content) for message in successor["original_messages"])
+    assert notices == ["为适配当前模型的输入限制，本次摘要省略了部分较早历史或工具正文；原始记录仍保留。"]
 
 
 def test_destination_summary_failure_never_calls_source_fallback(
@@ -3327,7 +3235,7 @@ def test_destination_summary_failure_never_calls_source_fallback(
         policy=ResolvedCompactionPolicy(
             automatic_enabled=False,
             manual_enabled=False,
-            minimum_reclaim_tokens=1,
+
         )
     )
     notices: list[str] = []
@@ -3462,7 +3370,7 @@ def test_visual_destination_projection_preserves_selected_image_history_and_rece
         policy=ResolvedCompactionPolicy(
             automatic_enabled=False,
             manual_enabled=False,
-            minimum_reclaim_tokens=1,
+
         )
     )
     runner = ConversationKernelRunner(
@@ -3531,15 +3439,10 @@ def test_visual_destination_projection_preserves_selected_image_history_and_rece
         for part in message.content
     )
     successor = _context_snapshot_payload(model.requests[-1])
-    recent_sections = [
-        section
-        for section in successor["sections"]
-        if section["metadata"].get("section") == "recent"
-    ]
     assert any(
         isinstance(part, LLMImagePart)
-        for section in recent_sections
-        for part in section["parts"]
+        for message in successor["original_messages"]
+        for part in message.content
     )
     assert any(
         isinstance(part, LLMImagePart)
@@ -3958,7 +3861,7 @@ def test_final_wire_compaction_trigger_and_adoption_ignore_provider_usage(
     owner = HostCompactionRuntimeOwner(
         policy=ResolvedCompactionPolicy(
             automatic_enabled=False,
-            minimum_reclaim_tokens=1,
+
         )
     )
     runner = ConversationKernelRunner(
@@ -4062,7 +3965,7 @@ def test_final_wire_compaction_summary_prefix_search_shrinks_replay_heavy_wire(
     owner = HostCompactionRuntimeOwner(
         policy=ResolvedCompactionPolicy(
             automatic_enabled=False,
-            minimum_reclaim_tokens=1,
+
         )
     )
     runner = ConversationKernelRunner(
@@ -4100,7 +4003,7 @@ def test_final_wire_compaction_summary_prefix_search_shrinks_replay_heavy_wire(
             owner.policy,
             automatic_enabled=True,
             auto_trigger_ratio=0.85,
-            post_compaction_target_ratio=0.80,
+
         )
         outcomes = _record_automatic_compaction(runner)
         await runner.run_turn(
@@ -4131,8 +4034,9 @@ def test_final_wire_compaction_summary_prefix_search_shrinks_replay_heavy_wire(
         <= item[1].effective_input_budget_tokens
     )
     assert admitted_count < longest_count
-    assert admitted_quote.replaced_generic_wire_estimated_tokens > 0
-    assert admitted_quote.replay_wire_estimated_tokens > 0
+    assert admitted_quote.replaced_generic_wire_estimated_tokens == 0
+    assert admitted_quote.replay_wire_estimated_tokens == 0
+    assert any("This is a lossy Runtime-authored historical source" in join_text_content(message.content) for message in model.summary_transport.contexts[0].messages)
     selected_plan = model.summary_transport.contexts[0].provider_wire_input_plan
     assert selected_plan.quote == admitted_quote
     assert selected_plan.quote.raw_final_wire_estimated_input_tokens <= (
@@ -4208,7 +4112,7 @@ def test_k4_compaction_prefix_search_keeps_large_image_mandatory_suffix(
     owner = HostCompactionRuntimeOwner(
         policy=ResolvedCompactionPolicy(
             automatic_enabled=True,
-            minimum_reclaim_tokens=1,
+
         )
     )
     runner = ConversationKernelRunner(
@@ -4292,8 +4196,7 @@ def test_k4_compaction_prefix_search_keeps_large_image_mandatory_suffix(
     )
     # The selected summary prefix ends before the visual USER.  Its immutable
     # bytes therefore remain in the mandatory canonical suffix and are checked
-    # by the real dry successor compiler/materializer rather than the 2 MiB
-    # descriptor-only retained-tail policy.
+    # by the real dry successor compiler/materializer.
     assert not any(
         isinstance(part, LLMImagePart)
         for message in model.summary_transport.contexts[0].messages
@@ -4403,7 +4306,7 @@ def test_final_wire_compaction_summary_promotes_semantic_overbudget_replay_fit(
     owner = HostCompactionRuntimeOwner(
         policy=ResolvedCompactionPolicy(
             automatic_enabled=False,
-            minimum_reclaim_tokens=1,
+
         )
     )
     runner = ConversationKernelRunner(
@@ -4446,7 +4349,7 @@ def test_final_wire_compaction_summary_promotes_semantic_overbudget_replay_fit(
             owner.policy,
             automatic_enabled=True,
             auto_trigger_ratio=0.20,
-            post_compaction_target_ratio=0.10,
+
         )
         outcomes = _record_automatic_compaction(runner)
         await runner.run_turn(frozen_test_prompt("continue after wire admission"))
@@ -4487,13 +4390,14 @@ def test_final_wire_compaction_no_executable_summary_prefix_is_not_already_compa
     )
     limits = test_model_limits(
         total_context_tokens=256_000,
-        max_input_tokens=9_192,
+        max_input_tokens=8_692,
         max_output_tokens=200,
         default_output_tokens=200,
         input_safety_margin_tokens=0,
     )
-    # Keep the 1,000-token effective budget between soft trigger and hard gate.
-    first_text = "history:" + "h" * 2_200
+    # A 500-token business budget admits this short history but cannot fit
+    # the complete temporary summary instructions, including any projection.
+    first_text = "history:" + "h" * 700
     scripts = (
         (
             {
@@ -4521,9 +4425,9 @@ def test_final_wire_compaction_no_executable_summary_prefix_is_not_already_compa
     )
     owner = HostCompactionRuntimeOwner(
         policy=ResolvedCompactionPolicy(
-            automatic_enabled=trigger == "automatic",
-            auto_trigger_ratio=0.75,
-            minimum_reclaim_tokens=1,
+            automatic_enabled=False,
+            auto_trigger_ratio=0.10,
+
         )
     )
     runner = ConversationKernelRunner(
@@ -4558,6 +4462,7 @@ def test_final_wire_compaction_no_executable_summary_prefix_is_not_already_compa
             )
             second_text = None
         else:
+            owner.policy = replace(owner.policy, automatic_enabled=True)
             second = await runner.run_turn(
                 frozen_test_prompt("second input triggers compaction")
             )
@@ -4569,11 +4474,7 @@ def test_final_wire_compaction_no_executable_summary_prefix_is_not_already_compa
     outcome, second_text = asyncio.run(exercise())
 
     assert outcome.disposition is CompactionDisposition.FAILED
-    assert outcome.public_code == (
-        "NO_EXECUTABLE_DESTINATION_PROJECTION"
-        if trigger == "manual"
-        else "NO_EXECUTABLE_SUMMARY_PREFIX"
-    )
+    assert outcome.public_code == "NO_EXECUTABLE_SUMMARY_SOURCE"
     assert model.summary_transport.contexts == []
     assert second_text == (None if trigger == "manual" else "chat final")
     assert len(automatic_executions) == (0 if trigger == "manual" else 1)
@@ -4592,7 +4493,7 @@ def test_final_wire_compaction_no_executable_summary_prefix_is_not_already_compa
     assert (snapshot_count, event_count) == (0, 0)
 
 
-def test_automatic_candidate_shrink_search_reuses_summary_and_sources(
+def test_automatic_hard_boundary_retention_adjustment_resummarizes_expanded_history(
     stage2_migrated_postgres_database,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4624,7 +4525,7 @@ def test_automatic_candidate_shrink_search_reuses_summary_and_sources(
     owner = HostCompactionRuntimeOwner(
         policy=ResolvedCompactionPolicy(
             automatic_enabled=False,
-            minimum_reclaim_tokens=1,
+
             maximum_retained_tool_groups=1,
         )
     )
@@ -4747,7 +4648,7 @@ def test_automatic_candidate_shrink_search_reuses_summary_and_sources(
             owner.policy,
             automatic_enabled=True,
             auto_trigger_ratio=0.05,
-            post_compaction_target_ratio=0.04,
+
         )
         automatic_outcomes = _record_automatic_compaction(runner)
         active_turn = await runner.run_turn(
@@ -4762,14 +4663,13 @@ def test_automatic_candidate_shrink_search_reuses_summary_and_sources(
 
     assert outcome.disposition is CompactionDisposition.COMPACTED
     assert outcome.snapshot_id is not None
-    # K3 freezes one summary and retries only the local recent suffixes before
-    # restarting with a smaller protected tail.  Rejecting the first successor
-    # must therefore measure a second candidate without another model call.
-    assert len(model.summary_transport.contexts) == 1
+    # Reducing original retention expands H and requires a new summary.
+    assert len(model.summary_transport.contexts) == 2
     assert len(measured_snapshot_successors) >= 2
-    assert {
-        context.messages[-1].content for context in model.summary_transport.contexts
-    } == {(LLMTextPart(compaction_summary_request()),)}
+    assert _context_snapshot_payload(model.requests[-1])["earlier_context_summary"] == (
+        "compact handoff after shrinking the retained tool tail"
+    )
+    assert model.summary_transport.contexts[0].messages[-1].content != model.summary_transport.contexts[1].messages[-1].content
     assert final_text == "active turn continued"
     assert pre_compact_calls == 1
     assert runner._safe_point._active_handle is None  # noqa: SLF001
@@ -4818,8 +4718,8 @@ def test_final_wire_pre_full_drift_replans_fresh_without_shrinking_tail(
         policy=ResolvedCompactionPolicy(
             automatic_enabled=False,
             auto_trigger_ratio=0.05,
-            post_compaction_target_ratio=0.04,
-            minimum_reclaim_tokens=1,
+
+
             maximum_retained_tool_groups=max(1, retained_group_count),
         )
     )
@@ -4839,11 +4739,8 @@ def test_final_wire_pre_full_drift_replans_fresh_without_shrinking_tail(
         workspace_id=workspace_id,
     )
     transition = compaction_coordinator.validate_compaction_wire_transition
-    reclaim = compaction_coordinator.validate_compaction_reclaim
     dispatch_pre_compact = runner.compaction._dispatch_pre_compact
     pre_full_attempts = 0
-    numeric_reclaim_calls = 0
-    numeric_calls_at_drift: list[int] = []
     pre_compact_calls = 0
 
     async def record_pre_compact(**kwargs):
@@ -4851,27 +4748,16 @@ def test_final_wire_pre_full_drift_replans_fresh_without_shrinking_tail(
         pre_compact_calls += 1
         return await dispatch_pre_compact(**kwargs)
 
-    def record_numeric_reclaim(**kwargs):
-        nonlocal numeric_reclaim_calls
-        numeric_reclaim_calls += 1
-        return reclaim(**kwargs)
-
     def drift_first_pre_full_transition(**kwargs):
         nonlocal pre_full_attempts
         if kwargs["phase"] == "PRE_FULL":
             pre_full_attempts += 1
             if pre_full_attempts == 1:
-                numeric_calls_at_drift.append(numeric_reclaim_calls)
                 raise compaction_coordinator.CompactionWireTransitionDrift(
                     "injected PRE_FULL structural drift"
                 )
         return transition(**kwargs)
 
-    monkeypatch.setattr(
-        compaction_coordinator,
-        "validate_compaction_reclaim",
-        record_numeric_reclaim,
-    )
     monkeypatch.setattr(
         compaction_coordinator,
         "validate_compaction_wire_transition",
@@ -4903,8 +4789,6 @@ def test_final_wire_pre_full_drift_replans_fresh_without_shrinking_tail(
     assert result.final_text == "active turn after fresh compaction replan"
     assert outcome.disposition is CompactionDisposition.COMPACTED
     assert pre_full_attempts == 2
-    assert numeric_calls_at_drift == [0]
-    assert numeric_reclaim_calls == 2
     assert len(model.summary_transport.contexts) == 2
     assert len(model.summary_transport.contexts[0].messages) == len(
         model.summary_transport.contexts[1].messages
@@ -4945,8 +4829,8 @@ def test_automatic_non_reclaim_keeps_legal_original_turn_running(
         policy=ResolvedCompactionPolicy(
             automatic_enabled=False,
             auto_trigger_ratio=0.05,
-            post_compaction_target_ratio=0.04,
-            minimum_reclaim_tokens=1,
+
+
         )
     )
     runner = ConversationKernelRunner(
@@ -5016,7 +4900,7 @@ def test_round5b_summary_tool_call_gets_one_ephemeral_repair_and_no_dispatch(
     owner = HostCompactionRuntimeOwner(
         policy=ResolvedCompactionPolicy(
             automatic_enabled=False,
-            minimum_reclaim_tokens=1,
+
         )
     )
     physical_tool = _AssertingTool(provider, session_id)
@@ -5101,7 +4985,7 @@ def test_round5b_second_summary_tool_call_discards_without_canonical_effect(
     owner = HostCompactionRuntimeOwner(
         policy=ResolvedCompactionPolicy(
             automatic_enabled=False,
-            minimum_reclaim_tokens=1,
+
         )
     )
     physical_tool = _AssertingTool(provider, session_id)
@@ -5177,8 +5061,8 @@ def test_cancelled_automatic_summary_settles_started_request(
         policy=ResolvedCompactionPolicy(
             automatic_enabled=True,
             auto_trigger_ratio=0.05,
-            post_compaction_target_ratio=0.04,
-            minimum_reclaim_tokens=1,
+
+
         )
     )
     runner = ConversationKernelRunner(
@@ -5246,17 +5130,16 @@ def test_round5b_mid_turn_tool_followup_compacts_then_finishes(
         + _tool_stream()
     )
     model = _LimitedCompactionScriptedModel(
-        [first_response, _text_stream("finished after mid-turn compaction")],
-        summary,
+        [_text_stream("earlier settled history " + "h" * 200_000), first_response, _text_stream("finished after mid-turn compaction")],
+        [summary, summary],
         total_context_tokens=360_000,
         max_input_tokens=330_000,
     )
     owner = HostCompactionRuntimeOwner(
         policy=ResolvedCompactionPolicy(
-            auto_trigger_ratio=0.75,
-            post_compaction_target_ratio=0.60,
-            minimum_reclaim_tokens=1,
-            maximum_retained_tail_utf8_bytes=1,
+            auto_trigger_ratio=0.85,
+
+
         )
     )
     tool = _ThirtyKiBTool(provider, session_id)
@@ -5284,6 +5167,7 @@ def test_round5b_mid_turn_tool_followup_compacts_then_finishes(
         # K3 first admits the worst legal result wire before executing the tool.
         # The large actual assistant then makes the settled follow-up cross the
         # configured soft trigger while its compacted successor remains executable.
+        await runner.run_turn(frozen_test_prompt("earlier interaction"))
         result = await runner.run_turn(frozen_test_prompt("p" * 40_000))
         await owner.aclose()
         return result
@@ -5295,16 +5179,21 @@ def test_round5b_mid_turn_tool_followup_compacts_then_finishes(
     assert result.tool_call_count == 1
     assert triggers == [CompactionTrigger.MID_TURN_FOLLOWUP]
     assert len(model.summary_transport.contexts) == 1
+    assert any(
+        "accepted assistant context" in join_text_content(message.content)
+        for message in model.summary_transport.contexts[0].messages
+    )
     successor_snapshot = _context_snapshot_payload(model.requests[-1])
-    assert successor_snapshot["continuation"]["mode"] == "RESUME_ACTIVE_TURN"
-    assert successor_snapshot["continuation"]["active_request"]["text"] == (
-        "p" * 40_000
-    )
+    carrier = _snapshot_carrier(repository, session_id)
+    assert carrier.continuation_mode.value == "RESUME_ACTIVE_TURN"
+    assert carrier.active_request_entry_id in carrier.retained_entry_ids
+    compiled = model.requests[-1].compiled_input
+    assert [message.content for message, placement in zip(compiled.messages, compiled.message_placements, strict=True) if placement.origin_entry_id == carrier.active_request_entry_id] == [(LLMTextPart("p" * 40_000),)]
     assert len(tool.invocations) == 1
-    assert not any(
-        message.role is MessageRole.TOOL_RESULT
-        for message in model.requests[-1].compiled_input.messages
-    )
+    retained_results = [message for message in model.requests[-1].compiled_input.messages if message.role is MessageRole.TOOL_RESULT]
+    assert len(retained_results) == 1
+    assert retained_results[0].tool_call_id == "call:1"
+    assert "z" * (30 << 10) in join_text_content(retained_results[0].content)
 
 
 def test_mid_turn_compaction_preserves_active_plan_guidance_and_write_denial(
@@ -5357,17 +5246,16 @@ def test_mid_turn_compaction_preserves_active_plan_guidance_and_write_denial(
         },
     )
     model = _LimitedCompactionScriptedModel(
-        [first_response, attempted_write, _text_stream("write was denied")],
-        "Earlier planning context; no mode or permission claims.",
+        [_text_stream("earlier settled history " + "h" * 200_000), first_response, attempted_write, _text_stream("write was denied")],
+        ["Earlier planning context; no mode or permission claims."] * 2,
         total_context_tokens=360_000,
         max_input_tokens=330_000,
     )
     owner = HostCompactionRuntimeOwner(
         policy=ResolvedCompactionPolicy(
-            auto_trigger_ratio=0.75,
-            post_compaction_target_ratio=0.60,
-            minimum_reclaim_tokens=1,
-            maximum_retained_tail_utf8_bytes=1,
+            auto_trigger_ratio=0.85,
+
+
         )
     )
     live_bus = LiveAgentEventBus()
@@ -5409,6 +5297,7 @@ def test_mid_turn_compaction_preserves_active_plan_guidance_and_write_denial(
 
     async def exercise():
         try:
+            await runner.run_turn(frozen_test_prompt("earlier interaction"))
             return await runner.run_turn(
                 frozen_test_prompt("p" * 40_000),
                 requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
@@ -5425,13 +5314,15 @@ def test_mid_turn_compaction_preserves_active_plan_guidance_and_write_denial(
     assert outcomes[0][1].disposition is CompactionDisposition.COMPACTED, outcomes
     assert outcomes[0][1].target_turn_id == result.turn_id
     assert len(model.summary_transport.contexts) == 1
-    assert len(model.requests) == 3
-    successor = model.requests[1]
-    assert all(request.turn_id == result.turn_id for request in model.requests)
-    assert (
-        _context_snapshot_payload(successor)["continuation"]["mode"]
-        == "RESUME_ACTIVE_TURN"
+    assert any(
+        "accepted planning context" in join_text_content(message.content)
+        for message in model.summary_transport.contexts[0].messages
     )
+    assert len(model.requests) == 4
+    successor = model.requests[2]
+    assert all(request.turn_id == result.turn_id for request in model.requests[1:])
+    assert _snapshot_carrier(repository, session_id).continuation_mode.value == "RESUME_ACTIVE_TURN"
+    _context_snapshot_payload(successor)
     observations = {}
     for message in successor.compiled_input.messages:
         try:
@@ -5499,7 +5390,7 @@ def test_final_wire_below_trigger_compaction_precheck_reuses_one_materialization
     )
     model = _ScriptedModel([_text_stream("ordinary final-wire dispatch")])
     owner = HostCompactionRuntimeOwner(
-        policy=ResolvedCompactionPolicy(minimum_reclaim_tokens=1)
+        policy=ResolvedCompactionPolicy()
     )
     runner = ConversationKernelRunner(
         model_resolution_snapshot_provider=test_model_resolution_snapshot,
@@ -5652,7 +5543,7 @@ def test_final_wire_late_measurement_failure_closes_linear_dispatch_authority(
     owner = HostCompactionRuntimeOwner(
         policy=ResolvedCompactionPolicy(
             automatic_enabled=False,
-            minimum_reclaim_tokens=1,
+
         )
     )
     runner = ConversationKernelRunner(
@@ -5737,8 +5628,8 @@ def test_final_wire_post_full_hook_sibling_wins_with_one_authority_transfer(
         policy=ResolvedCompactionPolicy(
             automatic_enabled=False,
             auto_trigger_ratio=0.05,
-            post_compaction_target_ratio=0.04,
-            minimum_reclaim_tokens=1,
+
+
         )
     )
     runner = ConversationKernelRunner(
@@ -5845,8 +5736,8 @@ def test_final_wire_post_full_hook_timeout_falls_back_with_fresh_install_deadlin
         policy=ResolvedCompactionPolicy(
             automatic_enabled=False,
             auto_trigger_ratio=0.05,
-            post_compaction_target_ratio=0.04,
-            minimum_reclaim_tokens=1,
+
+
         )
     )
     runner = ConversationKernelRunner(
@@ -5952,8 +5843,8 @@ def test_final_wire_post_full_failure_closes_unique_handle_and_hook_reservation(
         policy=ResolvedCompactionPolicy(
             automatic_enabled=False,
             auto_trigger_ratio=0.05,
-            post_compaction_target_ratio=0.04,
-            minimum_reclaim_tokens=1,
+
+
         )
     )
     runner = ConversationKernelRunner(
@@ -6048,8 +5939,8 @@ def test_proactive_auto_compaction_starts_request_before_summary_and_preserves_i
     owner = HostCompactionRuntimeOwner(
         policy=ResolvedCompactionPolicy(
             auto_trigger_ratio=0.90,
-            post_compaction_target_ratio=0.75,
-            minimum_reclaim_tokens=1,
+
+
         )
     )
     runner = ConversationKernelRunner(
@@ -6163,7 +6054,7 @@ def test_round5b_idle_manual_compaction_adopts_without_successor_open(
     owner = HostCompactionRuntimeOwner(
         policy=ResolvedCompactionPolicy(
             automatic_enabled=False,
-            minimum_reclaim_tokens=1,
+
         )
     )
     runner = ConversationKernelRunner(
@@ -6193,9 +6084,10 @@ def test_round5b_idle_manual_compaction_adopts_without_successor_open(
     assert outcome.disposition is CompactionDisposition.COMPACTED
     assert outcome.snapshot_id is not None
     assert len(model.summary_transport.contexts) == 1
-    assert model.summary_transport.contexts[0].messages[-1].content == (
-        LLMTextPart(compaction_summary_request()),
-    )
+    instruction = join_text_content(model.summary_transport.contexts[0].messages[-1].content)
+    assert instruction.startswith("Summary scope:")
+    assert "exact retained reference material" in instruction
+    assert instruction.endswith(compaction_summary_request())
     assert len(model.requests) == 1
     scope = ProviderInputContinuityScope(
         session_id=session_id,
@@ -6242,8 +6134,9 @@ def test_round5b_idle_manual_compaction_adopts_without_successor_open(
     assert restarted.final_text == "answer after restart"
     assert len(replacement_model.requests) == 1
     restart_snapshot = _context_snapshot_payload(replacement_model.requests[0])
-    assert restart_snapshot["continuation"]["mode"] == "AWAIT_NEXT_USER"
-    assert restart_snapshot["continuation"]["active_request"] is None
+    carrier = _snapshot_carrier(replacement_repository, session_id)
+    assert carrier.continuation_mode.value == "AWAIT_NEXT_USER"
+    assert carrier.active_request_entry_id is None
     assert (
         sum(
             message.content == (LLMTextPart("question after restart"),)
@@ -6256,7 +6149,7 @@ def test_round5b_idle_manual_compaction_adopts_without_successor_open(
 @pytest.mark.parametrize(
     "summary_characters",
     (100_000, 1_200_000),
-    ids=("fits-despite-growth", "hard-budget-failure"),
+    ids=("no-token-gain", "hard-budget-failure"),
 )
 def test_idle_manual_summary_uses_actual_budget_even_when_history_is_short(
     stage2_migrated_postgres_database,
@@ -6281,7 +6174,7 @@ def test_idle_manual_summary_uses_actual_budget_even_when_history_is_short(
     owner = HostCompactionRuntimeOwner(
         policy=ResolvedCompactionPolicy(
             automatic_enabled=False,
-            minimum_reclaim_tokens=1,
+
         )
     )
     runner = ConversationKernelRunner(
@@ -6308,12 +6201,10 @@ def test_idle_manual_summary_uses_actual_budget_even_when_history_is_short(
 
     outcome = asyncio.run(exercise())
 
-    succeeds = summary_characters == 100_000
-    assert outcome.disposition is (
-        CompactionDisposition.COMPACTED if succeeds else CompactionDisposition.FAILED
-    )
-    assert outcome.public_code == ("COMPACTED" if succeeds else "COMPACTION_FAILED")
-    assert (outcome.snapshot_id is not None) is succeeds
+    no_gain = summary_characters == 100_000
+    assert outcome.disposition is (CompactionDisposition.NOT_NEEDED if no_gain else CompactionDisposition.FAILED)
+    assert outcome.public_code == ("CONTEXT_ALREADY_COMPACT" if no_gain else "COMPACTION_FAILED")
+    assert outcome.snapshot_id is None
     assert len(model.summary_transport.contexts) == 1
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
@@ -6323,7 +6214,7 @@ def test_idle_manual_summary_uses_actual_budget_even_when_history_is_short(
             "SELECT count(*) FROM pulsara_v3.context_snapshots WHERE session_id = %s",
             (session_id,),
         ).fetchone()[0]
-    assert snapshot_count == int(succeeds)
+    assert snapshot_count == 0
 
 
 def test_round3_1_empty_epoch_absorbs_pre_first_call_steers_once(
@@ -7677,7 +7568,7 @@ def test_k3_soft_trigger_failure_closes_prepared_input_and_interrupts_started_tu
         _AssertingTool(provider, session_id), tool_names=()
     )
     owner = HostCompactionRuntimeOwner(
-        policy=ResolvedCompactionPolicy(minimum_reclaim_tokens=1)
+        policy=ResolvedCompactionPolicy()
     )
     runner = ConversationKernelRunner(
         model_resolution_snapshot_provider=test_model_resolution_snapshot,

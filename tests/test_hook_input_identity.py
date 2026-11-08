@@ -210,6 +210,8 @@ def test_child_final_real_host_dispatches_stop_with_actual_session(tmp_path, mon
         assert [item['turn_id'] for item in submissions] == [work['turn_id'] for work in works]
         assert all(item['permission_mode'] == 'bypassPermissions' and item['model'] for item in submissions)
         tools = [item for item in payloads if item["hook_event_name"] in {"PreToolUse", "PostToolUse"}]
-        assert tools and all(item["input_origin"] == "MODEL_TOOL_CALL" for item in tools)
+        expected_origins = {"exec_cell": "MODEL_TOOL_CALL", "manage_cell": "MODEL_TOOL_CALL", "run_agent": "CODE_MODE_CALL"}
+        assert {item["tool_name"] for item in tools} == set(expected_origins)
+        assert all(item["input_origin"] == expected_origins[item["tool_name"]] for item in tools)
 
     asyncio.run(scenario())

@@ -214,7 +214,7 @@ async def run(args, report, saved, save):
                 # The compaction experiment explicitly adopts its successor;
                 # automatic compaction cannot create unrecorded comparison cuts.
                 session._compaction.policy = ResolvedCompactionPolicy(
-                    automatic_enabled=False, minimum_reclaim_tokens=1
+                    automatic_enabled=False
                 )
                 prompts = [
                     (

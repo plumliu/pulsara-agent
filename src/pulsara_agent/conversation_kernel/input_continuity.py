@@ -879,23 +879,23 @@ class HostProviderInputContinuityOwner:
             scope=scope,
             canonical_frontier=canonical_frontier,
             dispatch_anchor=dispatch_anchor,
-            detached_destination_projection=False,
+            auxiliary_source=False,
         )
 
-    def freeze_destination_projection_planning_input(
+    def freeze_auxiliary_planning_input(
         self,
         *,
         scope: ProviderInputContinuityScope,
         canonical_frontier: ProcessLocalCanonicalFrontier,
         dispatch_anchor: ProviderInputDispatchAnchor,
     ) -> FrozenProviderInputAppendPlanningInput:
-        """Freeze a non-installable Tier-3 projection outside A's prefix."""
+        """Freeze a non-installable auxiliary source with its true predecessor."""
 
         return self._freeze_planning_input(
             scope=scope,
             canonical_frontier=canonical_frontier,
             dispatch_anchor=dispatch_anchor,
-            detached_destination_projection=True,
+            auxiliary_source=True,
         )
 
     def _freeze_planning_input(
@@ -904,7 +904,7 @@ class HostProviderInputContinuityOwner:
         scope: ProviderInputContinuityScope,
         canonical_frontier: ProcessLocalCanonicalFrontier,
         dispatch_anchor: ProviderInputDispatchAnchor,
-        detached_destination_projection: bool,
+        auxiliary_source: bool,
     ) -> FrozenProviderInputAppendPlanningInput:
         self._require_scope(scope)
         with self._lock:
@@ -926,8 +926,20 @@ class HostProviderInputContinuityOwner:
             if slot.state is _SlotState.CLOSED:
                 raise ProviderInputContinuityConflict("provider-input scope is closed")
             reservation: EmptyPreparationReservation | None = None
-            if detached_destination_projection:
-                predecessor_view = None
+            if auxiliary_source:
+                if slot.state is _SlotState.AUTHORIZED_EMPTY:
+                    predecessor_view = None
+                elif slot.state is _SlotState.INSTALLED:
+                    if slot.installed is None:
+                        raise ProviderInputContinuityConflict(
+                            "installed auxiliary source lost its cohort"
+                        )
+                    predecessor_view = slot.installed.view
+                else:
+                    raise ProviderInputContinuityConflict(
+                        "continuity scope is not available for an auxiliary source: "
+                        f"{slot.state.value}"
+                    )
             elif slot.state is _SlotState.AUTHORIZED_EMPTY:
                 lease = slot.bootstrap_lease
                 if lease is None:

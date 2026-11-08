@@ -701,8 +701,8 @@ def test_human_steer_during_ordinary_summary_after_question_resolution(
             await eventually(opened)
             target = session.active_root_turn_id()
             session._compaction.policy = ResolvedCompactionPolicy(
-                auto_trigger_ratio=0.20, post_compaction_target_ratio=0.15,
-                minimum_reclaim_tokens=1,
+                auto_trigger_ratio=0.20,
+
             )
             q1 = await session.submit_prompt(command_id=random_id("command"), content=PromptContent.text("FIRST_HUMAN_GUIDANCE"))
             first = asyncio.create_task(session.steer_queued_prompt(command_id=random_id("command"),

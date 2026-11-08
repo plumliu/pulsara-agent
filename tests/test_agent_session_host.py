@@ -785,8 +785,8 @@ def test_child_first_preparation_adopts_real_common_snapshot_for_next_work(
                 return child.active_root_turn_id() is None
             await eventually(child_idle)
             child._compaction.policy=ResolvedCompactionPolicy(
-                auto_trigger_ratio=0.10, post_compaction_target_ratio=0.08,
-                minimum_reclaim_tokens=1,
+                auto_trigger_ratio=0.10,
+
             )
             compactions=[]
             planning_failures=[]

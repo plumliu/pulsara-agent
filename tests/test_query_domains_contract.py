@@ -108,7 +108,7 @@ def test_capability_owner_rejects_mixed_query_before_observing_runtime(monkeypat
 
 def test_collaboration_query_dispatch_preserves_scope_pages_and_work_details():
     async def run():
-        work_row = {"agent_id": AGENT, "work_id": WORK, "instruction": "Exact work", "status": "completed", "final": "Exact final"}
+        work_row = {"agent_id": AGENT, "work_id": WORK, "work_title": "Exact title", "instruction": "Exact work", "status": "completed", "final": "Exact final"}
         repository = NS(list_query_agent_sessions=object(), list_query_agent_works=object(), query_visible_agent_work=object())
         calls = []
 
@@ -117,7 +117,14 @@ def test_collaboration_query_dispatch_preserves_scope_pages_and_work_details():
             assert values["root_session_id"] == ROOT
             assert values["observer_session_id"] in {ROOT, AGENT}
             if method is repository.list_query_agent_sessions:
-                return [{"agent_id": AGENT}, {"agent_id": OTHER}]
+                return [
+                    {"agent_id": AGENT, "title": "Ada Lovelace",
+                     "ui_current_work_id": WORK, "ui_current_work_title": "Exact work",
+                     "ui_current_work_status": "running", "ui_queued_work_count": 2},
+                    {"agent_id": OTHER, "title": "Alan Turing",
+                     "ui_current_work_id": None, "ui_current_work_title": None,
+                     "ui_current_work_status": None, "ui_queued_work_count": 0},
+                ]
             if method is repository.list_query_agent_works:
                 if values["agent_id"] != AGENT:
                     raise ValueError("AGENT does not exist in this collaboration")
@@ -134,17 +141,21 @@ def test_collaboration_query_dispatch_preserves_scope_pages_and_work_details():
             return json.loads(result.content)
 
         page = await query({"max_items": 1})
-        assert page == {"root": agent_target("ROOT"), "agents": [{"agent": agent_target(AGENT), "name": None,
+        assert page == {"root": agent_target("ROOT"), "agents": [{"agent": agent_target(AGENT), "name": "Ada Lovelace",
+            "current_work": work_target(WORK), "current_work_title": "Exact work",
+            "current_work_status": "running", "queued_work_count": 2,
             "inspect": {"tool": "query_agents", "arguments": {"target": agent_target(AGENT)}}}],
             "next": {"tool": "query_agents", "arguments": {"cursor": AGENT, "max_items": 1}}}
         assert calls[-1][1]["limit"] == 2
         assert calls[-1][1]["observer_session_id"] == ROOT
         works = await query({"target": agent_target(AGENT), "cursor": WORK, "max_items": 1})
         assert "final" not in works["works"][0]
+        assert works["works"][0]["work_title"] == "Exact title"
         assert works["works"][0]["inspect"] == {"tool": "query_agents", "arguments": {"target": work_target(WORK)}}
         assert calls[-1][1]["cursor"] == WORK
         exact = await query({"target": work_target(WORK)})
         assert exact["instruction"] == "Exact work" and exact["final"] == "Exact final"
+        assert exact["work_title"] == "Exact title"
         with pytest.raises(ValueError, match="AGENT does not exist"):
             await query({"target": agent_target(OTHER)})
         before = len(calls)

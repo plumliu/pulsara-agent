@@ -812,7 +812,7 @@ def test_compaction_installs_the_actual_measured_hook_sibling_winner(
     )
     owner = HostCompactionRuntimeOwner(policy=ResolvedCompactionPolicy(
         automatic_enabled=False, auto_trigger_ratio=0.05,
-        post_compaction_target_ratio=0.04, minimum_reclaim_tokens=1,
+
     ))
     runner = ConversationKernelRunner(
         model_resolution_snapshot_provider=test_model_resolution_snapshot,

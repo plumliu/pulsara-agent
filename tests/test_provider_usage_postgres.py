@@ -193,7 +193,7 @@ def test_real_host_three_calls_use_old_input_anchor_across_missing_usage(tmp_pat
             from tests.dogfood.run_model_switch_handover_dogfood import _seed_completed_history
             from pulsara_agent.conversation_kernel.compaction.contracts import ResolvedCompactionPolicy, CompactionDisposition
             session._compaction.policy = ResolvedCompactionPolicy(
-                automatic_enabled=False, minimum_reclaim_tokens=1,
+                automatic_enabled=False,
                 maximum_recent_human_messages=1, maximum_recent_human_text_utf8_bytes=8192)
             await _seed_completed_history(session, segments=3, repetitions=1000)
             before_compaction_preview = await session.read_context_usage()

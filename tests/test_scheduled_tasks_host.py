@@ -58,7 +58,12 @@ def test_complete_core_schedule_tools_execute_and_user_management_needs_no_ui_se
                 effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
             ).executor_bindings
             names = {binding.tool_name for binding in bindings}
-            assert len(names) == 39
+            from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog
+            from pulsara_agent.ports.tool_execution import ToolInvocationOwnerKind
+            catalog = builtin_tool_catalog()
+            expected = {entry.descriptor.name for entry in catalog if entry.descriptor.is_model_callable and ToolInvocationOwnerKind.HOST_MAIN_RUN in entry.availability_requirement.allowed_invocation_owners}
+            assert names == expected
+            assert all(binding.catalog_entry is next(entry for entry in catalog if entry.descriptor.name == binding.tool_name) for binding in bindings)
             assert {"read_video_frames", "read_transcript", "annotate_media"} <= names
             assert {"query_schedules", "manage_schedule"} <= names
 
@@ -880,7 +885,7 @@ def test_scheduled_source_survives_real_compaction_fork_and_parent_deletion(
         port.model_runtime = core._model_runtime
         try:
             h.session._compaction.policy = ResolvedCompactionPolicy(
-                automatic_enabled=False, minimum_reclaim_tokens=1
+                automatic_enabled=False
             )
             task = await create(
                 service, h.session, prompt="Saved report context. " * 1500
@@ -939,7 +944,7 @@ def test_scheduled_source_survives_real_compaction_fork_and_parent_deletion(
                 h.session._compaction.policy,
                 automatic_enabled=True,
                 auto_trigger_ratio=ratio * 0.95,
-                post_compaction_target_ratio=ratio * 0.85,
+
             )
             port.pausing = {
                 "action": "pause",
@@ -1067,10 +1072,7 @@ def test_scheduled_source_survives_real_compaction_fork_and_parent_deletion(
                 scheduled_request.source_entry_sequence
                 > facts.context_binding_fact.source_through_sequence
             )
-            assert all(
-                r.input_origin.value != "SCHEDULED_TASK"
-                for r in canonical.snapshot_carrier.recent_human_requests
-            )
+            assert scheduled_request.source_entry_id not in canonical.snapshot_carrier.retained_entry_ids
         finally:
             await service.aclose()
             await sessions.aclose()

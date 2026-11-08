@@ -202,12 +202,12 @@ def test_host_compaction_keeps_the_real_current_page_and_copied_next(
         force_compaction = True
         try:
             await root.update_model_call_binding(model_binding(runtime))
-            root._compaction.policy = ResolvedCompactionPolicy(automatic_enabled=False, minimum_reclaim_tokens=1)
+            root._compaction.policy = ResolvedCompactionPolicy(automatic_enabled=False)
             _seed_history(root, segments=5, repetitions=150)
             usage = await root.read_context_usage()
             ratio = usage["input_tokens"] / usage["input_budget_tokens"]
             forced_policy = replace(root._compaction.policy, automatic_enabled=True,
-                                    auto_trigger_ratio=ratio * 0.95, post_compaction_target_ratio=ratio * 0.85)
+                                    auto_trigger_ratio=ratio * 0.95)
 
             async def observe_real_page(**kwargs):
                 nonlocal force_compaction
@@ -352,12 +352,12 @@ async def _open_recovery_host(tmp_path, monkeypatch, database, *, paths, resourc
     all_old_rejected = asyncio.Event()
     try:
         await root.update_model_call_binding(model_binding(runtime))
-        root._compaction.policy = ResolvedCompactionPolicy(automatic_enabled=False, minimum_reclaim_tokens=1)
+        root._compaction.policy = ResolvedCompactionPolicy(automatic_enabled=False)
         _seed_history(root, segments=5, repetitions=150)
         usage = await root.read_context_usage()
         ratio = usage["input_tokens"] / usage["input_budget_tokens"]
         recovery_policy = replace(root._compaction.policy, automatic_enabled=True,
-                                  auto_trigger_ratio=ratio * 0.95, post_compaction_target_ratio=ratio * 0.85)
+                                  auto_trigger_ratio=ratio * 0.95)
         model.enable_recovery = lambda: setattr(root._compaction, "policy", recovery_policy)
 
         hypothetical = {}

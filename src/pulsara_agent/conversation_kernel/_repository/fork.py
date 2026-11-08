@@ -5,7 +5,7 @@ from __future__ import annotations
 from pulsara_agent.identity import derive_id, is_valid_id
 
 from bisect import bisect_right
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from time import monotonic
 
 from psycopg import Connection, IsolationLevel, sql
@@ -429,36 +429,20 @@ class _ForkOperations:
                     )
                     carrier = build_compaction_snapshot_carrier(
                         summary=summary,
-                        recent_human_requests=tuple(
-                            replace(
-                                request,
-                                content=remap_annotation_sources(
-                                    request.content, entry_map
-                                ),
-                            )
-                            for request in old.recent_human_requests
+                        retained_entry_ids=tuple(
+                            entry_map[entry_id] for entry_id in old.retained_entry_ids
                         ),
                         continuation_mode=CompactionContinuationMode.AWAIT_NEXT_USER,
-                        active_request=None,
-                        retained_historical_requests=tuple(
-                            replace(
-                                request,
-                                content=remap_annotation_sources(
-                                    request.content, entry_map
-                                ),
-                            )
-                            for request in material.retained_historical_requests
-                        ),
+                        active_request_entry_id=None,
                     )
                     snapshot_id = derive_id("snapshot", "fork", child_session_id, anchor_entry_id)
                     source = material.snapshot
-                    publication = materialize_compaction_snapshot(
+                    body = materialize_compaction_snapshot(
                         connection,
                         publisher=self._canonical_content_publisher,
                         workspace_id=material.workspace_id,
                         carrier=carrier,
                     )
-                    body = publication.body
                     _insert(
                         connection,
                         "context_snapshots",
@@ -492,13 +476,6 @@ class _ForkOperations:
                             "content_media_type": body.media_type,
                             "content_codec": body.codec,
                         },
-                    )
-                    insert_canonical_prompt_refs(
-                        connection,
-                        session_id=child_session_id,
-                        workspace_id=material.workspace_id,
-                        image_blob_ids=publication.image_blob_ids,
-                        context_snapshot_id=snapshot_id,
                     )
                 child_anchor_id = entry_map[anchor_entry_id]
                 _insert(

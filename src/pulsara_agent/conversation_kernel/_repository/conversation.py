@@ -1408,7 +1408,7 @@ class _ConversationOperations:
                 workspace_id=snapshot.workspace_id,
                 carrier=snapshot.carrier,
             )
-            if publication.body != snapshot.content:
+            if publication != snapshot.content:
                 raise ConversationKernelConflict(
                     "compaction snapshot storage descriptor drifted"
                 )
@@ -1433,13 +1433,6 @@ class _ConversationOperations:
                     snapshot.model_contract,
                     *_content_columns(snapshot.content),
                 ),
-            )
-            insert_canonical_prompt_refs(
-                connection,
-                session_id=snapshot.session_id,
-                workspace_id=snapshot.workspace_id,
-                image_blob_ids=publication.image_blob_ids,
-                context_snapshot_id=snapshot.snapshot_id,
             )
             connection.execute(
                 """

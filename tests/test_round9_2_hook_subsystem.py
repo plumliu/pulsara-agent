@@ -1747,6 +1747,7 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
         CompactionScope,
         CompactionTargetBranch,
         CompactionTrigger,
+        ResolvedCompactionPolicy,
     )
     from pulsara_agent.conversation_kernel.compaction.coordinator import (
         _new_compaction_attempt_token,
@@ -1932,7 +1933,11 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
 
             class _OuterOwner:
                 def __init__(self) -> None:
-                    self.policy = SimpleNamespace(enabled=True)
+                    self.policy = ResolvedCompactionPolicy()
+
+                def automatic_allowed(self, *, scope_kind) -> bool:
+                    assert scope_kind is ModelInputScopeKind.ROOT
+                    return True
 
                 async def run_fenced(
                     self, *, scope, trigger, operation, admitted_writer, attempt_id

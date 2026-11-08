@@ -106,10 +106,15 @@ def test_model_cell_stop_preserves_exact_short_receipt_without_ui_pending_count(
 @pytest.mark.parametrize("operation", ("exec_cell", "manage_cell"))
 def test_cell_control_budget_failure_returns_known_no_effect_result(operation):
     from pulsara_agent.code_mode.host import CodeModeHost
+    from pulsara_agent.conversation_kernel.tool_runtime import execution_catalog_entry, _json_schema_value
+    from pulsara_agent.primitives.context import freeze_json
     async def run():
         ctx = context(maximum=1)
+        decide = execution_catalog_entry("decide", code_mode=True).descriptor
         ctx.__dict__.update(attempt_id=random_id("attempt"), turn_id=random_id("turn"),
-            code_mode_snapshot=SimpleNamespace(tool_directory=SimpleNamespace(tool_specs=())))
+            code_mode_snapshot=SimpleNamespace(decision_available=False,
+                tool_directory=SimpleNamespace(tool_specs=(SimpleNamespace(
+                    name=decide.name, parameters=freeze_json(_json_schema_value(decide.input_schema))),))))
         host = CodeModeHost()
         port = object.__new__(DirectKernelToolPort)
         port._code_mode = host
@@ -234,7 +239,7 @@ def test_runtime_cancellation_reaches_synchronous_tool_and_joins_cleanup():
             permission_confirmation_granted=False)
         port._closed, port._session_id = False, ctx.session_id
         port._validate_surface_borrow = lambda *args: binding
-        port._subagent, port._memory = None, None
+        port._subagent, port._decision, port._memory = None, None, None
         port._tools = {"find_files": CancellableTool()}
         port._deadlines = KernelExecutionDeadlineFactory()
         io = port._physical_io = KernelSessionIO()

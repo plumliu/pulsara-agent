@@ -135,7 +135,7 @@ async def _run() -> dict[str, object]:
                     turn_calls.append(tuple(calls[first_call:]))
                 session._compaction.policy = ResolvedCompactionPolicy(  # noqa: SLF001
                     automatic_enabled=False,
-                    minimum_reclaim_tokens=1,
+
                     maximum_recent_human_messages=1,
                     maximum_recent_human_text_utf8_bytes=8 << 10,
                 )
