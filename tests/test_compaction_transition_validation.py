@@ -174,7 +174,7 @@ def _lineage_candidates(*, post=False):
             item.content.canonical_expanded_bytes if item.item_kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT else coordinator.provider_input_item_canonical_expanded_bytes(item)
             for item in items
         ), closures=(), late_outcomes=())
-        facts = NS(canonical_input=canonical_input, context_binding_fact=binding, run_permission_snapshot=None, plan_workflow_fact=None, plan_handoff_fact=None, previous_turn_outcome_fact=None, tool_observation_freshness_fact=None)
+        facts = NS(canonical_input=canonical_input, context_binding_fact=binding, run_permission_snapshot=None, plan_workflow_fact=None, plan_handoff_fact=None, previous_turn_outcome_fact=None)
         return NS(canonical_read=NS(compile_snapshot=facts, replay_manifest_cut=NS(manifests=())))
 
     source = candidate(10, 3, (snapshot(10), active, summarized, new), 16)

@@ -1,4 +1,4 @@
-"""Real-provider capability UI provenance and damaged-owner recovery, isolated."""
+"""Real-provider capability refresh and damaged-owner recovery, isolated."""
 
 from __future__ import annotations
 
@@ -57,7 +57,7 @@ async def run(selected=None):
     }
     suffix = "" if len(selected) == 5 else "-" + "-".join(sorted(selected))
     output = Path(
-        "output/diagnostics/capability-change-observation/real-provider"
+        "output/diagnostics/capability-refresh/real-provider"
         + suffix
         + ".json"
     )
@@ -88,33 +88,14 @@ async def run(selected=None):
                 permission_policy=preset_to_policy("bypass-permissions"),
                 active_skill_names=frozenset(),
             )
-            installed_inputs = {}
-
             async def session(name):
                 root = base / name
                 root.mkdir()
                 handle = await controller.create_session(
-                    workspace_kind="project",
-                    workspace_path=str(root),
+                    workspace_kind="project", workspace_path=str(root),
                     model_call_binding=_binding(delegate, connection),
                 )
-                host = handle.session
-                previous = host._runner._provider_input_installed_observer
-
-                def observed(request):
-                    compiled = request.compiled_input
-                    inputs = installed_inputs.setdefault(host.session_id, [])
-                    if inputs:
-                        old = inputs[-1]
-                        assert compiled.system_prompt == old.system_prompt
-                        assert compiled.tools == old.tools
-                        assert compiled.messages[: len(old.messages)] == old.messages
-                    inputs.append(compiled)
-                    if previous:
-                        previous(request)
-
-                host._runner._provider_input_installed_observer = observed
-                return host
+                return handle.session
 
             async def turn(host, label, text):
                 print(f"Running {label}", flush=True)
@@ -158,12 +139,6 @@ async def run(selected=None):
                     assert expected_actions[label].issubset(actions), (label, actions)
                 if label.endswith("diagnose") or label == "mcp_bad_config":
                     assert not actions, "Diagnosis must not mutate capability state"
-                if label in {"ui_deleted", "hook_gui_notice"}:
-                    assert not any(
-                        block.get("kind") == "tool_call"
-                        for call in evidence["calls"][before:]
-                        for block in call["normalized_blocks"]
-                    ), "Acknowledging a settled UI fact must not need another query"
                 return result
 
             def source(name):
@@ -194,38 +169,12 @@ async def run(selected=None):
                     await controller.remove_user_skill(
                         skill_path=str(path), expected=expected
                     )
-                    answer = await turn(
-                        ui,
-                        "ui_deleted",
-                        "我刚刚在能力页删除了 ui-demo。你能看到这次操作的系统提示吗？简短说明你看到的来源和结果。",
+                    await turn(ui, "ui_deleted", "请只回复收到。")
+                    assert not any(
+                        'CAPABILITY_CHANGE' in json.dumps(call["provider_input"], ensure_ascii=False)
+                        for call in evidence["calls"]
                     )
-                    assert "能力" in answer.final_text and (
-                        "删除" in answer.final_text or "REMOVED" in answer.final_text
-                    )
-                    assert ui._pending_capability_change is None
-                    await turn(ui, "ui_consumed", "明白了，请只回复收到。")
-                    latest = evidence["calls"][-1]["provider_input"]
-                    notices = []
-                    for message in latest["messages"]:
-                        content = message.get("content")
-                        if isinstance(content, str) and content.startswith(
-                            '{"pulsara_runtime_observation":'
-                        ):
-                            observation = json.loads(content)[
-                                "pulsara_runtime_observation"
-                            ]
-                            if observation["source"] == "CAPABILITY_CHANGE":
-                                notices.append(observation)
-                    assert len(notices) == 2 and all(
-                        notice["presence"] == "VALUE" for notice in notices
-                    )
-                    assert [
-                        json.loads(notice["body"])["action"] for notice in notices
-                    ] == [
-                        "INSTALL_LOOSE_SKILL",
-                        "REMOVE_LOOSE_SKILL",
-                    ]
-                    evidence["checks"]["ui_notice_consumed_once"] = True
+                    evidence["checks"]["ui_change_has_no_duplicate_notice"] = True
 
                 if "plugin" in selected:
                     plugin_source = base / "sources" / "plugin"
@@ -347,8 +296,8 @@ async def run(selected=None):
                     )
                     await turn(
                         hook,
-                        "hook_gui_notice",
-                        "我刚刚在能力页保存了 Hook 配置，你能看到这次操作提示吗？不必执行 Hook。",
+                        "hook_after_save",
+                        "请只回复收到。",
                     )
                     (home / "hooks.json").write_text("{bad")
                     await turn(
@@ -396,7 +345,6 @@ async def run(selected=None):
                     state = provider.trust_store.read(provider.source_subject(HookSourceKind.USER_FILE))
                     assert not state.enabled and state.trusted_definition_digest is None
                     evidence["checks"]["hook_bad_trust_unknown_then_native_disable_revoke"] = True
-                evidence["checks"]["same_epoch_prefix_continuity"] = True
                 evidence["status"] = "PASSED"
             finally:
                 await controller.aclose()

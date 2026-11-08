@@ -133,9 +133,7 @@ class RunnerFixture:
         runner._root_memory_use_policy = MemoryUsePolicy.ALL_DISABLED_BY_USER
         runner._writer_lease = SimpleNamespace(guard=SimpleNamespace(session_id=self.session_id))
         for name in (
-            "_workspace_gate", "_root_control_preparation_barrier", "_before_provider_preparation",
-            "_provider_input_installed_observer", "_provider_input_failure_observer", "_extensions",
-            "_root_control_completion_fence", "_root_control_completion_settlement",
+            "_workspace_gate", "_before_provider_preparation", "_extensions",
             "_hook_dispatcher", "_hook_context_owner", "_hook_scope", "_presentation_notice_sink",
         ):
             setattr(runner, name, None)
@@ -578,7 +576,12 @@ def test_first_call_above_auto_trigger_obeys_existing_failure_circuit(
                 assert not root._compaction.automatic_allowed(scope_kind=ModelInputScopeKind.ROOT)
                 _seed_history(root, segments=8, repetitions=300)
                 installed = []
-                monkeypatch.setattr(root._runner, "_provider_input_installed_observer", installed.append)
+                original_install = root._runner._provider_dispatch.install_provider_open
+                async def observe_install(**kwargs):
+                    result = await original_install(**kwargs)
+                    installed.append(result.request)
+                    return result
+                monkeypatch.setattr(root._runner._provider_dispatch, "install_provider_open", observe_install)
                 result = await root.run_turn(PromptContent.text("Continue the historical investigation."),
                     command_id=random_id("command"))
                 assert result.final_text == "HTTP413_FINISHED"
@@ -594,3 +597,33 @@ def test_first_call_above_auto_trigger_obeys_existing_failure_circuit(
                 await core.shutdown()
 
     asyncio.run(scenario())
+
+
+def test_optional_user_actions_cannot_alone_trigger_auto_compaction(monkeypatch):
+    import pulsara_agent.conversation_kernel.runner as runner_module
+    monkeypatch.setattr(runner_module, "AcceptedProviderFinalSource", lambda **kwargs: kwargs)
+    fixture = RunnerFixture(['accepted'], scope=ModelInputScopeKind.ROOT)
+    runner = fixture.runner
+    original = replace(fixture.initial.quote, budget_input_tokens=700, raw_final_wire_estimated_input_tokens=700, generic_wire_estimated_input_tokens=700)
+    reduced = replace(fixture.initial.quote, budget_input_tokens=200, raw_final_wire_estimated_input_tokens=200, generic_wire_estimated_input_tokens=200)
+    fixture.initial.quote = original
+    object.__setattr__(fixture.initial.prepared_call, 'epoch_call_target',
+                       SimpleNamespace(physical_call_target=object()))
+    runner._continuity = SimpleNamespace(current_usage_anchor=lambda _scope: None)
+    candidate = object()
+    selected = []
+    fixture.initial.select_wire_candidate = selected.append
+    runner.compaction.measure_dispatch_wire = AsyncMock(
+        return_value=SimpleNamespace(quote=original, candidate=object())
+    )
+    runner.compaction.wire_decision_crosses_automatic_threshold = Mock(
+        side_effect=lambda _dispatch, decision: decision.quote.budget_input_tokens >= 500
+    )
+    runner._provider_dispatch.measure_without_user_actions = AsyncMock(
+        return_value=SimpleNamespace(quote=reduced, candidate=candidate)
+    )
+    result = asyncio.run(fixture.run())
+    assert result.final_text == 'accepted'
+    assert selected == [candidate]
+    assert len(fixture.installed) == 1
+    runner.compaction.execute_active.assert_not_awaited()

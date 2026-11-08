@@ -9,12 +9,9 @@ from typing import TYPE_CHECKING, Callable, Iterator, TypeVar
 
 from pulsara_agent.conversation_kernel.contracts import HostWriterGuard
 from pulsara_agent.conversation_kernel.steer import (
-    PreparedActiveRootInputAdmission,
     PreparedActiveRootInputCandidate,
 )
 from pulsara_agent.conversation_kernel.repository import (
-    AcceptedEntry,
-    ConversationKernelConflict,
     ConversationKernelRepository,
 )
 from pulsara_agent.conversation_kernel.reader import (
@@ -24,9 +21,6 @@ from pulsara_agent.conversation_kernel.tool_surface import (
     OwnerIssuedCapabilityDispatchObservation,
 )
 from pulsara_agent.model_input.contracts import PreparedProviderInputCut
-from pulsara_agent.ports.user_control_feedback import (
-    UserControlFeedbackInstallationAttempt,
-)
 
 
 T = TypeVar("T")
@@ -690,68 +684,6 @@ class ProviderSafePointCoordinator:
             return successor
 
 
-
-    def install_user_control_feedback(
-        self,
-        handle: PreparedProviderInputHandle,
-        *,
-        attempt: UserControlFeedbackInstallationAttempt,
-        provider_input_admission: PreparedActiveRootInputAdmission,
-        deadline_monotonic: float,
-    ) -> AcceptedEntry:
-        """Install or exact-confirm one immutable user-control candidate."""
-
-        with self._lock:
-            self._require_current(handle)
-            if handle._model_active:
-                raise ExternalSourceNotAtSafePoint("provider model operation is active")
-            if (
-                provider_input_admission.candidate.expected_provider_input_cut
-                != handle.cut
-            ):
-                raise ConversationKernelConflict(
-                    "user control feedback admission lost its exact input cut"
-                )
-            confirmed = self._repository.confirm_user_control_feedback_winner(
-                self._guard,
-                candidate=attempt,
-                deadline_monotonic=deadline_monotonic,
-            )
-            if confirmed is not None:
-                return confirmed
-            try:
-                return self._repository.accept_user_control_feedback(
-                    self._guard,
-                    candidate=attempt,
-                    provider_input_admission=provider_input_admission,
-                    deadline_monotonic=deadline_monotonic,
-                )
-            except ConversationKernelConflict:
-                raise
-            except BaseException:
-                confirmed = self._repository.confirm_user_control_feedback_winner(
-                    self._guard,
-                    candidate=attempt,
-                    deadline_monotonic=deadline_monotonic,
-                )
-                if confirmed is None:
-                    raise
-                return confirmed
-
-    def confirm_user_control_feedback(
-        self,
-        *,
-        attempt: UserControlFeedbackInstallationAttempt,
-        deadline_monotonic: float,
-    ) -> AcceptedEntry | None:
-        """Read-only exact confirmation for an ambiguity-owned candidate."""
-
-        with self._lock:
-            return self._repository.confirm_user_control_feedback_winner(
-                self._guard,
-                candidate=attempt,
-                deadline_monotonic=deadline_monotonic,
-            )
 
     @contextmanager
     def exclusive_safe_mutation(self) -> Iterator[None]:

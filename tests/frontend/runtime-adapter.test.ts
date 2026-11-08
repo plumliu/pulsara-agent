@@ -3119,9 +3119,9 @@ it('retains deduplicated interruption history across continued turns and an olde
   expect(connection.current().interruptionNotices![0].displayAfterMessageId).toBe('old-input');
 });
 
-it('projects a notice from a cold feedback-only page without requiring a visible message', async () => {
+it('projects a notice from a cold page containing a hidden Cell result', async () => {
   const view=new CanonicalHistoryView('cold',{path:'/missing',outcome:'MISSING',reason:null},{session_id:'cold',event_sequence_cut:'4',
-    entries:[{entry_id:'feedback',entry_sequence:'3',turn_id:'stopped',entry_kind:'USER_CONTROL_FEEDBACK'}],
+    entries:[{entry_id:'cell-result',entry_sequence:'3',turn_id:'stopped',entry_kind:'TOOL_RESULT',tool_result:{source_kind:'CODE_MODE_CALL'}}],
     interruption_notices:[{owner_kind:'EXECUTED_TURN',owner_id:'stopped',reason:'USER_STOPPED',terminal_at_utc:'2026-10-05T00:00:00Z',display_after_entry_sequence:'3'}]});
   await view.initialize();
   expect(view.current().messages).toEqual([]);

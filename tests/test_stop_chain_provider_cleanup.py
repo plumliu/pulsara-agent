@@ -147,7 +147,6 @@ def setup_execution(monkeypatch, transport, usage=None):
         transport_timeout_policy=timeout,
         install_authority=SimpleNamespace(consume=Mock()),
         usage_observer=usage,
-        transport_invocation_observer=None,
     )
     runner = ConversationKernelRunner.__new__(ConversationKernelRunner)
     runner._active_execution = None

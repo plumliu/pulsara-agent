@@ -117,9 +117,12 @@ class _SettlementBarrier:
 def _instrument(session, directory, installs):
     barrier = _SettlementBarrier(session, directory)
     session._runner._assistant_settlements.settle = barrier.settle
-    original = session._runner._provider_input_installed_observer
+    dispatch = session._runner._provider_dispatch
+    original = dispatch.install_provider_open
 
-    def observe(request):
+    async def observe(**kwargs):
+        opened = await original(**kwargs)
+        request = opened.request
         compiled = request.compiled_input
         installs.append(
             {
@@ -133,10 +136,9 @@ def _instrument(session, directory, installs):
                 "at_utc": datetime.now(timezone.utc).isoformat(),
             }
         )
-        if original:
-            original(request)
+        return opened
 
-    session._runner._provider_input_installed_observer = observe
+    dispatch.install_provider_open = observe
 
 
 async def _ready(directory, phase):

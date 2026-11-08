@@ -23,7 +23,6 @@ from tests.test_compaction_first_call_source_boundary import _first_call_read
         CanonicalInputOriginKind.AGENT_MESSAGE,
         CanonicalInputOriginKind.AGENT_MATERIAL,
         CanonicalInputOriginKind.CELL_OUTPUT,
-        CanonicalInputOriginKind.USER_CONTROL_FEEDBACK,
     ),
 )
 def test_text_supplement_is_n_until_an_assistant_consumes_its_input_cut(origin):

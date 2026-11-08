@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from pulsara_agent.conversation_kernel.prompt_content import MAXIMUM_PROMPT_MULTIPART_BYTES
 
-from pulsara_agent.capability.change_observation import FrozenCapabilityChange
 from pulsara_agent.tools.builtins.media import IMAGE_TOOL_NAMES, parse_image_tool_source
 from pulsara_agent.identity import derive_id
 
@@ -179,7 +178,6 @@ from pulsara_agent.tools.builtins.filesystem import (
     ViewImageSourceKind,
 )
 from pulsara_agent.conversation_kernel.repository import (
-    AcceptedEntry,
     AssistantBlock,
     AssistantDataBlock,
     AssistantTextBlock,
@@ -227,9 +225,6 @@ from pulsara_agent.conversation_kernel.reader import (
 from pulsara_agent.conversation_kernel.safe_point import (
     PreparedProviderInputHandle,
     ProviderSafePointCoordinator,
-)
-from pulsara_agent.ports.user_control_feedback import (
-    UserControlFeedbackInstallationAttempt,
 )
 from pulsara_agent.model_input.compiler import (
     StructuredModelInputCompiler,
@@ -936,10 +931,6 @@ class CompactionContinuationBlocked(RuntimeError):
     pass
 
 
-class RootControlCompletionSettlementPort(Protocol):
-    async def __call__(self, turn_id: str, *, turn_completed: bool) -> None: ...
-
-
 async def _dispatch_session_start_hooks(
     dispatcher: KernelHookDispatcher,
     envelope: HookDispatchEnvelope[SessionStartInput],
@@ -1123,18 +1114,8 @@ class ConversationKernelRunner:
         input_reader: CanonicalProviderInputReader | None = None,
         safe_point: ProviderSafePointCoordinator | None = None,
         before_provider_preparation: Callable[[], Awaitable[bool]] | None = None,
-        capability_change_reader: Callable[[], Awaitable[FrozenCapabilityChange | None]]
-        | None = None,
-        capability_change_installed: Callable[[FrozenCapabilityChange], Awaitable[None]]
-        | None = None,
         workspace_gate: WorkspaceExecutionGate | None = None,
-        root_control_preparation_barrier: (
-            Callable[[str], Awaitable[None]] | None
-        ) = None,
-        root_control_completion_fence: (Callable[[str], Awaitable[bool]] | None) = None,
-        root_control_completion_settlement: (
-            RootControlCompletionSettlementPort | None
-        ) = None,
+        take_user_actions: Callable[[], Awaitable[str | None]] | None = None,
         content_publisher: CanonicalContentPublisher | None = None,
         io_owner: KernelSessionIO | None = None,
         context_source_collector: ContextSourceCollectorPort,
@@ -1161,12 +1142,6 @@ class ConversationKernelRunner:
         hook_scope: HookDispatchScopeRef | None = None,
         session_start_source: str = "startup",
         presentation_notice_sink: Callable[[str], None] | None = None,
-        provider_input_installed_observer: (
-            Callable[[KernelModelExecutionRequest], None] | None
-        ) = None,
-        provider_input_failure_observer: (
-            Callable[[str, str], Awaitable[None]] | None
-        ) = None,
     ) -> None:
         if (
             maximum_input_tokens_per_call is not None
@@ -1191,9 +1166,6 @@ class ConversationKernelRunner:
         blob_store = PostgresCanonicalBlobStore(repository.connection_provider)
         self._workspace_gate = workspace_gate
         self._before_provider_preparation = before_provider_preparation
-        self._root_control_preparation_barrier = root_control_preparation_barrier
-        self._root_control_completion_fence = root_control_completion_fence
-        self._root_control_completion_settlement = root_control_completion_settlement
         self._safe_point = safe_point or ProviderSafePointCoordinator(
             repository=repository,
             guard=writer_lease.guard,
@@ -1264,8 +1236,6 @@ class ConversationKernelRunner:
         self._hook_context_owner = hook_context_owner
         self._hook_scope = hook_scope
         self._presentation_notice_sink = presentation_notice_sink
-        self._provider_input_installed_observer = provider_input_installed_observer
-        self._provider_input_failure_observer = provider_input_failure_observer
         self._session_start_boundary = _SessionStartColdBoundaryOwner(
             session_start_source
         )
@@ -1288,8 +1258,7 @@ class ConversationKernelRunner:
             maximum_input_tokens_per_call=maximum_input_tokens_per_call,
             workspace_resolver=self._workspace_resolver,
             compaction_owner=compaction_owner,
-            capability_change_reader=capability_change_reader,
-            capability_change_installed=capability_change_installed,
+            take_user_actions=take_user_actions,
         )
         self.compaction = CompactionCoordinator(
             workspace_gate=workspace_gate,
@@ -1722,7 +1691,6 @@ class ConversationKernelRunner:
         successor_wire_decision: PreparedWireMeasurementDecision | None = None
         completed_tool_batch = False
         stop_continuation_used = False
-        input_selection_in_progress = False
         # One rejected business operation owns this qualification across
         # successor preparation, steer and transport-generation retries.
         http413_failed_wire_quote: FrozenProviderWireInputQuote | None = None
@@ -1741,11 +1709,6 @@ class ConversationKernelRunner:
                     await self._workspace_gate.wait_available()
                 if (
                     successor_dispatch is None
-                    and self._root_control_preparation_barrier is not None
-                ):
-                    await self._root_control_preparation_barrier(turn_id)
-                if (
-                    successor_dispatch is None
                     and self._before_provider_preparation is not None
                 ):
                     # No input/surface handle exists here. A transferred base
@@ -1760,7 +1723,6 @@ class ConversationKernelRunner:
                 if intent.cause is not None:
                     raise asyncio.CancelledError
                 model_call_count += 1
-                input_selection_in_progress = True
                 planning_deadline = self._planning_deadline()
                 dispatch = successor_dispatch
                 successor_dispatch = None
@@ -2020,6 +1982,16 @@ class ConversationKernelRunner:
                             reusable_observation=reusable_wire_observation,
                         )
                         reusable_wire_observation = None
+                    if wire_decision is not None and (
+                        (direct_switch_candidate is not None and not self.compaction.direct_switch_wire_admitted(wire_decision))
+                        or (not automatic_compaction_decided and self.compaction.wire_decision_crosses_automatic_threshold(dispatch, wire_decision))
+                    ):
+                        reduced = await self._provider_dispatch.measure_without_user_actions(
+                            dispatch, deadline=planning_deadline
+                        )
+                        if reduced is not None:
+                            dispatch.select_wire_candidate(reduced.candidate)
+                            wire_decision = reduced
                     if direct_switch_candidate is not None:
                         if wire_decision is None:
                             raise RuntimeError(
@@ -2117,7 +2089,6 @@ class ConversationKernelRunner:
                         "provider execution lacks an execution-backed surface"
                     )
                 provider_replay_reservation = None
-                control_answer_fenced = False
                 pending_http413_failure: ProviderModelExecutionFailed | None = None
                 execution = None
                 business_output_collected = False
@@ -2171,15 +2142,12 @@ class ConversationKernelRunner:
                             )
                         finally:
                             dispatch.retire_hook_context_reservation()
-                    if self._provider_input_installed_observer is not None:
-                        self._provider_input_installed_observer(provider_open.request)
                     request = provider_open.request
                     _require_http413_retry_shrink(
                         http413_failed_wire_quote,
                         http413_recovery_source,
                         request.wire_input_plan.quote,
                     )
-                    input_selection_in_progress = False
                     execution = provider_open.execution
                     permit = provider_open.permit
                     entry_id = random_id("entry")
@@ -2201,33 +2169,12 @@ class ConversationKernelRunner:
                         for item in completed.blocks
                         if isinstance(item, CompletedToolCallBlock)
                     )
-                    pending_control_feedback = False
-                    pending_steer_before_settlement = False
-                    if not calls and self._root_control_completion_fence is not None:
-                        # The Host callback may wait after installing its exact
-                        # process-local seal.  Transfer cleanup ownership before
-                        # awaiting so cancellation cannot strand that writer
-                        # reservation ahead of idle/manual compaction.
-                        control_answer_fenced = True
-                        pending_control_feedback = (
-                            await self._root_control_completion_fence(turn_id)
-                        )
-                        pending_steer_before_settlement = bool(
-                            await self._io.run(
-                                self._repository.read_pending_prompt_steer_facts,
-                                session_id=identity.session_id,
-                                target_turn_id=turn_id,
-                                deadline_monotonic=self._canonical_deadline(),
-                            )
-                        )
                     try:
                         output_quote = self._quote_post_response_resources(
                             request=request,
                             permit=permit,
                             collected=collected,
                             canonical_facts=canonical_facts,
-                            pending_root_dynamic_followup=pending_control_feedback
-                            or pending_steer_before_settlement,
                         )
                         self._require_post_response_resources(
                             output_quote,
@@ -2238,14 +2185,6 @@ class ConversationKernelRunner:
                             ),
                         )
                     except OutputResourceInterruption as exc:
-                        if (
-                            control_answer_fenced
-                            and self._root_control_completion_settlement is not None
-                        ):
-                            await self._root_control_completion_settlement(
-                                turn_id, turn_completed=False
-                            )
-                            control_answer_fenced = False
                         self._live_bus.offer_settlement_nowait(
                             kind=LiveSettlementKind.ABORTED,
                             session_id=request.session_id,
@@ -2331,8 +2270,6 @@ class ConversationKernelRunner:
                             stop_continuation.decision
                             is ContinuationDecision.TERMINALIZE
                         )
-                    if complete_turn:
-                        complete_turn = not pending_control_feedback
                     frozen_visualizations = ()
                     if complete_turn and not calls:
                         frozen_visualizations = (
@@ -2366,31 +2303,12 @@ class ConversationKernelRunner:
                     # The settlement owner now owns promotion/release across
                     # exact-confirm and caller cancellation.
                     provider_replay_reservation = None
-                    try:
-                        accepted = await self._assistant_settlements.settle(settlement)
-                    except BaseException:
-                        if (
-                            control_answer_fenced
-                            and self._root_control_completion_settlement is not None
-                        ):
-                            await self._root_control_completion_settlement(
-                                turn_id, turn_completed=False
-                            )
-                            control_answer_fenced = False
-                        raise
+                    accepted = await self._assistant_settlements.settle(settlement)
                     # Canonical assistant acceptance, rather than transport
                     # completion, ends both first-call and 413 recovery scope.
                     first_call_history_through_sequence = None
                     http413_failed_wire_quote = None
                     http413_recovery_source = None
-                    if (
-                        control_answer_fenced
-                        and self._root_control_completion_settlement is not None
-                    ):
-                        await self._root_control_completion_settlement(
-                            turn_id, turn_completed=accepted.turn_completed
-                        )
-                        control_answer_fenced = False
                     if (
                         stop_continuation is not None
                         and stop_continuation.decision
@@ -2447,13 +2365,6 @@ class ConversationKernelRunner:
                         ) from error
                     pending_http413_failure = error
                 finally:
-                    if (
-                        control_answer_fenced
-                        and self._root_control_completion_settlement is not None
-                    ):
-                        await self._root_control_completion_settlement(
-                            turn_id, turn_completed=False
-                        )
                     if provider_replay_reservation is not None:
                         self._continuity.release_assistant_replay_fragment_reservation(
                             provider_replay_reservation
@@ -2633,16 +2544,6 @@ class ConversationKernelRunner:
                 if active_surface_borrow is not None:
                     active_surface_borrow.close()
                     active_surface_borrow = None
-                if (
-                    input_selection_in_progress
-                    and self._provider_input_failure_observer is not None
-                ):
-                    await self._provider_input_failure_observer(
-                        turn_id,
-                        "INPUT_COMPILE_FAILED"
-                        if isinstance(error, StructuredModelInputCompileError)
-                        else "INPUT_ADMISSION_FAILED",
-                    )
                 if self._extensions is not None:
                     if isinstance(error, StructuredModelInputCompileError):
                         self._offer_operational_best_effort(
@@ -2772,69 +2673,6 @@ class ConversationKernelRunner:
             reservation.commit()
         return reservation
 
-
-    async def install_user_control_feedback(
-        self,
-        *,
-        attempt: UserControlFeedbackInstallationAttempt,
-        deadline_monotonic: float,
-        admitted_writer: CompactionWriteReservation,
-        cancellation_intent: ActiveTurnCancellationIntent | None = None,
-    ) -> AcceptedEntry:
-        confirmed = await self._io.run(
-            self._safe_point.confirm_user_control_feedback,
-            attempt=attempt,
-            deadline_monotonic=deadline_monotonic,
-        )
-        if confirmed is not None:
-            return confirmed
-        candidate = await self._io.run(
-            self._repository.prepare_user_control_feedback_provider_input_candidate,
-            self._writer_lease.guard,
-            candidate=attempt,
-            deadline_monotonic=deadline_monotonic,
-        )
-        prepared: PreparedProspectiveActiveRootInput | None = None
-        publication_handle = None
-        try:
-            prepared = await self._prepare_active_root_input(
-                candidate,
-                deadline=deadline_monotonic,
-                cancellation_intent=cancellation_intent,
-                admitted_writer=admitted_writer,
-            )
-            publication_handle = prepared.take_handle_for_publication()
-            accepted = await self._io.run(
-                self._safe_point.install_user_control_feedback,
-                publication_handle,
-                attempt=attempt,
-                provider_input_admission=prepared.admission,
-                deadline_monotonic=deadline_monotonic,
-            )
-            await self._provider_dispatch.confirm_published_active_root_input(
-                prepared,
-                publication_handle=publication_handle,
-                deadline=deadline_monotonic,
-            )
-            publication_handle = None
-            return accepted
-        finally:
-            if publication_handle is not None:
-                publication_handle.close()
-            if prepared is not None:
-                prepared.close()
-
-    async def confirm_user_control_feedback(
-        self,
-        *,
-        attempt: UserControlFeedbackInstallationAttempt,
-        deadline_monotonic: float,
-    ) -> AcceptedEntry | None:
-        return await self._io.run(
-            self._safe_point.confirm_user_control_feedback,
-            attempt=attempt,
-            deadline_monotonic=deadline_monotonic,
-        )
 
     def provider_retry_observation(self) -> dict[str, object] | None:
         execution = self._active_execution
@@ -3088,7 +2926,6 @@ class ConversationKernelRunner:
         permit: ProcessLocalProviderInputInstallPermit,
         collected: _CollectedModelResponse,
         canonical_facts: FrozenCanonicalCompileSnapshot,
-        pending_root_dynamic_followup: bool = False,
     ) -> FrozenPostResponseResourceQuote:
         completed = collected.completed
         assistant = _completed_assistant_semantic_message(completed)
@@ -3097,8 +2934,6 @@ class ConversationKernelRunner:
             for item in completed.blocks
             if isinstance(item, CompletedToolCallBlock)
         )
-        if pending_root_dynamic_followup and calls:
-            raise ValueError("dynamic ROOT follow-up quote has an invalid response")
         plan_batch = any(call.tool_name in _PLAN_CONTROL_TOOL_NAMES for call in calls)
         canonical_followup = 0
         logical_followup = 0
@@ -3282,7 +3117,7 @@ class ConversationKernelRunner:
         if hook_source is not None:
             source_messages.append(hook_source)
         needs_followup = (
-            bool(calls) or hook_source is not None or pending_root_dynamic_followup
+            bool(calls) or hook_source is not None
         )
         if needs_followup:
             source_messages.extend(

@@ -125,12 +125,15 @@ def test_process_loss_pending_agent_waits_before_final_provider_and_preserves_sc
             assert session._delivery_task is None
             assert session._cell_output_task is None
             assert session.host_session_id not in owner._sessions
-            previous = session._runner._provider_input_installed_observer
-            def installed(request):
-                prefix_installs.append((session.session_id, request))
-                if previous is not None:
-                    previous(request)
-            session._runner._provider_input_installed_observer = installed
+            dispatch = session._runner._provider_dispatch
+            install_provider_open = dispatch.install_provider_open
+
+            async def installed(**kwargs):
+                result = await install_provider_open(**kwargs)
+                prefix_installs.append((session.session_id, result.request))
+                return result
+
+            monkeypatch.setattr(dispatch, 'install_provider_open', installed)
             if session.session_id == identities['agent_id']:
                 child = session
                 before_registration.set()

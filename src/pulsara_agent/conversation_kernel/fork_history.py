@@ -46,10 +46,6 @@ from pulsara_agent.model_input.provider_replay import (
     decode_provider_replay_fragment,
     freeze_provider_replay_manifest,
 )
-from pulsara_agent.ports.user_control_feedback import (
-    USER_CONTROL_FEEDBACK_MEDIA_TYPE,
-    project_user_control_feedback_for_provider,
-)
 from pulsara_agent.ports.tool_execution import freeze_tool_json_object
 
 if TYPE_CHECKING:
@@ -497,12 +493,6 @@ def read_fork_historical_material(
                     _project_plan_continuation_storage(attributed, text)
                 elif raw["entry_kind"] == "TERMINAL_OBSERVATION":
                     _validate_terminal_observation_content(body)
-                elif raw["entry_kind"] == "USER_CONTROL_FEEDBACK":
-                    if raw["content_media_type"] != USER_CONTROL_FEEDBACK_MEDIA_TYPE:
-                        raise ConversationKernelConflict(
-                            "Fork user control feedback descriptor is invalid"
-                        )
-                    project_user_control_feedback_for_provider(body)
             elif raw["entry_kind"] not in {
                 "ASSISTANT_MESSAGE",
                 "ASSISTANT_TOOL_REQUEST",

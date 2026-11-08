@@ -40,7 +40,6 @@ from pulsara_agent.conversation_kernel.context_sources import (
     ContextSourceRegistry,
     build_memory_context_source,
 )
-from pulsara_agent.conversation_kernel.cancellation import ActiveTurnCancellationIntent
 from pulsara_agent.conversation_kernel.cold_epoch import (
     CanonicalColdContinuationSeed,
     AdoptedCompactionContinuationSeed,
@@ -62,7 +61,6 @@ from pulsara_agent.conversation_kernel.compaction.prompt import (
     compaction_summary_request,
 )
 from pulsara_agent.conversation_kernel.compaction.runtime import (
-    CompactionWriteReservation,
     HostCompactionRuntimeOwner,
 )
 from pulsara_agent.conversation_kernel.memory.contracts import (
@@ -161,11 +159,6 @@ from pulsara_agent.ports.provider_stream import (
 )
 from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
 from pulsara_agent.model_input.lowering import decode_tool_result_observation
-from pulsara_agent.ports.user_control_feedback import (
-    ProcessControlFeedbackContent,
-    UserControlFeedbackInstallationAttempt,
-    UserControlProcessFact,
-)
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.support.postgres import verified_postgres_provider
@@ -1759,346 +1752,6 @@ def test_capability_adoption_runs_before_each_unprepared_dispatch(
     assert len(observations[1]) == 1
 
 
-def test_k3_user_control_feedback_is_measured_before_atomic_publication(
-    stage2_migrated_postgres_database,
-) -> None:
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = ConversationKernelRepository(provider)
-    session_id = _name("session")
-    workspace_id = _name("workspace")
-    lease = _acquire_bound_host_writer(
-        repository,
-        session_id=session_id,
-        workspace_id=workspace_id,
-        writer_owner_id=_name("host"),
-        lease_seconds=30,
-        deadline_monotonic=monotonic() + 30,
-    )
-    command_id = _name("command")
-    turn_id = derive_id("turn", "command", session_id, command_id)
-    model = _ScriptedModel([_tool_stream(), _text_stream("feedback observed")])
-    tool = _AssertingTool(provider, session_id)
-    installed: list[AcceptedEntry] = []
-    runner: ConversationKernelRunner
-
-    async def install_feedback_before_followup() -> bool:
-        if len(model.requests) != 1 or installed:
-            return True
-        content = ProcessControlFeedbackContent(
-            command_id=random_id("command"),
-            session_id=session_id,
-            host_session_id="host:yinyxklzunar54s7objjdbphcy",
-            process_id="process:ynxq64ktp5aspyvhcguxzui4vy",
-            command="python worker.py",
-            cwd="/tmp",
-            origin_turn_id=turn_id,
-            origin_conversation_scope_kind="ROOT",
-            origin_session_id=session_id,
-            target_root_turn_id=turn_id,
-            process=UserControlProcessFact(
-                "TERMINATION_COMPLETED", "killed", -15, "TERMINAL", False
-            ),
-            public_code="BACKGROUND_CONTROL_COMPLETED",
-            public_detail="The process was stopped.",
-        )
-        installed.append(
-            await runner.install_user_control_feedback(
-                attempt=UserControlFeedbackInstallationAttempt(
-                    session_id=session_id,
-                    workspace_id=workspace_id,
-                    writer_generation=lease.guard.writer_generation,
-                    target_root_turn_id=turn_id,
-                    entry_id=_name("entry"),
-                    content=content,
-                    occurred_at=datetime.now(timezone.utc),
-                    actor_id="host:yinyxklzunar54s7objjdbphcy",
-                ),
-                deadline_monotonic=monotonic() + 30,
-                admitted_writer=CompactionWriteReservation(ModelInputScopeKind.ROOT),
-            )
-        )
-        return True
-
-    runner = ConversationKernelRunner(
-        model_resolution_snapshot_provider=test_model_resolution_snapshot,
-        repository=repository,
-        writer_lease=lease,
-        model=model,
-        tools=StructuredToolPort(tool, tool_names=("exec_process",)),
-        live_bus=LiveAgentEventBus(),
-        context_source_collector=StaticContextSourceCollector(),
-        before_provider_preparation=install_feedback_before_followup,
-    )
-    result = asyncio.run(
-        runner.run_turn(
-            frozen_test_prompt("call a tool, then observe control feedback"),
-            command_id=command_id,
-        )
-    )
-
-    assert result.final_text == "feedback observed"
-    assert len(installed) == 1
-    feedback_messages = tuple(
-        message
-        for placement, message in zip(
-            model.requests[1].compiled_input.message_placements,
-            model.requests[1].compiled_input.messages,
-            strict=True,
-        )
-        if placement.origin_entry_id == installed[0].entry_id
-    )
-    assert len(feedback_messages) == 1
-    assert "pulsara_user_control_feedback" in join_text_content(
-        feedback_messages[0].content
-    )
-
-
-def test_k3_user_control_feedback_resource_failure_precedes_publication(
-    stage2_migrated_postgres_database,
-) -> None:
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = ConversationKernelRepository(provider)
-    session_id = _name("session")
-    workspace_id = _name("workspace")
-    lease = _acquire_bound_host_writer(
-        repository,
-        session_id=session_id,
-        workspace_id=workspace_id,
-        writer_owner_id=_name("host"),
-        lease_seconds=30,
-        deadline_monotonic=monotonic() + 30,
-    )
-    command_id = _name("command")
-    feedback_entry_id = _name("entry")
-    turn_id = _name("turn")
-    start_test_root_turn(
-        repository,
-        lease.guard,
-        command_id=command_id,
-        turn_id=turn_id,
-        entry_id=_name("entry"),
-        context_binding_revision_id=_name("binding"),
-        permission_snapshot_id=_name("permission"),
-        requested_permission_mode=DEFAULT_PERMISSION_MODE,
-        model_call_binding=test_model_binding(test_model_runtime()),
-        content=FrozenPromptContent.text("existing active input"),
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=monotonic() + 30,
-    )
-    model = _ScriptedModel([])
-
-    runner = ConversationKernelRunner(
-        model_resolution_snapshot_provider=test_model_resolution_snapshot,
-        repository=repository,
-        writer_lease=lease,
-        model=model,
-        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
-        live_bus=LiveAgentEventBus(),
-        context_source_collector=StaticContextSourceCollector(),
-        maximum_input_tokens_per_call=100,
-    )
-    with pytest.raises(StructuredModelInputCompileError):
-        asyncio.run(
-            runner.install_user_control_feedback(
-                attempt=UserControlFeedbackInstallationAttempt(
-                    session_id=session_id,
-                    workspace_id=workspace_id,
-                    writer_generation=lease.guard.writer_generation,
-                    target_root_turn_id=turn_id,
-                    entry_id=feedback_entry_id,
-                    content=ProcessControlFeedbackContent(
-                        command_id=random_id("command"),
-                        session_id=session_id,
-                        host_session_id="host:yinyxklzunar54s7objjdbphcy",
-                        process_id="process:ynxq64ktp5aspyvhcguxzui4vy",
-                        command="python worker.py",
-                        cwd="/tmp",
-                        origin_turn_id=turn_id,
-                        origin_conversation_scope_kind="ROOT",
-                        origin_session_id=session_id,
-                        target_root_turn_id=turn_id,
-                        process=UserControlProcessFact(
-                            "TERMINATION_COMPLETED",
-                            "killed",
-                            -15,
-                            "TERMINAL",
-                            False,
-                        ),
-                        public_code="BACKGROUND_CONTROL_COMPLETED",
-                        public_detail="\\" * 28_000,
-                    ),
-                    occurred_at=datetime.now(timezone.utc),
-                    actor_id="host:yinyxklzunar54s7objjdbphcy",
-                ),
-                deadline_monotonic=monotonic() + 30,
-                admitted_writer=CompactionWriteReservation(ModelInputScopeKind.ROOT),
-            )
-        )
-    assert model.requests == []
-    with provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=monotonic() + 30,
-    ) as connection:
-        assert connection.execute(
-            "SELECT count(*) FROM pulsara_v3.transcript_entries "
-            "WHERE session_id=%s AND id=%s",
-            (session_id, feedback_entry_id),
-        ).fetchone() == (0,)
-        assert connection.execute(
-            "SELECT count(*) FROM pulsara_v3.agent_events "
-            "WHERE session_id=%s AND event_type='UserControlFeedbackAccepted'",
-            (session_id,),
-        ).fetchone() == (0,)
-
-
-def test_k3_active_feedback_compacts_before_atomic_publication(
-    stage2_migrated_postgres_database,
-) -> None:
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = ConversationKernelRepository(provider)
-    session_id = _name("session")
-    workspace_id = _name("workspace")
-    lease = _acquire_bound_host_writer(
-        repository,
-        session_id=session_id,
-        workspace_id=workspace_id,
-        writer_owner_id=_name("host"),
-        lease_seconds=30,
-        deadline_monotonic=monotonic() + 30,
-    )
-    turn_id = _name("turn")
-    start_test_root_turn(
-        repository,
-        lease.guard,
-        command_id=_name("command"),
-        turn_id=turn_id,
-        entry_id=_name("entry"),
-        context_binding_revision_id=_name("binding"),
-        permission_snapshot_id=_name("permission"),
-        requested_permission_mode=DEFAULT_PERMISSION_MODE,
-        model_call_binding=test_model_binding(test_model_runtime()),
-        content=FrozenPromptContent.text("active request"),
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=monotonic() + 30,
-    )
-    source_cut = repository.prepare_provider_input_cut(
-        lease.guard,
-        turn_id=turn_id,
-        deadline_monotonic=monotonic() + 30,
-    )
-    repository.commit_assistant_message(
-        lease.guard,
-        cut=source_cut,
-        entry_id=_name("entry"),
-        parent_content=InlineContent.from_bytes(b"\n" * 60_000),
-        blocks=(
-            AssistantTextBlock(
-                block_id=_name("block"),
-                text=InlineContent.from_bytes(b"\n" * 60_000),
-            ),
-        ),
-        complete_turn=False,
-        occurred_at=datetime.now(timezone.utc),
-        actor_id="model:test",
-        deadline_monotonic=monotonic() + 30,
-    )
-    model = _LimitedCompactionScriptedModel(
-        [], "A concise handoff retaining the active request."
-    )
-    owner = HostCompactionRuntimeOwner(
-        policy=ResolvedCompactionPolicy(
-            auto_trigger_ratio=0.90,
-
-
-        )
-    )
-    runner = ConversationKernelRunner(
-        model_resolution_snapshot_provider=test_model_resolution_snapshot,
-        repository=repository,
-        writer_lease=lease,
-        model=model,
-        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
-        live_bus=LiveAgentEventBus(),
-        context_source_collector=StaticContextSourceCollector(),
-        compaction_owner=owner,
-        workspace_id=workspace_id,
-    )
-    feedback_entry_id = _name("entry")
-    attempt = UserControlFeedbackInstallationAttempt(
-        session_id=session_id,
-        workspace_id=workspace_id,
-        writer_generation=lease.guard.writer_generation,
-        target_root_turn_id=turn_id,
-        entry_id=feedback_entry_id,
-        content=ProcessControlFeedbackContent(
-            command_id=random_id("command"),
-            session_id=session_id,
-            host_session_id="host:yinyxklzunar54s7objjdbphcy",
-            process_id="process:ynxq64ktp5aspyvhcguxzui4vy",
-            command="python worker.py",
-            cwd="/tmp",
-            origin_turn_id=turn_id,
-            origin_conversation_scope_kind="ROOT",
-            origin_session_id=session_id,
-            target_root_turn_id=turn_id,
-            process=UserControlProcessFact(
-                "TERMINATION_COMPLETED", "killed", -15, "TERMINAL", False
-            ),
-            public_code="BACKGROUND_CONTROL_COMPLETED",
-            public_detail="\\" * 18_000,
-        ),
-        occurred_at=datetime.now(timezone.utc),
-        actor_id="host:yinyxklzunar54s7objjdbphcy",
-    )
-
-    async def exercise():
-        accepted = await runner.install_user_control_feedback(
-            attempt=attempt,
-            deadline_monotonic=monotonic() + 30,
-            admitted_writer=CompactionWriteReservation(ModelInputScopeKind.ROOT),
-            cancellation_intent=ActiveTurnCancellationIntent(
-                turn_id, ModelInputScopeKind.ROOT
-            ),
-        )
-        await owner.aclose()
-        return accepted
-
-    accepted = asyncio.run(exercise())
-
-    assert accepted.entry_id == feedback_entry_id
-    assert model.requests == []
-    assert len(model.summary_transport.contexts) == 1
-    with provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=monotonic() + 30,
-    ) as connection:
-        snapshot_count, feedback_count = connection.execute(
-            "SELECT "
-            "(SELECT count(*) FROM pulsara_v3.context_snapshots "
-            " WHERE session_id=%s), "
-            "(SELECT count(*) FROM pulsara_v3.transcript_entries "
-            " WHERE session_id=%s AND id=%s)",
-            (session_id, session_id, feedback_entry_id),
-        ).fetchone()
-    assert snapshot_count == 1
-    assert feedback_count == 1
-    final_cut = repository.prepare_provider_input_cut(
-        lease.guard,
-        turn_id=turn_id,
-        deadline_monotonic=monotonic() + 30,
-    )
-    assert (
-        final_cut.context_binding_revision_id != source_cut.context_binding_revision_id
-    )
-    final_read = CanonicalProviderInputReader(
-        provider, blob_reader=runner._provider_dispatch._input_reader._blob_reader
-    ).read_frozen_dispatch(final_cut, deadline_monotonic=monotonic() + 30)
-    assert any(
-        item.source_entry_id == feedback_entry_id
-        for item in final_read.compile_snapshot.canonical_input.items
-    )
-
-
 def test_stage2_runner_commits_semantic_invalid_arguments_then_retries_and_completes(
     stage2_migrated_postgres_database,
 ) -> None:
@@ -2258,7 +1911,7 @@ def test_stage2_runner_commits_semantic_invalid_arguments_then_retries_and_compl
     assert steer_row[1] is not None
 
 
-def test_root_control_feedback_fence_keeps_turn_open_for_the_next_request(
+def test_plain_final_does_not_quote_an_unrequested_followup(
     monkeypatch: pytest.MonkeyPatch,
     stage2_migrated_postgres_database,
 ) -> None:
@@ -2273,33 +1926,14 @@ def test_root_control_feedback_fence_keeps_turn_open_for_the_next_request(
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
     )
-    barriers: list[str] = []
-    fences: list[str] = []
-    settlements: list[tuple[str, bool]] = []
-
-    async def barrier(turn_id: str) -> None:
-        barriers.append(turn_id)
-
-    async def fence(turn_id: str) -> bool:
-        fences.append(turn_id)
-        return len(fences) == 1
-
-    async def settle_fence(turn_id: str, *, turn_completed: bool) -> None:
-        settlements.append((turn_id, turn_completed))
-
     runner = ConversationKernelRunner(
         model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
-        model=_ScriptedModel(
-            [_text_stream("first answer"), _text_stream("feedback-aware answer")]
-        ),
+        model=_ScriptedModel([_text_stream("first answer")]),
         tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
-        root_control_preparation_barrier=barrier,
-        root_control_completion_fence=fence,
-        root_control_completion_settlement=settle_fence,
     )
     resource_quotes: list[FrozenPostResponseResourceQuote] = []
     require_resources = runner._require_post_response_resources
@@ -2327,65 +1961,11 @@ def test_root_control_feedback_fence_keeps_turn_open_for_the_next_request(
 
     monkeypatch.setattr(runner._tools, "prepare_visualizations", prepare_visualizations)
     result = asyncio.run(runner.run_turn(frozen_test_prompt("question")))
-    assert result.final_text == "feedback-aware answer"
-    assert prepared_visualizations == ["feedback-aware answer"]
-    assert result.model_call_count == 2
-    assert len(barriers) == 2
-    assert fences == [result.turn_id, result.turn_id]
-    assert settlements == [(result.turn_id, False), (result.turn_id, True)]
-    assert len(resource_quotes) == 2
-    assert resource_quotes[0].followup_wire is not None
-    assert resource_quotes[1].followup_wire is None
-
-
-def test_root_control_feedback_fence_cancellation_settles_installed_seal(
-    stage2_migrated_postgres_database,
-) -> None:
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = ConversationKernelRepository(provider)
-    session_id = _name("session")
-    lease = _acquire_bound_host_writer(
-        repository,
-        session_id=session_id,
-        workspace_id=_name("workspace"),
-        writer_owner_id=_name("host"),
-        lease_seconds=30,
-        deadline_monotonic=monotonic() + 30,
-    )
-    seal_installed = asyncio.Event()
-    hold_fence = asyncio.Event()
-    settlements: list[tuple[str, bool]] = []
-
-    async def fence(_turn_id: str) -> bool:
-        seal_installed.set()
-        await hold_fence.wait()
-        return False
-
-    async def settle_fence(turn_id: str, *, turn_completed: bool) -> None:
-        settlements.append((turn_id, turn_completed))
-
-    runner = ConversationKernelRunner(
-        model_resolution_snapshot_provider=test_model_resolution_snapshot,
-        repository=repository,
-        writer_lease=lease,
-        model=_ScriptedModel([_text_stream("answer")]),
-        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
-        live_bus=LiveAgentEventBus(),
-        context_source_collector=StaticContextSourceCollector(),
-        root_control_completion_fence=fence,
-        root_control_completion_settlement=settle_fence,
-    )
-
-    async def exercise() -> None:
-        running = asyncio.create_task(runner.run_turn(frozen_test_prompt("question")))
-        await asyncio.wait_for(seal_installed.wait(), timeout=2)
-        running.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await running
-
-    asyncio.run(exercise())
-    assert len(settlements) == 1
-    assert settlements[0][1] is False
+    assert result.final_text == "first answer"
+    assert prepared_visualizations == ["first answer"]
+    assert result.model_call_count == 1
+    assert len(resource_quotes) == 1
+    assert resource_quotes[0].followup_wire is None
 
 
 def test_stage2_runner_text_turn_has_two_entry_transactions_and_no_segments(

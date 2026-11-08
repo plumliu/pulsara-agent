@@ -1632,8 +1632,8 @@ export function ConversationMessages({
   const timeline: TimelineItem[] = messages.filter(message => !isEmptyLiveAssistant(message)).map(message => ({ message, windowId: message.historyWindowId
     ?? history?.windows.find(window => { const source = messageSourceEntryId(message); return Boolean(source && (window.entryIds?.includes(source) || window.firstEntryId === source || window.lastEntryId === source)); })?.id }));
   for (const notice of interruptionNotices.filter(item => !item.displayAfterMessageId)) {
-    // USER_CONTROL_FEEDBACK has no chat bubble. Its exact retained canonical
-    // entry still provides a timeline location inside its own loaded window.
+    // A retained entry without a chat bubble still locates the interruption
+    // inside its own loaded window.
     const window = history?.windows.find(item => notice.displayAfterEntryId && item.entryIds?.includes(notice.displayAfterEntryId));
     if (!window) continue;
     const windowIndex = history!.windows.indexOf(window);

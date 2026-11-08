@@ -141,8 +141,7 @@
 .background-process__details dl div { display: grid; grid-template-columns: 62px minmax(0,1fr); gap: 8px; }
 .background-process dt { color: var(--faint); font-size: var(--type-micro); }
 .background-process dd { min-width: 0; margin: 0; color: var(--muted); font-family: var(--mono); font-size: var(--type-micro); overflow-wrap: anywhere; }
-.background-process__attention, .background-process__feedback { display: flex; gap: 5px; align-items: flex-start; margin: 0; padding: 8px 10px; border-top: 1px solid color-mix(in srgb,var(--red) 18%,var(--line)); background: var(--red-soft); color: var(--red); font-size: var(--type-micro); line-height: 1.45; overflow-wrap: anywhere; }
-.background-process__feedback { border-color: var(--line); background: var(--violet-soft); color: var(--muted); }
+.background-process__attention { display: flex; gap: 5px; align-items: flex-start; margin: 0; padding: 8px 10px; border-top: 1px solid color-mix(in srgb,var(--red) 18%,var(--line)); background: var(--red-soft); color: var(--red); font-size: var(--type-micro); line-height: 1.45; overflow-wrap: anywhere; }
 .background-process__output { border-top: 1px solid var(--line); background: var(--paper-deep); color: var(--ink-soft); }
 .background-process__result { position: relative; }
 .background-process__result > strong { display: block; padding: 8px 11px 0; font-size: var(--type-micro); }

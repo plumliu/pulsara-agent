@@ -5,7 +5,6 @@ from __future__ import annotations
 from pulsara_agent.identity import random_id
 
 import asyncio
-from datetime import datetime, timezone
 import shutil
 from time import monotonic
 
@@ -21,10 +20,6 @@ from pulsara_agent.conversation_kernel.workspace import WorkspaceExecutionGate
 from pulsara_agent.llm.input import PromptContent
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 as wire
-from pulsara_agent.ports.user_control_feedback import (
-    WorkspaceRecreatedFeedbackContent,
-    project_user_control_feedback_for_provider,
-)
 from pulsara_agent.conversation_kernel.host import default_permission_policy
 from pulsara_agent.desktop_app.renderer_bridge import RendererBridge
 from pulsara_agent.desktop_app.session_controller import LocalSessionController
@@ -98,15 +93,6 @@ def test_workspace_gate_wait_is_cancelable_and_external_restore_wakes(tmp_path):
     asyncio.run(scenario())
 
 
-def test_workspace_feedback_closed_codec_has_no_process_facts(tmp_path):
-    fact = WorkspaceRecreatedFeedbackContent(
-        'session:5dyf7lfzp7z22pphjtostkgsjm', str(tmp_path), datetime.now(timezone.utc), 'turn:xayicncb3vcols33532v4oov6a'
-    )
-    value = fact.canonical_mapping()
-    assert value["kind"] == "workspace_recreated"
-    assert not {"process", "process_id", "other_work_stopped"} & value.keys()
-    lowered = project_user_control_feedback_for_provider(fact.canonical_bytes())
-    assert str(tmp_path) in lowered
 
 
 @pytest.mark.postgres
@@ -252,7 +238,7 @@ def test_cold_history_and_explicit_restore_use_real_core_without_read_activation
                 one.session._lease.guard.writer_generation
                 == initial_guard.writer_generation + 1
             )
-            assert one.session._workspace_recreated_at is not None
+            assert one.session._pending_workspace_recreated is not None
             assert root.is_dir() and list(root.iterdir()) == []
             assert one.session.workspace.workspace_key == first.workspace.workspace_key
             assert (
@@ -318,9 +304,9 @@ def test_running_response_settles_but_accepted_queue_waits_for_directory(
                 assert monotonic() < deadline
                 await asyncio.sleep(0.01)
             assert len(model.requests) == 2
-            assert "pulsara_user_control_feedback" in str(model.requests[1].compiled_input.messages)
+            assert "USER_ACTIONS" in str(model.requests[1].compiled_input.messages)
             assert str(root) in str(model.requests[1].compiled_input.messages)
-            assert session._workspace_recreated_at is None
+            assert session._pending_workspace_recreated is None
         finally:
             await core.close_session(session.host_session_id)
             await core.shutdown()
@@ -426,8 +412,8 @@ def test_unlaunched_tool_rejected_and_workspace_feedback_appends_at_ordinary_bar
                 if message.role is MessageRole.TOOL_RESULT
             )
             assert "TOOL_UNAVAILABLE" in str(tool_result.content)
-            assert "pulsara_user_control_feedback" in str(second.messages)
-            assert session._workspace_recreated_at is None
+            assert "USER_ACTIONS" in str(second.messages)
+            assert session._pending_workspace_recreated is None
         finally:
             await core.close_session(session.host_session_id)
             await core.shutdown()

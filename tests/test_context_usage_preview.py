@@ -4,6 +4,7 @@ from pulsara_agent.identity import derive_id
 import asyncio
 from contextvars import ContextVar
 from dataclasses import replace
+from datetime import datetime, timezone
 from uuid import uuid4
 
 import pytest
@@ -163,45 +164,44 @@ def test_host_context_preview_is_model_specific_and_does_not_open_or_install(
             assert after['compaction_expected'] is True
             assert len(requests) == 2
 
-            # An adopted capability notice still participates in the real
-            # read-only projection. Preview must not consume its one-shot fact.
-            from tests.test_capability_change_observation import change
-            from tests.test_capability_change_dispatch import _notices
+            # A pending user action belongs to the next ordinary business
+            # preparation; a preview must neither read nor consume it.
+            from pulsara_agent.model_input.contracts import ContextSourceKind
 
             await session.update_model_call_binding(test_model_binding(runtime))
-            await session.request_capability_refresh(change('preview-notice'))
-            await session._adopt_capabilities_if_requested()
-            pending = await session.freeze_capability_change()
-            assert pending is not None
+            recorded_at = datetime.now(timezone.utc)
+            await session.record_workspace_recreated(recorded_at)
             installed = session._input_continuity.current_cohort(scope)
             dispatch = session._runner._provider_dispatch
             prepare = dispatch.prepare_compaction_source
             projections = []
+            pause_projection = False
+            entered, release = asyncio.Event(), asyncio.Event()
 
             async def observed_prepare(**kwargs):
                 projection = await prepare(**kwargs)
                 projections.append(projection)
+                if pause_projection:
+                    entered.set()
+                    try:
+                        await release.wait()
+                    except BaseException:
+                        projection.close()
+                        raise
                 return projection
 
             monkeypatch.setattr(dispatch, 'prepare_compaction_source', observed_prepare)
             assert (await read_preview())['state'] == 'ready'
-            assert projections[-1].sources.capability_change == pending
-            assert len(_notices(projections[-1].projection.projected_input)) == 1
-            assert session._capability_notification_revision == pending.revision
+            assert all(item.source_kind is not ContextSourceKind.USER_ACTIONS
+                       for item in projections[-1].sources.candidates)
+            assert session._pending_workspace_recreated == recorded_at
             assert session._input_continuity.current_cohort(scope) is installed
             assert len(requests) == 2
 
-            # Start close while the exact preview owns the preparation lane.
-            # Once the read completes, close must acquire the Host lock and
-            # physically settle; no timeout/fallback is added to production.
-            entered, release = asyncio.Event(), asyncio.Event()
-            snapshot = dispatch._capability_change_reader
-
-            async def paused_snapshot():
-                entered.set()
-                await release.wait()
-                return await snapshot()
-
+            # Hold the actual frozen projection while a close waiter is
+            # cancelled. The independently owned close still settles once the
+            # admitted preview releases its lane.
+            pause_projection = True
             close_entered = asyncio.Event()
             aclose = session.aclose
 
@@ -209,20 +209,26 @@ def test_host_context_preview_is_model_specific_and_does_not_open_or_install(
                 close_entered.set()
                 await aclose(**kwargs)
 
-            monkeypatch.setattr(dispatch, '_capability_change_reader', paused_snapshot)
             monkeypatch.setattr(session, 'aclose', observed_close)
             preview = asyncio.create_task(read_preview())
             try:
                 await asyncio.wait_for(entered.wait(), timeout=30)
+                frozen = projections[-1]
+                frozen_sources = frozen.sources
                 close = asyncio.create_task(core.close_session(session.host_session_id))
                 await asyncio.wait_for(close_entered.wait(), timeout=30)
                 assert session._close_async_lock.locked()
                 assert not close.done()
+                close.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await close
+                assert frozen.sources is frozen_sources
+                assert session._pending_workspace_recreated == recorded_at
                 release.set()
-                result, _ = await asyncio.wait_for(asyncio.gather(preview, close), timeout=30)
+                result = await asyncio.wait_for(preview, timeout=30)
+                await asyncio.wait_for(core.close_session(session.host_session_id), timeout=30)
                 assert result['state'] == 'ready'
                 assert session._closed
-                assert session._capability_notification_revision == pending.revision
                 assert len(requests) == 2
             finally:
                 release.set()

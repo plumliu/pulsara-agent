@@ -1,8 +1,6 @@
 """Process-local exact user-control command contracts.
 
-These values describe one Host-owned attempt.  They are deliberately not a
-durable operation log; only the separately typed background-process feedback
-may enter canonical history.
+These values describe one Host-owned attempt, not a durable operation log.
 """
 
 from __future__ import annotations
@@ -39,28 +37,6 @@ class ControlQueryStatus(StrEnum):
     FOUND = "FOUND"
     RESULT_UNAVAILABLE = "RESULT_UNAVAILABLE"
     OWNER_UNAVAILABLE = "OWNER_UNAVAILABLE"
-
-
-class FeedbackCanonicalStatus(StrEnum):
-    NOT_REQUIRED = "NOT_REQUIRED"
-    PENDING = "PENDING"
-    ACCEPTED = "ACCEPTED"
-    FAILED = "FAILED"
-    UNKNOWN = "UNKNOWN"
-
-
-class FeedbackInclusionStatus(StrEnum):
-    NOT_APPLICABLE = "NOT_APPLICABLE"
-    PENDING = "PENDING"
-    INCLUDED = "INCLUDED"
-    TARGET_ENDED_BEFORE_INCLUSION = "TARGET_ENDED_BEFORE_INCLUSION"
-    FAILED = "FAILED"
-    UNKNOWN = "UNKNOWN"
-
-
-class FeedbackOwnerAvailability(StrEnum):
-    AVAILABLE = "AVAILABLE"
-    UNAVAILABLE = "UNAVAILABLE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,26 +80,6 @@ class ProcessControlResult:
 
 
 @dataclass(frozen=True, slots=True)
-class FeedbackTransportResult:
-    invocation_attempted: bool = False
-    invocation_succeeded: bool | None = None
-    detail: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class UserControlFeedbackState:
-    canonical_status: FeedbackCanonicalStatus
-    inclusion_status: FeedbackInclusionStatus
-    owner_availability: FeedbackOwnerAvailability
-    reason: str | None = None
-    target_root_turn_id: str | None = None
-    entry_id: str | None = None
-    context_binding_revision_id: str | None = None
-    model_call_index: int | None = None
-    transport: FeedbackTransportResult = FeedbackTransportResult()
-
-
-@dataclass(frozen=True, slots=True)
 class UserControlOutcome:
     operation: UserControlOperation
     session_id: str
@@ -134,7 +90,6 @@ class UserControlOutcome:
     root: RootControlResult | None = None
     cell: CodeModeControlResult | None = None
     process: ProcessControlResult | None = None
-    feedback: UserControlFeedbackState | None = None
 
 
 __all__ = [
@@ -142,14 +97,9 @@ __all__ = [
     "CONTROL_RESULT_RETENTION_MS",
     "ControlQueryStatus",
     "CodeModeControlResult",
-    "FeedbackCanonicalStatus",
-    "FeedbackInclusionStatus",
-    "FeedbackOwnerAvailability",
-    "FeedbackTransportResult",
     "ProcessControlResult",
     "RootControlResult",
     "UserControlExecution",
-    "UserControlFeedbackState",
     "UserControlOperation",
     "UserControlOutcome",
     "UserControlRequest",

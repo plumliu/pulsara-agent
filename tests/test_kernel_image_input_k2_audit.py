@@ -31,29 +31,16 @@ def _mixed_content() -> FrozenPromptContent:
     )
 
 
-@pytest.mark.parametrize(
-    "origin",
-    (
-        CanonicalInputOriginKind.AGENT_INSTRUCTION,
-        CanonicalInputOriginKind.USER_CONTROL_FEEDBACK,
-    ),
-)
-def test_original_request_images_accept_agent_instruction_and_reject_feedback(origin):
-    def item():
-        return FrozenProviderInputItem(
-            item_kind=FrozenProviderInputItemKind.USER,
-            source_entry_id="entry:2b6xhmrsvzz7q4sgugd5cuq34a",
-            source_entry_sequence=1,
-            source_turn_id="turn:lm5ibydqxua377vt3bxuuqgvvu",
-            input_origin=origin,
-            content=_mixed_content().parts,
-        )
-
-    if origin is CanonicalInputOriginKind.AGENT_INSTRUCTION:
-        assert item().content == _mixed_content().parts
-    else:
-        with pytest.raises(ValueError, match="cannot carry image"):
-            item()
+def test_original_request_images_accept_agent_instruction():
+    item = FrozenProviderInputItem(
+        item_kind=FrozenProviderInputItemKind.USER,
+        source_entry_id="entry:2b6xhmrsvzz7q4sgugd5cuq34a",
+        source_entry_sequence=1,
+        source_turn_id="turn:lm5ibydqxua377vt3bxuuqgvvu",
+        input_origin=CanonicalInputOriginKind.AGENT_INSTRUCTION,
+        content=_mixed_content().parts,
+    )
+    assert item.content == _mixed_content().parts
 
 
 def test_canonical_expanded_bytes_counts_each_original_image_occurrence():

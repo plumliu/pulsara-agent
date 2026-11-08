@@ -466,19 +466,6 @@ export interface UserControlReceipt {
     physicalState: string;
     groupAlive?: boolean;
   };
-  feedback?: {
-    canonicalStatus: string;
-    inclusionStatus: string;
-    ownerAvailability: string;
-    reason?: string;
-    targetRootTurnId?: string;
-    entryId?: string;
-    contextBindingRevisionId?: string;
-    modelCallIndex?: number;
-    transportInvocationAttempted: boolean;
-    transportInvocationSucceeded?: boolean;
-    transportDetail?: string;
-  };
 }
 
 export interface UserControlQueryResult {
@@ -5524,10 +5511,8 @@ function projectCommand(value: ProtocolCommandOutcome): CommandReceipt {
   }
   const control = asRecord(value.user_control);
   const process = asRecord(control.process);
-  const feedback = asRecord(control.feedback);
   const hasControl = Object.keys(control).length > 0;
   const hasProcess = Object.keys(process).length > 0;
-  const hasFeedback = Object.keys(feedback).length > 0;
   const execution = String(control.execution ?? '').replace(/^USER_CONTROL_/u, '');
   return {
     commandId: value.command_id,
@@ -5563,23 +5548,6 @@ function projectCommand(value: ProtocolCommandOutcome): CommandReceipt {
         exitCode: process.exit_code === undefined ? undefined : numeric(process.exit_code),
         physicalState: String(process.physical_state ?? ''),
         groupAlive: process.group_alive === undefined ? undefined : Boolean(process.group_alive),
-      } : undefined,
-      feedback: hasFeedback ? {
-        canonicalStatus: String(feedback.canonical_status ?? ''),
-        inclusionStatus: String(feedback.inclusion_status ?? ''),
-        ownerAvailability: String(feedback.owner_availability ?? ''),
-        reason: String(feedback.reason ?? '') || undefined,
-        targetRootTurnId: String(feedback.target_root_turn_id ?? '') || undefined,
-        entryId: String(feedback.entry_id ?? '') || undefined,
-        contextBindingRevisionId: String(feedback.context_binding_revision_id ?? '') || undefined,
-        modelCallIndex: feedback.model_call_index === undefined
-          ? undefined
-          : numeric(feedback.model_call_index),
-        transportInvocationAttempted: Boolean(feedback.transport_invocation_attempted),
-        transportInvocationSucceeded: feedback.transport_invocation_succeeded === undefined
-          ? undefined
-          : Boolean(feedback.transport_invocation_succeeded),
-        transportDetail: String(feedback.transport_detail ?? '') || undefined,
       } : undefined,
     } : undefined,
   };

@@ -818,7 +818,7 @@ def test_stage2_schema_and_descriptor_oracles_are_exact(
     assert len(CONVERSATION_KERNEL_RELATIONS) == 31
     assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 31
     assert "agent_known_sessions" in CONVERSATION_KERNEL_RELATIONS
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 25
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 24
     assert LIVE_EVENT_TYPES == (
         "TextStart", "TextDelta", "TextEnd", "ThinkingStart", "ThinkingDelta",
         "ThinkingEnd", "DataStart", "DataDelta", "DataEnd", "ToolCallStart",

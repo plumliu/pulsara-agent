@@ -637,9 +637,7 @@ def test_fork_tool_body_and_late_closure_are_history_only(repo, late):
     reader = CanonicalProviderInputReader(repo.connection_provider)
     facts = reader.read_frozen_compile_snapshot(cut, deadline_monotonic=monotonic() + 30)
     snapshot = facts.canonical_input
-    freshness = facts.tool_observation_freshness_fact
-    assert freshness.current_turn_ref == cut.turn_id
-    assert freshness.immediate_predecessor_turn_ref is None
+    assert facts.previous_turn_outcome_fact is None
     sources = [item.tool_result_context.timing.source_turn_ref
         for item in snapshot.items
         if item.tool_result_context is not None]

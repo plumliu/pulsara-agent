@@ -142,14 +142,14 @@ _SOURCE_POLICY = {
         (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
-    ContextSourceKind.CAPABILITY_CHANGE: (
-        "pulsara.capability-change.v1",
+    ContextSourceKind.USER_ACTIONS: (
+        "pulsara.user-actions.v1",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.TRUSTED_RUNTIME_FACT,
-        ContextBudgetClass.IMPORTANT,
-        49,
-        29,
-        (ContextRenderMode.FULL, ContextRenderMode.UNAVAILABLE_MINIMAL),
+        ContextBudgetClass.OPTIONAL,
+        48,
+        90,
+        (ContextRenderMode.FULL,),
         ContextSourceLifecycle.ONE_SHOT,
     ),
     ContextSourceKind.SKILL_CATALOG: (
@@ -190,16 +190,6 @@ _SOURCE_POLICY = {
         45,
         10,
         (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
-        ContextSourceLifecycle.TURN_APPEND,
-    ),
-    ContextSourceKind.TOOL_OBSERVATION_FRESHNESS: (
-        "pulsara.tool-observation-freshness.v1",
-        ContextChannel.RUNTIME_OBSERVATION,
-        ContextTrustClass.TRUSTED_RUNTIME_FACT,
-        ContextBudgetClass.MUST_KEEP,
-        70,
-        10,
-        (ContextRenderMode.FULL,),
         ContextSourceLifecycle.TURN_APPEND,
     ),
     ContextSourceKind.RUNTIME_CLOCK: (
@@ -285,7 +275,7 @@ _SOURCE_ABSENCE_POLICY = {
     ContextSourceKind.PLAN_WORKFLOW: frozenset(
         {ContextSourceAbsenceKind.EXPLICIT_EMPTY}
     ),
-    ContextSourceKind.CAPABILITY_CHANGE: frozenset(
+    ContextSourceKind.USER_ACTIONS: frozenset(
         {ContextSourceAbsenceKind.NOT_APPLICABLE}
     ),
     ContextSourceKind.SKILL_CATALOG: frozenset(
@@ -307,9 +297,6 @@ _SOURCE_ABSENCE_POLICY = {
     ),
     ContextSourceKind.PREVIOUS_TURN_OUTCOME: frozenset(
         {ContextSourceAbsenceKind.EXPLICIT_EMPTY}
-    ),
-    ContextSourceKind.TOOL_OBSERVATION_FRESHNESS: frozenset(
-        {ContextSourceAbsenceKind.NOT_APPLICABLE}
     ),
     ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD: frozenset(
         {
@@ -881,6 +868,10 @@ class StructuredModelInputCompiler:
         )
         self._validate_tool_delivery_variants(tool_states)
         self._validate_source_byte_bounds(request)
+        if self._omit_oversized_user_actions(request):
+            for state in source_states:
+                if state.candidate.source_kind is ContextSourceKind.USER_ACTIONS:
+                    state.omitted = True
         diagnostics = [item.code for item in request.sources.diagnostics]
 
         layout = self._layout(
@@ -1359,7 +1350,7 @@ class StructuredModelInputCompiler:
             elif absence is not None:
                 if absence.source_kind in {
                     ContextSourceKind.HOOK_CONTEXT,
-                    ContextSourceKind.CAPABILITY_CHANGE,
+                    ContextSourceKind.USER_ACTIONS,
                 }:
                     # Advisory ONE_SHOT data has no provider-visible clearing
                     # semantics when its future slot is empty.
@@ -1605,6 +1596,7 @@ class StructuredModelInputCompiler:
         deadline.check()
         self._validate_sources(request)
         self._validate_tool_surface(request)
+        omit_user_actions = self._omit_oversized_user_actions(request)
         previous_messages = predecessor.messages
         previous_heads = {item.source_kind: item for item in predecessor.source_heads}
         old_count = len(predecessor.canonical_frontier.ordered_item_fingerprints)
@@ -1644,6 +1636,11 @@ class StructuredModelInputCompiler:
             state = self._source_state_with_render_floor(
                 candidate, source_render_floors, wire_selection
             )
+            if (
+                omit_user_actions
+                and candidate.source_kind is ContextSourceKind.USER_ACTIONS
+            ):
+                state.omitted = True
             if (
                 state.omitted
                 and previous is not None
@@ -1737,7 +1734,10 @@ class StructuredModelInputCompiler:
                 raise StructuredModelInputCompileError(
                     ModelInputCompileFailureKind.REQUIRED_SOURCE_UNAVAILABLE
                 )
-            if absence.source_kind is ContextSourceKind.HOOK_CONTEXT:
+            if absence.source_kind in {
+                ContextSourceKind.HOOK_CONTEXT,
+                ContextSourceKind.USER_ACTIONS,
+            }:
                 # HOOK_CONTEXT is an advisory ONE_SHOT suffix.  Its absence on
                 # a later call must neither clear the installed observation nor
                 # synthesize a second provider-visible message.
@@ -2176,7 +2176,10 @@ class StructuredModelInputCompiler:
 
     def _validate_sources(self, request: StructuredModelInputCompileRequest) -> None:
         sources = request.sources
-        if len(sources.candidates) > self._limits.maximum_source_candidates:
+        if (
+            len(sources.candidates) - int(self._omit_oversized_user_actions(request))
+            > self._limits.maximum_source_candidates
+        ):
             raise StructuredModelInputCompileError(
                 ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
             )
@@ -2242,6 +2245,9 @@ class StructuredModelInputCompiler:
             if any(
                 variant.utf8_bytes > self._limits.maximum_single_source_variant_bytes
                 for variant in candidate.variants
+            ) and not (
+                candidate.source_kind is ContextSourceKind.USER_ACTIONS
+                and self._omit_oversized_user_actions(request)
             ):
                 raise StructuredModelInputCompileError(
                     ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
@@ -2310,11 +2316,41 @@ class StructuredModelInputCompiler:
             )
 
 
+    def _omit_oversized_user_actions(
+        self, request: StructuredModelInputCompileRequest
+    ) -> bool:
+        candidates = request.sources.candidates
+        action = next(
+            (
+                item for item in candidates
+                if item.source_kind is ContextSourceKind.USER_ACTIONS
+            ),
+            None,
+        )
+        if action is None:
+            return False
+        return (
+            len(candidates) > self._limits.maximum_source_candidates
+            or any(
+                v.utf8_bytes > self._limits.maximum_single_source_variant_bytes
+                for v in action.variants
+            )
+            or sum(item.variants[0].utf8_bytes for item in candidates)
+            > self._limits.maximum_aggregate_full_source_bytes
+            or sum(v.utf8_bytes for item in candidates for v in item.variants)
+            > self._limits.maximum_aggregate_source_variant_bytes
+        )
+
     def _validate_source_byte_bounds(
         self,
         request: StructuredModelInputCompileRequest,
     ) -> None:
         candidates = request.sources.candidates
+        if self._omit_oversized_user_actions(request):
+            candidates = tuple(
+                item for item in candidates
+                if item.source_kind is not ContextSourceKind.USER_ACTIONS
+            )
         aggregate_full = sum(item.variants[0].utf8_bytes for item in candidates)
         aggregate_all = sum(
             variant.utf8_bytes for item in candidates for variant in item.variants

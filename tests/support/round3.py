@@ -107,7 +107,6 @@ from pulsara_agent.model_input.contracts import (
     FrozenToolSpec,
     ModelInputScopeKind,
     canonical_compile_snapshot_fingerprint,
-    build_tool_observation_freshness_fact,
     context_binding_compile_fact_fingerprint,
     model_tool_surface_fingerprint,
 )
@@ -495,7 +494,6 @@ class StaticContextSourceCollector:
         permission_snapshot: FrozenRunPermissionSnapshot,
     ):
         del permission_snapshot
-        turn_ref = "turn:" + "a" * 26
         return (
             self._value_observation_message(
                 ContextSourceKind.RUN_PERMISSION,
@@ -511,11 +509,6 @@ class StaticContextSourceCollector:
                 ContextSourceKind.PLAN_WORKFLOW,
                 SourceObservationLifecycle.SNAPSHOT,
                 "plan workflow full",
-            ),
-            self._value_observation_message(
-                ContextSourceKind.TOOL_OBSERVATION_FRESHNESS,
-                SourceObservationLifecycle.TURN,
-                turn_ref,
             ),
         )
 
@@ -674,22 +667,21 @@ class StaticContextSourceCollector:
                     ),
                 ),
             )
-        freshness = canonical_facts.tool_observation_freshness_fact  # type: ignore[union-attr]
-        candidates += (
-            _candidate(
-                kind=ContextSourceKind.TOOL_OBSERVATION_FRESHNESS,
-                version="pulsara.tool-observation-freshness.v1",
+        user_actions = _kwargs.get("user_actions")
+        if user_actions is not None:
+            candidates += (_candidate(
+                kind=ContextSourceKind.USER_ACTIONS,
+                version="pulsara.user-actions.v1",
                 channel=ContextChannel.RUNTIME_OBSERVATION,
                 trust=ContextTrustClass.TRUSTED_RUNTIME_FACT,
-                budget=ContextBudgetClass.MUST_KEEP,
-                placement=70,
-                degradation=10,
-                variants=((ContextRenderMode.FULL, freshness.current_turn_ref),),
-            ),
-        )
+                budget=ContextBudgetClass.OPTIONAL,
+                placement=48,
+                degradation=90,
+                variants=((ContextRenderMode.FULL, user_actions),),
+            ),)
         present = {item.source_kind for item in candidates}
         absence_kinds = {
-            ContextSourceKind.CAPABILITY_CHANGE: ContextSourceAbsenceKind.NOT_APPLICABLE,
+            ContextSourceKind.USER_ACTIONS: ContextSourceAbsenceKind.NOT_APPLICABLE,
             ContextSourceKind.RUNTIME_CLOCK: ContextSourceAbsenceKind.UNAVAILABLE,
             ContextSourceKind.PLAN_HANDOFF: ContextSourceAbsenceKind.NOT_APPLICABLE,
             ContextSourceKind.PLAN_WORKFLOW: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
@@ -888,16 +880,7 @@ def static_canonical_compile_facts(
     object.__setattr__(provisional, "plan_workflow_fact", None)
     object.__setattr__(provisional, "plan_handoff_fact", None)
     object.__setattr__(provisional, "approved_plan_materialization_fact", None)
-    freshness = build_tool_observation_freshness_fact(
-        session_id=canonical_input.identity.session_id,
-        workspace_id="workspace:wdl6b3mtrkghwnvjo4an3ekbau",
-        current_turn_id=canonical_input.identity.turn_id,
-        current_scope_kind=canonical_input.identity.conversation_scope_kind,
-        current_initial_entry_sequence=1,
-        immediate_predecessor_turn_id=None,
-    )
     object.__setattr__(provisional, "previous_turn_outcome_fact", None)
-    object.__setattr__(provisional, "tool_observation_freshness_fact", freshness)
     object.__setattr__(provisional, "canonical_read_cut_fingerprint", "")
     return FrozenCanonicalCompileSnapshot(
         canonical_input=canonical_input,
@@ -907,7 +890,6 @@ def static_canonical_compile_facts(
         plan_handoff_fact=None,
         approved_plan_materialization_fact=None,
         previous_turn_outcome_fact=None,
-        tool_observation_freshness_fact=freshness,
         canonical_read_cut_fingerprint=canonical_compile_snapshot_fingerprint(
             provisional
         ),
@@ -1640,12 +1622,12 @@ def _candidate(
         ContextSourceKind.RUNTIME_CLOCK: ContextSourceLifecycle.CALL_APPEND,
         ContextSourceKind.RUN_PERMISSION: ContextSourceLifecycle.TURN_APPEND,
         ContextSourceKind.PLAN_HANDOFF: ContextSourceLifecycle.ONE_SHOT,
+        ContextSourceKind.USER_ACTIONS: ContextSourceLifecycle.ONE_SHOT,
         ContextSourceKind.PLAN_WORKFLOW: ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
         ContextSourceKind.SKILL_CATALOG: ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
         ContextSourceKind.MCP_CATALOG: ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
         ContextSourceKind.ACTIVE_SKILL: ContextSourceLifecycle.ACTIVATION_SNAPSHOT,
         ContextSourceKind.PREVIOUS_TURN_OUTCOME: ContextSourceLifecycle.TURN_APPEND,
-        ContextSourceKind.TOOL_OBSERVATION_FRESHNESS: ContextSourceLifecycle.TURN_APPEND,
     }[kind]
     modes = tuple(mode for mode, _text in variants)
     contract = context_fingerprint(

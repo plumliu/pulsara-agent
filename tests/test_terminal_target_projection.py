@@ -1,11 +1,14 @@
 """Copyable terminal identities at the existing model projection boundaries."""
 
+import asyncio
+from datetime import datetime, timezone
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from pulsara_agent.identity import derive_id
-from pulsara_agent.llm.input import FrozenPromptContent, LLMTextPart
+from pulsara_agent.llm.input import LLMTextPart
 from pulsara_agent.model_input.contracts import (
     CanonicalInputOriginKind,
     FrozenProviderInputItem,
@@ -20,11 +23,8 @@ from pulsara_agent.ports.terminal import (
 from pulsara_agent.ports.terminal_observation import (
     CellOutputContent,
 )
-from pulsara_agent.ports.user_control_feedback import (
-    ProcessControlFeedbackContent,
-    UserControlProcessFact,
-    project_user_control_feedback_for_provider,
-)
+from pulsara_agent.conversation_kernel.host import KernelHostSession, _ProcessControlObservation
+from pulsara_agent.conversation_kernel.user_control import ProcessControlResult
 
 
 def ident(kind):
@@ -59,37 +59,28 @@ def test_cell_original_projection_preserves_exact_typed_source(kind, text):
     assert fact.canonical_bytes() == body
 
 
-def test_human_stop_feedback_projects_targets_without_changing_native_control():
-    fact = ProcessControlFeedbackContent(
-        command_id=ident("command"),
-        session_id=ident("session"),
-        host_session_id=ident("host"),
-        process_id=ident("process"),
-        command="sleep 10",
-        cwd="/tmp",
-        origin_turn_id=ident("turn"),
-        origin_conversation_scope_kind="ROOT",
-        origin_session_id=ident("session"),
-        target_root_turn_id=ident("turn"),
-        process=UserControlProcessFact(
-            "TERMINATION_COMPLETED", "killed", -15, "TERMINAL", False
-        ),
-        public_code="BACKGROUND_CONTROL_COMPLETED",
-        public_detail="Stopped.",
-    )
-    body = fact.canonical_bytes()
-    public = json.loads(project_user_control_feedback_for_provider(body))[
-        "pulsara_user_control_feedback"
-    ]
-    assert (
-        parse_manage_process_input(
-            {"action": "poll", "target": public["target"]}
-        ).target.process_id
-        == fact.process_id
-    )
-    assert public["process"]["status"] == "killed"
-    assert public["process"]["exit_code"] == -15
-    assert public["process"]["physical_state"] == "TERMINAL"
-    assert "process_id" not in public
-    assert fact.canonical_bytes() == body
-    assert "monitor" not in json.loads(body) and "monitor_result" not in public
+def test_human_stop_observation_projects_a_copyable_process_target():
+    host = KernelHostSession.__new__(KernelHostSession)
+    host._lock = asyncio.Lock()
+    host._closing = host._closed = False
+    host._pending_workspace_recreated = None
+    process_id = ident("process")
+    result = ProcessControlResult("TERMINATION_COMPLETED", "killed", -15, "TERMINAL", False)
+    host._pending_process_controls = {
+        process_id: _ProcessControlObservation(
+            process_id, "ROOT", datetime.now(timezone.utc), result, None
+        )
+    }
+    host.workspace = SimpleNamespace(workspace_root="/tmp")
+    body = asyncio.run(host.take_user_actions())
+    assert body is not None
+    public = json.loads(body)["actions"][0]
+    assert parse_manage_process_input(
+        {"action": "poll", "target": public["target"]}
+    ).target.process_id == process_id
+    assert public["kind"] == "process_control"
+    assert public["origin"] == "ROOT"
+    assert public["status"] == "killed"
+    assert public["exit_code"] == -15
+    assert public["physical_state"] == "TERMINAL"
+    assert asyncio.run(host.take_user_actions()) is None

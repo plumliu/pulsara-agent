@@ -201,12 +201,16 @@ def test_first_stop_cause_wins_over_concurrent_root_work_failure():
 
 
 @pytest.mark.postgres
-def test_preparation_observer_failure_cannot_strand_started_turn(
-    stage2_migrated_postgres_database,
+def test_preparation_resource_failure_cannot_strand_started_turn(
+    stage2_migrated_postgres_database, monkeypatch,
 ):
     from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
     from pulsara_agent.conversation_kernel.repository import ConversationKernelRepository
     from pulsara_agent.conversation_kernel.runner import ConversationKernelRunner
+    from pulsara_agent.model_input.contracts import (
+        ModelInputCompileFailureKind,
+        StructuredModelInputCompileError,
+    )
     from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
     from tests.support.postgres import verified_postgres_provider
     from tests.test_stage2_conversation_runner import (
@@ -229,8 +233,6 @@ def test_preparation_observer_failure_cannot_strand_started_turn(
         writer_owner_id=_name("host"), lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
     )
-    async def failing_observer(turn_id, reason):
-        raise RuntimeError("failed to publish preparation observation")
     model = _ScriptedModel([_text_stream("must not open")])
     runner = ConversationKernelRunner(
         model_resolution_snapshot_provider=test_model_resolution_snapshot,
@@ -239,11 +241,27 @@ def test_preparation_observer_failure_cannot_strand_started_turn(
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
         maximum_input_tokens_per_call=4,
-        provider_input_failure_observer=failing_observer,
     )
-    with pytest.raises(RuntimeError, match="preparation observation"):
+    binding_failures = []
+    bind_wire = runner._provider_dispatch.bind_prepared_executable_wire_input
+
+    def observe_wire_binding(**kwargs):
+        try:
+            return bind_wire(**kwargs)
+        except StructuredModelInputCompileError as error:
+            binding_failures.append(error)
+            raise
+
+    monkeypatch.setattr(
+        runner._provider_dispatch, "bind_prepared_executable_wire_input", observe_wire_binding
+    )
+    with pytest.raises(StructuredModelInputCompileError) as rejected:
         asyncio.run(runner.run_turn(frozen_test_prompt("retain the original request")))
+    assert len(binding_failures) == 1
+    assert rejected.value is binding_failures[0]
+    assert rejected.value.kind is ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
     assert model.requests == []
+    assert runner._safe_point.is_idle()
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
         deadline_monotonic=monotonic() + 10,
@@ -252,6 +270,17 @@ def test_preparation_observer_failure_cannot_strand_started_turn(
             "SELECT status, terminal_reason FROM pulsara_v3.turns WHERE session_id=%s",
             (session_id,),
         ).fetchone() == ("INTERRUPTED", "PROVIDER_INPUT_RESOURCE_EXHAUSTED")
+        entries = connection.execute(
+            "SELECT entry_kind, inline_content FROM pulsara_v3.transcript_entries "
+            "WHERE session_id=%s ORDER BY entry_sequence", (session_id,),
+        ).fetchall()
+        assert len(entries) == 1
+        assert entries[0][0] == "USER_MESSAGE"
+        assert b"retain the original request" in bytes(entries[0][1])
+        assert connection.execute(
+            "SELECT count(*) FROM pulsara_v3.agent_events "
+            "WHERE session_id=%s AND event_type='TurnInterrupted'", (session_id,),
+        ).fetchone() == (1,)
 
 
 def test_waiter_cancel_without_explicit_cause_prevents_none_reissue():

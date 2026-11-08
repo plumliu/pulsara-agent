@@ -100,13 +100,13 @@ def test_session_start_preparation_failure_retires_context_and_resources(
                 frozen.append(value.reservation)
             return value
 
-        original_change_reader = provider._capability_change_reader
+        original_take_user_actions = provider._take_user_actions
         original_observations = provider._owner_dispatch_observations
 
         async def before_freeze():
             if pending:
                 await fail_preparation()
-            return await original_change_reader() if original_change_reader else None
+            return await original_take_user_actions() if original_take_user_actions else None
 
         async def after_freeze(**kwargs):
             if not pending:
@@ -122,7 +122,7 @@ def test_session_start_preparation_failure_retires_context_and_resources(
                 patch.setattr(context, "prepare_sync", prepare_pending)
                 patch.setattr(context, "freeze_for_target", freeze)
                 if phase == "pending_context":
-                    patch.setattr(provider, "_capability_change_reader", before_freeze)
+                    patch.setattr(provider, "_take_user_actions", before_freeze)
                 else:
                     patch.setattr(
                         provider, "_owner_dispatch_observations", after_freeze

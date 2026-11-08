@@ -33,10 +33,10 @@ it('keeps each notice outside intermediate results while the next turn runs and 
   expect(screen.getAllByText('本轮回复已中断。')).toHaveLength(1);
 });
 
-it('renders a standalone mounted notice even when its feedback entry has no visible message', () => {
-  const view=render(<ConversationMessages messages={[]} interruptionNotices={[{...notice,displayAfterMessageId:undefined,displayAfterEntryId:'feedback'}]}
-    history={{hasOlder:false,loading:false,windows:[{id:'feedback-window',entryIds:['feedback'],hasOlder:false,hasNewer:false,loading:false}]}}
-    outputOwnerKey="feedback-only" onReadToolOutput={vi.fn()} onNotify={vi.fn()} />);
+it('renders a standalone mounted notice even when a hidden Cell result has no visible message', () => {
+  const view=render(<ConversationMessages messages={[]} interruptionNotices={[{...notice,displayAfterMessageId:undefined,displayAfterEntryId:'cell-result'}]}
+    history={{hasOlder:false,loading:false,windows:[{id:'cell-result-window',entryIds:['cell-result'],hasOlder:false,hasNewer:false,loading:false}]}}
+    outputOwnerKey="cell-result-only" onReadToolOutput={vi.fn()} onNotify={vi.fn()} />);
   expect(screen.getAllByText('本轮回复已中断。')).toHaveLength(1);
   expect(view.container.querySelector('.conversation-interruption')?.closest('.conversation-run')).toBeNull();
 });

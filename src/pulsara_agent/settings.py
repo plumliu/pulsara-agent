@@ -6,8 +6,6 @@ import asyncio
 import json
 import os
 import stat
-from contextlib import contextmanager
-from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, TypeVar
@@ -40,11 +38,6 @@ from pulsara_agent.mcp_credentials import (
     owner_to_dict,
 )
 from pulsara_agent.process_credential_boundary import ProcessCredentialScrubSet
-
-
-_credential_mutation_scrub: ContextVar[tuple[object, ProcessCredentialScrubSet | None] | None] = ContextVar(
-    "local-settings-credential-mutation-scrub", default=None
-)
 
 
 LOCAL_SETTINGS_SCHEMA = "pulsara-local-settings:v5"
@@ -460,20 +453,6 @@ class LocalSettingsStore:
 
     def read(self) -> LocalSettings:
         return replace(read_local_settings(self.path), postgres=self._postgres)
-
-    @contextmanager
-    def capture_credential_mutations(self, scrub: ProcessCredentialScrubSet | None):
-        """Observe this operation's native settings cuts without retaining history."""
-        token = _credential_mutation_scrub.set((self, scrub))
-        try:
-            yield
-        finally:
-            _credential_mutation_scrub.reset(token)
-
-    @property
-    def credential_mutation_scrub(self) -> ProcessCredentialScrubSet | None:
-        observation = _credential_mutation_scrub.get()
-        return observation[1] if observation is not None and observation[0] is self else None
 
     async def set_input_suggestions_enabled(self, enabled: bool) -> LocalSettings:
         if type(enabled) is not bool:
@@ -895,14 +874,6 @@ class LocalSettingsStore:
                 self._read_for_explicit_repair if repair else self.read
             )
             updated, result = mutation(current)
-            scrub = self.credential_mutation_scrub
-            if scrub is not None:
-                # The canonical settings lock closes the queued-owner window:
-                # capture removed/rotated values before publication loses them.
-                # Both values already exist here; no extra settings reads.
-                for settings in (current, updated):
-                    for value in settings.credential_scrub_set().values:
-                        scrub.observe(value)
             if updated == current:
                 return current, result
             try:

@@ -2032,18 +2032,18 @@ describe('bounded history reading and DOM locations', () => {
 
 describe('independent interruption timeline rows', () => {
   const notice = { ownerKind: 'EXECUTED_TURN' as const, ownerId: 'stopped-root', reason: 'USER_STOPPED',
-    terminalAtUtc: '2026-10-18T00:00:00Z', displayAfterEntrySequence: 20, displayAfterEntryId: 'feedback' };
-  const window = { id: 'feedback-window', firstEntryId: undefined, lastEntryId: undefined,
-    entryIds: ['feedback'], hasOlder: true, hasNewer: true, loading: false };
+    terminalAtUtc: '2026-10-18T00:00:00Z', displayAfterEntrySequence: 20, displayAfterEntryId: 'cell-result' };
+  const window = { id: 'cell-result-window', firstEntryId: undefined, lastEntryId: undefined,
+    entryIds: ['cell-result'], hasOlder: true, hasNewer: true, loading: false };
 
-  it('shows a feedback-only page in its own window with both paging directions', async () => {
+  it('shows a page with a hidden Cell result in its own window with both paging directions', async () => {
     const read = vi.fn(async () => {});
     render(<WorkbenchView {...props({ isRunning: false, messages: [], interruptionNotices: [notice], onLoadHistory: read,
       history: { hasOlder: true, loading: false, windows: [window] } })} />);
     expect(screen.getByText('本轮回复已中断。')).toBeTruthy();
     expect(screen.getAllByRole('button', { name: '加载更早记录' })).toHaveLength(1);
     fireEvent.click(screen.getByRole('button', { name: '继续向后阅读' }));
-    await waitFor(() => expect(read).toHaveBeenCalledWith('feedback-window', 'newer'));
+    await waitFor(() => expect(read).toHaveBeenCalledWith('cell-result-window', 'newer'));
   });
 
   it('orders an independent notice by its exact retained window without attaching to an unrelated ROOT', () => {
@@ -2061,7 +2061,7 @@ describe('independent interruption timeline rows', () => {
     const before = screen.getByText('之前ROOT'); const after = screen.getByText('之后ROOT'); const marker = screen.getByText('本轮回复已中断。');
     expect(before.compareDocumentPosition(marker) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(marker.compareDocumentPosition(after) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(marker.closest('[data-source-entry]')?.getAttribute('data-source-entry')).toBe('feedback');
+    expect(marker.closest('[data-source-entry]')?.getAttribute('data-source-entry')).toBe('cell-result');
     expect(view.container.querySelectorAll('[data-interruption-owner]')).toHaveLength(1);
   });
 });

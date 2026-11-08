@@ -63,19 +63,11 @@ const controlNeedsPolling = (receipt?: CommandReceipt): boolean => Boolean(
   && (
     receipt.status === 'pending'
     || receipt.userControl?.execution === 'RUNNING'
-    || receipt.userControl?.feedback?.canonicalStatus === 'PENDING'
-    || receipt.userControl?.feedback?.inclusionStatus === 'PENDING'
   )
-  && receipt.userControl?.feedback?.ownerAvailability !== 'UNAVAILABLE',
 );
 
 const attemptNeedsPolling = (attempt: BackgroundControlAttempt): boolean => !attempt.ownerUnavailable
   && (Boolean(attempt.unknown) || !attempt.control || controlNeedsPolling(attempt.control));
-
-function ProcessFeedback({ receipt }: { receipt: CommandReceipt }) {
-  const feedback = receipt.userControl!.feedback!;
-  return <p className="background-process__feedback">反馈：{feedback.canonicalStatus === 'ACCEPTED' ? '已记录' : feedback.canonicalStatus === 'NOT_REQUIRED' ? '本次无需记录' : '记录状态待确认'} · {feedback.inclusionStatus === 'INCLUDED' ? '已编入原轮次模型请求' : feedback.inclusionStatus === 'TARGET_ENDED_BEFORE_INCLUSION' ? '原轮次在纳入前结束' : feedback.inclusionStatus === 'NOT_APPLICABLE' ? '不适用模型请求' : '请求纳入状态待确认'}{feedback.transportInvocationAttempted ? ` · 本地请求${feedback.transportInvocationSucceeded === false ? '发起失败' : '已发起'}` : ''}</p>;
-}
 
 const controlQueryMessage = (status: UserControlQueryResult['status']): string => (
   status === 'OWNER_UNAVAILABLE'
@@ -344,8 +336,7 @@ export function BackgroundTerminalPanel({
         if (requestRevision === revision.current) redraw();
       }
     }
-    // Retain only still-unresolved previous operations. Their feedback may
-    // continue after a new, explicitly requested physical termination.
+    // Retain only previous operations whose actual result remains unresolved.
     for (const [id, previous] of record.attempts) if (!attemptNeedsPolling(previous)) record.attempts.delete(id);
     const attempt: BackgroundControlAttempt = { reference, sending: true };
     record.currentCommandId = reference.commandId;
@@ -416,10 +407,9 @@ export function BackgroundTerminalPanel({
       </AnimatedDisclosure>
       {(item.error || record?.prepareError) && <p className="background-process__attention"><AlertTriangle size={12} /> {item.error || record?.prepareError}</p>}
       {record && [...record.attempts.values()].map(controlAttempt => <div key={controlAttempt.reference.commandId}>
-        {controlAttempt.reference.commandId !== record.currentCommandId && <small>上次终止操作{controlAttempt.unknown ? '结果待确认' : '反馈仍在确认'}</small>}
+        {controlAttempt.reference.commandId !== record.currentCommandId && <small>上次终止操作结果待确认</small>}
         {(controlAttempt.error || controlAttempt.control?.status === 'failed' || controlAttempt.control?.status === 'rejected') && <p className="background-process__attention"><AlertTriangle size={12} /> {controlAttempt.error || controlAttempt.control?.publicMessage || '终止操作未能确认完成。'}</p>}
         {controlAttempt.control?.status === 'succeeded' && <p>{controlAttempt.control.publicMessage || (controlAttempt.control.publicCode === 'CONTROL_ALREADY_TERMINAL' ? '原进程已结束。' : '终止操作已确认。')}</p>}
-        {controlAttempt.control?.userControl?.feedback && <ProcessFeedback receipt={controlAttempt.control} />}
       </div>)}
       {attempt?.unknown && canStop && <button type="button" disabled={pending} onClick={() => void stop(item.process, true)}>再次请求停止</button>}
       {record && !record.preparing && !attempt?.sending && [...record.attempts.values()].some(attemptNeedsPolling)

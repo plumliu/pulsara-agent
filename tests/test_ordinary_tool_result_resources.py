@@ -242,7 +242,6 @@ def _runner_quote(monkeypatch, calls, api):
         canonical_facts=SimpleNamespace(
             canonical_input=canonical, plan_workflow_fact=None
         ),
-        pending_root_dynamic_followup=False,
     )
     return runner, quote, seen
 
@@ -601,7 +600,6 @@ def test_real_followup_quote_mixes_minimum_results_multiple_images_and_native_re
                 ),
                 plan_workflow_fact=None,
             ),
-            pending_root_dynamic_followup=False,
         )
         allowances = quote.image_call_allowances
         assert len(allowances) == 2

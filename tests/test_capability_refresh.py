@@ -1,4 +1,4 @@
-"""Settled GUI facts stay advisory and share the existing adoption/install cuts."""
+"""Capability changes refresh the actual owners without a separate model notice."""
 
 from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 from pulsara_agent.identity import random_id as _new_management_call_id
@@ -11,20 +11,11 @@ from unittest.mock import AsyncMock
 import pytest
 from yaml.parser import ParserError
 
-from pulsara_agent.capability.change_observation import CapabilityUiChange
 from pulsara_agent.conversation_kernel.host import KernelHostSession
-from pulsara_agent.primitives.context import thaw_json, freeze_json
 from tests.test_capability_management_preparation import preparation, install_plugin
 from tests.test_app_capability_boundary import invoke, query_sources, skill_source
 
 
-def change(name="demo"):
-    return CapabilityUiChange.settled(
-        "REMOVE_LOOSE_SKILL",
-        "USER",
-        {"kind": "SKILL", "skill_path": f"/home/skills/{name}/SKILL.md"},
-        "REMOVED",
-    )
 
 
 @pytest.mark.parametrize('human', [True, False])
@@ -64,86 +55,13 @@ def test_context_collection_preserves_separate_human_skill_reference_surfaces(hu
         assert received[0] is surfaces
 
 
-def test_capability_snapshot_can_be_read_by_a_lock_owning_context_preview():
-    async def run():
-        host = SimpleNamespace(
-            _lock=asyncio.Lock(),
-            _require_open=lambda: None,
-            _capability_notification_revision=None,
-            _freeze_effective_capability_state=lambda: freeze_json({"skills": ["one", "two"]}),
-            _capability_refresh_requested_revision=0, _capability_refresh_wake=asyncio.Event(),
-            _capability_refresh_applied_revision=0,
-            _capability_refresh_attention=None,
-            reload_capabilities=AsyncMock(return_value={"status": "RELOADED"}),
-        )
-        async with host._lock:
-            assert await asyncio.wait_for(
-                KernelHostSession.freeze_capability_change(host), timeout=1,
-            ) is None
-        await KernelHostSession.request_capability_refresh(host, change())
-        await KernelHostSession._adopt_capabilities_if_requested(host)
-        pending = host._capability_notification_revision
-        async with host._lock:
-            frozen = await asyncio.wait_for(
-                KernelHostSession.freeze_capability_change(host), timeout=1,
-            )
-        assert frozen.revision == pending
-        assert host._capability_notification_revision == pending
-
-    asyncio.run(run())
 
 
-def test_pending_facts_fold_at_the_existing_refresh_cut_and_keep_newer_changes():
-    async def run():
-        host = SimpleNamespace(
-            _lock=asyncio.Lock(),
-            _require_open=lambda: None,
-            _capability_notification_revision=None,
-            _freeze_effective_capability_state=lambda: freeze_json({"skills": ["one", "two"]}),
-            _capability_refresh_requested_revision=0, _capability_refresh_wake=asyncio.Event(),
-            _capability_refresh_applied_revision=0,
-            _capability_refresh_attention=None,
-            reload_capabilities=AsyncMock(return_value={"status": "RELOADED"}),
-        )
-        await KernelHostSession.request_capability_refresh(host, change())
-        assert await KernelHostSession.freeze_capability_change(host) is None
-        host.reload_capabilities.assert_not_awaited()
-        await KernelHostSession.request_capability_refresh(host, change("last"))
-        await KernelHostSession._adopt_capabilities_if_requested(host)
-        frozen = await KernelHostSession.freeze_capability_change(host)
-        payload = json.loads(frozen.render())
-        assert payload["effective_state"] == {"skills": ["one", "two"]}
-        assert "action" not in payload and "changes" not in payload and "target" not in payload
-        await KernelHostSession.request_capability_refresh(host, change("newer"))
-        await KernelHostSession.consume_capability_change(host, frozen)
-        assert host._capability_notification_revision == 3
-        assert await KernelHostSession.freeze_capability_change(host) is None
-        host.reload_capabilities.side_effect = ValueError("unavailable")
-        await KernelHostSession._adopt_capabilities_if_requested(host)
-        latest = await KernelHostSession.freeze_capability_change(host)
-        assert json.loads(latest.render())["adoption"] == "PARTIAL"
-        await KernelHostSession.consume_capability_change(host, latest)
-        assert host._capability_notification_revision is None
-
-    asyncio.run(run())
 
 
-def test_notice_has_only_public_identity_and_no_request_body():
-    with pytest.raises(ValueError):
-        CapabilityUiChange.settled(
-            "UPDATE_LOCAL_MCP",
-            "USER",
-            {"kind": "MCP_SERVER", "config": {"secret": "private"}},
-            "UPDATED",
-        )
-    value = change()
-    assert thaw_json(value.target) == {
-        "kind": "SKILL",
-        "skill_path": "/home/skills/demo/SKILL.md",
-    }
 
 
-def test_user_facts_reach_live_hosts_and_workspace_facts_stay_in_their_scope(tmp_path):
+def test_user_refresh_reaches_live_hosts_and_workspace_refresh_stays_in_scope(tmp_path):
     from pulsara_agent.conversation_kernel.host import KernelHostCore
 
     async def run():
@@ -162,25 +80,15 @@ def test_user_facts_reach_live_hosts_and_workspace_facts_stay_in_their_scope(tmp
             _sessions={"a": first, "b": second},
             _workspace_capability_revisions={},
         )
-        fact = change()
-        assert await KernelHostCore.mark_capability_change(core, change=fact) == 2
-        first.request_capability_refresh.assert_awaited_once_with(fact)
-        second.request_capability_refresh.assert_awaited_once_with(fact)
+        assert await KernelHostCore.mark_capability_change(core) == 2
+        first.request_capability_refresh.assert_awaited_once_with()
+        second.request_capability_refresh.assert_awaited_once_with()
         first.request_capability_refresh.reset_mock()
         second.request_capability_refresh.reset_mock()
-        fact = CapabilityUiChange.settled(
-            "REMOVE_PLUGIN",
-            "WORKSPACE",
-            {"kind": "PLUGIN", "plugin_id": "demo"},
-            "REMOVED",
-        )
-        assert (
-            await KernelHostCore.mark_capability_change(
-                core, first.workspace.workspace_root, change=fact
-            )
-            == 1
-        )
-        first.request_capability_refresh.assert_awaited_once_with(fact)
+        assert await KernelHostCore.mark_capability_change(
+            core, first.workspace.workspace_root
+        ) == 1
+        first.request_capability_refresh.assert_awaited_once_with()
         second.request_capability_refresh.assert_not_awaited()
 
     asyncio.run(run())
@@ -212,77 +120,6 @@ def test_queued_gui_skill_cancellation_does_not_start_a_write(tmp_path, monkeypa
     asyncio.run(run())
 
 
-def test_capability_notice_is_one_shot_suffix_and_same_text_new_revision_is_distinct():
-    from pulsara_agent.conversation_kernel.context_sources import (
-        KernelContextSourceCollector,
-        ContextSourceRegistry,
-    )
-    from pulsara_agent.model_input.contracts import ContextSourceKind, ContextRenderMode
-    from pulsara_agent.model_input.compiler import StructuredModelInputCompiler
-    from pulsara_agent.model_input.continuity import decode_runtime_observation
-    from pulsara_agent.llm.input import MessageRole, join_text_content
-    from tests.test_round3_structured_model_input_compiler import (
-        _snapshot,
-        _user,
-        _sources,
-        _prepared_request,
-        _compile_and_install_append,
-        new_test_provider_input_continuity_owner,
-    )
-    from dataclasses import replace
-
-    collector = object.__new__(KernelContextSourceCollector)
-    collector._registry = ContextSourceRegistry()
-    compiler = StructuredModelInputCompiler()
-    owner = new_test_provider_input_continuity_owner()
-    initial = _user("first", sequence=1)
-    previous = None
-    items = []
-    for index, revision in enumerate((None, 1, None, 2), 1):
-        source = (
-            ()
-            if revision is None
-            else (
-                collector._candidate(
-                    ContextSourceKind.CAPABILITY_CHANGE,
-                    ('{"source":"CAPABILITY_UI","result":"REMOVED"}', ""),
-                    domain_identity={"revision": revision},
-                ),
-            )
-        )
-        items.append(
-            initial if index == 1 else _user(f"follow {index}", sequence=index)
-        )
-        request = replace(
-            _prepared_request(_snapshot(*items), _sources(*source)),
-            model_call_index=index,
-        )
-        _, view = _compile_and_install_append(
-            compiler=compiler, owner=owner, request=request
-        )
-        if previous is not None:
-            assert (
-                view.system_prompt == previous.system_prompt
-                and view.tools == previous.tools
-            )
-            assert view.messages[: len(previous.messages)] == previous.messages
-        notices = [
-            decode_runtime_observation(message)
-            for message in view.messages
-            if message.role is MessageRole.USER
-            and "pulsara_runtime_observation" in join_text_content(message.content)
-        ]
-        notices = [
-            notice
-            for notice in notices
-            if notice.source_kind is ContextSourceKind.CAPABILITY_CHANGE
-        ]
-        assert len(notices) == (0, 1, 1, 2)[index - 1]
-        assert all(notice.body and "REMOVED" in notice.body for notice in notices)
-        previous = view
-    # The fallback variant must never contain a truncated target/body.
-    assert source[0].variants[-1].mode is ContextRenderMode.UNAVAILABLE_MINIMAL
-    assert source[0].variants[-1].text == ""
 
 
 @pytest.mark.parametrize("damage", ["manifest", "package"])
@@ -587,14 +424,13 @@ def test_user_capability_toggles_use_the_real_core_deadline(tmp_path, monkeypatc
                 assert outcome["operation"]["success"]
                 assert outcome["adoption"]["pending_sessions"] == 3
             assert (host.refresh_requests, sibling.refresh_requests, other.refresh_requests) == (2, 2, 2)
-            assert manager.settings.credential_mutation_scrub is None
         finally:
             await manager.aclose()
 
     asyncio.run(run())
 
 
-def test_gui_notice_scrubs_saved_secrets_before_and_after_native_mcp_removal(tmp_path, monkeypatch):
+def test_gui_mcp_create_and_remove_preserves_credential_ownership(tmp_path, monkeypatch):
     from pulsara_agent.capability.mcp_management import (
         LocalMcpTarget, McpSecretMutation, config_guard,
     )
@@ -610,12 +446,12 @@ def test_gui_notice_scrubs_saved_secrets_before_and_after_native_mcp_removal(tmp
         controller.inspect_user_capabilities = AsyncMock(return_value={})
         host.request_capability_refresh = AsyncMock()
         manager = controller.core.mcp_management
-        # Newly saved by CREATE; removed by REMOVE before its notice is emitted.
+        # A newly saved secret remains private and is removed with its owner.
         secret = "fixture-managed-notice-secret"
         server_id = f"demo-{secret}"
         target = LocalMcpTarget(server_id)
         binding = McpCredentialBinding(target.owner, "bearer")
-        await controller.create_user_mcp_server(
+        created = await controller.create_user_mcp_server(
             server_id=server_id,
             config={
                 "enabled": False,
@@ -625,17 +461,14 @@ def test_gui_notice_scrubs_saved_secrets_before_and_after_native_mcp_removal(tmp
             secret_changes=(McpSecretMutation(binding, secret),),
         )
         assert manager.settings.read().mcp_secret(binding) == secret
-        created = host.request_capability_refresh.call_args.args[0]
-        assert secret not in json.dumps(thaw_json(created.target))
-        assert "REDACTED_CREDENTIAL" in thaw_json(created.target)["server_id"]
-        await controller.remove_user_mcp_server(
+        assert secret not in json.dumps(created)
+        host.request_capability_refresh.assert_awaited_once_with()
+        removed = await controller.remove_user_mcp_server(
             server_id=server_id, expected=config_guard(manager.inspect(target)),
         )
+        assert secret not in json.dumps(removed)
         assert manager.settings.read().mcp_secret(binding) is None
-        removed = host.request_capability_refresh.call_args.args[0]
-        assert removed.action.value == "REMOVE_LOCAL_MCP"
-        assert thaw_json(removed.target) == thaw_json(created.target)
-        assert secret not in json.dumps(thaw_json(removed.target))
+        assert host.request_capability_refresh.await_count == 2
         await manager.aclose()
 
     asyncio.run(run())
@@ -700,7 +533,7 @@ def test_reload_status_protocol_is_fixed_and_source_paths_are_dynamic(tmp_path, 
     asyncio.run(run())
 
 
-def test_notice_scrub_uses_typed_saved_credentials_without_redacting_public_context():
+def test_saved_credential_projection_preserves_public_context():
     from dataclasses import replace
     from pulsara_agent.mcp_credentials import LocalMcpOAuthRecord, McpCredentialOwner
     from tests.support.model_config import test_model_runtime as runtime
@@ -721,7 +554,7 @@ def test_notice_scrub_uses_typed_saved_credentials_without_redacting_public_cont
     assert public in projected
 
 
-def test_notice_scrub_unavailable_does_not_gate_hook_mutation(tmp_path, monkeypatch):
+def test_unavailable_settings_do_not_gate_hook_mutation(tmp_path, monkeypatch):
     from pulsara_agent.desktop_app.session_controller import LocalSessionController
     from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
     from pulsara_agent.settings import LocalSettingsStore
@@ -748,7 +581,7 @@ def test_notice_scrub_unavailable_does_not_gate_hook_mutation(tmp_path, monkeypa
     asyncio.run(run())
 
 
-def test_queued_native_remove_scrubs_credentials_added_while_waiting(tmp_path, monkeypatch):
+def test_queued_native_remove_cleans_credentials_added_while_waiting(tmp_path, monkeypatch):
     from pulsara_agent.capability.mcp_management import LocalMcpTarget, config_guard
     from pulsara_agent.mcp_credentials import McpCredentialBinding
     from tests.test_project_capability_management import _controller_with_sessions
@@ -766,30 +599,20 @@ def test_queued_native_remove_scrubs_credentials_added_while_waiting(tmp_path, m
         server_id = "demo-" + secret
         target = LocalMcpTarget(server_id)
         await manager.create(target, {"enabled": False, "transport": {"type": "stdio", "command": "/missing/demo"}})
-        pre_captured = asyncio.Event()
-        capture = controller._capture_capability_notice_scrub
-
-        async def observed_capture():
-            value = await capture()
-            pre_captured.set()
-            return value
-
-        controller._capture_capability_notice_scrub = observed_capture
         async with manager.lane:
             remove = asyncio.create_task(controller.remove_user_mcp_server(server_id=server_id, expected=config_guard(manager.inspect(target))))
-            await asyncio.wait_for(pre_captured.wait(), timeout=5)
+            while not manager.lane._waiters:
+                await asyncio.sleep(0)
             assert not remove.done()
-            # This writer is outside REMOVE's context and currently owns the
-            # lane. Its new value is absent from REMOVE's earlier scrub cut.
+            # A secret installed while REMOVE is queued still belongs to the
+            # exact owner selected by the native removal.
             binding = McpCredentialBinding(target.owner, "bearer")
             await manager.settings.replace_mcp_secrets(target.owner, ((binding, secret),))
         result = await remove
         assert result["operation"]["success"]
+        assert secret not in json.dumps(result)
         assert manager.settings.read().mcp_secret(binding) is None
-        fact = host.request_capability_refresh.call_args.args[0]
-        assert secret not in json.dumps(thaw_json(fact.target))
-        assert "REDACTED_CREDENTIAL" in thaw_json(fact.target)["server_id"]
-        assert manager.settings.credential_mutation_scrub is None
+        host.request_capability_refresh.assert_awaited_once_with()
         await manager.aclose()
 
     asyncio.run(run())

@@ -723,7 +723,6 @@ def build_synthetic_compaction_dispatch_read(
         "plan_handoff_fact": old_facts.plan_handoff_fact,
         "approved_plan_materialization_fact": approved,
         "previous_turn_outcome_fact": old_facts.previous_turn_outcome_fact,
-        "tool_observation_freshness_fact": (old_facts.tool_observation_freshness_fact),
     }
     provisional_facts = FrozenCanonicalCompileSnapshot.__new__(
         FrozenCanonicalCompileSnapshot
@@ -824,7 +823,6 @@ def rebase_compaction_dispatch_read_through_sequence(
             facts.approved_plan_materialization_fact
         ),
         "previous_turn_outcome_fact": facts.previous_turn_outcome_fact,
-        "tool_observation_freshness_fact": (facts.tool_observation_freshness_fact),
     }
     provisional_facts = FrozenCanonicalCompileSnapshot.__new__(
         FrozenCanonicalCompileSnapshot

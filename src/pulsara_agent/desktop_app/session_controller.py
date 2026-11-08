@@ -5,7 +5,6 @@ from __future__ import annotations
 from contextlib import contextmanager
 from functools import wraps
 
-from pulsara_agent.capability.change_observation import CapabilityUiChange
 from pulsara_agent.public_projection import public_record
 from pulsara_agent.capability.public_projection import (
     public_connection_editor, public_connection_review, public_credentials,
@@ -120,14 +119,6 @@ from pulsara_agent.desktop_app.path_completion import complete_workspace_paths
 from pulsara_agent.process_credential_boundary import ProcessCredentialScrubSet
 
 
-async def _with_capability_notice_scrub(controller, operation):
-    # Retain pre-mutation values: native REMOVE may delete their settings rows.
-    # Context-local lifetime keeps concurrent GUI operations independent.
-    scrub = await controller._capture_capability_notice_scrub()
-    with controller.core.mcp_management.settings.capture_credential_mutations(scrub):
-        return await operation()
-
-
 def _settled_capability_mutation(*, owns_lane):
     def decorate(operation):
         @wraps(operation)
@@ -135,14 +126,10 @@ def _settled_capability_mutation(*, owns_lane):
             if owns_lane:
                 # Preserve queued cancellation for GUI-owned filesystem writes.
                 async with self._capability_mutation_lock:
-                    return await _settle_capability_io(_with_capability_notice_scrub(
-                        self, lambda: operation(self, *args, **kwargs)
-                    ))
+                    return await _settle_capability_io(operation(self, *args, **kwargs))
             # MCP and Plugin connection/removal owners acquire the same lane
-            # themselves. Never acquire it twice; join their result + notice.
-            return await _settle_capability_io(_with_capability_notice_scrub(
-                self, lambda: operation(self, *args, **kwargs)
-            ))
+            # themselves. Never acquire it twice; join their result and refresh.
+            return await _settle_capability_io(operation(self, *args, **kwargs))
         return settled
     return decorate
 
@@ -579,7 +566,7 @@ class LocalSessionController:
             )
         )
         pending = (
-            await self._mark_capability_refresh(workspace_root, action="INSTALL_LOOSE_SKILL", target={"kind":"SKILL", "skill_path":str(outcome.destination_path / "SKILL.md")}, result=outcome.disposition.value)
+            await self._mark_capability_refresh(workspace_root)
             if outcome.destination_path is not None and (outcome.disposition.value == "INSTALLED" or (outcome.prior_disposition is not None and outcome.prior_disposition.value == "INSTALLED"))
             else 0
         )
@@ -610,7 +597,7 @@ class LocalSessionController:
             enabled=enabled,
             config_path=workspace_skill_config_path(workspace_root),
         )
-        pending = await self._mark_capability_refresh(workspace_root, action="SET_LOOSE_SKILL_ENABLED", target={"kind":"SKILL", "skill_path":str(skill_path)}, result="ENABLED" if enabled else "DISABLED", enabled=enabled)
+        pending = await self._mark_capability_refresh(workspace_root)
         capabilities = await self._session_capability_payload(handle)
         return {
             "operation": {
@@ -643,7 +630,7 @@ class LocalSessionController:
             LocalSkillRemovalDisposition.REMOVED,
             LocalSkillRemovalDisposition.CLEANUP_ATTENTION,
         }
-        pending = await self._mark_capability_refresh(workspace_root, action="REMOVE_LOOSE_SKILL", target={"kind":"SKILL", "skill_path":str(skill_path)}, result=outcome.disposition.value) if changed else 0
+        pending = await self._mark_capability_refresh(workspace_root) if changed else 0
         return {
             "operation": {
                 "status": outcome.disposition.value,
@@ -742,13 +729,7 @@ class LocalSessionController:
         return await self._workspace_mcp_settlement(handle, outcome, "REMOVED", server_id=server_id)
 
     async def _workspace_mcp_settlement(self, handle, outcome, status, *, server_id):
-        pending = await self._mark_capability_refresh(
-            handle.session.workspace.workspace_root,
-            action={"ADDED":"ADD_LOCAL_MCP", "REMOVED":"REMOVE_LOCAL_MCP"}.get(status, "UPDATE_LOCAL_MCP"),
-            target={"kind":"MCP_SERVER", "source_kind":"LOCAL", "server_id":server_id},
-            result="CLEANUP_ATTENTION" if outcome.cleanup_attention else status,
-            enabled=outcome.config.enabled if outcome.config is not None else None,
-        ) if outcome.applied else 0
+        pending = await self._mark_capability_refresh(handle.session.workspace.workspace_root) if outcome.applied else 0
         return {
             "operation": {
                 "status": status,
@@ -972,7 +953,7 @@ class LocalSessionController:
         )
         return scrub.scrub_text(str(error))
 
-    async def _mutate_user_hook(self, operation, *, action, plugin_id=None):
+    async def _mutate_user_hook(self, operation):
         from pulsara_agent.hooks.trust import HookMutationPublishedError
 
         async def settle():
@@ -982,11 +963,7 @@ class LocalSessionController:
             except HookMutationPublishedError as exc:
                 message = str(exc)
             try:
-                pending = await self._mark_capability_refresh(
-                    action=action,
-                    target={"kind":"HOOK_SOURCE", "source_kind":"LOCAL" if plugin_id is None else "PLUGIN", **({"plugin_id":plugin_id} if plugin_id is not None else {})},
-                    result="CLEANUP_ATTENTION" if message else "APPLIED",
-                )
+                pending = await self._mark_capability_refresh()
             except Exception:
                 pending = 0
                 message = message or "已写入，但会话刷新通知未完成，请刷新确认。"
@@ -997,7 +974,7 @@ class LocalSessionController:
             }
 
         async with self._capability_mutation_lock:
-            return await _settle_capability_io(_with_capability_notice_scrub(self, settle))
+            return await _settle_capability_io(settle())
 
     async def save_user_hook_config(self, *, exists, expected_text, text):
         from pulsara_agent.hooks.source import LocalHookConfigText
@@ -1009,7 +986,7 @@ class LocalSessionController:
                 expected=LocalHookConfigText(exists, expected_text),
                 text=text,
                 deadline_monotonic=deadline,
-            ), action="SAVE_HOOK_CONFIG",
+            ),
         )
 
     async def trust_user_hook(self, *, plugin_id, definition_digest, trust, accepted):
@@ -1055,7 +1032,7 @@ class LocalSessionController:
                 expected_digest=definition_digest,
                 current_digest_reader=current,
                 deadline_monotonic=deadline,
-            ), action="TRUST_HOOK_SOURCE", plugin_id=plugin_id,
+            ),
         )
 
     async def refresh_user_capabilities(self) -> dict[str, object]:
@@ -1120,7 +1097,7 @@ class LocalSessionController:
             )
         )
         pending = (
-            await self._mark_capability_refresh(action="INSTALL_LOOSE_SKILL", target={"kind":"SKILL", "skill_path":str(outcome.destination_path / "SKILL.md")}, result=outcome.disposition.value)
+            await self._mark_capability_refresh()
             if outcome.destination_path is not None and (outcome.disposition.value == "INSTALLED" or (outcome.prior_disposition is not None and outcome.prior_disposition.value == "INSTALLED"))
             else 0
         )
@@ -1164,7 +1141,7 @@ class LocalSessionController:
             skill_path=requested,
             enabled=enabled,
         )
-        pending = await self._mark_capability_refresh(action="SET_LOOSE_SKILL_ENABLED", target={"kind":"SKILL", "skill_path":str(requested)}, result="ENABLED" if enabled else "DISABLED", enabled=enabled)
+        pending = await self._mark_capability_refresh()
         capabilities = await self.inspect_user_capabilities()
         return {
             "adoption": {
@@ -1209,7 +1186,7 @@ class LocalSessionController:
             LocalSkillRemovalDisposition.REMOVED,
             LocalSkillRemovalDisposition.CLEANUP_ATTENTION,
         }
-        pending = await self._mark_capability_refresh(action="REMOVE_LOOSE_SKILL", target={"kind":"SKILL", "skill_path":str(path)}, result=outcome.disposition.value) if changed else 0
+        pending = await self._mark_capability_refresh() if changed else 0
         return {
             "operation": {
                 "status": outcome.disposition.value,
@@ -1368,12 +1345,7 @@ class LocalSessionController:
 
     async def _user_mcp_settlement(self, outcome, status, *, server_id):
         # No canonical mutation lane is held while physical consumers adopt/drain.
-        pending = await self._mark_capability_refresh(
-            action={"ADDED":"ADD_LOCAL_MCP", "REMOVED":"REMOVE_LOCAL_MCP"}.get(status, "UPDATE_LOCAL_MCP"),
-            target={"kind":"MCP_SERVER", "source_kind":"LOCAL", "server_id":server_id},
-            result="CLEANUP_ATTENTION" if outcome.cleanup_attention else status,
-            enabled=outcome.config.enabled if outcome.config is not None else None,
-        ) if outcome.applied else 0
+        pending = await self._mark_capability_refresh() if outcome.applied else 0
         return {
             "operation": {
                 "status": status,
@@ -1457,10 +1429,7 @@ class LocalSessionController:
         )
         published = outcome.prior if isinstance(outcome, CleanupUnavailablePluginInstallOutcome) else outcome
         if isinstance(published, SuccessfulPluginInstallOutcome):
-            await self._mark_capability_refresh(
-                action="INSTALL_PLUGIN", target={"kind":"PLUGIN", "plugin_id":published.identity.plugin_id},
-                result="CLEANUP_ATTENTION" if isinstance(outcome, CleanupUnavailablePluginInstallOutcome) or published.cleanup_attention else published.disposition.value,
-            )
+            await self._mark_capability_refresh()
         capabilities = await self.inspect_user_capabilities()
         return {
             "operation": _public_plugin_operation(outcome, _plugin_install_operation(outcome)),
@@ -1496,7 +1465,7 @@ class LocalSessionController:
             connection_review=connection_review,
         )
         pending = (
-            await self._mark_capability_refresh(action="SET_PLUGIN_ENABLED", target={"kind":"PLUGIN", "plugin_id":plugin_id}, result=outcome.disposition.value, enabled=enabled)
+            await self._mark_capability_refresh()
             if isinstance(outcome, SettledPluginEnablementOutcome)
             else 0
         )
@@ -1520,7 +1489,7 @@ class LocalSessionController:
     ) -> dict[str, object]:
         outcome = await self.core.remove_user_plugin(plugin_id, package_install_id)
         pending = (
-            await self._mark_capability_refresh(action="REMOVE_PLUGIN", target={"kind":"PLUGIN", "plugin_id":plugin_id}, result="CLEANUP_ATTENTION" if outcome.cleanup_attention else outcome.disposition.value)
+            await self._mark_capability_refresh()
             if isinstance(outcome, RemovedPluginOutcome)
             else 0
         )
@@ -1567,7 +1536,7 @@ class LocalSessionController:
                 connections=self.core.mcp_management,
             )
         )
-        pending = await self._mark_capability_refresh(action="CONFIGURE_PLUGIN_MCP_CONNECTION", target={"kind":"MCP_SERVER", "source_kind":"PLUGIN", "plugin_id":plugin_id, "server_id":server_id}, result="CLEANUP_ATTENTION" if result.cleanup_attention else "UPDATED") if result.applied else 0
+        pending = await self._mark_capability_refresh() if result.applied else 0
         return {
             "operation": {
                 "status": "UPDATED",
@@ -1632,48 +1601,8 @@ class LocalSessionController:
         )
         return len(results) - attention, attention
 
-    async def _capture_capability_notice_scrub(self) -> ProcessCredentialScrubSet | None:
-        from pulsara_agent.settings import LocalSettingsUnavailable
-
-        def capture(deadline_monotonic: float):
-            scrub = self.core.mcp_management.settings.read().credential_scrub_set()
-            process = self.core._credential_boundary.capture_scrub_set(
-                deadline_monotonic=deadline_monotonic
-            )
-            for value in process.values:
-                scrub.observe(value)
-            return scrub
-
-        try:
-            # Resolve the task-owned deadline on the event loop before worker I/O.
-            deadline = self.core._canonical_deadline()
-            return await asyncio.to_thread(capture, deadline)
-        except (LocalSettingsUnavailable, OSError, ValueError, TimeoutError):
-            # Advisory projection failure must neither gate native management
-            # nor publish an identity whose secret safety cannot be observed.
-            return None
-
-    async def _mark_capability_refresh(self, workspace_root: Path | None = None, *, action=None, target=None, result=None, enabled=None) -> int:
-        """Publish only a settled, server-attributed public identity."""
-        if action is None:
-            return await self.core.mark_capability_change(workspace_root)
-        scrub = self.core.mcp_management.settings.credential_mutation_scrub
-        if scrub is None:
-            return await self.core.mark_capability_change(workspace_root)
-        current = await self._capture_capability_notice_scrub()
-        if current is None:
-            return await self.core.mark_capability_change(workspace_root)
-        for value in current.values:
-            scrub.observe(value)
-        target = {
-            key: scrub.scrub_text(value) if isinstance(value, str) else value
-            for key, value in target.items()
-        }
-        change = CapabilityUiChange.settled(
-            action, "WORKSPACE" if workspace_root is not None else "USER",
-            target, result, enabled=enabled,
-        )
-        return await self.core.mark_capability_change(workspace_root, change=change)
+    async def _mark_capability_refresh(self, workspace_root: Path | None = None) -> int:
+        return await self.core.mark_capability_change(workspace_root)
 
     async def _session_capability_payload(
         self, handle: HostSessionHandle

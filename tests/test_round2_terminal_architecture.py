@@ -108,7 +108,7 @@ def _fixed_live_producers() -> dict[str, set[Path]]:
 def test_round2_closed_oracles_and_no_durable_terminal_authority(
     tmp_path: Path,
 ) -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 25
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 24
     assert len(LIVE_EVENT_TYPES) == 20
     assert len(SUBJECT_SLOTS) == 8
     assert len(APPEND_GUARDS) == 1
@@ -142,6 +142,8 @@ def test_round2_closed_oracles_and_no_durable_terminal_authority(
     )
     baseline = BASELINE.read_text(encoding="utf-8")
     for forbidden in (
+        "USER_CONTROL_FEEDBACK",
+        "UserControlFeedbackAccepted",
         "terminal_processes",
         "terminal_outputs",
         "terminal_monitors",

@@ -27,15 +27,12 @@ from psycopg.rows import dict_row
 
 from pulsara_agent.conversation_kernel.host import KernelHostCore
 from pulsara_agent.conversation_kernel.user_control import (
-    FeedbackCanonicalStatus,
-    FeedbackInclusionStatus,
     UserControlOperation,
     UserControlRequest,
     UserControlTarget,
     UserControlTargetKind,
 )
 from pulsara_agent.llm.model_catalog import ModelCatalogOwner, ModelsDevCatalogClient
-from pulsara_agent.llm.input import text_part_values
 from pulsara_agent.llm.runtime import ModelRuntime
 from pulsara_agent.primitives.context import thaw_json
 from pulsara_agent.primitives.permission import PermissionMode
@@ -224,7 +221,7 @@ def _control_request(
      admission_deadline_ms=session.control_admission_deadline_ms())
 
 
-async def _wait_control(session, request: UserControlRequest, *, feedback: bool):
+async def _wait_control(session, request: UserControlRequest):
     async def read():
         return await session.query_control_command(request)
 
@@ -232,18 +229,7 @@ async def _wait_control(session, request: UserControlRequest, *, feedback: bool)
         outcome = query.outcome
         if outcome is None or outcome.status == "PENDING":
             return False
-        control = outcome.user_control
-        if not feedback or control is None or control.feedback is None:
-            return True
-        state = control.feedback
-        if state.canonical_status is FeedbackCanonicalStatus.PENDING:
-            return False
-        if state.inclusion_status is FeedbackInclusionStatus.PENDING:
-            return False
-        return not (
-            state.inclusion_status is FeedbackInclusionStatus.INCLUDED
-            and not state.transport.invocation_attempted
-        )
+        return True
 
     query = await _wait_until("control result", read, settled, timeout_seconds=120)
     if query.outcome is None:
@@ -273,7 +259,6 @@ def _control_fact(outcome) -> dict[str, object]:
     control = outcome.user_control
     if control is None:
         raise RuntimeError("control outcome lacks its typed result")
-    feedback = control.feedback
     return {
         "command_id": outcome.command_id,
         "status": outcome.status,
@@ -285,13 +270,6 @@ def _control_fact(outcome) -> dict[str, object]:
         "root": None
         if control.root is None
         else {"status": control.root.status, "reason": control.root.reason},
-        "subagent": None
-        if control.subagent is None
-        else {
-            "disposition": control.subagent.disposition,
-            "status": control.subagent.status,
-            "reason": control.subagent.reason,
-        },
         "process": None
         if control.process is None
         else {
@@ -300,21 +278,6 @@ def _control_fact(outcome) -> dict[str, object]:
             "exit_code": control.process.exit_code,
             "physical_state": control.process.physical_state,
             "group_alive": control.process.group_alive,
-        },
-        "feedback": None
-        if feedback is None
-        else {
-            "canonical_status": feedback.canonical_status.value,
-            "inclusion_status": feedback.inclusion_status.value,
-            "owner_availability": feedback.owner_availability.value,
-            "reason": feedback.reason,
-            "target_root_turn_id": feedback.target_root_turn_id,
-            "entry_id": feedback.entry_id,
-            "context_binding_revision_id": feedback.context_binding_revision_id,
-            "model_call_index": feedback.model_call_index,
-            "transport_invocation_attempted": feedback.transport.invocation_attempted,
-            "transport_invocation_succeeded": feedback.transport.invocation_succeeded,
-            "transport_detail": feedback.transport.detail,
         },
     }
 
@@ -357,7 +320,7 @@ async def _run_stop_race(session) -> dict[str, object]:
     await delayed_io.entered.wait()
     turn_b = await _wait_active_turn(session, different_from=turn_a)
     delayed_io.release.set()
-    stop = await _wait_control(session, request, feedback=False)
+    stop = await _wait_control(session, request)
     await asyncio.gather(turn_a_task, return_exceptions=True)
     await _wait_until(
         "queued ROOT B completion",
@@ -432,13 +395,12 @@ async def _run_background_controls(session) -> dict[str, object]:
             session.run_turn(
                 PromptContent.text("Call terminal exactly once with command "
                 f"{delay!r}, yield_time_ms 10000 and max_output_chars 2000. "
-                "After it returns, summarize any typed user-control feedback visible in "
-                "your next request. Do not call other tools."),
+                "After it returns, finish briefly. Do not call other tools."),
                 command_id='command:qhmzqss2kxbf5jrmcv6obbud6e',
                 requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
             )
         )
-        target_turn = await _wait_active_turn(session)
+        await _wait_active_turn(session)
         await _wait_tool_command(session, delay)
         requests: list[UserControlRequest] = []
         accepted_controls = []
@@ -465,50 +427,15 @@ async def _run_background_controls(session) -> dict[str, object]:
             accepted_controls.append(_control_fact(accepted))
         await asyncio.wait_for(safe_point_entered.wait(), timeout=30)
 
-        async def read_feedback_states():
-            return [await session.query_control_command(request) for request in requests]
-
-        canonical_queries = await _wait_until(
-            "canonical user-control feedback at the injected safe point",
-            read_feedback_states,
-            lambda values: any(
-                query.outcome is not None
-                and query.outcome.user_control is not None
-                and query.outcome.user_control.feedback is not None
-                and query.outcome.user_control.feedback.canonical_status
-                is FeedbackCanonicalStatus.ACCEPTED
-                for query in values
-            ),
-        )
-        canonical_at_gate = [
-            _control_fact(query.outcome)
-            for query in canonical_queries
-            if query.outcome is not None
+        settled = [
+            _control_fact(await _wait_control(session, request))
+            for request in requests
         ]
         release_safe_point.set()
         active_result = await active
     finally:
         release_safe_point.set()
         session._runner._before_provider_preparation = original_before_prepare  # noqa: SLF001
-    settled = [
-        _control_fact(await _wait_control(session, request, feedback=True))
-        for request in requests
-    ]
-    if any(
-        item["feedback"] is None
-        or item["feedback"]["target_root_turn_id"] != target_turn  # type: ignore[index]
-        for item in settled
-    ):
-        raise RuntimeError("active feedback did not stay bound to its exact ROOT")
-    if not any(
-        isinstance(item["feedback"], dict)
-        and item["feedback"]["canonical_status"] == "ACCEPTED"  # type: ignore[index]
-        and item["feedback"]["inclusion_status"] == "INCLUDED"  # type: ignore[index]
-        and item["feedback"]["transport_invocation_attempted"] is True  # type: ignore[index]
-        for item in settled
-    ):
-        raise RuntimeError("active ROOT did not receive a provider-bound control fact")
-
     idle_long = _shell_python(
         "import time; print('IDLE_LONG', flush=True); time.sleep(120)"
     )
@@ -543,7 +470,7 @@ async def _run_background_controls(session) -> dict[str, object]:
         session,
         "SELECT (SELECT count(*) FROM pulsara_v3.turns WHERE session_id=%s) AS turns, "
         "(SELECT count(*) FROM pulsara_v3.transcript_entries WHERE session_id=%s "
-        "AND entry_kind='USER_CONTROL_FEEDBACK') AS feedback",
+        ") AS entries",
         (session.session_id, session.session_id),
     )
     idle_controls = []
@@ -565,18 +492,18 @@ async def _run_background_controls(session) -> dict[str, object]:
             process_id=process.process_id,
          admission_deadline_ms=session.control_admission_deadline_ms())
         idle_controls.append(
-            _control_fact(await _wait_control(session, request, feedback=False))
+            _control_fact(await _wait_control(session, request))
         )
     after_idle = await asyncio.to_thread(
         _rows,
         session,
         "SELECT (SELECT count(*) FROM pulsara_v3.turns WHERE session_id=%s) AS turns, "
         "(SELECT count(*) FROM pulsara_v3.transcript_entries WHERE session_id=%s "
-        "AND entry_kind='USER_CONTROL_FEEDBACK') AS feedback",
+        ") AS entries",
         (session.session_id, session.session_id),
     )
     if before_idle != after_idle:
-        raise RuntimeError("idle process control created a ROOT or feedback entry")
+        raise RuntimeError("idle process control created a ROOT or transcript entry")
     natural_control = idle_controls[1]["process"]
     if (
         not isinstance(natural_control, dict)
@@ -592,7 +519,7 @@ async def _run_background_controls(session) -> dict[str, object]:
         "initial_processes": [_process_fact(process_a), _process_fact(process_b)],
         "safe_point_gate": {
             "preparation_count": preparation_count,
-            "canonical_at_gate": canonical_at_gate,
+            "settled_at_gate": settled,
         },
         "accepted_controls": accepted_controls,
         "settled_controls": settled,
@@ -623,7 +550,6 @@ async def _run(connection_id: str) -> dict[str, object]:
             runtime = _Pr03RecordingRuntime(delegate, provider_calls, None)
             core = KernelHostCore.production(model_runtime=runtime)
             session = None
-            installed_inputs: list[dict[str, object]] = []
             try:
                 session = await core.open_session(
                     HostWorkspaceInput(
@@ -639,58 +565,8 @@ async def _run(connection_id: str) -> dict[str, object]:
                     ),
                 )
                 await session.update_model_call_binding(_binding(delegate, connection))
-                original_observer = session._runner._provider_input_installed_observer  # noqa: SLF001
-
-                def observe_input(request) -> None:
-                    installed_inputs.append(
-                        {
-                            "turn_id": request.turn_id,
-                            "scope": request.compiled_input.canonical_input_identity.conversation_scope_kind.value,
-                            "context_binding_revision_id": request.cut.context_binding_revision_id,
-                            "model_call_index": request.model_call_index,
-                            "messages": [
-                                {
-                                    "role": message.role.value,
-                                    "content": list(
-                                        text_part_values(message.content)
-                                    ),
-                                    "origin_entry_id": placement.origin_entry_id,
-                                }
-                                for message, placement in zip(
-                                    request.compiled_input.messages,
-                                    request.compiled_input.message_placements,
-                                    strict=True,
-                                )
-                            ],
-                        }
-                    )
-                    if original_observer is not None:
-                        original_observer(request)
-
-                session._runner._provider_input_installed_observer = observe_input  # noqa: SLF001
                 stop_race = await _run_stop_race(session)
                 background = await _run_background_controls(session)
-                canonical = await asyncio.to_thread(
-                    _rows,
-                    session,
-                    """
-                    SELECT e.id AS entry_id, e.entry_sequence, e.turn_id,
-                           convert_from(e.inline_content, 'UTF8') AS content,
-                           ev.event_id, ev.event_type
-                    FROM pulsara_v3.transcript_entries AS e
-                    JOIN pulsara_v3.agent_events AS ev
-                      ON ev.session_id=e.session_id
-                     AND ev.subject_entry_id=e.id
-                    WHERE e.session_id=%s AND e.entry_kind='USER_CONTROL_FEEDBACK'
-                    ORDER BY e.entry_sequence
-                    """,
-                    (session.session_id,),
-                )
-                if not canonical or any(
-                    row["event_type"] != "UserControlFeedbackAccepted"
-                    for row in canonical
-                ):
-                    raise RuntimeError("active controls did not create an exact feedback pair")
                 return {
                     "schema_version": SCHEMA_VERSION,
                     "status": "passed",
@@ -703,8 +579,6 @@ async def _run(connection_id: str) -> dict[str, object]:
                     "clean_v0_ephemeral_database": True,
                     "stop_race": stop_race,
                     "background_controls": background,
-                    "canonical_feedback": canonical,
-                    "provider_input_installs": installed_inputs,
                     "provider_calls": provider_calls,
                 }
             finally:

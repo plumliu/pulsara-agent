@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pulsara_agent.identity import derive_id
 
 
 from pulsara_agent.conversation_kernel.interruption import interruption_payload
@@ -36,12 +35,9 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
 from pulsara_agent.conversation_kernel.contracts import (
     AssistantBlockKind,
     CanonicalContent,
-    CommittedEventDraft,
-    CommittedEventSubject,
     ConversationScopeKind,
     EntryKind,
     HostWriterGuard,
-    InlineContent,
     TurnStatus,
 )
 from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
@@ -72,20 +68,12 @@ from pulsara_agent.llm.model_connections import (
 from pulsara_agent.llm.model_target import FrozenModelResolutionSnapshot
 from pulsara_agent.model_input.contracts import (
     CanonicalInputOriginKind,
-    FrozenProviderInputItem,
     FrozenProviderInputItemKind,
     PreparedProviderInputCut,
 )
 from pulsara_agent.conversation_kernel.steer import (
-    PreparedActiveRootInputAdmission,
     PreparedActiveRootInputCandidate,
     StartedTurnInputGroup,
-)
-from pulsara_agent.llm.input import LLMTextPart
-from pulsara_agent.ports.user_control_feedback import (
-    USER_CONTROL_FEEDBACK_MEDIA_TYPE,
-    UserControlFeedbackInstallationAttempt,
-    project_user_control_feedback_for_provider,
 )
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
@@ -107,7 +95,6 @@ from .contracts import (
     AssistantToolCallBlock,
     ConversationKernelConflict,
     PreparedRootTurnIntent,
-    StaleHostWriter,
     TurnAdmissionConfirmation,
     TurnAdmissionConfirmationKind,
     _content_columns,
@@ -997,235 +984,6 @@ class _ConversationOperations:
 
 
 
-
-    def accept_user_control_feedback(
-        self,
-        guard: HostWriterGuard,
-        *,
-        candidate: UserControlFeedbackInstallationAttempt,
-        provider_input_admission: PreparedActiveRootInputAdmission,
-        deadline_monotonic: float,
-    ) -> AcceptedEntry:
-        """Atomically append one exact user-control fact to its running ROOT."""
-
-        if candidate.session_id != guard.session_id:
-            raise ValueError("user control feedback belongs to another session")
-        if candidate.writer_generation != guard.writer_generation:
-            raise StaleHostWriter("user control feedback writer generation is stale")
-        content = InlineContent.from_bytes(
-            candidate.content.canonical_bytes(),
-            media_type=USER_CONTROL_FEEDBACK_MEDIA_TYPE,
-            codec="utf-8",
-        )
-        with self._writer_transaction(
-            guard, deadline_monotonic=deadline_monotonic
-        ) as connection:
-            prospective = self._build_user_control_feedback_provider_input_candidate(
-                connection,
-                guard,
-                candidate=candidate,
-                lock=True,
-            )
-            if provider_input_admission.candidate != prospective:
-                raise ConversationKernelConflict(
-                    "user control feedback provider admission is stale"
-                )
-            workspace_id = prospective.workspace_id
-            entry_sequence = self._allocate_entry_sequence(connection, guard.session_id)
-            self._insert_entry(
-                connection,
-                session_id=guard.session_id,
-                workspace_id=workspace_id,
-                turn_id=candidate.target_root_turn_id,
-                entry_id=candidate.entry_id,
-                entry_sequence=entry_sequence,
-                entry_kind=EntryKind.USER_CONTROL_FEEDBACK,
-                content=content,
-            )
-            event = self._append_events(
-                connection,
-                guard,
-                workspace_id=workspace_id,
-                drafts=(self._user_control_feedback_event(candidate),),
-            )[0]
-            return AcceptedEntry(
-                entry_id=candidate.entry_id,
-                turn_id=candidate.target_root_turn_id,
-                entry_sequence=entry_sequence,
-                event_sequence=event.event_sequence,
-            )
-
-    def prepare_user_control_feedback_provider_input_candidate(
-        self,
-        guard: HostWriterGuard,
-        *,
-        candidate: UserControlFeedbackInstallationAttempt,
-        deadline_monotonic: float,
-    ) -> PreparedActiveRootInputCandidate:
-        """Freeze the exact active ROOT suffix before feedback publication."""
-
-        if candidate.session_id != guard.session_id:
-            raise ValueError("user control feedback belongs to another session")
-        if candidate.writer_generation != guard.writer_generation:
-            raise StaleHostWriter("user control feedback writer generation is stale")
-        with self._provider.connection(
-            lane=PostgresConnectionLane.HOST_CONTROL,
-            row_factory=dict_row,
-            deadline_monotonic=deadline_monotonic,
-            isolation_level=IsolationLevel.REPEATABLE_READ,
-        ) as connection:
-            self._require_writer(connection, guard, lock=False)
-            return self._build_user_control_feedback_provider_input_candidate(
-                connection,
-                guard,
-                candidate=candidate,
-                lock=False,
-            )
-
-    def _build_user_control_feedback_provider_input_candidate(
-        self,
-        connection: Connection,
-        guard: HostWriterGuard,
-        *,
-        candidate: UserControlFeedbackInstallationAttempt,
-        lock: bool,
-    ) -> PreparedActiveRootInputCandidate:
-        turn = self._require_provider_safe_turn_in_transaction(
-            connection,
-            session_id=guard.session_id,
-            turn_id=candidate.target_root_turn_id,
-            lock=lock,
-        )
-        state = connection.execute(
-            """
-            SELECT s.workspace_id, s.latest_entry_sequence,
-                   count(e.id) FILTER (
-                       WHERE e.entry_owner_kind = 'EXECUTED_TURN'
-                         AND e.turn_id = t.id
-                         AND e.entry_kind IN (
-                             'ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST'
-                         )
-                   ) AS accepted_assistant_count
-            FROM pulsara_v3.turns AS t
-            JOIN pulsara_v3.sessions AS s ON s.id = t.session_id
-            LEFT JOIN pulsara_v3.transcript_entries AS e
-              ON e.session_id = t.session_id
-            WHERE t.session_id = %s AND t.id = %s
-            GROUP BY s.workspace_id, s.latest_entry_sequence
-            """,
-            (guard.session_id, candidate.target_root_turn_id),
-        ).fetchone()
-        if state is None:
-            raise ConversationKernelConflict("user control feedback target is absent")
-        pending_steer = connection.execute(
-            """
-            SELECT 1 FROM pulsara_v3.prompt_queue_items
-            WHERE session_id = %s AND target_turn_id = %s
-              AND status = 'PENDING' AND delivery_mode = 'STEER_ACTIVE_TURN'
-            LIMIT 1
-            """,
-            (guard.session_id, candidate.target_root_turn_id),
-        ).fetchone()
-        if pending_steer is not None:
-            raise ConversationKernelConflict("turn is not at a provider safe point")
-        workspace_id = str(state["workspace_id"])
-        if (
-            str(turn["workspace_id"]) != workspace_id
-            or workspace_id != candidate.workspace_id
-        ):
-            raise ConversationKernelConflict(
-                "user control feedback target is not the bound ROOT"
-            )
-        content = candidate.content.canonical_bytes()
-        provider_text = project_user_control_feedback_for_provider(content)
-        latest_sequence = int(state["latest_entry_sequence"])
-        cut = PreparedProviderInputCut(
-            session_id=guard.session_id,
-            turn_id=candidate.target_root_turn_id,
-            context_binding_revision_id=str(
-                turn["current_context_binding_revision_id"]
-            ),
-            provider_input_through_sequence=latest_sequence,
-        )
-        return PreparedActiveRootInputCandidate(
-            workspace_id=workspace_id,
-            expected_provider_input_cut=cut,
-            next_model_call_index=int(state["accepted_assistant_count"]) + 1,
-            unpublished_items=(
-                FrozenProviderInputItem(
-                    item_kind=FrozenProviderInputItemKind.USER,
-                    source_entry_id=candidate.entry_id,
-                    source_entry_sequence=latest_sequence + 1,
-                    source_turn_id=candidate.target_root_turn_id,
-                    content=(LLMTextPart(provider_text),),
-                    input_origin=CanonicalInputOriginKind.USER_CONTROL_FEEDBACK,
-                ),
-            ),
-            unpublished_item_canonical_expanded_bytes=(len(content),),
-        )
-
-    def confirm_user_control_feedback_winner(
-        self,
-        guard: HostWriterGuard,
-        *,
-        candidate: UserControlFeedbackInstallationAttempt,
-        deadline_monotonic: float,
-    ) -> AcceptedEntry | None:
-        """Confirm only the exact entry/event pair after an ambiguous commit."""
-
-        content = InlineContent.from_bytes(
-            candidate.content.canonical_bytes(),
-            media_type=USER_CONTROL_FEEDBACK_MEDIA_TYPE,
-            codec="utf-8",
-        )
-        with self._provider.connection(
-            lane=PostgresConnectionLane.HOST_CONTROL,
-            row_factory=dict_row,
-            deadline_monotonic=deadline_monotonic,
-            isolation_level=IsolationLevel.REPEATABLE_READ,
-        ) as connection:
-            self._require_writer(connection, guard, lock=False)
-            entry = connection.execute(
-                """
-                SELECT * FROM pulsara_v3.transcript_entries
-                WHERE entry_owner_kind = 'EXECUTED_TURN' AND session_id = %s AND id = %s
-                """,
-                (guard.session_id, candidate.entry_id),
-            ).fetchone()
-            event_draft = self._user_control_feedback_event(candidate)
-            events = connection.execute(
-                "SELECT * FROM pulsara_v3.agent_events WHERE event_id = %s",
-                (event_draft.event_id,),
-            ).fetchall()
-            if entry is None and not events:
-                return None
-            if entry is None or len(events) != 1:
-                raise ConversationKernelConflict(
-                    "user control feedback winner is partially installed"
-                )
-            if (
-                str(entry["workspace_id"]) != candidate.workspace_id
-                or str(entry["turn_id"]) != candidate.target_root_turn_id
-                or str(entry["entry_kind"]) != EntryKind.USER_CONTROL_FEEDBACK.value
-                or entry["context_binding_revision_id"] is not None
-                or entry["provider_input_through_sequence"] is not None
-                or self._content_from_row(entry) != content
-            ):
-                raise ConversationKernelConflict(
-                    "user control feedback identity names another entry"
-                )
-            event = self._exact_event_for_confirmation(
-                connection,
-                event_draft,
-                session_id=guard.session_id,
-                workspace_id=candidate.workspace_id,
-            )
-            return AcceptedEntry(
-                entry_id=candidate.entry_id,
-                turn_id=candidate.target_root_turn_id,
-                entry_sequence=int(entry["entry_sequence"]),
-                event_sequence=int(event["event_sequence"]),
-            )
 
     def confirm_manual_compaction_command(
         self,
@@ -2629,23 +2387,3 @@ class _ConversationOperations:
                     (session_id, after_sequence, limit),
                 ).fetchall()
             )
-
-
-    @staticmethod
-    def _user_control_feedback_event(
-        candidate: UserControlFeedbackInstallationAttempt,
-    ) -> CommittedEventDraft:
-        return CommittedEventDraft(
-            event_id=derive_id("event", "accepted", candidate.session_id, CommittedEventType.USER_CONTROL_FEEDBACK_ACCEPTED.name, SubjectSlot.ENTRY.name, candidate.entry_id, ""),
-            event_type=CommittedEventType.USER_CONTROL_FEEDBACK_ACCEPTED,
-            subject=CommittedEventSubject(
-                slot=SubjectSlot.ENTRY,
-                subject_id=candidate.entry_id,
-            ),
-            actor_kind="user",
-            actor_id=candidate.actor_id,
-            sensitivity_class="S1",
-            projection_profile="IMMUTABLE_ENTRY",
-            occurred_at=candidate.occurred_at,
-            payload={"entry_kind": EntryKind.USER_CONTROL_FEEDBACK.value},
-        )

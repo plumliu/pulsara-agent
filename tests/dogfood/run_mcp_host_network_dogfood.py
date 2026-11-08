@@ -105,8 +105,11 @@ async def run():
                 handle = await controller.create_session(workspace_kind="project", workspace_path=str(workspace), model_call_binding=binding)
                 host = handle.session
                 inputs = []
-                previous = host._runner._provider_input_installed_observer
-                def observe(request):
+                dispatch = host._runner._provider_dispatch
+                previous = dispatch.install_provider_open
+                async def observe(**kwargs):
+                    opened = await previous(**kwargs)
+                    request = opened.request
                     compiled = request.compiled_input
                     if inputs:
                         old = inputs[-1]
@@ -114,9 +117,8 @@ async def run():
                         assert compiled.tools == old.tools
                         assert compiled.messages[:len(old.messages)] == old.messages
                     inputs.append(compiled)
-                    if previous:
-                        previous(request)
-                host._runner._provider_input_installed_observer = observe
+                    return opened
+                dispatch.install_provider_open = observe
                 async def turn(label, text):
                     print("Running", label, flush=True)
                     result = await host.run_turn(PromptContent.text(text))

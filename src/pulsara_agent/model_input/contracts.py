@@ -14,10 +14,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import StrEnum
 from hashlib import sha256
-from typing import TYPE_CHECKING, Literal, Mapping, Protocol
-
-if TYPE_CHECKING:
-    from pulsara_agent.capability.change_observation import FrozenCapabilityChange
+from typing import Literal, Mapping, Protocol
 
 from pulsara_agent.llm.estimator import FinalWireTokenEstimate
 from pulsara_agent.llm.input import (
@@ -98,7 +95,6 @@ class CanonicalInputOriginKind(StrEnum):
     AGENT_MESSAGE = "AGENT_MESSAGE"
     CELL_OUTPUT = "CELL_OUTPUT"
     PLAN_CONTINUATION = "PLAN_CONTINUATION"
-    USER_CONTROL_FEEDBACK = "USER_CONTROL_FEEDBACK"
 
 
 class ContextSourceKind(StrEnum):
@@ -108,12 +104,11 @@ class ContextSourceKind(StrEnum):
     RUN_PERMISSION = "RUN_PERMISSION"
     PLAN_HANDOFF = "PLAN_HANDOFF"
     PLAN_WORKFLOW = "PLAN_WORKFLOW"
-    CAPABILITY_CHANGE = "CAPABILITY_CHANGE"
+    USER_ACTIONS = "USER_ACTIONS"
     SKILL_CATALOG = "SKILL_CATALOG"
     MCP_CATALOG = "MCP_CATALOG"
     ACTIVE_SKILL = "ACTIVE_SKILL"
     PREVIOUS_TURN_OUTCOME = "PREVIOUS_TURN_OUTCOME"
-    TOOL_OBSERVATION_FRESHNESS = "TOOL_OBSERVATION_FRESHNESS"
     MEMORY_RESPONSE_PREFERENCE_HEAD = "MEMORY_RESPONSE_PREFERENCE_HEAD"
     MEMORY_RECALL = "MEMORY_RECALL"
     MEMORY_WRITE_HINT = "MEMORY_WRITE_HINT"
@@ -512,7 +507,6 @@ class ContextSourceCandidate:
                 or self.channel is not ContextChannel.RUNTIME_OBSERVATION
                 or self.source_kind
                 not in {
-                    ContextSourceKind.CAPABILITY_CHANGE,
                     ContextSourceKind.SKILL_CATALOG,
                     ContextSourceKind.ACTIVE_SKILL,
                 }
@@ -615,7 +609,6 @@ class CollectedContextSources:
     registry_fingerprint: str
     collection_fingerprint: str
     absent_facts: tuple[ContextSourceAbsentFact, ...] = ()
-    capability_change: FrozenCapabilityChange | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         kinds = tuple(item.source_kind for item in self.candidates)
@@ -755,7 +748,6 @@ def validate_compaction_request_shape(
             CanonicalInputOriginKind.AGENT_INSTRUCTION,
             CanonicalInputOriginKind.AGENT_MATERIAL,
             CanonicalInputOriginKind.AGENT_MESSAGE,
-            CanonicalInputOriginKind.USER_CONTROL_FEEDBACK,
         },
         FrozenProviderInputItemKind.PLAN_CONTINUATION: {
             CanonicalInputOriginKind.PLAN_CONTINUATION
@@ -767,7 +759,6 @@ def validate_compaction_request_shape(
         raise ValueError("compaction request kind/origin union is invalid")
     if active and input_origin in {
         CanonicalInputOriginKind.HUMAN_STEER,
-        CanonicalInputOriginKind.USER_CONTROL_FEEDBACK,
         CanonicalInputOriginKind.AGENT_MATERIAL,
         CanonicalInputOriginKind.AGENT_MESSAGE,
     }:
@@ -1489,91 +1480,6 @@ def previous_turn_outcome_fingerprint(
 
 
 @dataclass(frozen=True, slots=True)
-class FrozenToolObservationFreshnessCompileFact:
-    session_id: str
-    workspace_id: str
-    current_turn_id: str
-    current_scope_kind: ModelInputScopeKind
-    current_turn_ref: str
-    current_initial_entry_sequence: int
-    immediate_predecessor_turn_id: str | None
-    immediate_predecessor_turn_ref: str | None
-    classification_contract: Literal["pulsara.tool-observation-freshness.v1"]
-    fact_fingerprint: str
-
-    def __post_init__(self) -> None:
-        if self.current_initial_entry_sequence < 1:
-            raise ValueError("tool freshness current sequence is invalid")
-        if (self.immediate_predecessor_turn_id is None) != (
-            self.immediate_predecessor_turn_ref is None
-        ):
-            raise ValueError("tool freshness predecessor union is invalid")
-        for identity, ref in (
-            (self.current_turn_id, self.current_turn_ref),
-            (self.immediate_predecessor_turn_id, self.immediate_predecessor_turn_ref),
-        ):
-            if ref is not None:
-                require_id(ref, "turn")
-            if identity != ref:
-                raise ValueError("tool freshness reference differs from its turn")
-        if self.classification_contract != "pulsara.tool-observation-freshness.v1":
-            raise ValueError("tool freshness classification contract is invalid")
-        if self.fact_fingerprint != tool_observation_freshness_fingerprint(self):
-            raise ValueError("tool freshness fingerprint mismatch")
-
-
-def tool_observation_freshness_fingerprint(
-    fact: FrozenToolObservationFreshnessCompileFact,
-) -> str:
-    return context_fingerprint(
-        "pulsara:tool-observation-freshness:v1",
-        {
-            "session_id": fact.session_id,
-            "workspace_id": fact.workspace_id,
-            "current_turn_id": fact.current_turn_id,
-            "current_scope_kind": fact.current_scope_kind.value,
-            "current_turn_ref": fact.current_turn_ref,
-            "current_initial_entry_sequence": fact.current_initial_entry_sequence,
-            "immediate_predecessor_turn_id": fact.immediate_predecessor_turn_id,
-            "immediate_predecessor_turn_ref": fact.immediate_predecessor_turn_ref,
-            "classification_contract": fact.classification_contract,
-        },
-    )
-
-
-def build_tool_observation_freshness_fact(
-    *,
-    session_id: str,
-    workspace_id: str,
-    current_turn_id: str,
-    current_scope_kind: ModelInputScopeKind,
-    current_initial_entry_sequence: int,
-    immediate_predecessor_turn_id: str | None,
-) -> FrozenToolObservationFreshnessCompileFact:
-    values = {
-        "session_id": session_id,
-        "workspace_id": workspace_id,
-        "current_turn_id": current_turn_id,
-        "current_scope_kind": current_scope_kind,
-        "current_turn_ref": current_turn_id,
-        "current_initial_entry_sequence": current_initial_entry_sequence,
-        "immediate_predecessor_turn_id": immediate_predecessor_turn_id,
-        "immediate_predecessor_turn_ref": immediate_predecessor_turn_id,
-        "classification_contract": "pulsara.tool-observation-freshness.v1",
-    }
-    provisional = FrozenToolObservationFreshnessCompileFact.__new__(
-        FrozenToolObservationFreshnessCompileFact
-    )
-    for name, value in values.items():
-        object.__setattr__(provisional, name, value)
-    object.__setattr__(provisional, "fact_fingerprint", "")
-    return FrozenToolObservationFreshnessCompileFact(
-        **values,
-        fact_fingerprint=tool_observation_freshness_fingerprint(provisional),
-    )
-
-
-@dataclass(frozen=True, slots=True)
 class FrozenCanonicalCompileSnapshot:
     canonical_input: CanonicalModelInputSnapshot = field(repr=False)
     context_binding_fact: FrozenContextBindingCompileFact
@@ -1584,7 +1490,6 @@ class FrozenCanonicalCompileSnapshot:
         repr=False
     )
     previous_turn_outcome_fact: FrozenPreviousTurnOutcomeCompileFact | None
-    tool_observation_freshness_fact: FrozenToolObservationFreshnessCompileFact
     canonical_read_cut_fingerprint: str
 
     def __post_init__(self) -> None:
@@ -1724,20 +1629,12 @@ class FrozenCanonicalCompileSnapshot:
                     "approved Plan materialization would duplicate content"
                 )
         previous = self.previous_turn_outcome_fact
-        freshness = self.tool_observation_freshness_fact
-        if (
-            freshness.session_id != identity.session_id
-            or freshness.current_turn_id != identity.turn_id
-            or freshness.current_scope_kind is not identity.conversation_scope_kind
-        ):
-            raise ValueError("tool freshness fact does not exact-join input")
         if previous is not None and (
             previous.session_id != identity.session_id
             or previous.current_turn_id != identity.turn_id
             or previous.current_scope_kind is not identity.conversation_scope_kind
-            or (previous.predecessor_turn_id != freshness.immediate_predecessor_turn_id)
         ):
-            raise ValueError("previous-turn fact does not exact-join freshness")
+            raise ValueError("previous-turn fact does not exact-join input")
         if self.canonical_read_cut_fingerprint != (
             canonical_compile_snapshot_fingerprint(self)
         ):
@@ -1772,9 +1669,6 @@ def canonical_compile_snapshot_fingerprint(
                 None
                 if snapshot.previous_turn_outcome_fact is None
                 else snapshot.previous_turn_outcome_fact.fact_fingerprint
-            ),
-            "tool_observation_freshness": (
-                snapshot.tool_observation_freshness_fact.fact_fingerprint
             ),
         },
     )

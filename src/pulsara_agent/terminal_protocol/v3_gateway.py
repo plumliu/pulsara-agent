@@ -109,7 +109,7 @@ from pulsara_agent.terminal_process.models import TerminalProcessInfo
 PROTOCOL_MAJOR = 6
 PROTOCOL_MINOR = 0
 PROTOCOL_SCHEMA_FINGERPRINT = (
-    "sha256:776184635283aa45b10e79089d857c4a2105aa08db3405c2c5bdff07d719cbc0"
+    "sha256:e0a3630fda2840bdaac85abf6a391203647cbe04b99d4b4b3c2d5eeeba6bd3d2"
 )
 MAXIMUM_FRAME_BYTES = 8 << 20
 MAXIMUM_OBSERVATION_WAIT_MS = STAGE2_LIMITS.committed_observation_hard_wait_ms
@@ -2052,29 +2052,6 @@ def _user_control_outcome_to_wire(value: object) -> wire.UserControlOutcome:
         if value.process.group_alive is not None:
             process.group_alive = value.process.group_alive
         result.process.CopyFrom(process)
-    if value.feedback is not None:
-        feedback = wire.UserControlFeedbackState(
-            canonical_status=value.feedback.canonical_status.value,
-            inclusion_status=value.feedback.inclusion_status.value,
-            owner_availability=value.feedback.owner_availability.value,
-            reason=value.feedback.reason or "",
-            target_root_turn_id=value.feedback.target_root_turn_id or "",
-            entry_id=value.feedback.entry_id or "",
-            context_binding_revision_id=(
-                value.feedback.context_binding_revision_id or ""
-            ),
-            transport_invocation_attempted=(
-                value.feedback.transport.invocation_attempted
-            ),
-            transport_detail=value.feedback.transport.detail or "",
-        )
-        if value.feedback.model_call_index is not None:
-            feedback.model_call_index = value.feedback.model_call_index
-        if value.feedback.transport.invocation_succeeded is not None:
-            feedback.transport_invocation_succeeded = (
-                value.feedback.transport.invocation_succeeded
-            )
-        result.feedback.CopyFrom(feedback)
     return result
 
 

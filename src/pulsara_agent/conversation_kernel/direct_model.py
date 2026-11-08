@@ -461,9 +461,6 @@ class PreparedKernelModelExecution:
             [KernelModelExecutionRequest, TransportUsageReport, ProcessLocalProviderInputInstallPermit, ProviderNormalizedTerminalKind | None, bool], Awaitable[None]
         ]
         | None,
-        transport_invocation_observer: (
-            Callable[[KernelModelExecutionRequest, bool, str | None], None] | None
-        ),
     ) -> None:
         self.request = request
         self.final_context = replace(
@@ -477,7 +474,6 @@ class PreparedKernelModelExecution:
         self._transport_timeout_policy = transport_timeout_policy
         self._install_authority = install_authority
         self._usage_observer = usage_observer
-        self._transport_invocation_observer = transport_invocation_observer
         self._completed: CompletedProviderModelExecution | None = None
         self._completed_taken = False
         self._state = _PreparedExecutionState.PREFLIGHTED
@@ -606,14 +602,10 @@ class PreparedKernelModelExecution:
             if borrowed.call.fact != prepared_call.fact:
                 raise RuntimeError("borrowed foreground model call drifted")
             execution = borrowed.open_stream(context=self.final_context)
-        except BaseException as exc:
+        except BaseException:
             if borrowed is not None:
                 borrowed.close()
-            if self._transport_invocation_observer is not None:
-                self._transport_invocation_observer(request, False, str(exc))
             raise
-        if self._transport_invocation_observer is not None:
-            self._transport_invocation_observer(request, True, None)
         with self._lock:
             self._state = _PreparedExecutionState.STREAMING
         semantic_error: BaseException | None = None
@@ -791,9 +783,6 @@ class DirectKernelModelPort:
         ]
         | None = None,
         timeout_policy: OpenAITransportTimeoutPolicy | None = None,
-        transport_invocation_observer: (
-            Callable[[KernelModelExecutionRequest, bool, str | None], None] | None
-        ) = None,
     ) -> None:
         transport_timeout = (
             timeout_policy or DEFAULT_KERNEL_WATCHDOG_POLICY.foreground_transport
@@ -805,7 +794,6 @@ class DirectKernelModelPort:
         self._model_runtime = model_runtime
         self._transport_timeout = transport_timeout
         self._usage_observer = usage_observer
-        self._transport_invocation_observer = transport_invocation_observer
         self._transport_timeout_policy_fingerprint = (
             transport_timeout.policy_fingerprint
         )
@@ -1226,7 +1214,6 @@ class DirectKernelModelPort:
             transport_timeout_policy=self._transport_timeout,
             install_authority=install_authority,
             usage_observer=self._usage_observer,
-            transport_invocation_observer=self._transport_invocation_observer,
         )
 
     def plan_wire_input(

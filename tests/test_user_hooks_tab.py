@@ -14,7 +14,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from pulsara_agent.capability.change_observation import CapabilityUiChange
 from pulsara_agent.capability.pulsara_home import resolve_pulsara_home
 from pulsara_agent.hooks.config_parser import (
     HookConfigParseError,
@@ -275,11 +274,7 @@ def test_published_mutations_report_attention_and_still_mark_refresh(
         )
         assert outcome["status"] == "ATTENTION" and "已写入" in outcome["message"]
         assert provider.user_config_path.read_text() == CONFIG
-        controller.core.mark_capability_change.assert_awaited_once_with(
-            None, change=CapabilityUiChange.settled(
-                "SAVE_HOOK_CONFIG", "USER", {"kind":"HOOK_SOURCE", "source_kind":"LOCAL"}, "CLEANUP_ATTENTION" if failure == "fsync" else "APPLIED"
-            )
-        )
+        controller.core.mark_capability_change.assert_awaited_once_with(None)
 
     asyncio.run(run())
 
@@ -323,11 +318,7 @@ def test_started_write_settles_after_cancel_but_queued_cancel_does_not_write(
         release.set()
         assert (await task)["status"] == "APPLIED"
         assert provider.user_config_path.read_text() == CONFIG
-        controller.core.mark_capability_change.assert_awaited_once_with(
-            None, change=CapabilityUiChange.settled(
-                "SAVE_HOOK_CONFIG", "USER", {"kind":"HOOK_SOURCE", "source_kind":"LOCAL"}, "APPLIED"
-            )
-        )
+        controller.core.mark_capability_change.assert_awaited_once_with(None)
 
     try:
         asyncio.run(run())
@@ -611,11 +602,7 @@ def test_trust_replace_fsync_failure_reports_written_and_keeps_adoption(
             ).trusted_definition_digest
             == review["definition_digest"]
         )
-        controller.core.mark_capability_change.assert_awaited_once_with(
-            None, change=CapabilityUiChange.settled(
-                "TRUST_HOOK_SOURCE", "USER", {"kind":"HOOK_SOURCE", "source_kind":"LOCAL"}, "CLEANUP_ATTENTION"
-            )
-        )
+        controller.core.mark_capability_change.assert_awaited_once_with(None)
 
     asyncio.run(run())
 

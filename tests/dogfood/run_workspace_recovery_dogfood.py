@@ -113,7 +113,7 @@ async def run():
                 )
                 assert (
                     list(root.iterdir()) == []
-                    and restored.session._workspace_recreated_at is not None
+                    and restored.session._pending_workspace_recreated is not None
                 )
                 followup = await restored.session.run_turn(
                     PromptContent.text(
@@ -139,10 +139,10 @@ async def run():
                 assert any(
                     "workspace_recreated"
                     in json.dumps(call["provider_input"], ensure_ascii=False)
-                    for call in resumed_calls[1:]
+                    for call in resumed_calls
                 )
                 assert (
-                    restored.session._workspace_recreated_at is None
+                    restored.session._pending_workspace_recreated is None
                     and not (root / "original.txt").exists()
                 )
                 assert "RESTORE_OK" in followup.final_text

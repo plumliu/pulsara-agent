@@ -175,7 +175,6 @@ _ENTRY_TYPES = frozenset(
         CommittedEventType.TOOL_RESULT_ACCEPTED.value,
         CommittedEventType.USER_STEER_ACCEPTED.value,
         CommittedEventType.TERMINAL_OBSERVATION_ACCEPTED.value,
-        CommittedEventType.USER_CONTROL_FEEDBACK_ACCEPTED.value,
         CommittedEventType.PLAN_CONTINUATION_ACCEPTED.value,
     }
 )
@@ -191,9 +190,9 @@ COMMITTED_PROJECTION_BRANCH_BY_TYPE: Mapping[str, str] = MappingProxyType(
     }
 )
 
-if len(_COMMITTED_ENUM) != 25 or len(COMMITTED_EVENT_DESCRIPTORS) != 25:
+if len(_COMMITTED_ENUM) != 24 or len(COMMITTED_EVENT_DESCRIPTORS) != 24:
     raise RuntimeError(
-        "Protocol v3 committed projection map must contain exact 25 types"
+        "Protocol v3 committed projection map must contain exact 24 types"
     )
 
 

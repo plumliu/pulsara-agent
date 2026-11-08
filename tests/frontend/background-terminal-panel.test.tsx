@@ -143,10 +143,6 @@ describe('BackgroundTerminalPanel PR03 controls', () => {
       publicMessage: '进程已结束，但资源清理失败。',
       userControl: {
         accepted: true, execution: 'FINISHED',
-        feedback: {
-          canonicalStatus: 'ACCEPTED', inclusionStatus: 'INCLUDED', ownerAvailability: 'AVAILABLE',
-          transportInvocationAttempted: true, transportInvocationSucceeded: true,
-        },
       },
     }));
     const onOpenProcess = vi.fn();
@@ -173,7 +169,7 @@ describe('BackgroundTerminalPanel PR03 controls', () => {
       sessionId: 'session-a', hostSessionId: 'host-a', targetId: 'process-a',
     })));
     expect(screen.getByText('进程已结束，但资源清理失败。')).toBeTruthy();
-    expect(screen.getByText(/已编入原轮次模型请求/)).toBeTruthy();
+    expect(screen.queryByText(/已编入原轮次模型请求/)).toBeNull();
     expect(onOpenProcess).not.toHaveBeenCalled();
   });
 
@@ -397,27 +393,17 @@ it('keeps UNKNOWN as query-only unless the user explicitly requests another stop
   expect(props.terminateProcess.mock.calls[0][0].commandId).not.toBe(props.terminateProcess.mock.calls[1][0].commandId);
 });
 
-it('continues prior feedback after another physical stop and does not overwrite the new operation', async () => {
+it('does not poll after the physical control result has finished', async () => {
   vi.useFakeTimers();
-  const oldFeedback = deferred<import('../../frontend/lib/runtime-adapter').UserControlQueryResult>();
   const props = panelProps();
-  props.terminateProcess.mockImplementationOnce(async reference => ({ ...finishedReceipt(reference, '首次物理结果已确认'),
-    userControl: { accepted: true, execution: 'FINISHED', feedback: {
-      canonicalStatus: 'ACCEPTED', inclusionStatus: 'PENDING', ownerAvailability: 'AVAILABLE',
-    } } }));
-  props.queryControl.mockImplementation(() => oldFeedback.promise);
+  props.terminateProcess.mockImplementationOnce(async reference => finishedReceipt(reference, '物理结果已确认'));
   render(<BackgroundTerminalPanel {...props} />);
   await act(async () => {});
   fireEvent.click(screen.getByRole('button', { name: '终止 printf long-output' }));
   await act(async () => {});
-  await act(async () => vi.advanceTimersByTimeAsync(1000));
-  fireEvent.click(screen.getByRole('button', { name: '终止 printf long-output' }));
-  await act(async () => {});
-  expect(props.terminateProcess).toHaveBeenCalledTimes(2);
-  expect(screen.getByText('上次终止操作反馈仍在确认')).toBeTruthy();
-  await act(async () => oldFeedback.resolve({ status: 'FOUND', receipt: finishedReceipt(props.terminateProcess.mock.calls[0][0], '旧反馈已确认') }));
-  expect(screen.queryByText('旧反馈已确认')).toBeNull();
-  expect(screen.getByText('正在终止')).toBeTruthy();
+  await act(async () => vi.advanceTimersByTimeAsync(3000));
+  expect(screen.getByText('物理结果已确认')).toBeTruthy();
+  expect(props.queryControl).not.toHaveBeenCalled();
 });
 
 it('does not resurrect an operation whose result observation was explicitly ended', async () => {

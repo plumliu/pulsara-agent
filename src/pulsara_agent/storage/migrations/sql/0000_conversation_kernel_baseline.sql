@@ -386,7 +386,6 @@ CREATE TABLE pulsara_v3.transcript_entries (
     entry_kind text NOT NULL CHECK (entry_kind IN (
         'USER_MESSAGE', 'USER_STEER', 'ASSISTANT_MESSAGE',
         'ASSISTANT_TOOL_REQUEST', 'TOOL_RESULT', 'TERMINAL_OBSERVATION',
-        'USER_CONTROL_FEEDBACK',
         'PLAN_CONTINUATION'
     )),
     context_binding_revision_id text,
@@ -1602,7 +1601,7 @@ CREATE TABLE pulsara_v3.agent_events (
         'CapabilityDecisionAccepted', 'InteractionDecisionAccepted', 'ToolAttemptAccepted',
         'ToolRemoteIdentityPublished', 'PromptQueued', 'PromptConsumed', 'PromptCancelled',
         'PromptRejected', 'CompactionAdopted',
-        'TerminalObservationAccepted', 'UserControlFeedbackAccepted',
+        'TerminalObservationAccepted',
         'PlanWorkflowEntered',
         'PlanQuestionAsked', 'PlanQuestionAnswered', 'PlanDraftSubmitted',
         'PlanDraftDecisionAccepted', 'PlanWorkflowExited',
@@ -1653,7 +1652,7 @@ CREATE TABLE pulsara_v3.agent_events (
     CHECK (
         (event_type IN ('UserMessageAccepted', 'AssistantMessageAccepted',
             'AssistantToolRequestAccepted', 'ToolResultAccepted', 'UserSteerAccepted',
-            'TerminalObservationAccepted', 'UserControlFeedbackAccepted')
+            'TerminalObservationAccepted')
             AND subject_entry_id IS NOT NULL) OR
         (event_type IN ('TurnCompleted', 'TurnInterrupted') AND subject_turn_id IS NOT NULL) OR
         (event_type IN ('CapabilityDecisionAccepted', 'InteractionDecisionAccepted')

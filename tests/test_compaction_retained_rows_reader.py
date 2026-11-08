@@ -336,7 +336,6 @@ def test_snapshot_hydrates_only_body_and_exact_joins_its_owner():
     [
         ("PLAN_CONTINUATION", None),
         ("TERMINAL_OBSERVATION", "CELL_OUTPUT"),
-        ("USER_CONTROL_FEEDBACK", None),
         ("USER_STEER", "HUMAN_STEER"),
         ("USER_MESSAGE", "AGENT_INSTRUCTION"),
     ],

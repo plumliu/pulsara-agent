@@ -56,7 +56,8 @@ enum CommittedEventType {
   PLAN_DRAFT_DECISION_ACCEPTED = 32;
   PLAN_WORKFLOW_EXITED = 33;
   PLAN_CONTINUATION_ACCEPTED = 34;
-  USER_CONTROL_FEEDBACK_ACCEPTED = 35;
+  reserved 35;
+  reserved "USER_CONTROL_FEEDBACK_ACCEPTED";
 }
 
 enum LiveEventType {
@@ -99,7 +100,8 @@ enum EntryKind {
   TOOL_RESULT = 5;
   TERMINAL_OBSERVATION = 6;
   PLAN_CONTINUATION = 7;
-  USER_CONTROL_FEEDBACK = 9;
+  reserved 9;
+  reserved "USER_CONTROL_FEEDBACK";
 }
 
 enum PermissionMode {
@@ -900,20 +902,6 @@ message ProcessControlResult {
   optional bool group_alive = 5;
 }
 
-message UserControlFeedbackState {
-  string canonical_status = 1;
-  string inclusion_status = 2;
-  string owner_availability = 3;
-  string reason = 4;
-  string target_root_turn_id = 5;
-  string entry_id = 6;
-  string context_binding_revision_id = 7;
-  optional uint64 model_call_index = 8;
-  bool transport_invocation_attempted = 9;
-  optional bool transport_invocation_succeeded = 10;
-  string transport_detail = 11;
-}
-
 message UserControlOutcome {
   UserControlOperation operation = 1;
   string session_id = 2;
@@ -923,7 +911,8 @@ message UserControlOutcome {
   UserControlExecution execution = 6;
   RootControlResult root = 7;
   ProcessControlResult process = 9;
-  UserControlFeedbackState feedback = 11;
+  reserved 11;
+  reserved "feedback";
   CodeModeControlResult cell = 12;
 }
 

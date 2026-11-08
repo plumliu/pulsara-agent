@@ -1615,7 +1615,6 @@ def test_compaction_cut_lineage_uses_full_history_materialization_floor() -> Non
                     plan_workflow_fact=shared_fact,
                     plan_handoff_fact=shared_fact,
                     previous_turn_outcome_fact=shared_fact,
-                    tool_observation_freshness_fact=shared_fact,
                 ),
                 replay_manifest_cut=SimpleNamespace(manifests=()),
             )
@@ -2318,7 +2317,7 @@ def test_round5b_tool_groups_pair_reused_call_ids_with_exact_request() -> None:
 
 
 def test_round5b_architecture_and_oracle_are_exact() -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 25
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 24
     assert len(LIVE_EVENT_TYPES) == 20
     assert not {"TerminalMonitorOpened", "TerminalMonitorObservation", "TerminalMonitorClosed"} & set(LIVE_EVENT_TYPES)
     assert len(SUBJECT_SLOTS) == 8

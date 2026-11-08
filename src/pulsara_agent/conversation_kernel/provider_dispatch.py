@@ -15,9 +15,6 @@ from threading import Lock
 from time import monotonic
 from typing import Awaitable, Callable, Protocol
 
-from pulsara_agent.capability.change_observation import FrozenCapabilityChange
-
-
 from pulsara_agent.conversation_kernel.blob import (
     PostgresCanonicalBlobStore,
 )
@@ -178,7 +175,6 @@ from pulsara_agent.model_input.contracts import (
     ContextSourceAbsenceKind,
     ContextSourceCandidate,
     ContextSourceKind,
-    ContextRenderMode,
     FrozenCanonicalCompileSnapshot,
     CanonicalModelInputIdentity,
     CanonicalModelInputSnapshot,
@@ -1580,10 +1576,7 @@ class ProviderDispatchCoordinator:
         maximum_input_tokens_per_call: int | None,
         workspace_resolver: SessionWorkspaceResolver,
         compaction_owner: HostCompactionRuntimeOwner | None,
-        capability_change_reader: Callable[[], Awaitable[FrozenCapabilityChange | None]]
-        | None = None,
-        capability_change_installed: Callable[[FrozenCapabilityChange], Awaitable[None]]
-        | None = None,
+        take_user_actions: Callable[[], Awaitable[str | None]] | None = None,
     ) -> None:
         self._repository = repository
         self._writer_lease = writer_lease
@@ -1609,8 +1602,25 @@ class ProviderDispatchCoordinator:
             deadline_factory=deadline_factory,
         )
         self._compaction_owner = compaction_owner
-        self._capability_change_reader = capability_change_reader
-        self._capability_change_installed = capability_change_installed
+        self._take_user_actions = take_user_actions
+
+    async def _take_user_actions_for_preparation(
+        self,
+        *,
+        scope: ModelInputScopeKind,
+        semantic_only: bool,
+        compaction_candidate_family: bool,
+        noninstallable_preparation: bool,
+    ) -> str | None:
+        if (
+            self._take_user_actions is None
+            or scope is not ModelInputScopeKind.ROOT
+            or semantic_only
+            or compaction_candidate_family
+            or noninstallable_preparation
+        ):
+            return None
+        return await self._take_user_actions()
 
     def _canonical_deadline(self) -> float:
         return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
@@ -2347,10 +2357,11 @@ class ProviderDispatchCoordinator:
                     retained_source,
                 )
             try:
-                capability_change = (
-                    await self._capability_change_reader()
-                    if self._capability_change_reader is not None
-                    else None
+                user_actions = await self._take_user_actions_for_preparation(
+                    scope=identity.conversation_scope_kind,
+                    semantic_only=semantic_only,
+                    compaction_candidate_family=_compaction_candidate_family,
+                    noninstallable_preparation=_noninstallable_preparation,
                 )
                 frozen_sources = await self._io.run(
                     self._context_source_collector.freeze_non_trigger_sources,
@@ -2360,7 +2371,7 @@ class ProviderDispatchCoordinator:
                     skill_dispatch_view=skill_view,
                     skill_owner_snapshot=skill_owner,
                     mcp_catalog_snapshot=mcp_owner.catalog_snapshot,
-                    capability_change=capability_change,
+                    user_actions=user_actions,
                     hook_context_estimator=(
                         None
                         if semantic_only or not include_hook_context
@@ -4336,6 +4347,46 @@ class ProviderDispatchCoordinator:
             memory_context=dispatch.memory_context,
         )
 
+    async def measure_without_user_actions(
+        self,
+        dispatch: PreparedProviderDispatch,
+        *,
+        deadline: float,
+    ) -> PreparedWireMeasurementDecision | None:
+        """Quote the same frozen preparation without its optional new notice."""
+        candidate = self.wire_candidate_for_dispatch(dispatch)
+        if not any(
+            item.source_kind is ContextSourceKind.USER_ACTIONS and item.included
+            for item in candidate.semantic_input.source_decisions
+        ):
+            return None
+        request = candidate.compile_request
+        assert request is not None and candidate.planning is not None
+        compiler = (
+            self._compiler.compile_installed_append
+            if candidate.cold_semantic is None
+            else self._compiler.compile_new_epoch
+        )
+        append = await self._io.run(
+            compiler,
+            request,
+            planning=candidate.planning,
+            deadline_monotonic=deadline,
+            source_render_floors=((ContextSourceKind.USER_ACTIONS, None),),
+            wire_selection=candidate.append_result.compiled_input,
+        )
+        cold = (
+            None if candidate.cold_semantic is None
+            else replace(candidate.cold_semantic, compiled_result=append)
+        )
+        reduced = replace(
+            candidate,
+            semantic_input=append.compiled_input,
+            append_result=append,
+            cold_semantic=cold,
+        )
+        return await self.measure_prepared_wire_candidate(reduced, deadline=deadline)
+
     def bind_selected_provider_dispatch(
         self,
         *,
@@ -4928,25 +4979,6 @@ class ProviderDispatchCoordinator:
                 execution=execution,
             )
             installed = True
-            change = dispatch.sources.capability_change
-            if (
-                change is not None
-                and self._capability_change_installed is not None
-                and any(
-                    decision.source_kind is ContextSourceKind.CAPABILITY_CHANGE
-                    and decision.selected_mode is ContextRenderMode.FULL
-                    for decision in compiled_input.source_decisions
-                )
-            ):
-                # Join this tiny process-local update even if transport is cancelled.
-                # No delivery acknowledgement or durable notification job is created.
-                task = asyncio.create_task(self._capability_change_installed(change))
-                while not task.done():
-                    try:
-                        await asyncio.shield(task)
-                    except asyncio.CancelledError:
-                        continue
-                task.result()
             self._tools.install_provider_input_tool_result_deliveries(
                 permit=permit,
                 canonical_facts=canonical_facts,
@@ -5272,10 +5304,6 @@ def _require_compaction_family_candidate_read(
             != first_facts.approved_plan_materialization_fact
         )
         or (facts.previous_turn_outcome_fact != first_facts.previous_turn_outcome_fact)
-        or (
-            facts.tool_observation_freshness_fact
-            != first_facts.tool_observation_freshness_fact
-        )
     ):
         raise StructuredModelInputCompileError(
             ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
@@ -5509,7 +5537,6 @@ def _prospective_provider_input_suffix_compile_snapshot(
         "plan_handoff_fact": base.plan_handoff_fact,
         "approved_plan_materialization_fact": (base.approved_plan_materialization_fact),
         "previous_turn_outcome_fact": base.previous_turn_outcome_fact,
-        "tool_observation_freshness_fact": (base.tool_observation_freshness_fact),
     }
     provisional = FrozenCanonicalCompileSnapshot.__new__(FrozenCanonicalCompileSnapshot)
     for name, value in values.items():

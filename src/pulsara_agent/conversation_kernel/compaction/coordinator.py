@@ -621,8 +621,6 @@ def _compaction_cut_lineage_exactly_joins(
         and successor_facts.plan_handoff_fact == source_facts.plan_handoff_fact
         and successor_facts.previous_turn_outcome_fact
         == source_facts.previous_turn_outcome_fact
-        and successor_facts.tool_observation_freshness_fact
-        == source_facts.tool_observation_freshness_fact
     )
 
 

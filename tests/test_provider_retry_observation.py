@@ -149,6 +149,7 @@ def test_provider_cancellation_precedes_blocked_cell_join(operation):
             await blocked_cell_join.wait()
         host = SimpleNamespace(
             _lock=asyncio.Lock(), _close_async_lock=asyncio.Lock(), _closed=False,
+            _pending_workspace_recreated=None, _pending_process_controls={},
             _active_task=task, _active_turn_id=turn_id,
             _active_cancellation_intent=ActiveTurnCancellationIntent(turn_id, ModelInputScopeKind.ROOT),
             _external_new_turn_cancellation_intent=None,

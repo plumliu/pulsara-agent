@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from google.protobuf import descriptor_pb2
 
 from pulsara_agent.conversation_kernel.host import (
     KernelCommandOutcome,
@@ -365,6 +366,27 @@ def test_monitor_protocol_product_is_removed():
     assert 'MonitorControlResult' not in wire.DESCRIPTOR.message_types_by_name
     assert 'monitor' not in wire.UserControlOutcome.DESCRIPTOR.fields_by_name
     assert all('MONITOR' not in value.name for value in wire.LiveEventType.DESCRIPTOR.values)
+
+
+def test_user_control_feedback_protocol_is_removed_and_numbers_are_reserved():
+    schema = descriptor_pb2.FileDescriptorProto.FromString(wire.DESCRIPTOR.serialized_pb)
+    enums = {item.name: item for item in schema.enum_type}
+    messages = {item.name: item for item in schema.message_type}
+    assert 'UserControlFeedbackState' not in messages
+    outcome = messages['UserControlOutcome']
+    assert 'feedback' not in {field.name for field in outcome.field}
+    assert 'feedback' in outcome.reserved_name
+    assert any(item.start <= 11 < item.end for item in outcome.reserved_range)
+    assert {field.name: field.number for field in outcome.field}['process'] == 9
+    assert {field.name: field.number for field in outcome.field}['cell'] == 12
+    for enum_name, removed_name, number in (
+        ('EntryKind', 'USER_CONTROL_FEEDBACK', 9),
+        ('CommittedEventType', 'USER_CONTROL_FEEDBACK_ACCEPTED', 35),
+    ):
+        enum = enums[enum_name]
+        assert removed_name not in {item.name for item in enum.value}
+        assert removed_name in enum.reserved_name
+        assert any(item.start <= number <= item.end for item in enum.reserved_range)
 
 
 def test_pr02_protocol_carries_exact_result_queue_and_prompt_delivery_identity() -> None:

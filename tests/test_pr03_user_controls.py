@@ -2,8 +2,8 @@ from __future__ import annotations
 from pulsara_agent.identity import derive_id
 
 import asyncio
-from dataclasses import replace
 from types import SimpleNamespace
+from time import monotonic
 
 from pulsara_agent.conversation_kernel.cancellation import (
     ActiveTurnCancellationIntent,
@@ -14,16 +14,14 @@ from pulsara_agent.conversation_kernel.compaction.runtime import (
 from pulsara_agent.conversation_kernel.host import KernelHostSession
 from pulsara_agent.conversation_kernel.user_control import (
     ControlQueryStatus,
-    FeedbackCanonicalStatus,
-    FeedbackInclusionStatus,
-    FeedbackOwnerAvailability,
-    UserControlFeedbackState,
     UserControlOperation,
     UserControlRequest,
     UserControlTarget,
     UserControlTargetKind,
 )
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
+from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
+from tests.support.model_config import test_model_runtime
 
 
 class _Clock:
@@ -52,6 +50,8 @@ class _Repository:
 def _host(clock: _Clock) -> KernelHostSession:
     host = object.__new__(KernelHostSession)
     host._writer_renewal_failure = None
+    host._model_runtime = test_model_runtime()
+    host._credential_boundary = ProcessCredentialBoundary()
     host.session_id = 'session:5dyf7lfzp7z22pphjtostkgsjm'
     host.host_session_id = 'host:gubylb5v44ganghpuxoqfvlrji'
     host._control_monotonic = clock
@@ -60,24 +60,21 @@ def _host(clock: _Clock) -> KernelHostSession:
     host._code_mode = SimpleNamespace(mark_turn_stopped=lambda _turn: None,
                                      stop_turn=lambda _turn: asyncio.sleep(0), index=lambda: ())
     host._user_control_attempts = {}
+    host._pending_workspace_recreated = None
+    host._pending_process_controls = {}
+    host.workspace = SimpleNamespace(workspace_root="/tmp/workspace")
     host._lock = asyncio.Lock()
     host._active_task = None
     host._active_turn_id = None
-    host._control_completion_sealed_turn_id = None
-    host._control_completion_write_reservation = None
-    host._control_completion_seal_changed = asyncio.Event()
-    host._control_completion_seal_changed.set()
     host._compaction = HostCompactionRuntimeOwner()
     host._compaction_write_reservations = {}
-    host._root_compaction_write_changed = asyncio.Event()
-    host._root_compaction_write_changed.set()
     host._active_cancellation_intent = None
     host._pending_root_successor = None
     host._closing = False
     host._closed = False
     host._io = _IO()
     host.repository = _Repository()
-    host._canonical_deadline = lambda: 10_000.0
+    host._canonical_deadline = lambda: monotonic() + 10
     return host
 
 
@@ -200,7 +197,7 @@ def test_pr03_background_control_terminates_the_exact_process() -> None:
         class _Tools:
 
             def list_background_terminal_processes(self):
-                return [SimpleNamespace(process_id='process:34npgaljkboupr4n456vrmou6a')]
+                return [SimpleNamespace(process_id='process:34npgaljkboupr4n456vrmou6a', origin=SimpleNamespace(conversation_scope_kind='ROOT', session_id=host.session_id))]
 
             def terminate_background_terminal_process(self, process_id: str):
                 order.append(f"process:{process_id}")
@@ -223,76 +220,17 @@ def test_pr03_background_control_terminates_the_exact_process() -> None:
          admission_deadline_ms=host.control_admission_deadline_ms())
         assert accepted.status == "PENDING"
         assert accepted.user_control is not None
-        assert accepted.user_control.feedback is not None
-        assert accepted.user_control.feedback.canonical_status == "NOT_REQUIRED"
         attempt = host._user_control_attempts[command_id]
         assert attempt.task is not None
         await attempt.task
         assert order == ['process:process:34npgaljkboupr4n456vrmou6a']
         assert attempt.outcome.status == "SUCCEEDED"
         assert attempt.outcome.user_control is not None
-
-
-    asyncio.run(scenario())
-
-
-def test_pr03_root_completion_seal_prevents_late_feedback_binding() -> None:
-    async def scenario() -> None:
-        host = _host(_Clock())
-        active_release = asyncio.Event()
-        active = asyncio.create_task(active_release.wait())
-        host._active_task = active
-        host._active_turn_id = 'turn:74y74rvr2pht5lydgxvy57nxgq'
-
-
-        class _Tools:
-
-            def list_background_terminal_processes(self):
-                return [SimpleNamespace(process_id='process:34npgaljkboupr4n456vrmou6a')]
-
-            def terminate_background_terminal_process(self, _process_id: str):
-                return SimpleNamespace(
-                    disposition=SimpleNamespace(value="TERMINATION_COMPLETED"),
-                    result=SimpleNamespace(
-                        status=SimpleNamespace(value="killed"), exit_code=-15
-                    ),
-                    physical_state="PHYSICALLY_JOINED",
-                    group_alive=False,
-                )
-
-        host._tools = _Tools()
-        assert not await host._coordinate_user_control_feedback_at_root_completion(
-            'turn:74y74rvr2pht5lydgxvy57nxgq'
-        )
-        assert host._control_completion_sealed_turn_id == 'turn:74y74rvr2pht5lydgxvy57nxgq'
-
-        command_id = _command(host, "sealed-root")
-        accepted = await host.request_terminate_background_process(
-            command_id=command_id,
-            expected_session_id=host.session_id,
-            expected_host_session_id=host.host_session_id,
-            process_id='process:34npgaljkboupr4n456vrmou6a',
-         admission_deadline_ms=host.control_admission_deadline_ms())
-        assert accepted.user_control is not None
-        assert accepted.user_control.feedback is not None
-        assert accepted.user_control.feedback.target_root_turn_id is None
-        assert accepted.user_control.feedback.reason == "TARGET_CLOSED"
-        attempt = host._user_control_attempts[command_id]
-        assert attempt.task is not None
-        await attempt.task
-        assert attempt.outcome.user_control is not None
-        assert attempt.outcome.user_control.feedback is not None
-        assert attempt.outcome.user_control.feedback.target_root_turn_id is None
-        assert attempt.outcome.user_control.feedback.reason == "TARGET_CLOSED"
-
-        await host._settle_user_control_feedback_root_completion(
-            'turn:74y74rvr2pht5lydgxvy57nxgq', turn_completed=False
-        )
-        assert host._control_completion_sealed_turn_id is None
-        active_release.set()
-        await active
+        assert "process_control" in await host.take_user_actions()
 
     asyncio.run(scenario())
+
+
 
 
 def test_pr03_already_terminal_background_control_is_a_queryable_no_op() -> None:
@@ -303,7 +241,7 @@ def test_pr03_already_terminal_background_control_is_a_queryable_no_op() -> None
         class _Tools:
 
             def list_background_terminal_processes(self):
-                return [SimpleNamespace(process_id='process:qmi3ybigp4h4iv3tmaqmlm64am')]
+                return [SimpleNamespace(process_id='process:qmi3ybigp4h4iv3tmaqmlm64am', origin=SimpleNamespace(conversation_scope_kind='ROOT', session_id=host.session_id))]
 
             def terminate_background_terminal_process(self, _process_id: str):
                 return SimpleNamespace(
@@ -330,8 +268,7 @@ def test_pr03_already_terminal_background_control_is_a_queryable_no_op() -> None
         assert attempt.outcome.public_code == "CONTROL_ALREADY_TERMINAL"
         assert attempt.outcome.user_control is not None
         assert attempt.outcome.user_control.accepted is False
-        assert attempt.outcome.user_control.feedback is not None
-        assert attempt.outcome.user_control.feedback.reason == "NO_NEW_CONTROL_EFFECT"
+        assert await host.take_user_actions() is None
         assert (
             await host.query_control_command(attempt.request)
         ).status is ControlQueryStatus.FOUND
@@ -339,50 +276,6 @@ def test_pr03_already_terminal_background_control_is_a_queryable_no_op() -> None
     asyncio.run(scenario())
 
 
-def test_pr03_attempt_retention_waits_for_feedback_owner_and_restarts_at_terminal() -> (
-    None
-):
-    async def scenario() -> None:
-        clock = _Clock()
-        host = _host(clock)
-        request = UserControlRequest(
-            UserControlOperation.TERMINATE_BACKGROUND_PROCESS,
-            _command(host, "feedback-retention"),
-            host.session_id,
-            host.host_session_id,
-            UserControlTarget(UserControlTargetKind.BACKGROUND_PROCESS, 'process:34npgaljkboupr4n456vrmou6a'),
-         admission_deadline_ms=host.control_admission_deadline_ms())
-        feedback = UserControlFeedbackState(
-            FeedbackCanonicalStatus.PENDING,
-            FeedbackInclusionStatus.PENDING,
-            FeedbackOwnerAvailability.AVAILABLE,
-            target_root_turn_id='turn:74y74rvr2pht5lydgxvy57nxgq',
-        )
-        outcome = host._pending_control_outcome(request, feedback=feedback)
-        attempt = host._install_control_attempt_locked(request, outcome)
-        host._finish_control_attempt_locked(
-            attempt, replace(outcome, status="SUCCEEDED")
-        )
-        clock.seconds += 7_200
-        retained = await host.query_control_command(request)
-        assert retained.status is ControlQueryStatus.FOUND
-        async with host._lock:
-            host._replace_control_feedback_locked(
-                attempt,
-                replace(
-                    feedback,
-                    canonical_status=FeedbackCanonicalStatus.FAILED,
-                    inclusion_status=FeedbackInclusionStatus.NOT_APPLICABLE,
-                    reason="TARGET_CLOSED",
-                ),
-            )
-        assert attempt.retain_until_monotonic_ms is not None
-        assert attempt.retain_until_monotonic_ms > int(clock.seconds * 1000)
-        assert (
-            await host.query_control_command(request)
-        ).status is ControlQueryStatus.FOUND
-
-    asyncio.run(scenario())
 
 
 def test_pr03_query_requires_the_exact_control_value() -> None:

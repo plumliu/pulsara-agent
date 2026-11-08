@@ -323,7 +323,6 @@ def test_fresh_plan_upper_bounds_actual_source_collection(
         FrozenCanonicalCompileSnapshot,
         FrozenPlanHandoffCompileFact,
         FrozenPlanWorkflowCompileFact,
-        build_tool_observation_freshness_fact,
         canonical_compile_snapshot_fingerprint,
         plan_handoff_compile_fact_fingerprint,
         plan_workflow_compile_fact_fingerprint,
@@ -445,14 +444,6 @@ def test_fresh_plan_upper_bounds_actual_source_collection(
             run_permission_snapshot=permission,
             plan_workflow_fact=workflow,
             plan_handoff_fact=handoff,
-            tool_observation_freshness_fact=build_tool_observation_freshness_fact(
-                session_id=identity.session_id,
-                workspace_id="workspace:wdl6b3mtrkghwnvjo4an3ekbau",
-                current_turn_id=identity.turn_id,
-                current_scope_kind=ModelInputScopeKind.ROOT,
-                current_initial_entry_sequence=1,
-                immediate_predecessor_turn_id="turn:pn7ukdmpjtk6dicxnp2wg32nkq",
-            ),
         )
         facts = FrozenCanonicalCompileSnapshot(
             **values,

@@ -387,7 +387,7 @@ def test_tool_result_wire_has_no_citation_handle_or_legacy_null_slot() -> None:
 
 
 def test_round7_1_architecture_and_oracle_guards() -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 25
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 24
     assert len(LIVE_EVENT_TYPES) == 20
     assert len(SUBJECT_SLOTS) == 8
     assert len(APPEND_GUARDS) == 1

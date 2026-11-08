@@ -30,10 +30,6 @@ from pulsara_agent.conversation_kernel.repository_errors import (
     ConversationKernelConflict,
 )
 
-from pulsara_agent.ports.user_control_feedback import (
-    USER_CONTROL_FEEDBACK_MEDIA_TYPE,
-    project_user_control_feedback_for_provider,
-)
 from pulsara_agent.conversation_kernel.prompt_content import (
     PROMPT_BODY_MEDIA_TYPE,
     canonical_prompt_body_bytes,
@@ -63,7 +59,6 @@ from pulsara_agent.model_input.contracts import (
     FrozenPlanHandoffCompileFact,
     FrozenPlanWorkflowCompileFact,
     FrozenPreviousTurnOutcomeCompileFact,
-    FrozenToolObservationFreshnessCompileFact,
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
     LateToolOutcomeObservation,
@@ -84,7 +79,6 @@ from pulsara_agent.model_input.contracts import (
     approved_plan_materialization_fingerprint,
     provider_input_item_fingerprint,
     previous_turn_outcome_fingerprint,
-    tool_observation_freshness_fingerprint,
 )
 from pulsara_agent.model_input.continuity import ProviderInputContinuityScope
 from pulsara_agent.model_input.provider_replay import (
@@ -134,7 +128,6 @@ from pulsara_agent.primitives.tool_observation import (
     ToolObservationDurationDisposition,
     ToolObservationOrigin,
     canonical_utc_timestamp,
-    provider_visible_turn_ref,
     tool_observation_timing_fingerprint,
 )
 from pulsara_agent.primitives.tool_result_projection import (
@@ -396,7 +389,7 @@ class CanonicalProviderInputReader:
                             CASE
                               WHEN entry_kind IN (
                                   'USER_MESSAGE', 'USER_STEER',
-                                  'TERMINAL_OBSERVATION', 'USER_CONTROL_FEEDBACK',
+                                  'TERMINAL_OBSERVATION',
                                   'PLAN_CONTINUATION'
                               ) THEN content_size
                               WHEN entry_kind = 'TOOL_RESULT'
@@ -751,7 +744,7 @@ class CanonicalProviderInputReader:
                 )
 
             scope_kind = str(binding["conversation_scope_kind"])
-            previous_turn_outcome_fact, freshness_fact = self._load_round7_scope_facts(
+            previous_turn_outcome_fact = self._load_previous_turn_outcome(
                 connection,
                 cut=cut,
                 workspace_id=str(binding["workspace_id"]),
@@ -928,7 +921,6 @@ class CanonicalProviderInputReader:
                         "USER_MESSAGE",
                         "USER_STEER",
                         "TERMINAL_OBSERVATION",
-                        "USER_CONTROL_FEEDBACK",
                         "TOOL_RESULT",
                         "PLAN_CONTINUATION",
                     )
@@ -1080,39 +1072,6 @@ class CanonicalProviderInputReader:
                             call_ordinal=int(old_call["tool_call_ordinal"]),
                             result=result,
                         )
-                    continue
-                if kind == "USER_CONTROL_FEEDBACK":
-                    content = self._read_content(
-                        _with_inline_payload(row, entry_payloads[entry_id]),
-                        deadline_monotonic=deadline_monotonic,
-                    )
-                    canonical_bytes += len(content)
-                    if (
-                        str(row["content_media_type"])
-                        != USER_CONTROL_FEEDBACK_MEDIA_TYPE
-                        or str(row["content_codec"]) != "utf-8"
-                    ):
-                        raise ConversationKernelConflict(
-                            "user control feedback descriptor is invalid"
-                        )
-                    try:
-                        text = project_user_control_feedback_for_provider(content)
-                    except ValueError as exc:
-                        raise ConversationKernelConflict(
-                            "user control feedback content is invalid"
-                        ) from exc
-                    items.append(
-                        ProviderInputItem(
-                            item_kind=ProviderInputItemKind.USER,
-                            source_entry_id=entry_id,
-                            source_entry_sequence=sequence,
-                            source_turn_id=str(row["turn_id"]),
-                            content=(LLMTextPart(text),),
-                            input_origin=(
-                                CanonicalInputOriginKind.USER_CONTROL_FEEDBACK
-                            ),
-                        )
-                    )
                     continue
                 if kind in ("USER_MESSAGE", "USER_STEER"):
                     prompt_row = _with_inline_payload(row, entry_payloads[entry_id])
@@ -1475,9 +1434,6 @@ class CanonicalProviderInputReader:
             object.__setattr__(
                 provisional, "previous_turn_outcome_fact", previous_turn_outcome_fact
             )
-            object.__setattr__(
-                provisional, "tool_observation_freshness_fact", freshness_fact
-            )
             object.__setattr__(provisional, "canonical_read_cut_fingerprint", "")
             compile_snapshot = FrozenCanonicalCompileSnapshot(
                 canonical_input=canonical_input,
@@ -1487,7 +1443,6 @@ class CanonicalProviderInputReader:
                 plan_handoff_fact=handoff_fact,
                 approved_plan_materialization_fact=approved_fact,
                 previous_turn_outcome_fact=previous_turn_outcome_fact,
-                tool_observation_freshness_fact=freshness_fact,
                 canonical_read_cut_fingerprint=(
                     canonical_compile_snapshot_fingerprint(provisional)
                 ),
@@ -2085,7 +2040,7 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
 
 
 
-    def _load_round7_scope_facts(
+    def _load_previous_turn_outcome(
         self,
         connection,
         *,
@@ -2093,10 +2048,7 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
         workspace_id: str,
         scope_kind: ModelInputScopeKind,
         current_initial_entry_sequence: int,
-    ) -> tuple[
-        FrozenPreviousTurnOutcomeCompileFact | None,
-        FrozenToolObservationFreshnessCompileFact,
-    ]:
+    ) -> FrozenPreviousTurnOutcomeCompileFact | None:
         predecessor = connection.execute(
             """
             SELECT e.turn_id, e.entry_sequence, t.workspace_id, t.status,
@@ -2120,45 +2072,14 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
         predecessor_turn_id = (
             None if predecessor is None else str(predecessor["turn_id"])
         )
-        freshness_values = {
-            "session_id": cut.session_id,
-            "workspace_id": workspace_id,
-            "current_turn_id": cut.turn_id,
-            "current_scope_kind": scope_kind,
-            "current_turn_ref": provider_visible_turn_ref(
-                session_id=cut.session_id, turn_id=cut.turn_id
-            ),
-            "current_initial_entry_sequence": current_initial_entry_sequence,
-            "immediate_predecessor_turn_id": predecessor_turn_id,
-            "immediate_predecessor_turn_ref": (
-                None
-                if predecessor_turn_id is None
-                else provider_visible_turn_ref(
-                    session_id=cut.session_id, turn_id=predecessor_turn_id
-                )
-            ),
-            "classification_contract": "pulsara.tool-observation-freshness.v1",
-        }
-        provisional_freshness = FrozenToolObservationFreshnessCompileFact.__new__(
-            FrozenToolObservationFreshnessCompileFact
-        )
-        for name, value in freshness_values.items():
-            object.__setattr__(provisional_freshness, name, value)
-        object.__setattr__(provisional_freshness, "fact_fingerprint", "")
-        freshness = FrozenToolObservationFreshnessCompileFact(
-            **freshness_values,
-            fact_fingerprint=tool_observation_freshness_fingerprint(
-                provisional_freshness
-            ),
-        )
         if predecessor is None:
-            return None, freshness
+            return None
         if str(predecessor["workspace_id"]) != workspace_id:
             raise ConversationKernelConflict("previous-turn scope identity drifted")
         status = str(predecessor["status"])
         raw_reason = str(predecessor["terminal_reason"] or "")
         if status == "COMPLETED" or raw_reason.startswith("PLAN_FORCE_EXIT:"):
-            return None, freshness
+            return None
         if status != "INTERRUPTED" or predecessor["terminal_at"] is None:
             raise ConversationKernelConflict(
                 "previous turn is neither completed nor terminal interrupted"
@@ -2283,14 +2204,9 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
         for name, value in previous_values.items():
             object.__setattr__(provisional_previous, name, value)
         object.__setattr__(provisional_previous, "fact_fingerprint", "")
-        return (
-            FrozenPreviousTurnOutcomeCompileFact(
-                **previous_values,
-                fact_fingerprint=previous_turn_outcome_fingerprint(
-                    provisional_previous
-                ),
-            ),
-            freshness,
+        return FrozenPreviousTurnOutcomeCompileFact(
+            **previous_values,
+            fact_fingerprint=previous_turn_outcome_fingerprint(provisional_previous),
         )
 
     def _load_tool_state(
@@ -2590,9 +2506,6 @@ def _require_retained_request_row(
             origin = _canonical_input_origin(row, scope_kind=scope_kind)
         except (TypeError, ValueError) as error:
             raise ConversationKernelConflict("snapshot retained input origin is invalid") from error
-    elif kind == "USER_CONTROL_FEEDBACK":
-        item_kind = ProviderInputItemKind.USER
-        origin = CanonicalInputOriginKind.USER_CONTROL_FEEDBACK
     elif kind == "PLAN_CONTINUATION":
         item_kind = ProviderInputItemKind.PLAN_CONTINUATION
         origin = CanonicalInputOriginKind.PLAN_CONTINUATION
