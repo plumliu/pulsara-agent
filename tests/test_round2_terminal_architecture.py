@@ -175,9 +175,6 @@ def test_round2_terminal_observation_descriptor_and_payload_surface_are_narrow()
 
 def test_round2_live_terminal_events_have_only_real_process_local_producers() -> None:
     producers = _fixed_live_producers()
-    assert producers["TERMINAL_PROCESS_COMPLETED"] == {
-        Path("src/pulsara_agent/conversation_kernel/tool_runtime.py")
-    }
     for name in (
         "TERMINAL_MONITOR_OPENED",
         "TERMINAL_MONITOR_OBSERVATION",

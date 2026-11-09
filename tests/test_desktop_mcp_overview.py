@@ -9,6 +9,9 @@ import yaml
 
 from pulsara_agent import mcp_config
 from pulsara_agent.desktop_app import session_controller as controller_module
+from pulsara_agent.desktop_app import capability_projection as projection_module
+from pulsara_agent.desktop_app import session_capabilities as capabilities_module
+from pulsara_agent.desktop_app import skill_inventory as inventory_module
 from pulsara_agent.desktop_app.session_controller import LocalSessionController
 
 
@@ -20,7 +23,7 @@ def config(tmp_path, monkeypatch):
         "      type: streamable_http\n      endpoint: https://docs.example/mcp\n"
     )
     monkeypatch.setenv("PULSARA_HOME", str(tmp_path))
-    monkeypatch.setattr(controller_module, "_user_plugins_payload", lambda *_: {"status": "ready", "items": [], "details": []})
+    monkeypatch.setattr(projection_module, "_user_plugins_payload", lambda *_: {"status": "ready", "items": [], "details": []})
     return mcp_config.load_mcp_server_configs(user_config_path=path)[0]
 
 
@@ -92,7 +95,7 @@ def test_foreign_or_stale_owner_cannot_override_current_user_config(config, fore
 
 def test_disabled_current_config_wins_over_loaded_observation(config, tmp_path):
     path = tmp_path / "disabled.yaml"
-    entry = controller_module.config_to_entry(config)
+    entry = projection_module.config_to_entry(config)
     entry["enabled"] = False
     path.write_text(yaml.safe_dump({"servers": {config.server_id: entry}}))
     disabled = mcp_config.load_mcp_server_configs(user_config_path=path)[0]
@@ -103,7 +106,7 @@ def test_disabled_current_config_wins_over_loaded_observation(config, tmp_path):
 
 def test_inventory_reads_all_loaded_owners_and_drops_retired_owner(config, monkeypatch):
     async def exercise():
-        monkeypatch.setattr(controller_module, "_inspect_user_skills", lambda: {"status": "ready", "items": [], "issues": [], "roots": [], "details": []})
+        monkeypatch.setattr(capabilities_module, "_inspect_user_skills", lambda: {"status": "ready", "items": [], "issues": [], "roots": [], "details": []})
         controller = object.__new__(LocalSessionController)
         controller._lock = asyncio.Lock()
         controller._operations = {}
@@ -189,14 +192,14 @@ def test_workspace_skill_target_is_exact_and_collisions_fail(tmp_path, monkeypat
     class Inventory:
         def inspect_loose_skills(self, **_kwargs):
             return {"status": "COMPLETE", "config_available": True, "items": [dict(item) for item in items]}, None, None
-    monkeypatch.setattr(controller_module, "LocalSkillManagementService", Inventory)
-    monkeypatch.setattr(controller_module, "_skill_removal_identity", lambda *_: None)
+    monkeypatch.setattr(inventory_module, "LocalSkillManagementService", Inventory)
+    monkeypatch.setattr(inventory_module, "_skill_removal_identity", lambda *_: None)
     observed = controller_module._inspect_loose_skill_management(LocalSkillInstallScope.WORKSPACE, tmp_path)
     assert observed["items"][0]["id"] == derive_id("skill", "ui-target", "agents", "one")
     assert controller_module._workspace_skill_path(observed, observed["items"][0]["id"]) == (tmp_path / "one").resolve()
     with pytest.raises(ValueError):
         controller_module._workspace_skill_path(observed, "agents:one")
-    monkeypatch.setattr(controller_module, "derive_id", lambda *_: "skill:" + "a" * 26)
+    monkeypatch.setattr(inventory_module, "derive_id", lambda *_: "skill:" + "a" * 26)
     with pytest.raises(ValueError, match="identity collision"):
         controller_module._inspect_loose_skill_management(LocalSkillInstallScope.WORKSPACE, tmp_path)
 
@@ -212,7 +215,7 @@ def test_readonly_skill_winners_use_source_name_and_reject_collisions(tmp_path, 
                 name=name, description="", skill_path=str(tmp_path / name / "SKILL.md"),
                 authoring_diagnostic_codes=(),
             ) for source, name in (("user", "one"), ("plugin", "two")))
-    monkeypatch.setattr(controller_module, "CompleteEffectiveSkillCatalogInspection", Catalog)
+    monkeypatch.setattr(projection_module, "CompleteEffectiveSkillCatalogInspection", Catalog)
     inspection = SimpleNamespace(mcp_tools=(), mcp_catalog=SimpleNamespace(servers=(), provider_name_collision_facts=()),
         mcp_configured_servers=(), skill_catalog=Catalog(), configured_active_skill_names=frozenset())
     kwargs = dict(session_id="session:" + "a" * 26, workspace_root=tmp_path, workspace_kind="project",
@@ -221,7 +224,7 @@ def test_readonly_skill_winners_use_source_name_and_reject_collisions(tmp_path, 
     result = controller_module._capability_payload(**kwargs)
     assert [item["id"] for item in result["skills"]["items"]] == [
         derive_id("skill", "ui-target", "user", "one"), derive_id("skill", "ui-target", "plugin", "two")]
-    monkeypatch.setattr(controller_module, "derive_id", lambda *_: "skill:" + "a" * 26)
+    monkeypatch.setattr(projection_module, "derive_id", lambda *_: "skill:" + "a" * 26)
     with pytest.raises(ValueError, match="identity collision"):
         controller_module._capability_payload(**kwargs)
 

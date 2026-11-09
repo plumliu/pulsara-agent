@@ -206,7 +206,7 @@ await tools.wait_agent({
 
 派发回执、工具查询 WORK 的结果、Agent 的当前工作投影、工作流图和会话任务展示均从这一 canonical 值读取。frontend 的当前 Work 身份、标题和状态在同一个读取快照中关联派生，不成为第二份可独立写入的事实。停止请求尚未结算时不能提前显示下一项标题。
 
-UI 的当前 Work 必须关联真正的 `AGENT_INSTRUCTION` 队列行；Agent 是否正在执行、普通消息队列与 Work 队列数量是不同事实。基线通用 runtime 查询的 `current_work_id`／`queued_count` 还可能覆盖普通消息，不得直接当作标题展示所需的严格 Work 投影。复用现有查询 owner 提供类型明确的 UI 投影；不要为此直接改变 Agent 等待所依赖的通用绑定字段语义。若实现需要统一调整底层字段，必须先补齐消息驱动 turn 的等待语义分析和回归。
+UI 的当前 Work 必须关联真正的 `AGENT_INSTRUCTION` 队列行；Agent 是否正在执行、普通消息队列与 Work 队列数量是不同事实。按现行 [Agent 等待条件合同](PULSARA_AGENT_WAIT_UNTIL_IMPLEMENTATION_SPEC.zh.md)，runtime 查询的 `current_work_id` 同样只绑定正在执行的真实 Work；`queued_count` 仍统计所有待执行的 `NEW_TURN` 输入，UI 的排队 Work 数量只统计代理指令。普通 turn 可以处于执行中而没有当前 Work，已消费的 Agent 消息也不创建或替换 Work；不得仅由 `current_work_id` 为空推断 Agent 已 idle。展示和等待继续读取同一查询 owner 的真实 turn、队列及 Work 事实。
 
 不得把 `work_title` 写入 Agent 的长期会话标题，或者拿它寻找／重建 Agent target。不新增另一个 `agent_name` 参数。新 Agent 在原子准入事务中，从 `conversation_kernel/subagents/names.py` 的 100 位数学、物理、计算机学家预设中随机选取最多两个单词的名称，写入现有 Session `title`。同一 ROOT 内优先选择未使用的名称，同批分配也不重复；使用完预设后允许重名，不限制代理数量。名称不承担唯一身份，寻址与授权仍用完整 Target。
 

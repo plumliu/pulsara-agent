@@ -10,14 +10,13 @@ from pulsara_agent.identity import random_id
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
 import json
 from pathlib import Path
 from threading import Condition, Event, Lock, RLock
 from time import monotonic
 from typing import TYPE_CHECKING, Mapping, Protocol
 
-from jsonschema import ValidationError, validators
+from jsonschema import ValidationError
 
 from pulsara_agent.code_mode.contracts import CellParticipationObserver
 
@@ -27,44 +26,20 @@ if TYPE_CHECKING:
 
 
 from .capability_management import CapabilityManagementPreparation
-from .capability_management_execution import (
-    CapabilityManagementCall, capability_management_required_facts, capability_reload_required_facts,
-    require_capability_reload_budget,
-)
-from pulsara_agent.capability.mcp_management import McpManagementConflict
 from pulsara_agent.capability.management_form import (
     PendingCapabilityForm,
     AcceptedCapabilityFormSubmission,
 )
 
 from pulsara_agent.capability.builtin_catalog import (
-    BuiltinToolCatalogEntry,
-    builtin_availability_requirement_identity_fingerprint,
-    builtin_permission_contract_identity_fingerprint,
-    builtin_tool_catalog_entry,
     execution_catalog_entry,
-    builtin_tool_descriptor,
 )
 from pulsara_agent.capability.pulsara_home import (
     UserHomeResolution,
     resolve_user_home,
 )
-from pulsara_agent.capability.mcp_compatibility import NativeMcpCompatibility, native_mcp_compatibility
 from pulsara_agent.capability.contracts import (
-    CapabilityKind,
-    FrozenCapabilityDispatchCut,
-    CapabilitySourceKind,
-    CapabilitySourceRefreshMode,
-    CapabilitySourceSnapshotDisposition,
-    FrozenToolCapabilityExposurePlan,
     ToolCapabilityRouteKind,
-    ToolCapabilityOrigin,
-    capability_identity,
-    capability_source_ref,
-    capability_source_registration,
-    freeze_capability_source_snapshot,
-    freeze_tool_capability_fact,
-    tool_capability_version_ref,
 )
 from pulsara_agent.capability.mcp_projection import (
     McpInspectionDescriptorValues,
@@ -73,7 +48,6 @@ from pulsara_agent.capability.mcp_projection import (
 from pulsara_agent.model_input.contracts import (
     FrozenCanonicalCompileSnapshot,
     FrozenCompiledModelInput,
-    FrozenToolSpec,
     ModelInputScopeKind,
     ToolResultProviderRenderMode,
     compiled_tool_result_source_fingerprint,
@@ -91,22 +65,17 @@ from pulsara_agent.ports.terminal import (
     parse_query_processes_input,
 )
 from pulsara_agent.ports.tool_execution import (
-    ToolInvocationOwnerKind,
     Tool,
     ToolCall,
     ToolExecutionResult,
     ToolOutputSourceFormatHint,
     encode_tool_public_json,
 )
-from pulsara_agent.ports.tool_registry import (
-    tool_binding_contract_identity_fingerprint,
-)
 from pulsara_agent.terminal_process import (
     TerminalCwdScope,
     TerminalProcessInfo,
     TerminalProcessOrigin,
     TerminalRequest,
-    TerminalResult,
     TerminalManager,
 )
 from pulsara_agent.terminal_process.output import (
@@ -151,13 +120,11 @@ from pulsara_agent.llm.input import (
     frozen_tool_result_public_text,
 )
 from pulsara_agent.tools.builtins.workspace import WritePathScope
-from pulsara_agent.tools.builtins.media import MEDIA_TOOL_NAMES, MediaTool, validate_media_arguments
+from pulsara_agent.tools.builtins.media import MEDIA_TOOL_NAMES, MediaTool
 from pulsara_agent.conversation_kernel.tool_invocations import current_tool_invocation, ToolInvocationSourceKind
 from pulsara_agent.tools.builtins.presentation import OpenInPulsaraTool
 from pulsara_agent.tools.builtins.todo import (
     TodoTool,
-    TodoValidationError,
-    parse_todo_replacement,
 )
 from pulsara_agent.conversation_kernel.io import (
     KernelSessionIO,
@@ -172,14 +139,9 @@ from pulsara_agent.conversation_kernel.compaction.runtime_handoff import (
 )
 from pulsara_agent.conversation_kernel.capability_composition import (
     BuiltinCompositionState,
-    SealedBuiltinCapabilitySnapshot,
-    issue_sealed_builtin_capability_snapshot,
 )
 from pulsara_agent.conversation_kernel.interaction_arbiter import (
     InteractionAdmissionHooks,
-)
-from pulsara_agent.conversation_kernel.memory.contracts import (
-    FrozenModelCallMemoryContext,
 )
 from pulsara_agent.conversation_kernel.execution_watchdogs import (
     KernelExecutionDeadlineFactory,
@@ -195,39 +157,28 @@ from pulsara_agent.ports.live_agent_event import (
     CurrentWorkSnapshotUpdatedPayload,
     live_digest,
 )
-from pulsara_agent.primitives.model_call import sha256_fingerprint
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
     canonical_json_bytes,
-    context_fingerprint,
     freeze_json,
     thaw_json,
 )
 from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 from pulsara_agent.primitives.tool_observation import (
-    PhysicalToolObservationSupplement,
     ToolObservationOrigin,
     TrustedToolObservationSupplement,
-    normalize_observation_duration,
 )
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
 from pulsara_agent.conversation_kernel.tool_policy import (
     ToolDispatchAuthorizationPolicy,
-    ToolDispatchAuthorizationRequest,
-    ToolDispatchDecisionKind,
 )
 from pulsara_agent.conversation_kernel.tool_surface import (
-    CODE_MODE_SHARED_TOOL_NAMES,
-    CodeModeToolDirectory,
     BuiltinExecutionPolicyRef,
-    DirectToolAccessLeaf,
     McpEffectKind,
     McpToolExecutionPolicyFact,
     PreparedKernelToolSurface,
-    PreparedToolExecutionBinding,
     PreparedUnavailableDirectMcpGate,
-    ProcessLocalToolSurfaceAccess,
     ProcessLocalToolSurfaceBorrow,
     execution_policy_fingerprint,
     tool_observation_origin_for_binding,
@@ -245,7 +196,6 @@ from .tool_contracts import (
     ProcessLocalEffectSettlementResult,
     ProcessLocalEffectSettlementToken,
     PreparedResolvedToolInvocation,
-    PreparedPermissionRequest,
     PreparedToolInvocation,
     PreparedToolPreparationRejection,
 )
@@ -259,15 +209,11 @@ from .current_work_runtime import (
 from .mcp.supervisor import (
     McpBoundToolExecutor,
     McpDispatchAdmissionPermit,
-    McpDispatchPermitState,
     McpHostSupervisor,
     McpInstalledRuntimeGeneration,
-    McpKnownToolResult,
-    McpSnapshotStale,
     mcp_failure_required_facts,
 )
 from .tool_result_display import require_native_result_minimum
-from .mcp.contracts import McpDiscoveryCatalogInspection
 from .mcp.schema import McpSchemaEvaluationFailure, validate_mcp_arguments
 from .capability_query import CapabilitySourceQuery
 from pulsara_agent.capability.source_query import (
@@ -278,118 +224,59 @@ from pulsara_agent.capability.source_query import (
 from .mcp.meta import (
     McpToolRefCapacityExceeded,
     McpToolRefConsumerKind,
-    NewMcpToolRef,
     PreparedNewMcpToolRefSettlement,
     ProcessLocalNewMcpToolRefOwner,
 )
 
 
-_TERMINAL_PROCESS_ACTION_EFFECTS = (
-    ("poll", "TERMINAL_OBSERVATION"),
-    ("wait", "TERMINAL_OBSERVATION"),
-    ("write", "TERMINAL_EFFECT"),
-    ("submit", "TERMINAL_EFFECT"),
-    ("close_stdin", "TERMINAL_EFFECT"),
-    ("kill", "TERMINAL_EFFECT"),
+from .tool_runtime_bindings import (
+    _TERMINAL_PROCESS_ACTION_EFFECTS as _TERMINAL_PROCESS_ACTION_EFFECTS,
+    ProductionBuiltinExecutorBinding as ProductionBuiltinExecutorBinding,
+    _builtin_physical_effect_contract as _builtin_physical_effect_contract,
+    production_builtin_executor_binding_identity_fingerprint as production_builtin_executor_binding_identity_fingerprint,
+    _production_executor_binding as _production_executor_binding,
+    _qualified_executor_identity as _qualified_executor_identity,
 )
 
+from .tool_runtime_terminal import (
+    TerminalEffectAdmissionRejected as TerminalEffectAdmissionRejected,
+    _terminal_process_payload as _terminal_process_payload,
+    _terminal_result_facts as _terminal_result_facts,
+    _admit_terminal_effect as _admit_terminal_effect,
+    _terminal_execution_result as _terminal_execution_result,
+    _success as _success,
+)
 
-@dataclass(frozen=True, slots=True)
-class ProductionBuiltinExecutorBinding:
-    """Exact descriptor-to-executor closure for one advertised builtin."""
+from .tool_runtime_results import (
+    _await_mcp_operation as _await_mcp_operation,
+    _cancelled_mcp_before_dispatch as _cancelled_mcp_before_dispatch,
+    _kernel_tool_state as _kernel_tool_state,
+    _invocation_page_budget as _invocation_page_budget,
+    _no_effect_budget_result as _no_effect_budget_result,
+    _kernel_result_from_mcp_known as _kernel_result_from_mcp_known,
+    _freeze_physical_observation as _freeze_physical_observation,
+)
 
-    catalog_entry: BuiltinToolCatalogEntry
-    executor_identity: str
+from .tool_runtime_surface import _ToolSurfaceOperations, _mcp_executor_capability_version
 
-    @property
-    def tool_name(self) -> str:
-        return self.catalog_entry.name
+from .tool_runtime_schema import (
+    _validate_builtin_call_schema as _validate_builtin_call_schema,
+    _json_schema_value as _json_schema_value,
+    _thaw_json as _thaw_json,
+)
 
+from .tool_runtime_management import _ToolManagementOperations
 
-def _builtin_physical_effect_contract(
-    entry: BuiltinToolCatalogEntry,
-) -> object:
-    return (
-        {"actions": _TERMINAL_PROCESS_ACTION_EFFECTS}
-        if entry.name == "manage_process"
-        else {
-            "default": (
-                "TERMINAL_EFFECT"
-                if entry.name == "exec_process"
-                else entry.recovery_contract.severity
-            )
-        }
-    )
-
-
-def production_builtin_executor_binding_identity_fingerprint(
-    binding: ProductionBuiltinExecutorBinding,
-) -> str:
-    """Derive the stable physical binding identity at its actual consumers."""
-
-    entry = binding.catalog_entry
-    descriptor = entry.descriptor
-    contract = entry.binding_contract
-    input_schema_fingerprint = sha256_fingerprint(
-        "production-builtin-input-schema:v1", descriptor.input_schema
-    )
-    physical_effect_contract_fingerprint = sha256_fingerprint(
-        "production-builtin-physical-effect-contract:v1",
-        _builtin_physical_effect_contract(entry),
-    )
-    return sha256_fingerprint(
-        "production-builtin-executor-binding:v1",
-        {
-            "tool_name": entry.name,
-            "descriptor_id": descriptor.id,
-            "descriptor_contract_version": contract.contract_version,
-            "descriptor_fingerprint": descriptor.fingerprint(),
-            "input_schema_fingerprint": input_schema_fingerprint,
-            "binding_contract_fingerprint": (
-                tool_binding_contract_identity_fingerprint(contract)
-            ),
-            "catalog_entry_fingerprint": entry.entry_fingerprint,
-            "availability_requirement_fingerprint": (
-                builtin_availability_requirement_identity_fingerprint(
-                    entry.availability_requirement
-                )
-            ),
-            "permission_contract_fingerprint": (
-                builtin_permission_contract_identity_fingerprint(
-                    entry.permission_contract
-                )
-            ),
-            "execution_binding_kind": entry.execution_binding_kind.value,
-            "is_read_only": descriptor.is_read_only,
-            "permission_category": descriptor.permission_category,
-            "physical_effect_contract_fingerprint": (
-                physical_effect_contract_fingerprint
-            ),
-            "executor_identity": binding.executor_identity,
-        },
-    )
-
-
-def _production_executor_binding(
-    tool_name: str, executor_identity: str
-) -> ProductionBuiltinExecutorBinding:
-    if not tool_name or not executor_identity:
-        raise ValueError("production executor binding identity is incomplete")
-    entry = execution_catalog_entry(tool_name)
-    descriptor = entry.descriptor
-    contract = entry.binding_contract
-    if descriptor.name != tool_name or contract.tool_name != tool_name:
-        raise RuntimeError("builtin descriptor and executor name do not join")
-    return ProductionBuiltinExecutorBinding(
-        catalog_entry=entry,
-        executor_identity=executor_identity,
-    )
-
-
-def _qualified_executor_identity(owner: object, tool_name: str) -> str:
-    owner_type = type(owner)
-    return f"{owner_type.__module__}.{owner_type.__qualname__}#{tool_name}"
-
+from .tool_runtime_authorization import (
+    _ToolAuthorizationOperations,
+    _PendingMcpConfirmationAdmission as _PendingMcpConfirmationAdmission,
+    _PreparedMcpMetaInvocation as _PreparedMcpMetaInvocation,
+)
+from .tool_runtime_results import (
+    _mcp_unavailable_reason as _mcp_unavailable_reason,
+    _mcp_unavailable_inspection_message as _mcp_unavailable_inspection_message,
+    _mcp_unavailable_direct_message as _mcp_unavailable_direct_message,
+)
 
 class KernelSubagentToolPort(Protocol):
     @property
@@ -487,10 +374,6 @@ class KernelCapabilityReloadPort(Protocol):
     async def reload_capabilities(
         self, *, deadline_monotonic: float | None
     ) -> Mapping[str, object]: ...
-
-
-class TerminalEffectAdmissionRejected(ToolResultPageBoundary):
-    """The owned process action was rejected before its physical effect."""
 
 
 @dataclass(slots=True)
@@ -641,8 +524,6 @@ class _DirectTerminalQueryTool:
         })
 
 
-
-
 @dataclass(slots=True)
 class _DirectPlanControlTool:
     name: str
@@ -671,31 +552,15 @@ class _DirectMcpCatalogTool:
 
 
 @dataclass(frozen=True, slots=True)
-class _PendingMcpConfirmationAdmission:
-    generation: int
-    executor: McpBoundToolExecutor
-    scope_kind: ModelInputScopeKind
-    turn_id: str
-    tool_call_id: str
-
-
-@dataclass(frozen=True, slots=True)
 class _InstalledBorrowEpoch:
     conversation_scope_kind: ModelInputScopeKind
     epoch_nonce: str
     epoch_revision: int
 
 
-@dataclass(frozen=True, slots=True)
-class _PreparedMcpMetaInvocation:
-    executor: McpBoundToolExecutor
-    ref: NewMcpToolRef
-    arguments: FrozenJsonObjectFact
-
-
-
-
-class DirectKernelToolPort:
+class DirectKernelToolPort(
+    _ToolSurfaceOperations, _ToolAuthorizationOperations, _ToolManagementOperations
+):
     """Permission-before-attempt and process-local physical execution owner."""
 
     def __init__(
@@ -958,205 +823,6 @@ class DirectKernelToolPort:
             raise RuntimeError("MCP supervisor is not bound")
         await supervisor.wait_initial_readiness(conversation_scope_kind=conversation_scope_kind)
 
-    def _require_builtin_composition_preparing_locked(self) -> None:
-        if self._builtin_composition_state is not BuiltinCompositionState.PREPARING:
-            raise RuntimeError("builtin composition is already sealed or closed")
-
-    def seal_builtin_composition(self) -> object:
-        with self._surface_lock:
-            if self._builtin_composition_state is BuiltinCompositionState.CLOSED:
-                raise RuntimeError("builtin composition is closed")
-            if self._builtin_composition_state is BuiltinCompositionState.SEALED:
-                assert self._builtin_composition_seal is not None
-                return self._builtin_composition_seal
-            if any(
-                item is None
-                for item in (
-                    self._interaction,
-                    self._subagent,
-                    self._memory,
-                    self._decision,
-                    self._mcp_supervisor,
-                    self._capability_reload,
-                )
-            ):
-                raise RuntimeError("builtin composition required ports are incomplete")
-            self._sealed_builtin_bindings = self._executor_bindings_locked()
-            self._builtin_composition_seal = object()
-            self._builtin_composition_state = BuiltinCompositionState.SEALED
-            return self._builtin_composition_seal
-
-    def sealed_builtin_capability_snapshot(
-        self,
-        *,
-        conversation_scope_kind: ModelInputScopeKind,
-        effective_permission_mode: PermissionMode,
-    ) -> SealedBuiltinCapabilitySnapshot:
-        if not isinstance(effective_permission_mode, PermissionMode):
-            raise TypeError("builtin selection requires the actual turn permission mode")
-        with self._surface_lock:
-            if self._builtin_composition_state is not BuiltinCompositionState.SEALED:
-                raise RuntimeError("builtin composition is not sealed")
-            assert self._sealed_builtin_bindings is not None
-            assert self._builtin_composition_seal is not None
-            bindings = self._sealed_builtin_bindings
-            # Provider selection is distinct from the sealed execution catalog.
-            # Only the actual role's native definitions enter provider selection.
-            invocation_owner = (ToolInvocationOwnerKind.HOST_MAIN_RUN
-                if conversation_scope_kind is ModelInputScopeKind.ROOT else ToolInvocationOwnerKind.SUBAGENT)
-            bindings = tuple(item for item in bindings
-                if item.catalog_entry.descriptor.is_model_callable
-                and invocation_owner in item.catalog_entry.availability_requirement.allowed_invocation_owners)
-            if conversation_scope_kind is ModelInputScopeKind.SUBAGENT:
-                bindings = tuple(
-                    item
-                    for item in bindings
-                    if item.tool_name
-                    not in {
-                        *MEDIA_TOOL_NAMES, "open_in_pulsara", "search_sessions", "search_session_content",
-                        "read_session_content", "query_schedules", "manage_schedule", "search_memory", "get_memory",
-                        "remember", "mark_memory_relation", "enter_plan", "ask_plan_question",
-                        "exit_plan", "reload_capabilities", "manage_capability",
-                        "run_agent", "stop_agent",
-                        "exec_cell", "query_cells", "manage_cell",
-                    }
-                )
-            source = capability_source_ref(
-                CapabilitySourceKind.BUILTIN_REGISTRY,
-                "pulsara-builtin-tools",
-            )
-            registration = capability_source_registration(
-                source=source,
-                refresh_mode=CapabilitySourceRefreshMode.IMMUTABLE,
-                source_contract_fingerprint=context_fingerprint(
-                    "builtin-capability-source-contract:v1",
-                    tuple(
-                        (
-                            item.tool_name,
-                            item.catalog_entry.descriptor.fingerprint(),
-                            tool_binding_contract_identity_fingerprint(
-                                item.catalog_entry.binding_contract
-                            ),
-                        )
-                        for item in bindings
-                    ),
-                ),
-            )
-            facts = []
-            for binding in bindings:
-                entry = builtin_tool_catalog_entry(binding.tool_name)
-                if entry is not binding.catalog_entry:
-                    raise RuntimeError("builtin catalog/executor binding drifted")
-                descriptor = builtin_tool_descriptor(binding.tool_name)
-                schema = freeze_json(_json_schema_value(descriptor.input_schema))
-                if not isinstance(schema, FrozenJsonObjectFact):
-                    raise TypeError("builtin tool schema did not freeze to an object")
-                spec = FrozenToolSpec(
-                    name=binding.tool_name,
-                    description=descriptor.description,
-                    parameters=schema,
-                    descriptor_fingerprint=descriptor.fingerprint(),
-                )
-                facts.append(
-                    freeze_tool_capability_fact(
-                        identity=capability_identity(
-                            kind=CapabilityKind.TOOL,
-                            source=source,
-                            stable_name=binding.tool_name,
-                        ),
-                        origin=ToolCapabilityOrigin.BUILTIN,
-                        canonical_tool_spec=spec,
-                    )
-                )
-            source_snapshot = freeze_capability_source_snapshot(
-                registration=registration,
-                conversation_scope_kind=conversation_scope_kind,
-                disposition=CapabilitySourceSnapshotDisposition.COMPLETE,
-                facts=tuple(facts),
-            )
-            return issue_sealed_builtin_capability_snapshot(
-                conversation_scope_kind=conversation_scope_kind,
-                source_snapshot=source_snapshot,
-                executor_bindings=bindings,
-                builtin_composition_seal=self._builtin_composition_seal,
-            )
-
-    def prepare_tool_surface_safe_point(self) -> None:
-        supervisor = self._mcp_supervisor
-        if supervisor is None:
-            return
-        installed = supervisor.install_pending_at_safe_point()
-        if installed is None:
-            return
-        with self._surface_lock:
-            previous_generation = self._surface_generation
-            previous = self._mcp_current
-            self._surface_generation += 1
-            self._mcp_current = installed
-            self._mcp_runtime_by_surface_generation[self._surface_generation] = (
-                installed
-            )
-            if (
-                previous is not None
-                and previous_generation not in self._surface_borrows.values()
-            ):
-                for key in tuple(self._prepared_surfaces):
-                    if key[0] == previous_generation:
-                        self._prepared_surfaces.pop(key, None)
-                self._mcp_runtime_by_surface_generation.pop(previous_generation, None)
-                previous.release()
-
-    def freeze_mcp_capability_source_snapshot_set(
-        self,
-        *,
-        conversation_scope_kind: ModelInputScopeKind,
-    ):
-        supervisor = self._mcp_supervisor
-        if supervisor is None:
-            raise RuntimeError("MCP supervisor is not bound")
-        return supervisor.freeze_capability_source_snapshot_set(
-            conversation_scope_kind=conversation_scope_kind,
-        )
-
-    def observe_hook_review_tools(self):
-        """Disposable observation; never installs provider tools or grants authority."""
-        from pulsara_agent.hooks.matcher import tool_matcher_subject
-
-        with self._surface_lock:
-            if self._sealed_builtin_bindings is None:
-                raise RuntimeError("builtin composition is not sealed")
-            subjects = tuple(
-                tool_matcher_subject(binding.tool_name)
-                for binding in self._sealed_builtin_bindings
-            )
-            supervisor = self._mcp_supervisor
-        if supervisor is None:
-            return subjects, False
-        inspection = supervisor.inspect_discovery_catalog()
-        subjects += tuple(
-            tool_matcher_subject(
-                item.semantic.provider_tool_name,
-                resolved_remote_identity=item.semantic.provider_tool_name,
-            )
-            for item in inspection.tools
-        )
-        complete = all(
-            server.tool_surface_semantic_fingerprint is not None
-            for server in inspection.catalog_snapshot.servers
-        )
-        return subjects, complete
-
-    def inspect_mcp_discovery_catalog(self) -> McpDiscoveryCatalogInspection:
-        supervisor = self._mcp_supervisor
-        if supervisor is None:
-            raise RuntimeError("MCP supervisor is not bound")
-        return supervisor.inspect_discovery_catalog(live=True)
-
-    def freeze_mcp_capability_projection_input(self, owner):
-        supervisor = self._mcp_supervisor
-        if supervisor is None:
-            raise RuntimeError("MCP supervisor is not bound")
-        return supervisor.freeze_capability_projection_input(owner)
 
     async def reload_mcp_configs(
         self,
@@ -1233,78 +899,10 @@ class DirectKernelToolPort:
     def current_work_owner(self) -> CurrentWorkStateOwner:
         return self._current_work_owner
 
-    def _executor_bindings_locked(self) -> tuple[ProductionBuiltinExecutorBinding, ...]:
-        if self._sealed_builtin_bindings is not None:
-            return self._sealed_builtin_bindings
-        identities = {
-            name: _qualified_executor_identity(tool, name)
-            for name, tool in self._tools.items()
-        }
-        if self._subagent is not None:
-            for name in self._subagent.tool_names:
-                if name in identities:
-                    raise RuntimeError("production builtin has multiple executors")
-                identities[name] = _qualified_executor_identity(self._subagent, name)
-        if self._memory is not None:
-            for name in self._memory.tool_names:
-                if name in identities:
-                    raise RuntimeError("production builtin has multiple executors")
-                identities[name] = _qualified_executor_identity(self._memory, name)
-        if self._decision is not None:
-            for name in self._decision.tool_names:
-                if name in identities:
-                    raise RuntimeError("production builtin has multiple executors")
-                identities[name] = _qualified_executor_identity(self._decision, name)
-        return tuple(
-            _production_executor_binding(name, identities[name])
-            for name in sorted(identities)
-        )
-
-    @property
-    def executor_bindings(self) -> tuple[ProductionBuiltinExecutorBinding, ...]:
-        with self._surface_lock:
-            return self._executor_bindings_locked()
 
     def snapshot_workspace_root(self) -> Path:
         return self._terminal.workspace_root
 
-    def freeze_code_mode_tool_directory(
-        self, prepared: PreparedKernelToolSurface, *, effective_permission_mode: PermissionMode,
-    ) -> CodeModeToolDirectory:
-        """Freeze Cell capabilities from sealed owners, retaining only authorized MCP leaves."""
-        if (prepared.access.conversation_scope_kind is not ModelInputScopeKind.ROOT
-            or effective_permission_mode is not PermissionMode.BYPASS_PERMISSIONS):
-            raise PermissionError("Code Mode requires ROOT bypass-permissions mode")
-        with self._surface_lock:
-            self._require_prepared_surface_locked(prepared)
-            if self._builtin_composition_state is not BuiltinCompositionState.SEALED:
-                raise RuntimeError("Code Mode requires sealed execution capabilities")
-            assert self._sealed_builtin_bindings is not None
-            specs, bindings = [], []
-            for owner in self._sealed_builtin_bindings:
-                if owner.tool_name not in CODE_MODE_SHARED_TOOL_NAMES:
-                    continue
-                entry = execution_catalog_entry(owner.tool_name, code_mode=True)
-                descriptor = entry.descriptor
-                owner = replace(owner, catalog_entry=entry)
-                spec = FrozenToolSpec(name=owner.tool_name, description=descriptor.description,
-                    parameters=freeze_json(_json_schema_value(descriptor.input_schema)),
-                    descriptor_fingerprint=descriptor.fingerprint())
-                specs.append(spec)
-                bindings.append(PreparedToolExecutionBinding(tool_name=spec.name,
-                    descriptor_fingerprint=spec.descriptor_fingerprint,
-                    executor_binding_fingerprint=production_builtin_executor_binding_identity_fingerprint(owner),
-                    execution_policy=BuiltinExecutionPolicyRef(tool_name=spec.name,
-                        catalog_entry_fingerprint=entry.entry_fingerprint)))
-            # MCP discovery/authorization remains owned by the prepared capability cut.
-            # Never enumerate the supervisor's entire inventory to build a Cell catalog.
-            for spec in prepared.model_surface.tool_specs:
-                binding = prepared.binding(spec.name)
-                if (isinstance(binding, PreparedToolExecutionBinding)
-                    and isinstance(binding.execution_policy, McpToolExecutionPolicyFact)):
-                    specs.append(spec)
-                    bindings.append(binding)
-            return CodeModeToolDirectory(tuple(specs), tuple(bindings), prepared.access)
 
     @staticmethod
     def _entry_unavailable(tool_name: str, borrow: ProcessLocalToolSurfaceBorrow, arguments: Mapping[str, object]) -> str | None:
@@ -1552,238 +1150,6 @@ class DirectKernelToolPort:
         finally:
             await agent_rows.aclose()
 
-    def prepare_planned_tool_surface(
-        self,
-        *,
-        plan: FrozenToolCapabilityExposurePlan,
-        builtin: SealedBuiltinCapabilitySnapshot,
-    ) -> PreparedKernelToolSurface:
-        """Exact-join one semantic plan to this Host's physical owners."""
-
-        surface = plan.direct_tool_surface
-        scope = surface.conversation_scope_kind
-        if (
-            builtin.conversation_scope_kind is not scope
-            or plan.dispatch_view.parent_dispatch_cut.conversation_scope_kind
-            is not scope
-        ):
-            raise ValueError("planned tool surface scope is invalid")
-        with self._surface_lock:
-            if self._closed:
-                raise RuntimeError("tool surface is closed")
-            if (
-                self._builtin_composition_state is not BuiltinCompositionState.SEALED
-                or builtin.builtin_composition_seal
-                is not self._builtin_composition_seal
-            ):
-                raise RuntimeError("foreign or unsealed builtin snapshot")
-            # Bind current-contract frozen specs to the sealed execution owners.
-            builtin_by_name = {
-                item.tool_name: item for item in self._sealed_builtin_bindings
-            }
-            current_mcp = self._mcp_current
-            mcp_binding_by_name = (
-                {}
-                if current_mcp is None
-                else {item.tool_name: item for item in current_mcp.execution_bindings}
-            )
-            mcp_executor_by_name = {} if current_mcp is None else current_mcp.executors
-            route_by_name = {item.version.provider_name: item for item in plan.mcp_catalog_route_projection.routes}
-            version_by_name = {
-                item.provider_name: item
-                for item in plan.direct_projection_set.tool_versions
-            }
-            leaves: list[DirectToolAccessLeaf] = []
-            for spec in surface.tool_specs:
-                builtin_binding = builtin_by_name.get(spec.name)
-                if builtin_binding is not None:
-                    entry = builtin_binding.catalog_entry
-                    if (not entry.descriptor.is_model_callable
-                        or builtin_tool_descriptor(spec.name).fingerprint() != spec.descriptor_fingerprint):
-                        raise RuntimeError("planned builtin descriptor drifted")
-                    policy = BuiltinExecutionPolicyRef(
-                        tool_name=spec.name,
-                        catalog_entry_fingerprint=entry.entry_fingerprint,
-                    )
-                    leaves.append(
-                        PreparedToolExecutionBinding(
-                            tool_name=spec.name,
-                            descriptor_fingerprint=spec.descriptor_fingerprint,
-                            executor_binding_fingerprint=(
-                                production_builtin_executor_binding_identity_fingerprint(
-                                    builtin_binding
-                                )
-                            ),
-                            execution_policy=policy,
-                        )
-                    )
-                    continue
-                version = version_by_name.get(spec.name)
-                mcp_binding = mcp_binding_by_name.get(spec.name)
-                mcp_executor = mcp_executor_by_name.get(spec.name)
-                route = route_by_name.get(spec.name)
-                if (
-                    version is not None
-                    and mcp_binding is not None
-                    and mcp_executor is not None
-                    and route is not None
-                    and route.route is ToolCapabilityRouteKind.DIRECT
-                    and route.version == _mcp_executor_capability_version(mcp_executor)
-                    and mcp_binding.descriptor_fingerprint == mcp_executor.semantic.descriptor_fingerprint
-                    and native_mcp_compatibility(spec, mcp_executor.semantic.provider_spec()) is NativeMcpCompatibility.COMPATIBLE
-                    and mcp_executor.policy is mcp_binding.execution_policy
-                ):
-                    leaves.append(replace(mcp_binding,
-                        descriptor_fingerprint=spec.descriptor_fingerprint,
-                        current_mcp_spec=mcp_executor.semantic.provider_spec()))
-                    continue
-                if version is None:
-                    raise RuntimeError("planned MCP version is absent")
-                if route is None:
-                    raise RuntimeError("planned native MCP route is absent")
-                reason = (route.public_reason_code.value
-                          if route.route is ToolCapabilityRouteKind.UNAVAILABLE else
-                          "NATIVE_CONTRACT_REQUIRES_META" if mcp_binding is not None
-                          else "MCP_DIRECT_CURRENTLY_UNAVAILABLE")
-                leaves.append(
-                    PreparedUnavailableDirectMcpGate(
-                        capability_identity=(version.identity),
-                        tool_semantic_fingerprint=spec.descriptor_fingerprint,
-                        provider_tool_name=spec.name,
-                        unavailable_reason_code=reason,
-                        target=route.target,
-                        supervisor_authority_identity=self._mcp_supervisor,
-                    )
-                )
-            frozen_leaves = tuple(leaves)
-            access = ProcessLocalToolSurfaceAccess(
-                owner_epoch=self._surface_owner_epoch,
-                surface_generation=self._surface_generation,
-                conversation_scope_kind=scope,
-                _authority=self._surface_authority,
-                session_id=self._session_id,
-            )
-            prepared = PreparedKernelToolSurface(
-                model_surface=surface,
-                execution_bindings=frozen_leaves,
-                access=access,
-                capability_exposure_plan=plan,
-            )
-            self._prepared_surfaces[(self._surface_generation, scope)] = (
-                prepared
-            )
-            return prepared
-
-    def borrow_tool_surface(
-        self, prepared: PreparedKernelToolSurface
-    ) -> ProcessLocalToolSurfaceBorrow:
-        with self._surface_lock:
-            self._require_prepared_surface_locked(prepared)
-            if prepared.access.surface_generation != self._surface_generation:
-                raise RuntimeError("retiring tool surface refuses new borrows")
-            borrow_id = random_id("borrow")
-            while borrow_id in self._surface_borrows or borrow_id in self._surface_borrow_owners:
-                borrow_id = random_id("borrow")
-            borrow = ProcessLocalToolSurfaceBorrow(
-                prepared=prepared,
-                borrow_id=borrow_id,
-                _authority=self._surface_authority,
-                _validate=self._validate_surface_borrow,
-                _release=self._release_surface_borrow,
-            )
-            self._surface_borrows[borrow_id] = prepared.access.surface_generation
-            self._surface_borrow_owners[borrow_id] = borrow
-            return borrow
-
-    def borrow_code_mode_surface(
-        self, prepared: CodeModeToolDirectory, *, cell_id: str
-    ) -> ProcessLocalToolSurfaceBorrow:
-        """Borrow a physical invocation without pinning a provider epoch."""
-        self.prepare_tool_surface_safe_point()
-        with self._surface_lock:
-            if self._closed or prepared.access._authority is not self._surface_authority:
-                raise RuntimeError("Code Mode tool owner is unavailable")
-            access = replace(prepared.access, surface_generation=self._surface_generation)
-            physical_surface = replace(prepared, access=access)
-            borrow = ProcessLocalToolSurfaceBorrow(
-                prepared=physical_surface, borrow_id=random_id("borrow"),
-                _authority=self._surface_authority,
-                _validate=self._validate_surface_borrow,
-                _release=self._release_surface_borrow, code_cell_id=cell_id,
-            )
-            self._execution_borrows[borrow.borrow_id] = borrow
-            return borrow
-
-    def validate_tool_surface_borrow(
-        self,
-        borrow: ProcessLocalToolSurfaceBorrow,
-        prepared: PreparedKernelToolSurface,
-    ) -> None:
-        """Revalidate one pinned surface without selecting an arbitrary tool."""
-
-        with self._surface_lock:
-            if (
-                borrow._closed
-                or borrow._authority is not self._surface_authority
-                or borrow.borrow_id not in self._surface_borrows
-                or self._surface_borrow_owners.get(borrow.borrow_id) is not borrow
-                or not borrow.exactly_joins(prepared)
-            ):
-                raise RuntimeError("tool surface borrow is not active")
-            self._require_prepared_surface_locked(prepared)
-
-    def assert_no_tool_surface_borrows(
-        self,
-        *,
-        scope_kind: ModelInputScopeKind,
-    ) -> None:
-        """Prove all process-local surface borrows for this scope are closed."""
-
-        with self._surface_lock:
-            if any(
-                borrow.prepared.access.conversation_scope_kind is scope_kind
-                for borrow in self._surface_borrow_owners.values()
-            ):
-                raise RuntimeError("no-continuation left a tool surface borrow active")
-
-    def issue_capability_dispatch_observation(
-        self,
-        *,
-        capability_dispatch_cut: FrozenCapabilityDispatchCut,
-        prepared_surface: PreparedKernelToolSurface,
-        surface_borrow: ProcessLocalToolSurfaceBorrow,
-    ) -> object:
-        """Issue an exact one-shot carrier only for a registry-current borrow."""
-
-        from pulsara_agent.conversation_kernel.tool_surface import (
-            _issue_capability_dispatch_observation,
-        )
-
-        with self._surface_lock:
-            if (
-                surface_borrow._closed
-                or surface_borrow._authority is not self._surface_authority
-                or surface_borrow.borrow_id not in self._surface_borrows
-                or self._surface_borrow_owners.get(surface_borrow.borrow_id)
-                is not surface_borrow
-                or not surface_borrow.exactly_joins(prepared_surface)
-            ):
-                raise RuntimeError("tool surface borrow is not active")
-            self._require_prepared_surface_locked(prepared_surface)
-            access = prepared_surface.access
-            if (
-                access.conversation_scope_kind
-                is not capability_dispatch_cut.conversation_scope_kind
-            ):
-                raise RuntimeError(
-                    "capability dispatch observation does not exact-join"
-                )
-            return _issue_capability_dispatch_observation(
-                capability_dispatch_cut=capability_dispatch_cut,
-                prepared_surface=prepared_surface,
-                surface_borrow=surface_borrow,
-                owner=self,
-            )
 
     def install_provider_input_tool_result_deliveries(
         self,
@@ -1874,409 +1240,6 @@ class DirectKernelToolPort:
                 continuity_epoch_nonce=epoch.epoch_nonce,
             )
 
-    def _require_prepared_surface_locked(
-        self, prepared: PreparedKernelToolSurface
-    ) -> None:
-        access = prepared.access
-        key = (
-            access.surface_generation,
-            access.conversation_scope_kind,
-        )
-        retained = self._prepared_surfaces.get(key)
-        if (
-            self._closed
-            or access._authority is not self._surface_authority
-            or access.owner_epoch != self._surface_owner_epoch
-            or retained is None
-            or retained is not prepared
-        ):
-            raise RuntimeError("prepared tool surface is revoked")
-
-    def _validate_surface_borrow(
-        self, borrow: ProcessLocalToolSurfaceBorrow, tool_name: str
-    ) -> DirectToolAccessLeaf:
-        with self._surface_lock:
-            if borrow.code_cell_id is not None:
-                if (self._closed or borrow._closed
-                    or borrow._authority is not self._surface_authority
-                    or self._execution_borrows.get(borrow.borrow_id) is not borrow):
-                    raise RuntimeError("Code Mode invocation resource is unavailable")
-                return borrow.prepared.binding(tool_name)
-            if (
-                borrow._closed
-                or borrow._authority is not self._surface_authority
-                or borrow.borrow_id not in self._surface_borrows
-                or self._surface_borrow_owners.get(borrow.borrow_id) is not borrow
-            ):
-                raise RuntimeError("tool surface borrow is not active")
-            self._require_prepared_surface_locked(borrow.prepared)
-            for binding in borrow.prepared.execution_bindings:
-                if binding.tool_name == tool_name:
-                    return binding
-        raise RuntimeError("tool was not advertised by the prepared surface")
-
-    def _release_surface_borrow(self, borrow: ProcessLocalToolSurfaceBorrow) -> None:
-        with self._surface_condition:
-            if borrow.code_cell_id is not None:
-                if self._execution_borrows.pop(borrow.borrow_id, None) is not borrow:
-                    raise RuntimeError("Code Mode invocation resource is not current")
-                self._surface_condition.notify_all()
-                return
-            if borrow._authority is not self._surface_authority:
-                raise RuntimeError("tool surface borrow authority conflicts")
-            if self._surface_borrow_owners.get(borrow.borrow_id) is not borrow:
-                raise RuntimeError("tool surface borrow is not registry-current")
-            generation = self._surface_borrows.pop(borrow.borrow_id, None)
-            self._surface_borrow_owners.pop(borrow.borrow_id, None)
-            self._installed_epoch_by_borrow.pop(borrow.borrow_id, None)
-            if generation is not None and generation != self._surface_generation:
-                if generation not in self._surface_borrows.values():
-                    for key in tuple(self._prepared_surfaces):
-                        if key[0] == generation:
-                            self._prepared_surfaces.pop(key, None)
-                    runtime = self._mcp_runtime_by_surface_generation.pop(
-                        generation, None
-                    )
-                    if runtime is not None:
-                        runtime.release()
-            self._surface_condition.notify_all()
-
-    async def authorize(
-        self,
-        *,
-        tool_name: str,
-        arguments: Mapping[str, object],
-        tool_call_id: str,
-        turn_id: str,
-        assistant_entry_id: str,
-        permission_snapshot: FrozenRunPermissionSnapshot,
-        surface_borrow: ProcessLocalToolSurfaceBorrow,
-        memory_context: FrozenModelCallMemoryContext,
-    ) -> KernelToolAuthorization:
-        entry_error = self._entry_unavailable(tool_name, surface_borrow, arguments)
-        if entry_error:
-            return KernelToolAuthorization(KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
-                "tool-entry:code-mode-only", entry_error)
-        if tool_name in MEDIA_TOOL_NAMES and (
-            surface_borrow.code_cell_id is not None
-            or surface_borrow.prepared.access.conversation_scope_kind is not ModelInputScopeKind.ROOT
-            or (current_tool_invocation.get() is not None
-                and current_tool_invocation.get().kind is not ToolInvocationSourceKind.MODEL_TOOL_CALL)
-        ):
-            return KernelToolAuthorization(KernelToolAuthorizationKind.PERMISSION_DENIED,
-                "media:root-direct-only", "Media tools require a direct ROOT call")
-        try:
-            binding = self._validate_surface_borrow(surface_borrow, tool_name)
-        except (RuntimeError, KeyError):
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
-                "tool-surface:revoked",
-                f"tool unavailable: {tool_name}",
-            )
-        if isinstance(binding, PreparedUnavailableDirectMcpGate):
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
-                f"mcp-direct:{binding.unavailable_reason_code}",
-                _mcp_unavailable_direct_message(binding.unavailable_reason_code, binding.target, binding.tool_name),
-            )
-        if isinstance(binding.execution_policy, McpToolExecutionPolicyFact):
-            return self._authorize_mcp(
-                binding=binding,
-                arguments=arguments,
-                tool_call_id=tool_call_id,
-                turn_id=turn_id,
-                assistant_entry_id=assistant_entry_id,
-                permission_snapshot=permission_snapshot,
-                surface_borrow=surface_borrow,
-            )
-        tool = self._tools.get(tool_name)
-        subagent = self._subagent is not None and tool_name in self._subagent.tool_names
-        memory = self._memory is not None and tool_name in self._memory.tool_names
-        decision = self._decision is not None and tool_name in self._decision.tool_names
-        if (tool is None and not subagent and not memory and not decision) or self._closed:
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
-                "tool-surface:unavailable",
-                f"tool unavailable: {tool_name}",
-            )
-        if memory and (
-            (
-                tool_name in {"remember", "mark_memory_relation"}
-                and not memory_context.memory_use_policy.allows_writes
-            )
-            or (
-                tool_name not in {"remember", "mark_memory_relation"}
-                and not memory_context.memory_use_policy.allows_reads
-            )
-        ):
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.PERMISSION_DENIED,
-                context_fingerprint(
-                    "pulsara:memory-user-opt-out-authorization:v1",
-                    {
-                        "policy": memory_context.memory_use_policy.value,
-                        "tool_name": tool_name,
-                    },
-                ),
-                "memory use was disabled by the user for this run",
-            )
-        entry = execution_catalog_entry(tool_name)
-        schema = _json_schema_value(execution_catalog_entry(tool_name, code_mode=surface_borrow.code_cell_id is not None).descriptor.input_schema)
-        try:
-            _validate_builtin_call_schema(tool_name, schema, arguments)
-        except ValidationError as exc:
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.INVALID_ARGUMENTS,
-                f"descriptor:{entry.descriptor.id}",
-                f"invalid tool arguments: {exc.message}",
-            )
-        if decision:
-            if permission_snapshot.effective_mode is not PermissionMode.BYPASS_PERMISSIONS:
-                return KernelToolAuthorization(KernelToolAuthorizationKind.PERMISSION_DENIED,
-                    "decision:root-bypass-required", "decide requires ROOT bypass-permissions mode")
-            from pulsara_agent.conversation_kernel.decision_tools import validate_decision_arguments
-            try:
-                validate_decision_arguments(arguments)
-            except ValueError as exc:
-                return KernelToolAuthorization(KernelToolAuthorizationKind.INVALID_ARGUMENTS,
-                    "decision-arguments", str(exc))
-        if tool_name in MEDIA_TOOL_NAMES:
-            from pulsara_agent.media.source import MediaError
-
-            try:
-                validate_media_arguments(tool_name, arguments)
-            except ValueError as exc:
-                return KernelToolAuthorization(KernelToolAuthorizationKind.INVALID_ARGUMENTS,
-                    "media:invalid-arguments",
-                    f"{exc.code}: {exc}" if isinstance(exc, MediaError) else str(exc))
-        if tool_name == "open_in_pulsara" and surface_borrow.prepared.access.conversation_scope_kind is not ModelInputScopeKind.ROOT:
-            return KernelToolAuthorization(KernelToolAuthorizationKind.PERMISSION_DENIED, "open_in_pulsara_root_only", "open_in_pulsara requires ROOT scope")
-        if tool_name in {"view_image", "exec_process", "manage_process", "query_processes", "exec_cell", "query_cells", "manage_cell"}:
-            try:
-                if tool_name == "view_image":
-                    parse_view_image_source(arguments)
-                elif tool_name == "exec_process":
-                    parse_exec_process_input(arguments)
-                elif tool_name == "manage_process":
-                    parse_manage_process_input(arguments)
-                elif tool_name == "query_processes":
-                    parse_query_processes_input(arguments)
-                else:
-                    from pulsara_agent.code_mode.targets import parse_cell_target
-                    from pulsara_agent.identity import require_id
-                    if "target" in arguments:
-                        parse_cell_target(arguments["target"])
-                    if "cursor" in arguments:
-                        require_id(arguments["cursor"], "cell")
-                    for field in ("yield_time_ms", "max_items", "offset_chars", "max_chars"):
-                        if field in arguments and type(arguments[field]) is not int:
-                            raise ValueError(f"{field} must be an integer")
-            except ValueError as exc:
-                return KernelToolAuthorization(
-                    KernelToolAuthorizationKind.INVALID_ARGUMENTS,
-                    f"descriptor:{entry.descriptor.id}",
-                    f"invalid tool arguments: {exc}",
-                )
-        if tool_name in {"exec_cell", "query_cells", "manage_cell"}:
-            if (surface_borrow.code_cell_id is not None
-                or surface_borrow.prepared.access.conversation_scope_kind is not ModelInputScopeKind.ROOT
-                or permission_snapshot.effective_mode is not PermissionMode.BYPASS_PERMISSIONS):
-                return KernelToolAuthorization(KernelToolAuthorizationKind.PERMISSION_DENIED,
-                    "code-mode:root-bypass-required", f"{tool_name} is available only in bypass-permissions mode.")
-        if tool_name == "reload_capabilities":
-            access = surface_borrow.prepared.access
-            if (
-                access.conversation_scope_kind is not ModelInputScopeKind.ROOT
-                or permission_snapshot.effective_mode
-                is not PermissionMode.BYPASS_PERMISSIONS
-            ):
-                return KernelToolAuthorization(
-                    KernelToolAuthorizationKind.PERMISSION_DENIED,
-                    f"{tool_name}_requires_root_bypass_mode",
-                    f"{tool_name} requires ROOT bypass-permissions mode",
-                )
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.ALLOW,
-                f"descriptor:{entry.descriptor.id}:{entry.entry_fingerprint}",
-            )
-        if subagent:
-            access = surface_borrow.prepared.access
-            root_tools = {"run_agent", "stop_agent"}
-            if (permission_snapshot.effective_mode is not PermissionMode.BYPASS_PERMISSIONS
-                or (access.conversation_scope_kind is not ModelInputScopeKind.ROOT and tool_name in root_tools)):
-                return KernelToolAuthorization(
-                    KernelToolAuthorizationKind.PERMISSION_DENIED,
-                    "agent_requires_bypass", f"{tool_name} is available only in bypass-permissions mode.",
-                )
-            argument_error = self._subagent.validate_arguments(
-                tool_name=tool_name,
-                arguments=arguments,
-            )
-            if argument_error is not None:
-                return KernelToolAuthorization(
-                    KernelToolAuthorizationKind.INVALID_ARGUMENTS,
-                    f"descriptor:{entry.descriptor.id}",
-                    argument_error,
-                )
-        if tool_name == "todo":
-            try:
-                parse_todo_replacement(arguments)
-            except TodoValidationError as exc:
-                return KernelToolAuthorization(
-                    KernelToolAuthorizationKind.INVALID_ARGUMENTS,
-                    f"descriptor:{entry.descriptor.id}",
-                    str(exc),
-                )
-            access = surface_borrow.prepared.access
-            try:
-                self._current_work_owner.require_active(
-                    scope_kind=access.conversation_scope_kind,
-                    exact_turn_id=turn_id,
-                )
-            except LookupError:
-                return KernelToolAuthorization(
-                    KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
-                    "todo-run:inactive",
-                    "todo scope is no longer active",
-                )
-        if tool_name == "use_new_mcp_tool":
-            return self._authorize_meta_mcp(
-                arguments=arguments,
-                tool_call_id=tool_call_id,
-                turn_id=turn_id,
-                permission_snapshot=permission_snapshot,
-                surface_borrow=surface_borrow,
-            )
-        capability_call = None
-        if tool_name == "manage_capability":
-            access = surface_borrow.prepared.access
-            if access.conversation_scope_kind is not ModelInputScopeKind.ROOT:
-                return KernelToolAuthorization(
-                    KernelToolAuthorizationKind.PERMISSION_DENIED,
-                    "capability:root-only",
-                    "Capability management is available only in ROOT",
-                )
-            if self._capability_management is None:
-                return KernelToolAuthorization(
-                    KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
-                    "capability:unavailable",
-                    "Capability management is unavailable",
-                )
-            try:
-                prepared = await self._capability_management.prepare(arguments)
-            except ValueError as exc:
-                return KernelToolAuthorization(
-                    KernelToolAuthorizationKind.INVALID_ARGUMENTS,
-                    "capability:invalid-target",
-                    str(exc),
-                )
-            capability_call = CapabilityManagementCall(
-                self._capability_management, prepared
-            )
-            capability_call.subject = (
-                self._session_id,
-                turn_id,
-                assistant_entry_id,
-                tool_call_id,
-            )
-        decision = await self._authorization_policy.decide(
-            ToolDispatchAuthorizationRequest(
-                tool_name=tool_name,
-                tool_call_id=tool_call_id,
-                arguments=dict(arguments),
-                turn_id=turn_id,
-                assistant_entry_id=assistant_entry_id,
-                permission_snapshot=permission_snapshot,
-                workspace_root=self._workspace_root,
-                capability_effects=capability_call.prepared.effects
-                if capability_call
-                else None,
-            )
-        )
-        if capability_call is not None:
-            readonly_form = (
-                decision.kind is ToolDispatchDecisionKind.DENY
-                and permission_snapshot.effective_mode is PermissionMode.READ_ONLY
-            )
-            if decision.kind is ToolDispatchDecisionKind.DENY and not readonly_form:
-                capability_call.discard()
-                return KernelToolAuthorization(
-                    KernelToolAuthorizationKind.PERMISSION_DENIED,
-                    decision.reference,
-                    decision.public_message,
-                )
-            form = (
-                readonly_form
-                or bool(capability_call.prepared.user_inputs)
-                or (decision.kind is ToolDispatchDecisionKind.REQUIRE_CONFIRMATION)
-            )
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.CAPABILITY_FORM_REQUIRED
-                if form
-                else KernelToolAuthorizationKind.ALLOW,
-                decision.reference,
-                decision.public_message,
-                capability_call=capability_call,
-                capability_permission_required=decision.kind
-                is ToolDispatchDecisionKind.REQUIRE_CONFIRMATION,
-            )
-        if decision.kind is ToolDispatchDecisionKind.REQUIRE_CONFIRMATION:
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.REQUIRE_CONFIRMATION,
-                decision.reference,
-                decision.public_message,
-            )
-        if decision.kind is ToolDispatchDecisionKind.DENY:
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.PERMISSION_DENIED,
-                decision.reference,
-                decision.public_message,
-            )
-        if decision.kind is not ToolDispatchDecisionKind.ALLOW:
-            raise RuntimeError("permission decision vocabulary is invalid")
-        if tool_name in {"read_mcp_resource"}:
-            generation = surface_borrow.prepared.access.surface_generation
-            runtime, _current_generation = self._current_mcp_runtime_for_borrow(surface_borrow)
-            if runtime is None:
-                return KernelToolAuthorization(
-                    KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
-                    "mcp-runtime:unavailable",
-                    "MCP runtime is unavailable",
-                )
-            try:
-                permit = runtime.admit_standard_operation(
-                    tool_name=tool_name,
-                    arguments=arguments,
-                    descriptor_fingerprint=entry.descriptor.fingerprint(),
-                    session_id=self._session_id,
-                    scope_kind=(surface_borrow.prepared.access.conversation_scope_kind),
-                    turn_id=turn_id,
-                    tool_call_id=tool_call_id,
-                )
-            except McpSnapshotStale:
-                return KernelToolAuthorization(
-                    KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
-                    "mcp-runtime:snapshot-stale",
-                    "MCP_SNAPSHOT_STALE",
-                )
-            except ValueError:
-                return KernelToolAuthorization(
-                    KernelToolAuthorizationKind.INVALID_ARGUMENTS,
-                    "mcp-runtime:catalog-join-invalid",
-                    "MCP resource arguments do not match the exact catalog",
-                )
-            if permit is None:
-                raise RuntimeError("MCP remote read did not create a permit")
-            key = (generation, tool_call_id)
-            if key in self._mcp_dispatch_permits:
-                permit.release()
-                raise RuntimeError("MCP standard operation was authorized twice")
-            self._mcp_dispatch_permits[key] = permit
-            self._mcp_dispatch_resources[key] = runtime
-        return KernelToolAuthorization(
-            KernelToolAuthorizationKind.ALLOW,
-            f"descriptor:{entry.descriptor.id}:{entry.entry_fingerprint}",
-        )
 
     def _installed_epoch_for_borrow(
         self, surface_borrow: ProcessLocalToolSurfaceBorrow
@@ -2319,563 +1282,6 @@ class DirectKernelToolPort:
     def release_code_cell_mcp_refs(self, cell_id: str) -> None:
         self._mcp_meta_refs.retire_consumer(consumer_kind=McpToolRefConsumerKind.CODE_CELL, consumer_id=cell_id)
 
-    def _resolve_meta_ref_executor(
-        self,
-        *,
-        ref: NewMcpToolRef,
-        surface_borrow: ProcessLocalToolSurfaceBorrow,
-    ) -> tuple[McpBoundToolExecutor, int]:
-        if ref.consumer_kind is McpToolRefConsumerKind.CODE_CELL:
-            runtime, generation = self._current_mcp_runtime_for_borrow(surface_borrow)
-            if runtime is None:
-                raise LookupError("MCP_TOOL_REF_RUNTIME_UNAVAILABLE")
-            specs = runtime.root_tool_specs if ref.conversation_scope_kind is ModelInputScopeKind.ROOT else runtime.subagent_tool_specs
-            executors = [runtime.executors[item.provider_tool_name] for item in specs
-                         if item.provider_tool_name in runtime.executors]
-            matches = [item for item in executors
-                       if _mcp_executor_capability_version(item).identity == ref.capability_identity
-                       and _mcp_executor_capability_version(item).semantic_fingerprint == ref.tool_semantic_fingerprint
-                       and execution_policy_fingerprint(item.policy) == ref.mcp_execution_policy_fingerprint
-                       and item.runtime_generation_id == ref.runtime_generation]
-            if len(matches) != 1:
-                raise LookupError("MCP_TOOL_REF_BINDING_STALE")
-            return matches[0], surface_borrow.prepared.access.surface_generation
-        plan = surface_borrow.prepared.capability_exposure_plan
-        if plan is None:
-            raise LookupError("MCP_TOOL_REF_ROUTE_UNAVAILABLE")
-        matches = tuple(
-            item
-            for item in plan.mcp_catalog_route_projection.routes
-            if item.route_fingerprint == ref.tool_route_fingerprint
-            and item.version.identity == ref.capability_identity
-            and item.version.semantic_fingerprint == ref.tool_semantic_fingerprint
-        )
-        if len(matches) != 1:
-            raise LookupError("MCP_TOOL_REF_STALE_OR_FOREIGN")
-        route = matches[0]
-        if route.route is not ToolCapabilityRouteKind.NEW_MCP_META_ONLY:
-            raise LookupError("MCP_TOOL_REF_NOT_META_CALLABLE")
-        generation = surface_borrow.prepared.access.surface_generation
-        runtime = self._mcp_runtime_by_surface_generation.get(generation)
-        if runtime is None:
-            raise LookupError("MCP_TOOL_REF_RUNTIME_UNAVAILABLE")
-        executor = runtime.executors.get(route.version.provider_name)
-        if executor is None:
-            raise LookupError("MCP_TOOL_REF_EXECUTOR_UNAVAILABLE")
-        version = _mcp_executor_capability_version(executor)
-        if (
-            version != route.version
-            or executor.runtime_generation_id != ref.runtime_generation
-            or execution_policy_fingerprint(executor.policy)
-            != ref.mcp_execution_policy_fingerprint
-        ):
-            raise LookupError("MCP_TOOL_REF_BINDING_STALE")
-        return executor, generation
-
-    def _authorize_meta_mcp(
-        self,
-        *,
-        arguments: Mapping[str, object],
-        tool_call_id: str,
-        turn_id: str,
-        permission_snapshot: FrozenRunPermissionSnapshot,
-        surface_borrow: ProcessLocalToolSurfaceBorrow,
-    ) -> KernelToolAuthorization:
-        target = arguments.get("target")
-        token = target.get("tool_ref") if isinstance(target, Mapping) and target.get("kind") == "MCP_TOOL_REF" else None
-        inner = arguments.get("arguments")
-        if not isinstance(token, str) or not isinstance(inner, Mapping):
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.INVALID_ARGUMENTS,
-                "mcp-meta:arguments-invalid",
-                "invalid new MCP tool reference or arguments",
-            )
-        try:
-            ref = self._mcp_meta_refs.resolve_callable(
-                token, **self._mcp_ref_consumer_for_borrow(surface_borrow)
-            )
-            executor, generation = self._resolve_meta_ref_executor(
-                ref=ref, surface_borrow=surface_borrow
-            )
-        except LookupError as exc:
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
-                "mcp-meta:ref-unavailable",
-                f"{exc}. This call was not dispatched. Inspect this tool again with query_capabilities and use its current parameters and invocation.target. Do not repeat earlier actions whose outcome is uncertain.",
-            )
-        schema = thaw_json(executor.semantic.input_schema)
-        if not isinstance(schema, dict):
-            raise RuntimeError("MCP meta schema did not thaw to an object")
-        try:
-            validate_mcp_arguments(schema, dict(inner))
-        except McpSchemaEvaluationFailure as exc:
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
-                f"mcp-meta:{executor.semantic.descriptor_fingerprint}",
-                str(exc),
-            )
-        except ValidationError as exc:
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.INVALID_ARGUMENTS,
-                f"mcp-meta:{executor.semantic.descriptor_fingerprint}",
-                f"invalid MCP tool arguments: {exc.message}",
-            )
-        mode = permission_snapshot.effective_mode
-        if (
-            executor.policy.effect_kind is McpEffectKind.EXTERNAL_EFFECT
-            and mode is PermissionMode.READ_ONLY
-        ):
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.PERMISSION_DENIED,
-                f"mcp-policy:{execution_policy_fingerprint(executor.policy)}",
-                "external MCP effects are denied in read-only mode",
-            )
-        key = (generation, tool_call_id)
-        if (
-            key in self._mcp_dispatch_permits
-            or key in self._mcp_confirmation_admissions
-            or key in self._mcp_meta_invocations
-        ):
-            raise RuntimeError("MCP meta tool call was authorized twice")
-        frozen_arguments = freeze_json(dict(inner))
-        if not isinstance(frozen_arguments, FrozenJsonObjectFact):
-            raise TypeError("MCP meta arguments did not freeze to an object")
-        prepared = _PreparedMcpMetaInvocation(
-            executor=executor,
-            ref=ref,
-            arguments=frozen_arguments,
-        )
-        self._mcp_meta_invocations[key] = prepared
-        if executor.policy.effect_kind is McpEffectKind.EXTERNAL_EFFECT and mode in {
-            PermissionMode.ASK_PERMISSIONS,
-            PermissionMode.ACCEPT_EDITS,
-        }:
-            self._mcp_confirmation_admissions[key] = _PendingMcpConfirmationAdmission(
-                generation=generation,
-                executor=executor,
-                scope_kind=surface_borrow.prepared.access.conversation_scope_kind,
-                turn_id=turn_id,
-                tool_call_id=tool_call_id,
-            )
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.REQUIRE_CONFIRMATION,
-                f"mcp-policy:{execution_policy_fingerprint(executor.policy)}",
-                f"Allow external MCP action {executor.semantic.remote_tool_name}?",
-            )
-        try:
-            permit = executor.admit(
-                session_id=self._session_id,
-                scope_kind=surface_borrow.prepared.access.conversation_scope_kind,
-                turn_id=turn_id,
-                tool_call_id=tool_call_id,
-            )
-        except McpSnapshotStale:
-            self._mcp_meta_invocations.pop(key, None)
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
-                "mcp-runtime:snapshot-stale",
-                "MCP_SNAPSHOT_STALE",
-            )
-        self._mcp_dispatch_permits[key] = permit
-        return KernelToolAuthorization(
-            KernelToolAuthorizationKind.ALLOW,
-            f"mcp-policy:{execution_policy_fingerprint(executor.policy)}",
-        )
-
-    def _authorize_mcp(
-        self,
-        *,
-        binding: PreparedToolExecutionBinding,
-        arguments: Mapping[str, object],
-        tool_call_id: str,
-        turn_id: str,
-        assistant_entry_id: str,
-        permission_snapshot: FrozenRunPermissionSnapshot,
-        surface_borrow: ProcessLocalToolSurfaceBorrow,
-    ) -> KernelToolAuthorization:
-        policy = binding.execution_policy
-        if not isinstance(policy, McpToolExecutionPolicyFact):
-            raise TypeError("dynamic MCP policy union is invalid")
-        semantic = next(
-            item
-            for item in surface_borrow.tool_specs
-            if item.name == binding.tool_name
-        )
-        schema = thaw_json(semantic.parameters)
-        if not isinstance(schema, dict):
-            raise RuntimeError("MCP schema did not thaw to an object")
-        try:
-            validate_mcp_arguments(schema, dict(arguments))
-            if binding.current_mcp_spec is not None:
-                validate_mcp_arguments(thaw_json(binding.current_mcp_spec.parameters), dict(arguments))
-        except McpSchemaEvaluationFailure as exc:
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
-                f"mcp-descriptor:{binding.descriptor_fingerprint}",
-                str(exc),
-            )
-        except ValidationError as exc:
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.INVALID_ARGUMENTS,
-                f"mcp-descriptor:{binding.descriptor_fingerprint}",
-                f"invalid MCP tool arguments: {exc.message}",
-            )
-        runtime, _current_generation = self._current_mcp_runtime_for_borrow(surface_borrow)
-        generation = surface_borrow.prepared.access.surface_generation
-        if runtime is None:
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
-                "mcp-runtime:retired",
-                "MCP tool generation is no longer available",
-            )
-        executor = runtime.executors.get(binding.tool_name)
-        if executor is None:
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
-                "mcp-runtime:binding-missing",
-                "MCP tool binding is unavailable",
-            )
-        if surface_borrow.code_cell_id is not None:
-            scoped = runtime.root_tool_specs if surface_borrow.prepared.access.conversation_scope_kind is ModelInputScopeKind.ROOT else runtime.subagent_tool_specs
-            if executor.semantic not in scoped or executor.semantic.provider_spec() != semantic:
-                return KernelToolAuthorization(KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
-                    "mcp-runtime:binding-stale", "MCP_SNAPSHOT_STALE: inspect the current tool before retrying")
-            policy = executor.policy
-        elif (executor.policy is not policy or (binding.current_mcp_spec is not None
-                and executor.semantic.provider_spec() != binding.current_mcp_spec)):
-            return KernelToolAuthorization(KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
-                "mcp-runtime:binding-stale", "MCP_SNAPSHOT_STALE: inspect the current tool before retrying")
-        mode = permission_snapshot.effective_mode
-        if (
-            policy.effect_kind is McpEffectKind.EXTERNAL_EFFECT
-            and mode is PermissionMode.READ_ONLY
-        ):
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.PERMISSION_DENIED,
-                f"mcp-policy:{execution_policy_fingerprint(policy)}",
-                "external MCP effects are denied in read-only mode",
-            )
-        key = (generation, tool_call_id)
-        if (
-            key in self._mcp_dispatch_permits
-            or key in self._mcp_confirmation_admissions
-        ):
-            raise RuntimeError("MCP tool call was authorized twice")
-        if policy.effect_kind is McpEffectKind.EXTERNAL_EFFECT and mode in {
-            PermissionMode.ASK_PERMISSIONS,
-            PermissionMode.ACCEPT_EDITS,
-        }:
-            self._mcp_confirmation_admissions[key] = _PendingMcpConfirmationAdmission(
-                generation=generation,
-                executor=executor,
-                scope_kind=(surface_borrow.prepared.access.conversation_scope_kind),
-                turn_id=turn_id,
-                tool_call_id=tool_call_id,
-            )
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.REQUIRE_CONFIRMATION,
-                f"mcp-policy:{execution_policy_fingerprint(policy)}",
-                f"Allow external MCP action {binding.tool_name}?",
-            )
-        try:
-            permit = executor.admit(
-                session_id=self._session_id,
-                scope_kind=surface_borrow.prepared.access.conversation_scope_kind,
-                turn_id=turn_id,
-                tool_call_id=tool_call_id,
-            )
-        except McpSnapshotStale:
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
-                "mcp-runtime:snapshot-stale",
-                "MCP_SNAPSHOT_STALE",
-            )
-        self._mcp_dispatch_permits[key] = permit
-        self._mcp_dispatch_resources[key] = executor
-        return KernelToolAuthorization(
-            KernelToolAuthorizationKind.ALLOW,
-            f"mcp-policy:{execution_policy_fingerprint(policy)}",
-        )
-
-    def prepare_permission_request(
-        self,
-        *,
-        tool_call_id: str,
-        turn_id: str,
-        surface_borrow: ProcessLocalToolSurfaceBorrow,
-    ) -> PreparedPermissionRequest:
-        access = surface_borrow.prepared.access
-        state_key = (access.surface_generation, tool_call_id)
-        admission = self._mcp_confirmation_admissions.get(state_key)
-        permit = self._mcp_dispatch_permits.get(state_key)
-        if admission is not None and (
-            admission.generation != access.surface_generation
-            or admission.turn_id != turn_id
-            or admission.scope_kind is not access.conversation_scope_kind
-        ):
-            raise RuntimeError("permission request admission does not exact-join")
-        if permit is not None and (
-            permit.turn_id != turn_id
-            or permit.scope_kind is not access.conversation_scope_kind
-        ):
-            raise RuntimeError("permission request permit does not exact-join")
-        if admission is None and permit is None:
-            state_key = None
-        return PreparedPermissionRequest(
-            tool_call_id=tool_call_id,
-            turn_id=turn_id,
-            scope_kind=access.conversation_scope_kind,
-            request_nonce=object(),
-            pending_state_key=state_key,
-            pending_admission=admission,
-            pending_permit=permit,
-            pending_meta_invocation=(
-                None if state_key is None else self._mcp_meta_invocations.get(state_key)
-            ),
-        )
-
-    def _validate_permission_request(
-        self, prepared: PreparedPermissionRequest
-    ) -> tuple[
-        tuple[int, str] | None,
-        _PendingMcpConfirmationAdmission | None,
-        McpDispatchAdmissionPermit | None,
-    ]:
-        key = prepared.pending_state_key
-        if key is None:
-            return None, None, None
-        if not isinstance(key, tuple) or len(key) != 2:
-            raise RuntimeError("permission request state key is invalid")
-        admission = self._mcp_confirmation_admissions.get(key)
-        permit = self._mcp_dispatch_permits.get(key)
-        if (
-            admission is not prepared.pending_admission
-            or permit is not prepared.pending_permit
-            or self._mcp_meta_invocations.get(key)
-            is not prepared.pending_meta_invocation
-        ):
-            raise RuntimeError("permission request owner changed")
-        return key, admission, permit
-
-    def resolve_hook_permission(
-        self, *, prepared_request: PreparedPermissionRequest, allow: bool
-    ) -> KernelToolAuthorization:
-        key, admission, permit = self._validate_permission_request(prepared_request)
-        if not allow:
-            if key is not None and admission is not None:
-                self._mcp_confirmation_admissions.pop(key, None)
-                self._mcp_meta_invocations.pop(key, None)
-            if key is not None and permit is not None:
-                self._mcp_dispatch_resources.pop(key, None)
-                self._mcp_dispatch_permits.pop(key, None)
-                if permit.state.value == "ADMITTED":
-                    permit.release()
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.PERMISSION_DENIED,
-                "hook:permission-deny",
-                "Hook denied this exact permission request",
-            )
-        if key is not None and admission is not None:
-            if self._mcp_confirmation_admissions.pop(key, None) is not admission:
-                raise RuntimeError("MCP Hook permission owner changed")
-            try:
-                permit = admission.executor.admit(
-                    session_id=self._session_id,
-                    scope_kind=admission.scope_kind,
-                    turn_id=admission.turn_id,
-                    tool_call_id=admission.tool_call_id,
-                )
-            except BaseException:
-                self._mcp_meta_invocations.pop(key, None)
-                raise
-            if key in self._mcp_dispatch_permits:
-                permit.release()
-                raise RuntimeError("MCP Hook permission permit already exists")
-            self._mcp_dispatch_permits[key] = permit
-            self._mcp_dispatch_resources[key] = admission.executor
-        return KernelToolAuthorization(
-            KernelToolAuthorizationKind.ALLOW,
-            "hook:permission-allow",
-        )
-
-    async def request_capability_form(
-        self,
-        *,
-        authorization,
-        turn_id,
-        assistant_entry_id,
-        tool_call_id,
-        permission_snapshot,
-        cell_cancel_event=None,
-    ):
-        call = authorization.capability_call
-        if (
-            call is None
-            or authorization.kind
-            is not KernelToolAuthorizationKind.CAPABILITY_FORM_REQUIRED
-        ):
-            raise RuntimeError("capability form has no prepared call")
-        if self._interaction is None:
-            call.discard()
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
-                "interaction:no-controller",
-                "Capability configuration requires a controller",
-            )
-        try:
-            resolution = await self._interaction.request_capability_form(
-                turn_id=turn_id,
-                assistant_entry_id=assistant_entry_id,
-                tool_call_id=tool_call_id,
-                permission_snapshot=permission_snapshot,
-                form=call.form(authorization.public_message),
-                cell_cancel_event=cell_cancel_event,
-            )
-        except BaseException:
-            call.discard()
-            raise
-        if (
-            resolution.decision == "SUBMIT"
-            and resolution.capability_submission is not None
-        ):
-            call.accept(resolution.capability_submission)
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.ALLOW,
-                resolution.reference,
-                resolution.public_message,
-                capability_call=call,
-                capability_user_submission=True,
-            )
-        call.discard()
-        return KernelToolAuthorization(
-            KernelToolAuthorizationKind.TOOL_UNAVAILABLE
-            if "no-controller" in resolution.reference
-            else KernelToolAuthorizationKind.CANCELLED_BEFORE_DISPATCH,
-            resolution.reference,
-            resolution.public_message,
-        )
-
-    async def request_confirmation(
-        self,
-        *,
-        prepared_request: PreparedPermissionRequest,
-        tool_name: str,
-        assistant_entry_id: str,
-        permission_snapshot: FrozenRunPermissionSnapshot,
-        cell_cancel_event: asyncio.Event | None = None,
-    ) -> KernelToolAuthorization:
-        state_key, admission, permit = self._validate_permission_request(
-            prepared_request
-        )
-        admission_entry = (
-            None if state_key is None or admission is None else (state_key, admission)
-        )
-        permit_entry = (
-            None if state_key is None or permit is None else (state_key, permit)
-        )
-        tool_call_id = prepared_request.tool_call_id
-        turn_id = prepared_request.turn_id
-        if self._interaction is None:
-            if admission_entry is not None:
-                self._mcp_confirmation_admissions.pop(admission_entry[0], None)
-                self._mcp_meta_invocations.pop(admission_entry[0], None)
-            if permit_entry is not None:
-                self._mcp_dispatch_resources.pop(permit_entry[0], None)
-                self._mcp_dispatch_permits.pop(permit_entry[0], None)
-                permit_entry[1].release()
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.PERMISSION_DENIED,
-                "interaction:no-controller-owner",
-                "tool execution requires confirmation but no controller is attached",
-            )
-
-        def admit_before_publish() -> None:
-            if admission_entry is None:
-                return
-            key, admission = admission_entry
-            if self._mcp_confirmation_admissions.pop(key, None) is not admission:
-                raise RuntimeError("MCP confirmation admission owner changed")
-            permit = admission.executor.admit(
-                session_id=self._session_id,
-                scope_kind=admission.scope_kind,
-                turn_id=admission.turn_id,
-                tool_call_id=admission.tool_call_id,
-            )
-            if key in self._mcp_dispatch_permits:
-                permit.release()
-                raise RuntimeError("MCP confirmation permit already exists")
-            self._mcp_dispatch_permits[key] = permit
-            self._mcp_dispatch_resources[key] = admission.executor
-
-        def discard_admission() -> None:
-            if admission_entry is not None:
-                self._mcp_confirmation_admissions.pop(admission_entry[0], None)
-                self._mcp_meta_invocations.pop(admission_entry[0], None)
-                self._mcp_dispatch_resources.pop(admission_entry[0], None)
-                current = self._mcp_dispatch_permits.pop(admission_entry[0], None)
-                if current is not None and current.state.value == "ADMITTED":
-                    current.release()
-
-        resolution = await self._interaction.request_tool_confirmation(
-            turn_id=turn_id,
-            assistant_entry_id=assistant_entry_id,
-            tool_call_id=tool_call_id,
-            tool_name=tool_name,
-            permission_snapshot=permission_snapshot,
-            cell_cancel_event=cell_cancel_event,
-            admission_hooks=(
-                InteractionAdmissionHooks(
-                    before_publish=admit_before_publish,
-                    discard=discard_admission,
-                    owner_key=(
-                        "mcp-server:" + admission_entry[1].executor.semantic.server_id
-                    ),
-                )
-                if admission_entry is not None
-                else None
-            ),
-        )
-        permit_entry = (
-            None
-            if state_key is None
-            else (
-                (state_key, current)
-                if (current := self._mcp_dispatch_permits.get(state_key)) is not None
-                else None
-            )
-        )
-        if resolution.decision == "ALLOW":
-            if permit_entry is not None:
-                permit_entry[1].mark_attempt_accepted()
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.ALLOW,
-                resolution.reference,
-                resolution.public_message,
-                accepted_attempt_id=resolution.attempt_id,
-                accepted_permission_snapshot_fingerprint=(
-                    resolution.permission_snapshot_fingerprint
-                ),
-            )
-        if resolution.decision == "DENY":
-            if permit_entry is not None:
-                self._mcp_dispatch_resources.pop(permit_entry[0], None)
-                self._mcp_dispatch_permits.pop(permit_entry[0], None)
-                self._mcp_meta_invocations.pop(permit_entry[0], None)
-                if permit_entry[1].state.value == "ADMITTED":
-                    permit_entry[1].release()
-            return KernelToolAuthorization(
-                (KernelToolAuthorizationKind.CANCELLED_BEFORE_DISPATCH
-                 if resolution.reference == "interaction:cell-stopped" and resolution.result_entry_id is None
-                 else KernelToolAuthorizationKind.PERMISSION_DENIED),
-                resolution.reference,
-                resolution.public_message,
-                accepted_result_entry_id=resolution.result_entry_id,
-                accepted_result_id=resolution.result_id,
-                accepted_result_entry_sequence=(resolution.result_entry_sequence),
-                accepted_result_observed_at=resolution.result_observed_at,
-                accepted_result_public_body=resolution.result_public_body,
-            )
-        raise RuntimeError("interaction resolution vocabulary is invalid")
 
     async def _query_capabilities_result(
         self, *, tool_name, arguments, invocation_context
@@ -3414,242 +1820,39 @@ class DirectKernelToolPort:
         if tool_name in {"exec_cell", "query_cells", "manage_cell"}:
             return await self._invoke_code_mode_control(tool_name, arguments, invocation_context)
         if tool_name in SESSION_QUERY_TOOL_NAMES:
-            from pulsara_agent.conversation_kernel.session_content import (
-                SessionQueryError,
+            return await self._invoke_session_query(
+                tool_name=tool_name,
+                arguments=arguments,
+                tool_call_id=tool_call_id,
+                invocation_context=invocation_context,
+                page_budget=page_budget,
+                observation_origin=observation_origin,
             )
-            from pulsara_agent.conversation_kernel.repository_errors import (
-                ConversationKernelConflict,
+        if tool_name in {'query_schedules', 'manage_schedule'}:
+            return await self._invoke_scheduled_management(
+                tool_name=tool_name,
+                arguments=arguments,
+                tool_call_id=tool_call_id,
+                invocation_context=invocation_context,
+                page_budget=page_budget,
+                invocation_started=invocation_started,
+                observation_origin=observation_origin,
             )
-            from pulsara_agent.ports.tool_output import ToolOutputContentError
-            from pulsara_agent.terminal_protocol.canonical_v3 import (
-                CanonicalProtocolGap,
+        if tool_name == 'manage_capability':
+            return await self._invoke_capability_management(
+                turn_id=turn_id,
+                assistant_entry_id=assistant_entry_id,
+                tool_call_id=tool_call_id,
+                invocation_context=invocation_context,
+                page_budget=page_budget,
+                invocation_started=invocation_started,
+                observation_origin=observation_origin,
             )
-            from pulsara_agent.storage.migrations.errors import (
-                PostgresSchemaError,
-                PostgresSchemaFailureCode,
-            )
-            from psycopg import Error as PostgresError
-            from psycopg.errors import QueryCanceled
-
-            if (
-                self._session_content_query is None
-                or invocation_context.conversation_scope_kind != "ROOT"
-                or invocation_context.session_content_range is None
-            ):
-                raise RuntimeError("session query lost its ROOT call-local owner")
-            deadline = self._deadlines.deadline(
-                KernelWatchdogOwner.FOREGROUND_CANONICAL
-            )
-
-            def query(*, deadline_monotonic):
-                try:
-                    value = self._session_content_query.invoke(
-                        tool_name,
-                        dict(arguments),
-                        current_range=invocation_context.session_content_range,
-                        tool_call_id=tool_call_id,
-                        page_budget=page_budget,
-                        deadline_monotonic=deadline_monotonic,
-                    )
-                    return "SUCCESS", value
-                except SessionQueryError as exc:
-                    return "APPLICATION_ERROR", {"code": exc.code, "message": str(exc)}
-                except (TimeoutError, QueryCanceled):
-                    return "APPLICATION_ERROR", {
-                        "code": "QUERY_TIMEOUT",
-                        "message": "Session query timed out; narrow or retry it.",
-                    }
-                except CanonicalProtocolGap:
-                    return "APPLICATION_ERROR", {
-                        "code": "CURSOR_INVALID",
-                        "message": "History cuts do not match; restart the query.",
-                    }
-                except PostgresSchemaError as exc:
-                    code = (
-                        "QUERY_TIMEOUT"
-                        if exc.code is PostgresSchemaFailureCode.DEADLINE_EXCEEDED
-                        else "QUERY_UNAVAILABLE"
-                    )
-                    return "APPLICATION_ERROR", {
-                        "code": code,
-                        "message": "Canonical session storage is unavailable or timed out.",
-                    }
-                except (RuntimeError, ToolOutputContentError, ConversationKernelConflict):
-                    return "APPLICATION_ERROR", {
-                        "code": "CONTENT_CORRUPT",
-                        "message": "Saved session content could not be verified.",
-                    }
-                except ToolResultPageBoundary:
-                    raise
-                except ValueError:
-                    return "APPLICATION_ERROR", {
-                        "code": "INVALID_REQUEST",
-                        "message": "Invalid session query or cursor.",
-                    }
-                except PostgresError:
-                    return "APPLICATION_ERROR", {
-                        "code": "QUERY_UNAVAILABLE",
-                        "message": "Canonical session storage is unavailable.",
-                    }
-
-            physical = await self._physical_io.run_tool_invocation(
-                query, deadline_monotonic=deadline
-            )
-            if physical.disposition is PhysicalToolInvocationDisposition.RAISED:
-                if isinstance(physical.error, TimeoutError):
-                    state, value = (
-                        "APPLICATION_ERROR",
-                        {
-                            "code": "QUERY_TIMEOUT",
-                            "message": "Session query timed out; narrow or retry it.",
-                        },
-                    )
-                else:
-                    assert physical.error is not None
-                    raise KernelToolPhysicalInvocationError(
-                        effect_class="read_only",
-                        error=physical.error,
-                        timing=physical.timing.value,
-                        caller_cancelled=physical.caller_cancelled,
-                        physical_observation=physical.observation,
-                    )
-            else:
-                state, value = physical.value
-            return KernelToolResult(
-                state=state,
-                content=json.dumps(
-                    value, ensure_ascii=False, separators=(",", ":")
-                ).encode(),
-                page_complete=True,
-                public_format=ToolOutputSourceFormatHint.JSON,
-                caller_cancelled_while_running=physical.caller_cancelled,
-                effect_class="read_only",
-                physical_timing=physical.timing.value,
-                physical_observation=(
-                    None
-                    if physical.observation is None
-                    else replace(
-                        physical.observation, observation_origin_kind=observation_origin
-                    )
-                ),
-            )
-        if tool_name in {"query_schedules", "manage_schedule"}:
-            if self._scheduled_tasks is None or invocation_context.conversation_scope_kind != "ROOT":
-                raise RuntimeError("scheduled management lost its ROOT owner")
-            async def manage():
-                from pulsara_agent.scheduling.contracts import ScheduledTaskError
-                try:
-                    method = (self._scheduled_tasks.invoke_query if tool_name == "query_schedules"
-                              else self._scheduled_tasks.invoke_manage)
-                    value = await method(arguments,
-                        default_session_id=self._session_id,
-                        memory_domain_id=self._memory_domain_id,
-                        permission_mode=invocation_context.effective_permission_mode,
-                        page_budget=page_budget)
-                    return "SUCCESS", value
-                except ToolResultPageBoundary:
-                    raise
-                except (ScheduledTaskError, KeyError, ValueError) as exc:
-                    return "APPLICATION_ERROR", {"error": getattr(exc, "code", "INVALID_REQUEST"), "message": str(exc)}
-            # Reuse the existing admitted-async-operation settlement: cancellation
-            # waits for the management transaction and retains its actual result.
-            operation = asyncio.create_task(manage(), name=f"scheduled-management:{tool_call_id}")
-            known, cancelled = await _await_mcp_operation(operation)
-            state, value = known
-            return KernelToolResult(state=state,
-                content=json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode(),
-                public_format=ToolOutputSourceFormatHint.JSON,
-                page_complete=tool_name == "manage_schedule" or "target" not in arguments,
-                required_facts=(value if tool_name == "manage_schedule" and state == "SUCCESS" else {
-                    key: value[key] for key in ("target", "status", "revision") if key in value
-                }),
-                caller_cancelled_while_running=cancelled,
-                effect_class="read_only" if tool_name == "query_schedules" else "unknown_effect",
-                physical_observation=_freeze_physical_observation(invocation_started, observation_origin))
-        if tool_name == "manage_capability":
-            call = invocation_context.capability_call
-            if (
-                call is None
-                or call.service is not self._capability_management
-                or call.subject
-                != (self._session_id, turn_id, assistant_entry_id, tool_call_id)
-                or invocation_context.conversation_scope_kind != "ROOT"
-            ):
-                raise RuntimeError("capability execution lost its exact prepared owner")
-            try:
-                values = await call.execute(cell_cancel_event=invocation_context.cell_cancel_event, page_budget=page_budget)
-            except ToolResultPageBoundary:
-                raise
-            except McpManagementConflict as exc:
-                values = {
-                    "status": "CONFLICT",
-                    "message": str(exc),
-                    "adoption": "NOT_APPLICABLE",
-                }
-            except ValueError:
-                # Private form values may be present in a native validator's
-                # exception. Do not put that exception into tool/Hook context.
-                values = {
-                    "status": "REJECTED",
-                    "message": "Capability operation could not be applied; review its current configuration.",
-                    "adoption": "NOT_APPLICABLE",
-                }
-            if values["status"] == "APPLIED":
-                try:
-                    values[
-                        "adoption"
-                    ] = await self._capability_reload.adopt_capability_management_change(
-                        workspace_root=call._root()
-                    )
-                except asyncio.CancelledError:
-                    # Source is already settled. Preserve that fact; a later
-                    # safe point may retry adoption, never replay the mutation.
-                    values["adoption"] = "PARTIAL"
-                except Exception:
-                    values["adoption"] = "PARTIAL"
-            return KernelToolResult(
-                state="SUCCESS"
-                if values["status"] in {"APPLIED", "OBSERVED"}
-                else "CANCELLED" if values["status"] == "CANCELLED" else "APPLICATION_ERROR",
-                content=json.dumps(
-                    values, ensure_ascii=False, separators=(",", ":")
-                ).encode(),
-                public_format=ToolOutputSourceFormatHint.JSON,
-                required_facts=capability_management_required_facts(values),
-                effect_class="read_only"
-                if call.prepared.effects.read_only
-                else "unknown_effect",
-                physical_observation=_freeze_physical_observation(
-                    invocation_started, observation_origin
-                ),
-            )
-        if tool_name == "reload_capabilities":
-            if self._capability_reload is None:
-                raise RuntimeError("Capability reload port is unavailable")
-            try:
-                require_capability_reload_budget(page_budget)
-            except ToolResultPageBoundary:
-                return _no_effect_budget_result()
-            values = await self._capability_reload.reload_capabilities(
-                deadline_monotonic=self._deadlines.deadline(
-                    KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION
-                )
-            )
-            content = json.dumps(
-                dict(values),
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode("utf-8")
-            return KernelToolResult(
-                state="SUCCESS",
-                content=content,
-                public_format=ToolOutputSourceFormatHint.JSON,
-                required_facts=capability_reload_required_facts(values),
-                effect_class="read_only",
-                physical_observation=_freeze_physical_observation(
-                    invocation_started, observation_origin
-                ),
+        if tool_name == 'reload_capabilities':
+            return await self._invoke_capability_reload(
+                page_budget=page_budget,
+                invocation_started=invocation_started,
+                observation_origin=observation_origin,
             )
         if tool_name == "query_capabilities":
             return replace(
@@ -3808,66 +2011,14 @@ class DirectKernelToolPort:
         if isinstance(tool, OpenInPulsaraTool) and invocation_context.conversation_scope_kind != "ROOT":
             raise RuntimeError("open_in_pulsara requires ROOT scope")
         if isinstance(tool, TodoTool):
-            candidate = parse_todo_replacement(arguments)
-            counts = {
-                "pending": candidate.pending_count,
-                "in_progress": candidate.in_progress_count,
-                "completed": candidate.completed_count,
-                "total": len(candidate.ordered_items),
-            }
-            acknowledgement = json.dumps(
-                {
-                    "status": ("CLEARED" if not candidate.ordered_items else "UPDATED"),
-                    "counts": counts,
-                },
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode("utf-8")
-            try:
-                fits_receipt = page_budget.fits(acknowledgement.decode("utf-8"))
-            except ToolResultPageBoundary:
-                return _no_effect_budget_result()
-            if not fits_receipt:
-                return _no_effect_budget_result()
-            try:
-                prepared = self._current_work_owner.prepare_replace(
-                    scope_kind=(
-                        invocation_context.surface_borrow.prepared.access.conversation_scope_kind
-                    ),
-                    exact_turn_id=turn_id,
-                    attempt_id=attempt_id,
-                    proposed_result_entry_id=invocation_context.result_entry_id,
-                    candidate=candidate,
-                    acknowledgement=acknowledgement,
-                )
-            except LookupError:
-                return KernelToolResult(
-                    # The attempt already exists; scope expiry is a known
-                    # rejection, not a no-dispatch TOOL_UNAVAILABLE result.
-                    state="APPLICATION_ERROR",
-                    content=b'{"error":"todo scope is no longer active"}',
-                    effect_class="read_only",
-                    physical_observation=_freeze_physical_observation(
-                        invocation_started, observation_origin
-                    ),
-                )
-            token = ProcessLocalEffectSettlementToken(
-                prepared.token_id,
-                prepared,
-            )
-            self._todo_settlements[token.token_id] = token
-            return KernelToolResult(
-                state="SUCCESS",
-                content=acknowledgement,
-                public_format=ToolOutputSourceFormatHint.JSON,
-                page_complete=True,
-                required_facts=json.loads(acknowledgement),
-                process_local_settlement=token,
-                effect_class="read_only",
-                physical_observation=_freeze_physical_observation(
-                    invocation_started, observation_origin
-                ),
+            return await self._invoke_todo_replacement(
+                arguments=arguments,
+                turn_id=turn_id,
+                attempt_id=attempt_id,
+                invocation_context=invocation_context,
+                page_budget=page_budget,
+                invocation_started=invocation_started,
+                observation_origin=observation_origin,
             )
         cancel_requested = Event()
         call = ToolCall(
@@ -3884,154 +2035,113 @@ class DirectKernelToolPort:
             return await self._invoke_media(tool, arguments, invocation_context, binding,
                 invocation_started, observation_origin)
         if isinstance(tool, OpenInPulsaraTool):
-            from pulsara_agent.conversation_kernel.presentation_targets import (
-                ResolvedPresentationObject, resolve_visible_cell,
-            )
-
-            async def resolve_object(kind, identity):
-                if kind == "AGENT":
-                    if self._subagent is None:
-                        raise LookupError("Agent reader is unavailable")
-                    await self._subagent.resolve_visible_agent(identity)
-                    return ResolvedPresentationObject("AGENT", identity, self._session_id)
-                resolve_visible_cell(self, cell_id=identity)
-                return ResolvedPresentationObject("CELL", identity, self._session_id, self._host_owner_id)
-
-            result = await tool.execute_async(call, resolve_object=resolve_object)
-            return KernelToolResult(
-                state=_kernel_tool_state(result.status), content=result.output.encode("utf-8"),
-                public_format=result.public_format, page_complete=result.page_complete,
-                native_output=None if result.native_output is None else result.native_output.encode("utf-8"),
-                required_facts=result.required_facts, output_body_candidate=result.output_body_candidate,
-                effect_class="read_only",
-                physical_observation=_freeze_physical_observation(invocation_started, observation_origin),
+            return await self._invoke_presentation(
+                tool=tool,
+                call=call,
+                invocation_started=invocation_started,
+                observation_origin=observation_origin,
             )
         if isinstance(tool, ViewImageTool):
-            source = parse_view_image_source(arguments)
-            if (
-                invocation_context.input_modalities is not None
-                and "image" not in invocation_context.input_modalities
-            ):
-                return KernelToolResult(
-                    state="APPLICATION_ERROR",
-                    content=b'{"error":"MODEL_IMAGE_INPUT_UNSUPPORTED"}',
-                    effect_class="read_only",
-                    physical_observation=_freeze_physical_observation(
-                        invocation_started, observation_origin
-                    ),
-                )
-            allowance = invocation_context.image_resource_allowance
-            if allowance is None:
-                raise RuntimeError("view_image invocation lacks its resource allowance")
-            if (
-                allowance.tool_call_id != tool_call_id
-                or allowance.executor_binding_fingerprint
-                != binding.executor_binding_fingerprint
-            ):
-                raise RuntimeError("view_image resource allowance does not exact-join")
-            if (
-                source.kind is ViewImageSourceKind.PATH
-                and self._image_validator is None
-            ):
-                raise RuntimeError("view_image validation owner is unavailable")
-            if (
-                source.kind is ViewImageSourceKind.IMAGE_REF
-                and self._image_reference_read_port is None
-            ):
-                raise RuntimeError("view_image reference read owner is unavailable")
-            # Reading one immutable candidate obeys the existing physical image
-            # boundary. A full old context is not a smaller file-read boundary:
-            # the same candidate may fit a dry compaction successor without a
-            # second source read, browser render or image-reference lookup.
-            maximum_bytes = MAXIMUM_PROMPT_MULTIPART_BYTES
-            deadline = self._deadlines.deadline(
-                KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION
+            return await self._invoke_image(
+                tool=tool,
+                call=call,
+                tool_name=tool_name,
+                arguments=arguments,
+                tool_call_id=tool_call_id,
+                invocation_context=invocation_context,
+                binding=binding,
+                page_budget=page_budget,
+                invocation_started=invocation_started,
+                observation_origin=observation_origin,
             )
-            html_source = source.kind is ViewImageSourceKind.PATH and Path(source.value).suffix.lower() in {".html", ".htm"}
-            svg_source = source.kind is ViewImageSourceKind.PATH and Path(source.value).suffix.lower() == ".svg"
-            browser_source = html_source or svg_source
-            if source.kind is ViewImageSourceKind.PATH:
-                physical = await self._physical_io.run_tool_invocation(
-                    _read_browser_image_candidate if browser_source else _read_local_image_candidate,
-                    tool,
-                    call,
-                    maximum_bytes,
-                    deadline_monotonic=deadline,
-                )
-            else:
-                assert self._image_reference_read_port is not None
-                physical = await self._physical_io.run_tool_invocation(
-                    _read_canonical_image_reference,
-                    self._image_reference_read_port,
-                    invocation_context.session_id,
-                    invocation_context.workspace_id,
-                    source.value,
-                    maximum_bytes,
-                    deadline_monotonic=deadline,
-                )
-            if physical.disposition is PhysicalToolInvocationDisposition.RAISED:
-                assert physical.error is not None
-                if isinstance(
-                    physical.error,
-                    (CanonicalImageReferenceUnavailable,),
-                ):
-                    return KernelToolResult(
-                        state="APPLICATION_ERROR",
-                        content=b'{"error":"IMAGE_REFERENCE_UNAVAILABLE"}',
-                        effect_class="read_only",
-                        physical_timing=physical.timing.value,
-                        caller_cancelled_while_running=physical.caller_cancelled,
-                        physical_observation=(
-                            None
-                            if physical.observation is None
-                            else replace(
-                                physical.observation,
-                                observation_origin_kind=observation_origin,
-                            )
-                        ),
-                    )
-                if isinstance(
-                    physical.error,
-                    CanonicalImageReferenceResourceExceeded,
-                ):
-                    return KernelToolResult(
-                        state="APPLICATION_ERROR",
-                        content=b'{"error":"IMAGE_RESOURCE_EXCEEDED"}',
-                        effect_class="read_only",
-                        physical_timing=physical.timing.value,
-                        caller_cancelled_while_running=physical.caller_cancelled,
-                        physical_observation=(
-                            None
-                            if physical.observation is None
-                            else replace(
-                                physical.observation,
-                                observation_origin_kind=observation_origin,
-                            )
-                        ),
-                    )
-                raise KernelToolPhysicalInvocationError(
-                    effect_class="read_only",
-                    error=physical.error,
-                    timing=physical.timing.value,
-                    caller_cancelled=physical.caller_cancelled,
-                    physical_observation=(
-                        None
-                        if physical.observation is None
-                        else replace(
-                            physical.observation,
-                            observation_origin_kind=observation_origin,
-                        )
-                    ),
-                )
-            if physical.caller_cancelled:
-                raise asyncio.CancelledError
-            candidate = physical.value
-            if isinstance(candidate, ToolExecutionResult):
-                if not isinstance(candidate.output, str):
-                    raise TypeError("view_image read failure must be text")
+        return await self._invoke_physical_tool(
+            tool=tool,
+            call=call,
+            tool_name=tool_name,
+            arguments=arguments,
+            turn_id=turn_id,
+            attempt_id=attempt_id,
+            invocation_context=invocation_context,
+            live_sink=live_sink,
+            observation_origin=observation_origin,
+            cancel_requested=cancel_requested,
+        )
+
+    async def _invoke_image(
+        self, *, tool, call, tool_name, arguments, tool_call_id, invocation_context,
+        binding, page_budget, invocation_started, observation_origin,
+    ) -> KernelToolResult:
+        source = parse_view_image_source(arguments)
+        if (
+            invocation_context.input_modalities is not None
+            and "image" not in invocation_context.input_modalities
+        ):
+            return KernelToolResult(
+                state="APPLICATION_ERROR",
+                content=b'{"error":"MODEL_IMAGE_INPUT_UNSUPPORTED"}',
+                effect_class="read_only",
+                physical_observation=_freeze_physical_observation(
+                    invocation_started, observation_origin
+                ),
+            )
+        allowance = invocation_context.image_resource_allowance
+        if allowance is None:
+            raise RuntimeError("view_image invocation lacks its resource allowance")
+        if (
+            allowance.tool_call_id != tool_call_id
+            or allowance.executor_binding_fingerprint
+            != binding.executor_binding_fingerprint
+        ):
+            raise RuntimeError("view_image resource allowance does not exact-join")
+        if (
+            source.kind is ViewImageSourceKind.PATH
+            and self._image_validator is None
+        ):
+            raise RuntimeError("view_image validation owner is unavailable")
+        if (
+            source.kind is ViewImageSourceKind.IMAGE_REF
+            and self._image_reference_read_port is None
+        ):
+            raise RuntimeError("view_image reference read owner is unavailable")
+        # Reading one immutable candidate obeys the existing physical image
+        # boundary. A full old context is not a smaller file-read boundary:
+        # the same candidate may fit a dry compaction successor without a
+        # second source read, browser render or image-reference lookup.
+        maximum_bytes = MAXIMUM_PROMPT_MULTIPART_BYTES
+        deadline = self._deadlines.deadline(
+            KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION
+        )
+        html_source = source.kind is ViewImageSourceKind.PATH and Path(source.value).suffix.lower() in {".html", ".htm"}
+        svg_source = source.kind is ViewImageSourceKind.PATH and Path(source.value).suffix.lower() == ".svg"
+        browser_source = html_source or svg_source
+        if source.kind is ViewImageSourceKind.PATH:
+            physical = await self._physical_io.run_tool_invocation(
+                _read_browser_image_candidate if browser_source else _read_local_image_candidate,
+                tool,
+                call,
+                maximum_bytes,
+                deadline_monotonic=deadline,
+            )
+        else:
+            assert self._image_reference_read_port is not None
+            physical = await self._physical_io.run_tool_invocation(
+                _read_canonical_image_reference,
+                self._image_reference_read_port,
+                invocation_context.session_id,
+                invocation_context.workspace_id,
+                source.value,
+                maximum_bytes,
+                deadline_monotonic=deadline,
+            )
+        if physical.disposition is PhysicalToolInvocationDisposition.RAISED:
+            assert physical.error is not None
+            if isinstance(
+                physical.error,
+                (CanonicalImageReferenceUnavailable,),
+            ):
                 return KernelToolResult(
                     state="APPLICATION_ERROR",
-                    content=candidate.output.encode("utf-8"),
+                    content=b'{"error":"IMAGE_REFERENCE_UNAVAILABLE"}',
                     effect_class="read_only",
                     physical_timing=physical.timing.value,
                     caller_cancelled_while_running=physical.caller_cancelled,
@@ -4044,124 +2154,127 @@ class DirectKernelToolPort:
                         )
                     ),
                 )
-            if source.kind is ViewImageSourceKind.PATH:
-                if not isinstance(candidate, LocalHtmlReadCandidate if browser_source else LocalImageReadCandidate):
-                    raise TypeError(
-                        "view_image path read returned an invalid candidate"
-                    )
-                if browser_source:
-                    try:
-                        if svg_source:
-                            png = await self._visualization_screenshots.render(
-                                candidate.payload, deadline_monotonic=deadline, svg=True,
-                            )
-                        else:
-                            html = await freeze_html_resources(
-                                candidate.payload, candidate.access_path,
-                                io=self._physical_io, validator=self._image_validator,
-                                deadline_monotonic=deadline,
-                            )
-                            png = await self._visualization_screenshots.render(html, deadline_monotonic=deadline)
-                    except TimeoutError:
-                        return KernelToolResult(
-                            state="SYSTEM_ERROR", content=b'{"error":"HTML_PREPARATION_DEADLINE_EXPIRED"}',
-                            physical_timing=PhysicalToolInvocationTiming.LATE_AFTER_WATCHDOG.value,
-                            effect_class="read_only", physical_observation=_freeze_physical_observation(invocation_started, observation_origin),
-                        )
-                    except (VisualizationScreenshotError, ValueError, OSError) as exc:
-                        return KernelToolResult(
-                            state="APPLICATION_ERROR", content=json.dumps({"error": str(exc)}).encode(),
-                            physical_timing=(PhysicalToolInvocationTiming.LATE_AFTER_WATCHDOG.value if monotonic() >= deadline else physical.timing.value),
-                            effect_class="read_only", physical_observation=_freeze_physical_observation(invocation_started, observation_origin),
-                        )
-                    if len(png) > maximum_bytes:
-                        return KernelToolResult(state="APPLICATION_ERROR", content=b'{"error":"IMAGE_RESOURCE_EXCEEDED"}',
-                            physical_timing=(PhysicalToolInvocationTiming.LATE_AFTER_WATCHDOG.value if monotonic() >= deadline else physical.timing.value),
-                            effect_class="read_only", physical_observation=_freeze_physical_observation(invocation_started, observation_origin))
-                    candidate = LocalImageReadCandidate(png, candidate.access_path, candidate.requested_path)
-                assert self._image_validator is not None
-                try:
-                    image = await self._image_validator.freeze_local_image(
-                        candidate.payload,
-                        deadline_monotonic=deadline,
-                    )
-                except TimeoutError:
-                    return KernelToolResult(
-                        state="SYSTEM_ERROR",
-                        content=b'{"error":"IMAGE_VALIDATION_DEADLINE_EXPIRED"}',
-                        effect_class="read_only",
-                        physical_timing=(
-                            PhysicalToolInvocationTiming.LATE_AFTER_WATCHDOG.value
-                        ),
-                        physical_observation=_freeze_physical_observation(
-                            invocation_started, observation_origin
-                        ),
-                    )
-                except PromptImageValidationError as exc:
-                    code = (
-                        "IMAGE_FORMAT_UNSUPPORTED"
-                        if "unsupported" in str(exc).lower()
-                        else "IMAGE_DECODE_FAILED"
-                    )
-                    return KernelToolResult(
-                        state="APPLICATION_ERROR",
-                        content=json.dumps(
-                            {"error": code, "target": {"kind": "PATH", "path": candidate.requested_path}},
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                            sort_keys=True,
-                        ).encode("utf-8"),
-                        effect_class="read_only",
-                        physical_timing=(
-                            PhysicalToolInvocationTiming.LATE_AFTER_WATCHDOG.value
-                            if monotonic() >= deadline
-                            else physical.timing.value
-                        ),
-                        physical_observation=_freeze_physical_observation(
-                            invocation_started, observation_origin
-                        ),
-                    )
-            else:
-                if not isinstance(candidate, LLMImagePart):
-                    raise TypeError(
-                        "view_image reference read returned an invalid candidate"
-                    )
-                image = candidate
-            content = FrozenPromptContent((LLMTextPart(
-                "Current HTML still screenshot; 1200×800 viewport, light theme, visible, reduced motion; capture may crop to content-root bounds. Playback unverified. Publication rereads the file." if html_source else
-                "SVG image rendered at its dimensions or viewBox aspect ratio, without cropping. Scripts and external resources disabled." if svg_source else "Image loaded."
-            ), image))
-            content = bind_prompt_images(content, workspace_id=invocation_context.workspace_id)
-            accepted_page = allowance.accepts_page(
-                source=source,
-                content=content,
-                tool_name=tool_name,
-                page_budget=page_budget,
-            )
-            if (
-                not accepted_page
-                and invocation_context.refresh_image_resources is not None
-                and page_budget.fits_logical(frozen_tool_result_public_text(content, tool_name=tool_name))
+            if isinstance(
+                physical.error,
+                CanonicalImageReferenceResourceExceeded,
             ):
-                refreshed = await invocation_context.refresh_image_resources()
-                if refreshed is not None:
-                    fresh_allowance, fresh_budget = refreshed
-                    if (
-                        fresh_allowance.tool_call_id != allowance.tool_call_id
-                        or fresh_allowance.call_ordinal != allowance.call_ordinal
-                        or fresh_allowance.executor_binding_fingerprint != allowance.executor_binding_fingerprint
-                        or fresh_budget.tool_call_id != page_budget.tool_call_id
-                    ):
-                        raise RuntimeError("Refreshed image resources do not own this exact invocation")
-                    allowance, page_budget = fresh_allowance, fresh_budget
-                    accepted_page = allowance.accepts_page(
-                        source=source, content=content, tool_name=tool_name,
-                        page_budget=page_budget,
-                    )
-            if not accepted_page:
                 return KernelToolResult(
                     state="APPLICATION_ERROR",
                     content=b'{"error":"IMAGE_RESOURCE_EXCEEDED"}',
+                    effect_class="read_only",
+                    physical_timing=physical.timing.value,
+                    caller_cancelled_while_running=physical.caller_cancelled,
+                    physical_observation=(
+                        None
+                        if physical.observation is None
+                        else replace(
+                            physical.observation,
+                            observation_origin_kind=observation_origin,
+                        )
+                    ),
+                )
+            raise KernelToolPhysicalInvocationError(
+                effect_class="read_only",
+                error=physical.error,
+                timing=physical.timing.value,
+                caller_cancelled=physical.caller_cancelled,
+                physical_observation=(
+                    None
+                    if physical.observation is None
+                    else replace(
+                        physical.observation,
+                        observation_origin_kind=observation_origin,
+                    )
+                ),
+            )
+        if physical.caller_cancelled:
+            raise asyncio.CancelledError
+        candidate = physical.value
+        if isinstance(candidate, ToolExecutionResult):
+            if not isinstance(candidate.output, str):
+                raise TypeError("view_image read failure must be text")
+            return KernelToolResult(
+                state="APPLICATION_ERROR",
+                content=candidate.output.encode("utf-8"),
+                effect_class="read_only",
+                physical_timing=physical.timing.value,
+                caller_cancelled_while_running=physical.caller_cancelled,
+                physical_observation=(
+                    None
+                    if physical.observation is None
+                    else replace(
+                        physical.observation,
+                        observation_origin_kind=observation_origin,
+                    )
+                ),
+            )
+        if source.kind is ViewImageSourceKind.PATH:
+            if not isinstance(candidate, LocalHtmlReadCandidate if browser_source else LocalImageReadCandidate):
+                raise TypeError(
+                    "view_image path read returned an invalid candidate"
+                )
+            if browser_source:
+                try:
+                    if svg_source:
+                        png = await self._visualization_screenshots.render(
+                            candidate.payload, deadline_monotonic=deadline, svg=True,
+                        )
+                    else:
+                        html = await freeze_html_resources(
+                            candidate.payload, candidate.access_path,
+                            io=self._physical_io, validator=self._image_validator,
+                            deadline_monotonic=deadline,
+                        )
+                        png = await self._visualization_screenshots.render(html, deadline_monotonic=deadline)
+                except TimeoutError:
+                    return KernelToolResult(
+                        state="SYSTEM_ERROR", content=b'{"error":"HTML_PREPARATION_DEADLINE_EXPIRED"}',
+                        physical_timing=PhysicalToolInvocationTiming.LATE_AFTER_WATCHDOG.value,
+                        effect_class="read_only", physical_observation=_freeze_physical_observation(invocation_started, observation_origin),
+                    )
+                except (VisualizationScreenshotError, ValueError, OSError) as exc:
+                    return KernelToolResult(
+                        state="APPLICATION_ERROR", content=json.dumps({"error": str(exc)}).encode(),
+                        physical_timing=(PhysicalToolInvocationTiming.LATE_AFTER_WATCHDOG.value if monotonic() >= deadline else physical.timing.value),
+                        effect_class="read_only", physical_observation=_freeze_physical_observation(invocation_started, observation_origin),
+                    )
+                if len(png) > maximum_bytes:
+                    return KernelToolResult(state="APPLICATION_ERROR", content=b'{"error":"IMAGE_RESOURCE_EXCEEDED"}',
+                        physical_timing=(PhysicalToolInvocationTiming.LATE_AFTER_WATCHDOG.value if monotonic() >= deadline else physical.timing.value),
+                        effect_class="read_only", physical_observation=_freeze_physical_observation(invocation_started, observation_origin))
+                candidate = LocalImageReadCandidate(png, candidate.access_path, candidate.requested_path)
+            assert self._image_validator is not None
+            try:
+                image = await self._image_validator.freeze_local_image(
+                    candidate.payload,
+                    deadline_monotonic=deadline,
+                )
+            except TimeoutError:
+                return KernelToolResult(
+                    state="SYSTEM_ERROR",
+                    content=b'{"error":"IMAGE_VALIDATION_DEADLINE_EXPIRED"}',
+                    effect_class="read_only",
+                    physical_timing=(
+                        PhysicalToolInvocationTiming.LATE_AFTER_WATCHDOG.value
+                    ),
+                    physical_observation=_freeze_physical_observation(
+                        invocation_started, observation_origin
+                    ),
+                )
+            except PromptImageValidationError as exc:
+                code = (
+                    "IMAGE_FORMAT_UNSUPPORTED"
+                    if "unsupported" in str(exc).lower()
+                    else "IMAGE_DECODE_FAILED"
+                )
+                return KernelToolResult(
+                    state="APPLICATION_ERROR",
+                    content=json.dumps(
+                        {"error": code, "target": {"kind": "PATH", "path": candidate.requested_path}},
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ).encode("utf-8"),
                     effect_class="read_only",
                     physical_timing=(
                         PhysicalToolInvocationTiming.LATE_AFTER_WATCHDOG.value
@@ -4172,9 +2285,47 @@ class DirectKernelToolPort:
                         invocation_started, observation_origin
                     ),
                 )
+        else:
+            if not isinstance(candidate, LLMImagePart):
+                raise TypeError(
+                    "view_image reference read returned an invalid candidate"
+                )
+            image = candidate
+        content = FrozenPromptContent((LLMTextPart(
+            "Current HTML still screenshot; 1200×800 viewport, light theme, visible, reduced motion; capture may crop to content-root bounds. Playback unverified. Publication rereads the file." if html_source else
+            "SVG image rendered at its dimensions or viewBox aspect ratio, without cropping. Scripts and external resources disabled." if svg_source else "Image loaded."
+        ), image))
+        content = bind_prompt_images(content, workspace_id=invocation_context.workspace_id)
+        accepted_page = allowance.accepts_page(
+            source=source,
+            content=content,
+            tool_name=tool_name,
+            page_budget=page_budget,
+        )
+        if (
+            not accepted_page
+            and invocation_context.refresh_image_resources is not None
+            and page_budget.fits_logical(frozen_tool_result_public_text(content, tool_name=tool_name))
+        ):
+            refreshed = await invocation_context.refresh_image_resources()
+            if refreshed is not None:
+                fresh_allowance, fresh_budget = refreshed
+                if (
+                    fresh_allowance.tool_call_id != allowance.tool_call_id
+                    or fresh_allowance.call_ordinal != allowance.call_ordinal
+                    or fresh_allowance.executor_binding_fingerprint != allowance.executor_binding_fingerprint
+                    or fresh_budget.tool_call_id != page_budget.tool_call_id
+                ):
+                    raise RuntimeError("Refreshed image resources do not own this exact invocation")
+                allowance, page_budget = fresh_allowance, fresh_budget
+                accepted_page = allowance.accepts_page(
+                    source=source, content=content, tool_name=tool_name,
+                    page_budget=page_budget,
+                )
+        if not accepted_page:
             return KernelToolResult(
-                state="SUCCESS",
-                content=content,
+                state="APPLICATION_ERROR",
+                content=b'{"error":"IMAGE_RESOURCE_EXCEEDED"}',
                 effect_class="read_only",
                 physical_timing=(
                     PhysicalToolInvocationTiming.LATE_AFTER_WATCHDOG.value
@@ -4185,6 +2336,24 @@ class DirectKernelToolPort:
                     invocation_started, observation_origin
                 ),
             )
+        return KernelToolResult(
+            state="SUCCESS",
+            content=content,
+            effect_class="read_only",
+            physical_timing=(
+                PhysicalToolInvocationTiming.LATE_AFTER_WATCHDOG.value
+                if monotonic() >= deadline
+                else physical.timing.value
+            ),
+            physical_observation=_freeze_physical_observation(
+                invocation_started, observation_origin
+            ),
+        )
+
+
+    async def _invoke_physical_tool(
+        self, *, tool, call, tool_name, arguments, turn_id, attempt_id, invocation_context, live_sink, observation_origin, cancel_requested,
+    ) -> KernelToolResult:
         if isinstance(tool, (_DirectTerminalTool, _DirectTerminalProcessTool)):
             origin = TerminalProcessOrigin(
                 turn_id=turn_id,
@@ -4628,47 +2797,6 @@ async def _join_close_task(
     return deadline_expired
 
 
-async def _await_mcp_operation(
-    task: asyncio.Task[McpKnownToolResult],
-    *,
-    permit: McpDispatchAdmissionPermit | None = None,
-) -> tuple[McpKnownToolResult | None, bool]:
-    """Cancel an undispatched lane wait; join any physical call to settlement."""
-
-    caller_cancelled = False
-    cancelled_before_dispatch = False
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            caller_cancelled = True
-            if (permit is not None and not cancelled_before_dispatch
-                    and permit.state in {McpDispatchPermitState.ADMITTED, McpDispatchPermitState.ATTEMPT_ACCEPTED}):
-                # State changes and cancellation occur on the same event loop.
-                # Once LANE_ACQUIRED, the executor enters the physical call
-                # without yielding and its result must be joined instead.
-                cancelled_before_dispatch = True
-                task.cancel()
-            continue
-        except BaseException:
-            break
-    if cancelled_before_dispatch and task.cancelled():
-        # A task cancelled before its first step cannot run its own cleanup.
-        if permit is not None and permit.state is not McpDispatchPermitState.RELEASED:
-            permit.release()
-        return None, True
-    return task.result(), caller_cancelled
-
-
-def _cancelled_mcp_before_dispatch(effect_kind):
-    return KernelToolResult(
-        state="CANCELLED_BEFORE_DISPATCH",
-        content="Turn 已停止，此 MCP 操作未派发。".encode("utf-8"),
-        caller_cancelled_while_running=True,
-        effect_class="read_only" if effect_kind is McpEffectKind.READ_ONLY else "unknown_effect",
-    )
-
-
 def _execute_tool_call(
     tool: Tool,
     call: ToolCall,
@@ -4810,188 +2938,6 @@ def _execute_terminal_tool_call(
         )
 
 
-def _terminal_process_payload(native: Mapping[str, object]) -> dict[str, object]:
-    payload = dict(native)
-    payload["target"] = {"kind": "PROCESS", "process_id": payload.pop("process_id")}
-    # Metadata was not an output observation and must not advance a log reader.
-    payload.pop("output_cursor", None)
-    payload.pop("retained_from_cursor", None)
-    return payload
-
-
-
-
-def _terminal_result_facts(
-    call: ToolCall,
-    result: TerminalResult,
-    *,
-    action: str = "start",
-) -> dict[str, object]:
-    control_only = action in {"close_stdin", "kill"}
-    candidate = None if control_only else result.output_body_candidate
-    payload = {
-        "status": result.status.value,
-        "terminal_process_action": action,
-        "exit_code": result.exit_code,
-        "cwd": result.cwd,
-        "timed_out": result.timed_out,
-        "error": result.error if action == "start" else None,
-        "reason": None if result.reason is None else result.reason.value,
-        "yielded_to_background": result.status.value == "running",
-    }
-    if result.process_id is not None:
-        payload["target"] = {"kind": "PROCESS", "process_id": result.process_id}
-    if not control_only:
-        payload.update(
-            output_disposition=result.output_disposition.value,
-            output_cursor=result.output_cursor,
-            retained_from_cursor=result.retained_from_cursor,
-            gap_before_output=result.gap_before_output,
-            source_coverage=(
-                candidate.source_coverage.value if candidate is not None
-                else result.source_coverage.value
-            ),
-        )
-        if candidate is not None and candidate.source_coverage_reason is not None:
-            payload["source_coverage_reason"] = candidate.source_coverage_reason.value
-    if result.status.value == "running" and result.process_id is not None:
-        observe_arguments = {
-            "action": "wait",
-            "target": payload["target"],
-            "timeout_seconds": 30,
-        }
-        if not control_only and result.output_cursor is not None:
-            observe_arguments["since_cursor"] = result.output_cursor
-        if "max_output_chars" in call.arguments:
-            observe_arguments["max_output_chars"] = call.arguments["max_output_chars"]
-        payload["observe"] = {"tool": "manage_process", "arguments": observe_arguments}
-    return payload
-
-
-def _admit_terminal_effect(call: ToolCall, result: TerminalResult, *, action: str) -> None:
-    """Quote known owned identities before stdin, signals, or process spawn."""
-    from pulsara_agent.terminal_process.models import TerminalStatus
-    from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverageReason
-
-    budget = call.page_budget or ToolResultPageBudget(call.id)
-    control_only = action in {"close_stdin", "kill"}
-    # exit_code is sint32 in the existing terminal wire protocol. This is a
-    # quote of its scalar width, never a synthesized process identity/outcome.
-    # Cursors have no protocol upper bound: retain the actual owned positions.
-    for status in (TerminalStatus.RUNNING, TerminalStatus.SUCCESS, TerminalStatus.ERROR,
-                   TerminalStatus.TIMEOUT, TerminalStatus.KILLED):
-        for timed_out in (False, True):
-            facts = _terminal_result_facts(call, replace(
-                result, status=status, exit_code=-(1 << 31), timed_out=timed_out,
-                error=result.error or status.value,
-            ), action=action)
-            if not control_only:
-                facts.update(
-                    truncated=True, truncated_by_response_bound=True, output_preview="",
-                    source_coverage="RETAINED_SNAPSHOT",
-                    source_coverage_reason=max(
-                        ToolOutputSourceCoverageReason, key=lambda reason: len(reason.value)
-                    ).value,
-                )
-            body = json.dumps(facts, ensure_ascii=False, separators=(",", ":"))
-            if not budget.fits(body, include_read=not control_only and budget.read is not None):
-                raise TerminalEffectAdmissionRejected(
-                    "Terminal minimum receipt cannot fit before the process action"
-                )
-
-
-def _terminal_execution_result(
-    call: ToolCall,
-    result: TerminalResult,
-    *,
-    action: str = "start",
-) -> ToolExecutionResult:
-    budget = call.page_budget or ToolResultPageBudget(call.id)
-    control_only = action in {"close_stdin", "kill"}
-    candidate = None if control_only else result.output_body_candidate
-    payload = _terminal_result_facts(call, result, action=action)
-    required_facts = dict(payload)
-
-    def encoded(value: Mapping[str, object]) -> str:
-        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-
-    if control_only:
-        public_output = native_output = encoded(payload)
-        if not budget.fits(native_output):
-            if budget.accepts_provider_body is not None:
-                # This exact action already returned. Preserve its real result;
-                # final dispatch must admit/compact P, never rerun the action.
-                return _terminal_execution_result(replace(call, page_budget=replace(
-                    budget, accepts_provider_body=None
-                )), result, action=action)
-            raise ToolResultPageBoundary("Terminal control facts exceed the result budget")
-    else:
-        complete_text = candidate.text if candidate is not None else result.output
-        payload.update(
-            output=complete_text,
-            truncated=result.gap_before_output,
-            truncated_by_response_bound=False,
-        )
-        public_output = encoded(payload)
-        if len(result.output) == len(complete_text) and budget.fits(public_output):
-            native_output = public_output
-        else:
-            preview_facts = {
-                **required_facts,
-                "truncated": True,
-                "truncated_by_response_bound": True,
-            }
-            maximum = len(result.output)
-            low, high = 0, maximum
-            winner = None
-            while low <= high:
-                take = (low + high) // 2
-                preview = encoded({
-                    **preview_facts,
-                    "output_preview": result.output[-take:] if take else "",
-                })
-                if budget.fits(preview, include_read=budget.read is not None):
-                    winner = preview
-                    low = take + 1
-                else:
-                    high = take - 1
-            if winner is None:
-                if budget.accepts_provider_body is not None:
-                    return _terminal_execution_result(replace(call, page_budget=replace(
-                        budget, accepts_provider_body=None
-                    )), result, action=action)
-                raise ToolResultPageBoundary("Terminal observation facts exceed the result budget")
-            native_output = winner
-    state = (
-        ToolResultState.SUCCESS
-        if action != "start" or result.status.value in {"success", "running"}
-        else ToolResultState.INTERRUPTED
-        if result.status.value == "killed"
-        else ToolResultState.ERROR
-    )
-    trusted_duration = (
-        normalize_observation_duration(result.trusted_process_duration_microseconds)
-        if action in {"start", "poll", "wait"}
-        else None
-    )
-    return ToolExecutionResult(
-        call_id=call.id,
-        tool_name=call.name,
-        status=state,
-        output=public_output,
-        public_format=ToolOutputSourceFormatHint.JSON,
-        output_body_candidate=candidate,
-        native_output=native_output,
-        page_complete=control_only,
-        required_facts=required_facts,
-        trusted_observation=(
-            TrustedToolObservationSupplement(trusted_duration)
-            if trusted_duration is not None
-            else None
-        ),
-    )
-
-
 def _validated_terminal_observation_supplement(
     *,
     tool: Tool,
@@ -5020,79 +2966,6 @@ def _validated_terminal_observation_supplement(
     return None
 
 
-def _kernel_tool_state(status: ToolResultState) -> str:
-    return {
-        ToolResultState.SUCCESS: "SUCCESS", ToolResultState.ERROR: "APPLICATION_ERROR",
-        ToolResultState.INTERRUPTED: "CANCELLED", ToolResultState.DENIED: "APPLICATION_ERROR",
-        ToolResultState.RUNNING: "SUCCESS",
-    }[status]
-
-
-def _invocation_page_budget(context: KernelToolInvocationContext) -> ToolResultPageBudget:
-    budget = getattr(context, "page_budget", None)
-    if budget is not None:
-        return budget
-    if context.surface_borrow.code_cell_id is not None:
-        return ToolResultPageBudget(tool_call_id=context.tool_call_id)
-    raise ToolResultPageBoundary("native invocation has no allocated result budget")
-
-
-def _success(
-    call: ToolCall,
-    payload: Mapping[str, object],
-) -> ToolExecutionResult:
-    return ToolExecutionResult(
-        call_id=call.id,
-        tool_name=call.name,
-        status=ToolResultState.SUCCESS,
-        output=json.dumps(dict(payload), ensure_ascii=False),
-        public_format=ToolOutputSourceFormatHint.JSON,
-    )
-
-
-
-def _validate_builtin_call_schema(
-    tool_name: str, schema: dict[str, object], arguments: Mapping[str, object]
-) -> None:
-    validator = validators.validator_for(schema)
-    validator.check_schema(schema)
-    for error in validator(schema).iter_errors(dict(arguments)):
-        # Display targets settle independently; only their outer call shape is
-        # an admission failure. Keep the same structured schema on both wires.
-        if (
-            tool_name == "open_in_pulsara"
-            and len(error.absolute_path) >= 2
-            and error.absolute_path[0] == "targets"
-            and isinstance(error.absolute_path[1], int)
-        ):
-            continue
-        raise error
-
-
-def _json_schema_value(value: Mapping[str, object]) -> dict[str, object]:
-    """Lower recursively frozen catalog values to JSON Schema containers."""
-
-    return {str(key): _thaw_json(item) for key, item in value.items()}
-
-
-def _mcp_executor_capability_version(executor: McpBoundToolExecutor):
-    semantic = executor.semantic
-    source = capability_source_ref(
-        CapabilitySourceKind.MCP_SERVER,
-        semantic.server_id,
-    )
-    fact = freeze_tool_capability_fact(
-        identity=capability_identity(
-            kind=CapabilityKind.TOOL,
-            source=source,
-            stable_name=semantic.remote_tool_name,
-        ),
-        origin=ToolCapabilityOrigin.MCP,
-        canonical_tool_spec=semantic.provider_spec(),
-    )
-    return tool_capability_version_ref(fact)
-
-
 def _mcp_inspection_values(
     executor: McpBoundToolExecutor,
 ) -> McpInspectionDescriptorValues:
@@ -5105,39 +2978,6 @@ def _mcp_inspection_values(
         input_schema=semantic.input_schema,
         output_schema=semantic.output_schema,
         effect_kind=executor.policy.effect_kind.value,
-    )
-
-
-def _mcp_unavailable_reason(reason: str) -> str:
-    return {
-        "REMOVED": "The server no longer lists this tool.",
-        "SOURCE_UNAVAILABLE": "The server's current tool list is unavailable.",
-        "DIRTY_FENCED": "The server's tool list is being refreshed.",
-        "SCOPE_INVISIBLE": "This tool is not available to this agent.",
-        "NATIVE_CONTRACT_REQUIRES_META": "This tool's previous entry can no longer be used.",
-        "DESCRIPTOR_OVERBOUND": "The tool definition is too large to inspect, so this tool cannot be called.",
-    }.get(reason, "The tool is not currently available.")
-
-
-def _mcp_unavailable_inspection_message(reason: str, server_id: str) -> str:
-    target = json.dumps({"kind": "MCP_SERVER", "runtime_server_id": derive_id("mcp-server", "runtime-target", server_id)}, ensure_ascii=False)
-    return _mcp_unavailable_reason(reason) + (
-        f" If this blocks the task, check the server with query_capabilities target={target}."
-    )
-
-
-def _mcp_unavailable_direct_message(reason: str, target, provider_tool_name: str) -> str:
-    inspect_target = json.dumps({"kind": "MCP_TOOL", "server_id": target.server_id,
-        "tool_name": provider_tool_name}, ensure_ascii=False)
-    if reason == "NATIVE_CONTRACT_REQUIRES_META":
-        return (
-            "This direct tool entry has been replaced; this call was not dispatched. "
-            f"Use query_capabilities with target={inspect_target} and follow invocation.mode. "
-            "For META, use the returned input_schema and invocation.target with use_new_mcp_tool."
-        )
-    return (
-        "This call was not dispatched. " + _mcp_unavailable_reason(reason)
-        + f" Use query_capabilities with target={inspect_target} for its current availability."
     )
 
 
@@ -5156,54 +2996,6 @@ def _mcp_pre_dispatch_result(page_budget, permit, effect_kind) -> KernelToolResu
         permit.release()
         return _no_effect_budget_result()
     return None
-
-
-def _no_effect_budget_result() -> KernelToolResult:
-    facts = {"error": "OUTPUT_PAGE_BOUNDARY", "physical_outcome": "NO_EFFECT", "retry_performed": False}
-    return KernelToolResult(state="APPLICATION_ERROR", content=canonical_json_bytes(facts),
-        required_facts=facts, public_format=ToolOutputSourceFormatHint.JSON, effect_class="read_only")
-
-
-def _kernel_result_from_mcp_known(
-    known: McpKnownToolResult,
-    *,
-    caller_cancelled: bool,
-    effect_kind: McpEffectKind,
-    physical_observation: PhysicalToolObservationSupplement,
-) -> KernelToolResult:
-    return KernelToolResult(public_format=ToolOutputSourceFormatHint.JSON,
-        state=known.state,
-        content=known.content,
-        remote_identity=known.remote_identity,
-        remote_identity_verification=known.remote_identity_verification,
-        caller_cancelled_while_running=caller_cancelled,
-        effect_class=(
-            "read_only" if effect_kind is McpEffectKind.READ_ONLY else "unknown_effect"
-        ),
-        physical_observation=physical_observation,
-    )
-
-
-def _freeze_physical_observation(
-    started_at_monotonic: float,
-    origin: ToolObservationOrigin,
-) -> PhysicalToolObservationSupplement:
-    elapsed = normalize_observation_duration(
-        max(0, int((monotonic() - started_at_monotonic) * 1_000_000))
-    )
-    return PhysicalToolObservationSupplement(
-        observed_at=datetime.now(timezone.utc),
-        elapsed_microseconds=elapsed,
-        observation_origin_kind=origin,
-    )
-
-
-def _thaw_json(value: object) -> object:
-    if isinstance(value, Mapping):
-        return {str(key): _thaw_json(item) for key, item in value.items()}
-    if isinstance(value, tuple):
-        return [_thaw_json(item) for item in value]
-    return value
 
 
 __all__ = [

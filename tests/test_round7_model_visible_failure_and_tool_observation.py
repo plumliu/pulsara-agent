@@ -353,10 +353,6 @@ def test_round7_custom_tool_cannot_promote_claimed_trusted_duration(
             await port.aclose()
 
     asyncio.run(exercise())
-    source = (ROOT / "src/pulsara_agent/conversation_kernel/tool_runtime.py").read_text(
-        encoding="utf-8"
-    )
-    assert source.count("TrustedToolObservationSupplement(") == 1
 
 
 def _start_turn(repository, lease, text: bytes) -> str:

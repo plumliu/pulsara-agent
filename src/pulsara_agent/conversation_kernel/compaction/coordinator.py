@@ -2,7 +2,36 @@
 
 from __future__ import annotations
 
-from pulsara_agent.identity import derive_id, random_id
+from pulsara_agent.conversation_kernel.compaction.admission import (
+    CompactionAdmissionOperations,
+    _target_is_known_text_only as _target_is_known_text_only,
+)
+from pulsara_agent.conversation_kernel.compaction.execution_context import (
+    CompactionContextOperations,
+)
+from pulsara_agent.conversation_kernel.compaction.execution_contracts import (
+    AutomaticCompactionTriggerCandidate as AutomaticCompactionTriggerCandidate,
+    CompactionAttemptToken as CompactionAttemptToken,
+    CompactionExecutionResult as CompactionExecutionResult,
+    ModelSwitchCompactionTriggerCandidate as ModelSwitchCompactionTriggerCandidate,
+    ModelSwitchDirectPrecompileDecision as ModelSwitchDirectPrecompileDecision,
+    OrdinaryPrecompileDecision as OrdinaryPrecompileDecision,
+    PrecompileCompactionDecision as PrecompileCompactionDecision,
+    PreparedCompactSessionStart as PreparedCompactSessionStart,
+    PreparedCompactSessionStartFacts as PreparedCompactSessionStartFacts,
+    SessionStartCompactBoundaryPort as SessionStartCompactBoundaryPort,
+    SessionStartCompactPort as SessionStartCompactPort,
+    _COMPACTION_ATTEMPT_TOKEN_SEAL as _COMPACTION_ATTEMPT_TOKEN_SEAL,
+    _CompactionFencedRestart as _CompactionFencedRestart,
+    _PendingToolBatchAdoption as _PendingToolBatchAdoption,
+    _PendingToolBatchSource as _PendingToolBatchSource,
+    _PostAdoptionCompactionFailure as _PostAdoptionCompactionFailure,
+    _SummaryWinner as _SummaryWinner,
+    _already_compact_result as _already_compact_result,
+    _new_compaction_attempt_token as _new_compaction_attempt_token,
+)
+
+from pulsara_agent.identity import derive_id
 
 
 from pulsara_agent.conversation_kernel.interruption import summary_interruption_suffix
@@ -14,7 +43,7 @@ import asyncio
 from dataclasses import dataclass, field as dataclass_field, replace
 
 from datetime import datetime, timezone
-from typing import Callable, Literal, Protocol
+from typing import Callable, Literal
 
 
 from time import monotonic
@@ -29,9 +58,6 @@ from pulsara_agent.conversation_kernel.blob import (
     CanonicalContentPublisher,
 )
 
-from pulsara_agent.conversation_kernel.context_sources import (
-    build_compaction_context_source,
-)
 
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     COMPACTION_MODEL_CONTRACT,
@@ -53,8 +79,6 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     ExpectedCompactionPredecessorRevision,
     FrozenCompactionCanonicalRead,
     FrozenCompactionSourceView,
-    ProtectedTailSelectionFact,
-    ProviderPrefixCutProof,
     PreparedCompactionCanonicalAdoption,
     manual_compaction_snapshot_id,
     build_prepared_compaction_canonical_adoption,
@@ -72,7 +96,6 @@ from pulsara_agent.conversation_kernel.compaction.model_call import (
 
 from pulsara_agent.conversation_kernel.compaction.planner import (
     build_synthetic_compaction_dispatch_read,
-    compaction_effective_history_has_image,
     CompactionPlanningError,
     CompactionReclaimUnavailable,
     NoSafeCompactionSummaryPrefix,
@@ -111,9 +134,6 @@ from pulsara_agent.conversation_kernel.input_continuity import (
     _issue_successor_final_abandonment_evidence,
 )
 
-from pulsara_agent.conversation_kernel.compaction.runtime_handoff import (
-    FrozenCompactionRuntimeHandoff,
-)
 
 from pulsara_agent.conversation_kernel.cold_epoch import (
     AdoptedCompactionContinuationSeed,
@@ -165,11 +185,9 @@ from pulsara_agent.conversation_kernel.provider_dispatch import (
     PendingEmptyCompactionDrySource,
     PreparedCompactionSourceDispatch,
     PreparedProviderDispatch,
-    PreparedProviderHeadroomAdmission,
     PreparedProspectiveActiveRootInput,
     PreparedProviderWireCandidate,
     PreparedWireMeasurementDecision,
-    HandleFreeProviderWireObservation,
     ProviderDispatchCoordinator,
 )
 
@@ -195,10 +213,6 @@ from pulsara_agent.model_input.compiler import (
 
 from pulsara_agent.model_input.contracts import (
     ContextBindingBaseKind,
-    ContextSourceAbsentFact,
-    ContextSourceAbsenceKind,
-    ContextSourceCandidate,
-    ContextSourceKind,
     FrozenProviderInputItemKind,
     ModelInputScopeKind,
     ModelInputCompileFailureKind,
@@ -231,27 +245,12 @@ from pulsara_agent.conversation_kernel.direct_model import (
 )
 from pulsara_agent.llm.frozen_target import (
     FrozenEpochModelCallTarget,
-    FrozenEpochModelTargetBundle,
 )
 
-from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
-from pulsara_agent.hooks.context import PendingHookContextReservation
 from pulsara_agent.hooks.contracts import (
-    GateDecision,
-    HookDispatchEnvelope,
     HookDispatchScopeRef,
-    PostCompactInput,
-    PostCompactRef,
-    PreCompactInput,
-    PreCompactRef,
 )
 from pulsara_agent.hooks.dispatcher import KernelHookDispatcher
-from pulsara_agent.hooks.matcher import event_matcher_subject
-
-
-def _target_is_known_text_only(target: PreparedKernelModelTarget) -> bool:
-    modalities = target.target.fact.input_modalities
-    return modalities is not None and "text" in modalities and "image" not in modalities
 
 
 @dataclass(frozen=True, slots=True)
@@ -730,40 +729,6 @@ def _rebase_pending_active_candidate(
     )
 
 
-@dataclass(frozen=True, slots=True)
-class CompactionExecutionResult:
-    outcome: CompactionOutcome
-    successor_dispatch: PreparedProviderDispatch | None = dataclass_field(
-        default=None, repr=False
-    )
-    prospective_active_input: PreparedProspectiveActiveRootInput | None = (
-        dataclass_field(default=None, repr=False)
-    )
-    active_continuation_blocked_reason: str | None = None
-    successor_wire_decision: PreparedWireMeasurementDecision | None = dataclass_field(
-        default=None, repr=False
-    )
-
-    def __post_init__(self) -> None:
-        if self.active_continuation_blocked_reason is not None and (
-            self.outcome.disposition is not CompactionDisposition.COMPACTED
-            or self.successor_dispatch is not None
-            or self.prospective_active_input is not None
-        ):
-            raise ValueError("compaction continuation block carrier is invalid")
-        if (
-            sum(
-                value is not None
-                for value in (
-                    self.successor_dispatch,
-                    self.prospective_active_input,
-                )
-            )
-            > 1
-        ):
-            raise ValueError("compaction result has multiple continuation owners")
-
-
 async def _join_compaction_settlement(
     task: asyncio.Task[CompactionExecutionResult],
 ) -> CompactionExecutionResult:
@@ -791,38 +756,6 @@ async def _join_compaction_settlement(
             result.prospective_active_input.close(error=cancellation)
         raise cancellation
     return result
-
-
-@dataclass(frozen=True, slots=True)
-class _CompactionFencedRestart:
-    """Stack-free restart request after one fenced attempt releases its owners."""
-
-    maximum_retained_tool_groups: int | None
-    pre_compact_dispatched: bool
-
-
-@dataclass(frozen=True, slots=True)
-class _PendingToolBatchSource:
-    closed_source_cut: PreparedProviderInputCut
-    assistant_entry_id: str
-    ordered_tool_call_ids: tuple[str, ...]
-
-
-@dataclass(slots=True)
-class _PendingToolBatchAdoption:
-    dry_dispatch: PreparedCompactionDryProjection
-    candidate: PreparedCompactionCanonicalAdoption
-    source_read: FrozenCompactionCanonicalRead
-    source: _PendingToolBatchSource
-    destination_target: PreparedKernelModelTarget
-    scope: CompactionScope
-    model_call_index: int
-    memory_use_policy: MemoryUsePolicy
-    attempt_token: CompactionAttemptToken
-    hook_scope: HookDispatchScopeRef | None
-    session_start_compact_port: SessionStartCompactPort | None
-    session_start_boundary_port: SessionStartCompactBoundaryPort | None
-    source_projected: bool
 
 
 @dataclass(slots=True)
@@ -853,198 +786,7 @@ class PendingToolBatchCompaction:
         return await self._coordinator._finalize_pending_tool_batch(adoption)
 
 
-@dataclass(frozen=True, slots=True)
-class _SummaryWinner:
-    semantic: PreparedCompactionSummarySemantic = dataclass_field(repr=False)
-    decision: PreparedWireMeasurementDecision = dataclass_field(repr=False)
-    tail: ProtectedTailSelectionFact
-    prefix: ProviderPrefixCutProof
-    retained_entry_ids: tuple[str, ...]
-    continuation: tuple[CompactionContinuationMode, str | None]
-    retained_tool_group_count: int
-
-
-def _already_compact_result(turn_id: str) -> CompactionExecutionResult:
-    return CompactionExecutionResult(
-        CompactionOutcome(
-            CompactionDisposition.NOT_NEEDED,
-            turn_id,
-            None,
-            None,
-            "CONTEXT_ALREADY_COMPACT",
-        )
-    )
-
-
-class _PostAdoptionCompactionFailure(BaseException):
-    """Carry an already-FULL compaction winner until its error is re-raised."""
-
-    def __init__(self, outcome: CompactionOutcome, error: BaseException) -> None:
-        if (
-            outcome.disposition is not CompactionDisposition.COMPACTED
-            or outcome.snapshot_id is None
-            or outcome.revision_ordinal is None
-        ):
-            raise ValueError("post-adoption failure lacks its canonical winner")
-        super().__init__(type(error).__name__)
-        self.outcome = outcome
-        self.error = error
-
-
-_COMPACTION_ATTEMPT_TOKEN_SEAL = object()
-
-
-@dataclass(frozen=True, slots=True, init=False)
-class CompactionAttemptToken:
-    attempt_id: str
-    session_id: str
-    turn_id: str
-    scope_kind: ModelInputScopeKind
-    trigger: CompactionTrigger
-
-    def __init__(
-        self,
-        *,
-        attempt_id: str,
-        session_id: str,
-        turn_id: str,
-        scope_kind: ModelInputScopeKind,
-        trigger: CompactionTrigger,
-        _seal: object,
-    ) -> None:
-        if _seal is not _COMPACTION_ATTEMPT_TOKEN_SEAL or not attempt_id:
-            raise TypeError("compaction attempt token is coordinator-issued")
-        object.__setattr__(self, "attempt_id", attempt_id)
-        object.__setattr__(self, "session_id", session_id)
-        object.__setattr__(self, "turn_id", turn_id)
-        object.__setattr__(self, "scope_kind", scope_kind)
-        object.__setattr__(self, "trigger", trigger)
-
-
-def _new_compaction_attempt_token(
-    *,
-    session_id: str,
-    turn_id: str,
-    scope_kind: ModelInputScopeKind,
-    trigger: CompactionTrigger,
-) -> CompactionAttemptToken:
-    return CompactionAttemptToken(
-        attempt_id=random_id("compact-attempt"),
-        session_id=session_id,
-        turn_id=turn_id,
-        scope_kind=scope_kind,
-        trigger=trigger,
-        _seal=_COMPACTION_ATTEMPT_TOKEN_SEAL,
-    )
-
-
-@dataclass(frozen=True, slots=True)
-class PreparedCompactSessionStartFacts:
-    attempt_token: CompactionAttemptToken = dataclass_field(repr=False, compare=False)
-    adopted_snapshot_id: str
-    adopted_binding_revision_id: str
-    scope: CompactionScope
-    turn_id: str
-    model_id: str
-    permission_snapshot: FrozenRunPermissionSnapshot = dataclass_field(repr=False)
-    deadline_monotonic: float = dataclass_field(repr=False, compare=False)
-
-    def __post_init__(self) -> None:
-        if (
-            self.scope.turn_id != self.turn_id
-            or self.attempt_token.session_id != self.scope.session_id
-            or (self.attempt_token.turn_id != self.turn_id)
-            or (self.attempt_token.scope_kind is not self.scope.scope_kind)
-            or (not self.adopted_snapshot_id)
-            or (not self.adopted_binding_revision_id)
-            or (not self.model_id)
-            or (not self.permission_snapshot.snapshot_id)
-            or (self.deadline_monotonic <= 0)
-        ):
-            raise ValueError("compact SessionStart facts do not exact-join")
-
-
-@dataclass(frozen=True, slots=True)
-class PreparedCompactSessionStart:
-    proceed: bool
-    reason: str | None = None
-    reservation: PendingHookContextReservation | None = dataclass_field(
-        default=None, repr=False, compare=False
-    )
-
-    def __post_init__(self) -> None:
-        if not self.proceed and self.reservation is not None:
-            raise ValueError("blocked compact SessionStart cannot own context")
-
-
-class SessionStartCompactPort(Protocol):
-    async def __call__(
-        self, facts: PreparedCompactSessionStartFacts
-    ) -> PreparedCompactSessionStart: ...
-
-
-class SessionStartCompactBoundaryPort(Protocol):
-    async def arm_compact_boundary(
-        self,
-        *,
-        attempt_token: CompactionAttemptToken,
-        adopted_snapshot_id: str,
-        adopted_binding_revision_id: str,
-    ) -> None: ...
-
-
-@dataclass(frozen=True, slots=True)
-class OrdinaryPrecompileDecision:
-    """Unique ordinary admission plus its handle-free exact wire observation."""
-
-    ordinary_admission: PreparedProviderHeadroomAdmission = dataclass_field(repr=False)
-    reusable_wire_observation: HandleFreeProviderWireObservation = dataclass_field(
-        repr=False, compare=False
-    )
-
-
-@dataclass(frozen=True, slots=True)
-class ModelSwitchDirectPrecompileDecision:
-    """Attempt direct switch; the complete final dispatch is still measured."""
-
-    ordinary_admission: PreparedProviderHeadroomAdmission = dataclass_field(repr=False)
-    switch_candidate: ModelSwitchCompactionTriggerCandidate = dataclass_field(
-        repr=False
-    )
-
-
-@dataclass(frozen=True, slots=True)
-class ModelSwitchCompactionTriggerCandidate:
-    """Authority-free destination captured by the direct precheck."""
-
-    destination_target: PreparedKernelModelTarget = dataclass_field(repr=False)
-    trigger: CompactionTrigger = CompactionTrigger.MODEL_SWITCH_HANDOVER
-
-
-@dataclass(frozen=True, slots=True)
-class AutomaticCompactionTriggerCandidate:
-    """Authority-free trigger fact; fenced execution recaptures all source truth."""
-
-    trigger: CompactionTrigger
-    reason: Literal["FINAL_WIRE_POLICY"] = "FINAL_WIRE_POLICY"
-
-    def __post_init__(self) -> None:
-        if self.trigger not in {
-            CompactionTrigger.AUTO_ACTIVE_CONTEXT,
-            CompactionTrigger.MID_TURN_FOLLOWUP,
-        }:
-            raise ValueError("automatic trigger candidate has a non-automatic trigger")
-
-
-PrecompileCompactionDecision = (
-    OrdinaryPrecompileDecision
-    | AutomaticCompactionTriggerCandidate
-    | ModelSwitchDirectPrecompileDecision
-    | ModelSwitchCompactionTriggerCandidate
-)
-
-
-class CompactionCoordinator:
+class CompactionCoordinator(CompactionAdmissionOperations, CompactionContextOperations):
     """Own active/idle compaction planning, adoption and successor installation."""
 
     def __init__(
@@ -1093,173 +835,10 @@ class CompactionCoordinator:
     def _canonical_deadline(self) -> float:
         return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
 
-    async def prepare_precompile_admission(
-        self,
-        *,
-        turn_id: str,
-        model_call_index: int,
-        deadline: float,
-    ) -> PreparedProviderHeadroomAdmission:
-        return await self._provider_dispatch.prepare_headroom_admission(
-            turn_id=turn_id,
-            model_call_index=model_call_index,
-            deadline=deadline,
-        )
-
-    def automatic_allowed(
-        self,
-        *,
-        scope_kind: ModelInputScopeKind,
-    ) -> bool:
-        return (
-            self._compaction_owner is not None
-            and self._compaction_owner.policy.enabled
-            and self._compaction_owner.policy.automatic_enabled
-            and (
-                self._compaction_owner.automatic_allowed(
-                    scope_kind=scope_kind,
-                )
-            )
-        )
-
-    def precompile_needed(
-        self,
-        *,
-        scope_kind: ModelInputScopeKind,
-        allow_model_switch: bool,
-    ) -> bool:
-        if self.automatic_allowed(scope_kind=scope_kind):
-            return True
-        if not allow_model_switch:
-            return False
-        # The first call must inspect canonical history even when no installed A
-        # survives (cold restart/fork).  A known text-only B may need a destination projection.
-        return True
-
-    def context_allowance_change_pending(
-        self,
-        *,
-        scope_kind: ModelInputScopeKind,
-        destination: PreparedKernelModelTarget,
-    ) -> bool:
-        source = self._provider_dispatch.installed_source_target(
-            scope=ProviderInputContinuityScope(
-                session_id=self._writer_lease.guard.session_id,
-                scope_kind=scope_kind,
-            ),
-            destination=destination,
-        )
-        if source is None:
-            return False
-        target_fact = destination.epoch_call_target.target_bundle.target_fact
-        # Only the user allowance can grant a later-call handover. Physical
-        # limits, identity, reasoning, projection and estimator must still match.
-        return (
-            replace(
-                source,
-                target_fact=source.target_fact.model_copy(
-                    update={
-                        "context_window_tokens": target_fact.context_window_tokens,
-                        "context_budget": target_fact.context_budget,
-                    }
-                ),
-            )
-            == destination.epoch_call_target.target_bundle
-        )
-
     async def _resolved_workspace_id(self, *, deadline: float | None = None) -> str:
         return await self._workspace_resolver.resolve(
             deadline=self._canonical_deadline() if deadline is None else deadline
         )
-
-    @staticmethod
-    def _hook_trigger(trigger: CompactionTrigger) -> str:
-        return "manual" if trigger is CompactionTrigger.MANUAL else "auto"
-
-    async def _dispatch_pre_compact(
-        self,
-        *,
-        dispatch: PreparedCompactionSourceDispatch,
-        scope: HookDispatchScopeRef | None,
-        attempt_token: CompactionAttemptToken,
-        turn_id: str,
-        trigger: CompactionTrigger,
-        deadline: float,
-    ) -> tuple[bool, str | None]:
-        dispatcher = self._hook_dispatcher
-        if dispatcher is None or scope is None:
-            return True, None
-        trigger_name = self._hook_trigger(trigger)
-        public_input = PreCompactInput(
-            session_kind=scope.kind.value,
-            input_origin=None,
-            session_id=self._writer_lease.guard.session_id,
-            cwd=str(self._tools.snapshot_workspace_root()),
-            model=dispatch.prepared_call.call.target.fact.model_id,
-            turn_id=turn_id,
-            trigger=trigger_name,
-        )
-        outcome = await dispatcher.dispatch(
-            HookDispatchEnvelope(
-                dispatcher.capture_view(),
-                scope,
-                public_input,
-                PreCompactRef(
-                    attempt_token,
-                    attempt_token.scope_kind.value,
-                    turn_id,
-                    trigger_name,
-                ),
-                deadline,
-            ),
-            matcher_subject=event_matcher_subject(
-                public_input.event_type, trigger=trigger_name
-            ),
-        )
-        return outcome.decision is GateDecision.PROCEED, outcome.reason
-
-    async def _dispatch_post_compact(
-        self,
-        *,
-        model_id: str,
-        cwd: str,
-        scope: HookDispatchScopeRef | None,
-        attempt_token: CompactionAttemptToken,
-        candidate: PreparedCompactionCanonicalAdoption,
-        turn_id: str,
-        trigger: CompactionTrigger,
-        deadline: float,
-    ) -> tuple[bool, str | None]:
-        dispatcher = self._hook_dispatcher
-        if dispatcher is None or scope is None:
-            return True, None
-        trigger_name = self._hook_trigger(trigger)
-        public_input = PostCompactInput(
-            session_kind=scope.kind.value,
-            input_origin=None,
-            session_id=self._writer_lease.guard.session_id,
-            cwd=cwd,
-            model=model_id,
-            turn_id=turn_id,
-            trigger=trigger_name,
-        )
-        outcome = await dispatcher.dispatch(
-            HookDispatchEnvelope(
-                dispatcher.capture_view(),
-                scope,
-                public_input,
-                PostCompactRef(
-                    attempt_token,
-                    candidate.snapshot.snapshot_id,
-                    candidate.binding.binding_revision_id,
-                ),
-                deadline,
-            ),
-            matcher_subject=event_matcher_subject(
-                public_input.event_type, trigger=trigger_name
-            ),
-        )
-        return outcome.decision is GateDecision.PROCEED, outcome.reason
 
     async def execute_active(
         self,
@@ -1506,237 +1085,6 @@ class CompactionCoordinator:
         except asyncio.CancelledError:
             raise
 
-    async def prepare_precompile(
-        self,
-        *,
-        turn_id: str,
-        model_call_index: int,
-        inherited_memory_use_policy: MemoryUsePolicy,
-        trigger: CompactionTrigger,
-        scope_kind: ModelInputScopeKind,
-        headroom_admission: PreparedProviderHeadroomAdmission,
-        deadline: float,
-        allow_model_switch: bool = False,
-        first_call_history_through_sequence: int | None = None,
-    ) -> PrecompileCompactionDecision | None:
-        owner = self._compaction_owner
-        if owner is None:
-            headroom_admission.close()
-            return None
-        try:
-            scope = CompactionScope(
-                session_id=self._writer_lease.guard.session_id,
-                workspace_id=await self._resolved_workspace_id(deadline=deadline),
-                turn_id=turn_id,
-                scope_kind=scope_kind,
-            )
-        except BaseException:
-            headroom_admission.close()
-            raise
-
-        dispatch: PreparedCompactionSourceDispatch | None = None
-        source_target: FrozenEpochModelTargetBundle | None = None
-        headroom_consumed = False
-        try:
-            preflight = headroom_admission.preflight
-            prepared_target = headroom_admission.prepared_target
-            if allow_model_switch:
-                source_target = self._provider_dispatch.installed_source_target(
-                    scope=ProviderInputContinuityScope(
-                        session_id=scope.session_id,
-                        scope_kind=scope.scope_kind,
-                    ),
-                    destination=prepared_target,
-                )
-                if _target_is_known_text_only(prepared_target):
-                    history_read = await self._io.run(
-                        self._input_reader.read_frozen_compaction_cut,
-                        headroom_admission.cut,
-                        deadline_monotonic=deadline,
-                    )
-                    if (
-                        history_read.scope != scope
-                        or history_read.turn_status != "RUNNING"
-                        or preflight.effective_materialization_lineage_floor
-                        != history_read.safe_head_range.effective_materialization_lineage_floor
-                    ):
-                        raise CompactionPlanningError(
-                            "model-switch history preflight changed at admission"
-                        )
-                    if first_call_history_through_sequence is not None and any(
-                        item.source_entry_sequence is not None
-                        and item.source_entry_sequence
-                        > first_call_history_through_sequence
-                        and isinstance(item.content, tuple)
-                        and content_has_image(item.content)
-                        for item in history_read.dispatch_read.compile_snapshot.canonical_input.items
-                    ):
-                        raise ModelTargetCapabilityMismatch(
-                            "the current input group contains images unsupported by the selected model"
-                        )
-                    if compaction_effective_history_has_image(
-                        history_read,
-                        first_call_history_through_sequence=first_call_history_through_sequence,
-                    ):
-                        if not owner.policy.enabled:
-                            raise StructuredModelInputCompileError(
-                                ModelInputCompileFailureKind.MODEL_SWITCH_REQUIRES_COMPACTION
-                            )
-                        headroom_admission.close()
-                        return ModelSwitchCompactionTriggerCandidate(
-                            destination_target=prepared_target,
-                        )
-            transferred_handle = headroom_admission.take_handle()
-            headroom_consumed = True
-            dispatch = await self._provider_dispatch.prepare_compaction_source(
-                turn_id=turn_id,
-                model_call_index=model_call_index,
-                inherited_memory_use_policy=inherited_memory_use_policy,
-                deadline=deadline,
-                existing_handle=transferred_handle,
-                headroom_preflight_override=preflight,
-                prepared_target_override=prepared_target,
-            )
-            canonical_read = await self._io.run(
-                self._input_reader.read_frozen_compaction_cut,
-                dispatch.cut,
-                deadline_monotonic=deadline,
-            )
-            if canonical_read.scope != scope or canonical_read.turn_status != "RUNNING":
-                raise CompactionPlanningError(
-                    "precompile compaction target changed at admission"
-                )
-            canonical_range = canonical_read.safe_head_range
-            if (
-                preflight.effective_materialization_lineage_floor
-                != canonical_range.effective_materialization_lineage_floor
-            ):
-                raise CompactionPlanningError(
-                    "compaction headroom quote differs from its frozen source"
-                )
-            if source_target is not None:
-                quote = dispatch.wire_quote
-                destination_trigger = int(
-                    quote.effective_input_budget_tokens
-                    * owner.policy.auto_trigger_ratio
-                )
-                if (
-                    quote.budget_input_tokens < destination_trigger
-                    and quote.final_wire_utf8_bytes <= MAXIMUM_PROVIDER_WIRE_INPUT_BYTES
-                ):
-                    handle, measurement = dispatch.take_below_trigger_ownership()
-                    dispatch = None
-                    measurement.discard_materialization_to_quote()
-                    return ModelSwitchDirectPrecompileDecision(
-                        ordinary_admission=PreparedProviderHeadroomAdmission(
-                            handle, preflight, prepared_target
-                        ),
-                        switch_candidate=ModelSwitchCompactionTriggerCandidate(
-                            destination_target=prepared_target,
-                        ),
-                    )
-                dispatch.discard_wire_materialization_to_quote()
-                dispatch.close()
-                dispatch = None
-                if not owner.policy.enabled:
-                    raise StructuredModelInputCompileError(
-                        ModelInputCompileFailureKind.MODEL_SWITCH_REQUIRES_COMPACTION
-                    )
-                return ModelSwitchCompactionTriggerCandidate(
-                    destination_target=prepared_target,
-                )
-            source_view = freeze_compaction_source_view(
-                canonical_read=canonical_read,
-                compile_binding=dispatch.prepared_call.compile_binding,
-                semantic_projection=dispatch.projection,
-                predecessor_epoch_view=dispatch.planning.predecessor_view,
-                provider_wire_quote=dispatch.wire_quote,
-                producer_wire_api=(
-                    dispatch.prepared_call.call.target.model_profile.route_wire_profile.wire_api
-                ),
-            )
-            if not self.automatic_allowed(scope_kind=scope_kind):
-                wire_candidate = dispatch.wire_candidate
-                handle, measurement = dispatch.take_below_trigger_ownership()
-                dispatch = None
-                ordinary = PreparedProviderHeadroomAdmission(
-                    handle, preflight, prepared_target
-                )
-                observation = HandleFreeProviderWireObservation(
-                    candidate=wire_candidate,
-                    measurement=measurement,
-                )
-                return OrdinaryPrecompileDecision(
-                    ordinary_admission=ordinary,
-                    reusable_wire_observation=observation,
-                )
-            if not should_trigger_compaction(
-                source_view=source_view,
-                policy=owner.policy,
-                force=False,
-            ):
-                wire_candidate = dispatch.wire_candidate
-                handle, measurement = dispatch.take_below_trigger_ownership()
-                dispatch = None
-                ordinary: PreparedProviderHeadroomAdmission | None = None
-                observation: HandleFreeProviderWireObservation | None = None
-                try:
-                    ordinary = PreparedProviderHeadroomAdmission(
-                        handle,
-                        preflight,
-                        prepared_target,
-                    )
-                    observation = HandleFreeProviderWireObservation(
-                        candidate=wire_candidate,
-                        measurement=measurement,
-                    )
-                    return OrdinaryPrecompileDecision(
-                        ordinary_admission=ordinary,
-                        reusable_wire_observation=observation,
-                    )
-                except BaseException:
-                    if observation is None:
-                        measurement.discard_materialization_to_quote()
-                    else:
-                        observation.discard()
-                    if ordinary is None:
-                        handle.close()
-                    else:
-                        ordinary.close()
-                    raise
-            dispatch.discard_wire_materialization_to_quote()
-            dispatch.close()
-            dispatch = None
-            return AutomaticCompactionTriggerCandidate(trigger=trigger)
-        except (asyncio.CancelledError, StaleHostWriter):
-            if dispatch is not None:
-                dispatch.close()
-            raise
-        except StructuredModelInputCompileError as error:
-            if dispatch is not None:
-                dispatch.close()
-            elif not headroom_consumed:
-                headroom_admission.close()
-            if source_target is not None or error.kind is (
-                ModelInputCompileFailureKind.MODEL_SWITCH_REQUIRES_COMPACTION
-            ):
-                raise
-            owner.record_automatic_failure(
-                scope_kind=scope_kind,
-            )
-            return None
-        except BaseException:
-            if dispatch is not None:
-                dispatch.close()
-            elif not headroom_consumed:
-                headroom_admission.close()
-            if source_target is not None:
-                raise
-            owner.record_automatic_failure(
-                scope_kind=scope_kind,
-            )
-            return None
-
     async def _execute_active(
         self,
         *,
@@ -1844,96 +1192,6 @@ class CompactionCoordinator:
         ).startswith("HOOK_PRE_COMPACT_BLOCKED"):
             owner.record_automatic_failure(scope_kind=scope_kind)
         return execution
-
-    async def measure_dispatch_wire(
-        self,
-        dispatch: PreparedProviderDispatch,
-        *,
-        deadline: float,
-        reusable_observation: HandleFreeProviderWireObservation | None = None,
-    ) -> PreparedWireMeasurementDecision:
-        decision = await self._provider_dispatch.measure_prepared_wire_candidate(
-            self._provider_dispatch.wire_candidate_for_dispatch(dispatch),
-            deadline=deadline,
-            reusable_observation=reusable_observation,
-        )
-        dispatch.select_wire_candidate(decision.candidate)
-        return decision
-
-    def direct_switch_wire_admitted(
-        self, decision: PreparedWireMeasurementDecision
-    ) -> bool:
-        """Admit a complete direct-switch input below the automatic trigger."""
-        owner = self._compaction_owner
-        return (
-            owner is not None
-            and decision.wire_input_plan is not None
-            and decision.quote.budget_input_tokens
-            < int(
-                decision.quote.effective_input_budget_tokens
-                * owner.policy.auto_trigger_ratio
-            )
-        )
-
-    def wire_decision_crosses_automatic_threshold(
-        self,
-        dispatch: PreparedProviderDispatch,
-        decision: PreparedWireMeasurementDecision,
-    ) -> bool:
-        owner = self._compaction_owner
-        if (
-            owner is None
-            or not owner.policy.enabled
-            or not self.automatic_allowed(
-                scope_kind=(
-                    dispatch.canonical_read.compile_snapshot.canonical_input.identity.conversation_scope_kind
-                )
-            )
-        ):
-            return False
-        if decision.candidate != self._provider_dispatch.wire_candidate_for_dispatch(
-            dispatch
-        ):
-            raise RuntimeError("wire decision belongs to another provider dispatch")
-        quote = decision.quote
-        budget = quote.effective_input_budget_tokens
-        if quote.budget_input_tokens >= int(budget * owner.policy.auto_trigger_ratio):
-            return True
-        return False
-
-    async def _freeze_compaction_runtime_source(
-        self,
-        *,
-        scope: CompactionScope,
-        deadline: float,
-    ) -> tuple[
-        ContextSourceCandidate | ContextSourceAbsentFact,
-        FrozenCompactionRuntimeHandoff | None,
-    ]:
-        remaining = deadline - monotonic()
-        if remaining <= 0:
-            raise TimeoutError("compaction runtime handoff deadline expired")
-        handoff = await asyncio.wait_for(
-            self._tools.freeze_compaction_runtime_handoff(
-                conversation_scope_kind=scope.scope_kind,
-                session_id=scope.session_id,
-                work_turn_id=scope.turn_id,
-            ),
-            timeout=remaining,
-        )
-        if handoff is None:
-            source = build_compaction_context_source(
-                kind=ContextSourceKind.COMPACTION_RUNTIME_HANDOFF,
-                texts=None,
-                absence_kind=ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-            )
-        else:
-            source = build_compaction_context_source(
-                kind=ContextSourceKind.COMPACTION_RUNTIME_HANDOFF,
-                texts=(handoff.full_text, handoff.compact_text),
-                domain_identity=handoff.source_fingerprint,
-            )
-        return source, handoff
 
     async def _select_summary(
         self,

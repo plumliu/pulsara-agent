@@ -12,7 +12,7 @@ from pulsara_agent.cli import build_parser
 from pulsara_agent.capability.contracts import LocalSkillRootKind
 from pulsara_agent.capability.local_skills import LooseSkillDefinitionProducer
 from pulsara_agent.desktop_app.application import DesktopApplication
-from pulsara_agent.desktop_app import session_controller as module
+from pulsara_agent.desktop_app import skill_inventory as module
 from pulsara_agent.desktop_app.session_controller import LocalSessionController
 from tests.support.model_config import test_model_runtime as make_runtime
 

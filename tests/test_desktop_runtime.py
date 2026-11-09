@@ -250,7 +250,7 @@ def test_workbench_exit_during_startup_joins_the_original_sessionless_core_bound
 import asyncio, json, sys, threading
 import pytest
 from pulsara_agent import desktop_runtime as module
-from pulsara_agent.conversation_kernel import host
+from pulsara_agent.conversation_kernel import host, host_management
 from pulsara_agent.desktop_app.application import DatabaseDataPlaneState
 from tests.test_kernel_resource_lifecycle import resources
 
@@ -278,7 +278,7 @@ async def exercise():
                 def rows(*args):
                     loop.call_soon_threadsafe(physical_started.set)
                     threading.Event().wait()
-                patch.setattr(host, "_list_resumable_session_rows_across_workspaces", rows)
+                patch.setattr(host_management, "_list_resumable_session_rows_across_workspaces", rows)
                 pending = asyncio.create_task(core.list_resumable_sessions_across_workspaces())
                 await physical_started.wait()
                 deadline = next(iter(core._resource_operations.values()))

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from pulsara_agent.conversation_kernel import host
+from pulsara_agent.conversation_kernel import host, host_management
 from pulsara_agent.workspace_identity import HostWorkspaceInput
 from pulsara_agent.identity import random_id
 from tests.support.model_config import test_model_runtime as make_runtime
@@ -61,7 +61,7 @@ def resources(monkeypatch):
 def test_cold_public_preparation_reads_and_opens_share_one_operation(monkeypatch, tmp_path):
     async def run():
         core, leases, entered, release = resources(monkeypatch)
-        monkeypatch.setattr(host, "_list_resumable_session_rows_across_workspaces", lambda *_args: [])
+        monkeypatch.setattr(host_management, "_list_resumable_session_rows_across_workspaces", lambda *_args: [])
 
         async def opened(*_args, **_kwargs):
             return await core._ensure_resources()
@@ -187,7 +187,7 @@ def test_shutdown_waits_for_accepted_physical_read(monkeypatch):
             assert finish.wait(5)
             return []
 
-        monkeypatch.setattr(host, "_list_resumable_session_rows_across_workspaces", rows)
+        monkeypatch.setattr(host_management, "_list_resumable_session_rows_across_workspaces", rows)
         read = asyncio.create_task(core.list_resumable_sessions_across_workspaces())
         assert await asyncio.to_thread(reading.wait, 5)
         stopped = asyncio.Event()
@@ -351,7 +351,7 @@ def test_workbench_boundary_uses_the_actual_cold_operation_deadline_without_sess
                 assert finish.wait(5)
                 return []
 
-            monkeypatch.setattr(host, "_list_resumable_session_rows_across_workspaces", rows)
+            monkeypatch.setattr(host_management, "_list_resumable_session_rows_across_workspaces", rows)
             operation = asyncio.create_task(core.list_resumable_sessions_across_workspaces())
             assert await asyncio.to_thread(reading.wait, 5)
             original_deadline = next(iter(core._resource_operations.values()))

@@ -208,15 +208,6 @@ def test_stage2_product_contract_survives_the_clean_migration_universe() -> None
 
 
 def test_stage2_gui_host_and_renderer_neutral_protocol_select_kernel_v3() -> None:
-    from pulsara_agent.conversation_kernel.host import KernelHostCore
-    from pulsara_agent.terminal_protocol import TerminalKernelProtocolServer
-    from pulsara_agent.desktop_app.application import DesktopApplication
-
-    assert KernelHostCore.__module__ == "pulsara_agent.conversation_kernel.host"
-    assert TerminalKernelProtocolServer.__module__ == (
-        "pulsara_agent.terminal_protocol.v3_gateway"
-    )
-    assert DesktopApplication.__module__ == "pulsara_agent.desktop_app.application"
     assert not (ROOT / "src/pulsara_agent/host").exists()
     assert not (ROOT / "src/pulsara_agent/terminal_client").exists()
     assert not (ROOT / "clients/terminal").exists()

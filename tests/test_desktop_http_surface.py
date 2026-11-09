@@ -16,6 +16,8 @@ from tests.retrieval_fixtures import input_for
 from pulsara_agent.capability.mcp_management import McpManagementConflict
 from pulsara_agent.desktop_app import http_server as http_server_module
 from pulsara_agent.desktop_app import session_controller as session_controller_module
+from pulsara_agent.desktop_app import capability_projection as capability_projection_module
+from pulsara_agent.desktop_app import session_capabilities as session_capabilities_module
 from pulsara_agent.conversation_kernel.host import SessionControlRejected
 from pulsara_agent.desktop_app.renderer_bridge import RendererBridge
 from pulsara_agent.desktop_app.http_server import LocalHttpServer
@@ -1634,7 +1636,7 @@ def test_user_mcp_live_overlay_requires_exact_user_source_and_config(
     )
 
     monkeypatch.setattr(
-        session_controller_module,
+        capability_projection_module,
         "_user_plugins_payload",
         lambda _inspection, _resolver: {"status": "ready", "items": [], "details": []},
     )
@@ -2231,7 +2233,7 @@ def test_user_capability_http_preserves_dynamic_mcp_package_named_fields(tmp_pat
         installed = await owner.plugins.install_local_plugin(InstallLocalPluginRequest(source, PluginScopeKind.USER, monotonic() + 10), connections=owner.mcp)
         assert installed.disposition.value == "INSTALLED"
         package_id = installed.package_install_id
-        monkeypatch.setattr(session_controller_module, "_inspect_user_skills", lambda: {"items": [], "issues": [], "roots": []})
+        monkeypatch.setattr(session_capabilities_module, "_inspect_user_skills", lambda: {"items": [], "issues": [], "roots": []})
         controller = object.__new__(LocalSessionController)
         controller._lock = asyncio.Lock()
         controller._operations = {}

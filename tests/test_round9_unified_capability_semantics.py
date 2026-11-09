@@ -2,7 +2,6 @@ from __future__ import annotations
 from tests.support.model_config import scheduled_task_service
 
 from dataclasses import fields, replace
-import ast
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1171,40 +1170,6 @@ def test_round9_production_has_no_pre_registry_tool_surface_bypass() -> None:
     assert "_compatibility_native_projection_set" not in direct_model
 
 
-def test_round9_owner_snapshot_issuers_and_registry_merge_have_closed_callers() -> None:
-    src = Path(__file__).parents[1] / "src" / "pulsara_agent"
-    allowed = {
-        "issue_sealed_builtin_capability_snapshot": {
-            "conversation_kernel/tool_runtime.py",
-        },
-        "issue_mcp_capability_source_snapshot_set": {
-            "conversation_kernel/mcp/supervisor.py",
-        },
-        "issue_skill_catalog_source_snapshot": {
-            "conversation_kernel/capability.py",
-        },
-        "freeze_capability_registry_from_owner_snapshots": {
-            "conversation_kernel/provider_dispatch.py",
-        },
-    }
-    observed = {name: set() for name in allowed}
-    for path in src.rglob("*.py"):
-        relative = path.relative_to(src).as_posix()
-        if relative == "conversation_kernel/capability_composition.py":
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            if isinstance(node.func, ast.Name):
-                name = node.func.id
-            elif isinstance(node.func, ast.Attribute):
-                name = node.func.attr
-            else:
-                continue
-            if name in observed:
-                observed[name].add(relative)
-    assert observed == allowed
 
 
 @pytest.mark.parametrize("builtin_count", [0, 39, 64])

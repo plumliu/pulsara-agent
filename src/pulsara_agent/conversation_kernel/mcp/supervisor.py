@@ -1,16 +1,13 @@
 """Host-scoped MCP physical owner, discovery, fencing, and exact execution."""
 
 from __future__ import annotations
-from pulsara_agent.identity import derive_id, random_id, require_id
 
 import asyncio
-from contextlib import asynccontextmanager, suppress
+import random
+from contextlib import suppress
 from dataclasses import dataclass, field
-from enum import StrEnum
 from importlib import import_module
 from pathlib import Path
-import random
-import re
 from threading import RLock
 from typing import TYPE_CHECKING, Awaitable, Callable, Mapping
 
@@ -25,6 +22,7 @@ from pulsara_agent.capability.contracts import (
     McpProviderNameCollisionFact,
     McpProviderNameCollisionMember,
     McpToolCapabilityRef,
+    ToolCapabilityOrigin,
     capability_identity,
     capability_source_ref,
     capability_source_registration,
@@ -32,7 +30,6 @@ from pulsara_agent.capability.contracts import (
     freeze_mcp_inspectability_fact,
     freeze_tool_capability_fact,
     tool_capability_version_ref,
-    ToolCapabilityOrigin,
 )
 from pulsara_agent.capability.mcp_projection import (
     McpInspectionDescriptorValues,
@@ -44,91 +41,111 @@ from pulsara_agent.conversation_kernel.capability_composition import (
     PreparedMcpInspectionInput,
     issue_mcp_capability_source_snapshot_set,
 )
+from pulsara_agent.identity import random_id
 from pulsara_agent.mcp_config import (
     LocalConfiguredMcpRuntimeSource,
     ManagedPackageMcpRuntimeSource,
-    McpConfiguredEffect,
-    McpInvalidToolPolicy,
     McpScopePolicy,
     McpServerConfig,
 )
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.primitives.context import (
-    FrozenJsonObjectFact,
     canonical_json_bytes,
     context_fingerprint,
-    freeze_json,
 )
 from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
 
 from ..tool_surface import (
     McpEffectKind,
-    McpPolicyClassificationSource,
     McpToolExecutionPolicyFact,
     PreparedToolExecutionBinding,
     execution_policy_fingerprint,
 )
 from .contracts import (
-    McpAdvertisedCapabilities,
-    McpProtocolConformanceError,
-    McpTransportOperationError,
     MAXIMUM_CONFIGURED_MCP_SERVERS,
-    MAXIMUM_DISCOVERED_TOOLS_PER_SERVER,
-    MAXIMUM_DISCOVERY_ITEMS_PER_SERVER,
-    MAXIMUM_DISCOVERY_PAGES_PER_METHOD,
-    MAXIMUM_MCP_CATALOG_RESULT_BYTES,
-    MAXIMUM_MCP_INSTRUCTIONS_BYTES,
     MAXIMUM_MCP_HOST_IN_FLIGHT,
     MAXIMUM_MCP_REMOTE_BODY_BYTES,
     McpCatalogSnapshot,
     McpCatalogToolInspection,
     McpConfiguredServerInspection,
     McpDiscoveryCatalogInspection,
-    McpDiscoverySnapshot,
     McpInstallationCandidate,
     McpPhysicalConcurrencyKind,
-    McpPromptSemanticFact,
-    McpResourceSemanticFact,
-    McpResourceTemplateSemanticFact,
+    McpProtocolConformanceError,
     McpServerCatalogEntry,
     McpServerState,
     McpToolSemanticFact,
+    McpTransportOperationError,
     build_catalog_snapshot,
     mcp_prompt_public_item,
-    mcp_resource_public_item,
-    mcp_resource_template_public_item,
     scope_mcp_discovery_snapshot,
 )
-from .naming import mangle_mcp_tool_names
-from .schema import McpOutputSchemaMismatch, mcp_schema_validator
 from .input_required import (
     McpInputRequiredRoundOwner,
     McpInputRequiredUnsupported,
 )
+from .schema import McpOutputSchemaMismatch
+
 if TYPE_CHECKING:
-    from .sdk_facade import BoundedMcpSdkClient, MCPError, types
-from .wire import DEFAULT_MCP_WIRE_BOUNDS, validate_schema
-
-
-class McpDispatchFenceState(StrEnum):
-    OPEN = "OPEN"
-    DIRTY_FENCED = "DIRTY_FENCED"
-    CLOSED = "CLOSED"
-
-
-class McpDispatchPermitState(StrEnum):
-    ADMITTED = "ADMITTED"
-    ATTEMPT_ACCEPTED = "ATTEMPT_ACCEPTED"
-    LANE_ACQUIRED = "LANE_ACQUIRED"
-    RELEASED = "RELEASED"
-
-
-class McpSnapshotStale(RuntimeError):
-    pass
-
-
-class _McpDispatchCancelledBeforeStart(RuntimeError):
-    pass
+    from .sdk_facade import BoundedMcpSdkClient, types
+from .discovery import (
+    _DEFAULT_MCP_SCHEMA_DIALECT as _DEFAULT_MCP_SCHEMA_DIALECT,
+    _SUPPORTED_MCP_SCHEMA_DIALECTS as _SUPPORTED_MCP_SCHEMA_DIALECTS,
+    _assert_catalog_item_bound as _assert_catalog_item_bound,
+    _bounded_public_identity as _bounded_public_identity,
+    _candidate as _candidate,
+    _discovery_snapshot_physical_bytes as _discovery_snapshot_physical_bytes,
+    _DiscoveryBudget as _DiscoveryBudget,
+    _effect as _effect,
+    _list_optional_resource_templates as _list_optional_resource_templates,
+    _list_pages as _list_pages,
+    _mcp_schema_dialect as _mcp_schema_dialect,
+    _prompt as _prompt,
+    _resource as _resource,
+    _resource_template as _resource_template,
+    _sanitize_text as _sanitize_text,
+    discover_mcp_catalog as discover_mcp_catalog,
+)
+from .resource_uris import (
+    _URI_TEMPLATE_VARIABLE as _URI_TEMPLATE_VARIABLE,
+    _match_named_uri_expansion as _match_named_uri_expansion,
+    _match_uri_template_expansion as _match_uri_template_expansion,
+    _parse_resource_uri_template as _parse_resource_uri_template,
+    _resource_uri_in_snapshot as _resource_uri_in_snapshot,
+    _resource_uri_matches_template as _resource_uri_matches_template,
+    _standard_operation_target as _standard_operation_target,
+    _standard_resource_uri as _standard_resource_uri,
+    _uri_template_variable_name as _uri_template_variable_name,
+)
+from .results import (
+    McpKnownToolResult as McpKnownToolResult,
+    _known_mcp_remote_error as _known_mcp_remote_error,
+    _known_mcp_system_failure as _known_mcp_system_failure,
+    _mcp_error_is_transport_failure as _mcp_error_is_transport_failure,
+    _mcp_invocation_failure as _mcp_invocation_failure,
+    _mcp_remote_identity as _mcp_remote_identity,
+    _mcp_standard_operation_identity as _mcp_standard_operation_identity,
+    mcp_failure_required_facts as mcp_failure_required_facts,
+)
+from .standard_operations import (
+    _get_prompt_result as _get_prompt_result,
+    _invoke_standard_remote_result as _invoke_standard_remote_result,
+    _remaining_mcp_timeout as _remaining_mcp_timeout,
+    user_prompt_text as user_prompt_text,
+)
+from .slots import (
+    McpConnectionSlot as McpConnectionSlot,
+    McpDispatchAdmissionPermit as McpDispatchAdmissionPermit,
+    McpDispatchFenceState as McpDispatchFenceState,
+    McpDispatchPermitState as McpDispatchPermitState,
+    McpPhysicalOperationPermit as McpPhysicalOperationPermit,
+    McpSlotLease as McpSlotLease,
+    McpSnapshotStale as McpSnapshotStale,
+    _acquire_dispatch_lane as _acquire_dispatch_lane,
+    _close_physical_lifetime_anchor as _close_physical_lifetime_anchor,
+    _McpDispatchCancelledBeforeStart as _McpDispatchCancelledBeforeStart,
+)
+from .wire import DEFAULT_MCP_WIRE_BOUNDS
 
 
 async def _prepare_sdk_client_factory() -> type[BoundedMcpSdkClient]:
@@ -151,510 +168,12 @@ async def _prepare_sdk_client_factory() -> type[BoundedMcpSdkClient]:
     return module.BoundedMcpSdkClient
 
 
-async def _acquire_dispatch_lane(lane: asyncio.Semaphore, cell_cancel_event: asyncio.Event | None) -> None:
-    if cell_cancel_event is None:
-        await lane.acquire()
-        return
-    if cell_cancel_event.is_set():
-        raise _McpDispatchCancelledBeforeStart
-    acquire = asyncio.create_task(lane.acquire())
-    cell_cancelled = asyncio.create_task(cell_cancel_event.wait())
-    transferred = False
-    try:
-        await asyncio.wait((acquire, cell_cancelled), return_when=asyncio.FIRST_COMPLETED)
-        if cell_cancel_event.is_set():
-            raise _McpDispatchCancelledBeforeStart
-        await acquire
-        transferred = True
-    finally:
-        cell_cancelled.cancel()
-        if not transferred:
-            acquire.cancel()
-        settled = await asyncio.gather(acquire, cell_cancelled, return_exceptions=True)
-        # Cancellation can race a successful semaphore grant. Return exactly
-        # that grant unless ownership transferred to the physical operation.
-        if not transferred and settled[0] is True:
-            lane.release()
-
-
-_DEFAULT_MCP_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema"
-_SUPPORTED_MCP_SCHEMA_DIALECTS = frozenset(
-    {
-        "http://json-schema.org/draft-07/schema#",
-        "https://json-schema.org/draft/2019-09/schema",
-        _DEFAULT_MCP_SCHEMA_DIALECT,
-    }
-)
-
-
 @dataclass(frozen=True, slots=True)
 class _McpConnectOutcome:
     """Result owned by the existing physical connection-attempt task."""
 
     state: McpServerState
     failure: str | None = None
-
-
-class McpSlotLease:
-    """Opaque, non-copyable capability issued by exactly one slot owner."""
-
-    __slots__ = (
-        "slot_id",
-        "connection_generation",
-        "admitted_discovery_generation",
-        "admitted_execution_binding_fingerprint",
-        "lease_identity",
-        "_slot",
-        "_authority",
-        "_released",
-    )
-
-    def __init__(
-        self,
-        *,
-        slot: "McpConnectionSlot",
-        authority: object,
-        admitted_discovery_generation: int,
-    ) -> None:
-        if authority is not slot._lease_authority:  # noqa: SLF001
-            raise RuntimeError("MCP slot lease construction is sealed")
-        self.slot_id = slot.slot_id
-        self.connection_generation = slot.connection_generation
-        self.admitted_discovery_generation = admitted_discovery_generation
-        self.admitted_execution_binding_fingerprint = (
-            slot.execution_binding_fingerprint
-        )
-        self.lease_identity = context_fingerprint(
-            "mcp-slot-lease-identity:v1",
-            {
-                "slot_id": self.slot_id,
-                "connection_generation": self.connection_generation,
-                "admitted_discovery_generation": self.admitted_discovery_generation,
-                "execution_binding_fingerprint": (
-                    self.admitted_execution_binding_fingerprint
-                ),
-            },
-        )
-        self._slot = slot
-        self._authority = authority
-        self._released = False
-
-    def exactly_joins(self, slot: "McpConnectionSlot") -> bool:
-        return (
-            not self._released
-            and self._slot is slot
-            and self._authority is slot._lease_authority  # noqa: SLF001
-            and self.slot_id == slot.slot_id
-            and self.connection_generation == slot.connection_generation
-            and self.admitted_execution_binding_fingerprint
-            == slot.execution_binding_fingerprint
-        )
-
-    def release(self) -> None:
-        if self._released:
-            return
-        self._slot.release_lease(self)
-        self._released = True
-
-    def __copy__(self) -> None:
-        raise TypeError("MCP slot leases cannot be copied")
-
-    def __deepcopy__(self, memo: object) -> None:
-        del memo
-        raise TypeError("MCP slot leases cannot be copied")
-
-
-@dataclass(slots=True)
-class McpDispatchAdmissionPermit:
-    permit_id: str
-    session_id: str
-    scope_kind: ModelInputScopeKind
-    turn_id: str
-    tool_call_id: str
-    descriptor_fingerprint: str
-    policy_fingerprint: str
-    runtime_generation_id: int
-    admitted_dirty_generation: int
-    lease: McpSlotLease = field(repr=False)
-    _slot: "McpConnectionSlot" = field(repr=False)
-    _authority: object = field(repr=False)
-    state: McpDispatchPermitState = McpDispatchPermitState.ADMITTED
-
-    def mark_attempt_accepted(self) -> None:
-        self._slot.mark_attempt_accepted(self)
-
-    async def acquire_operation(self, *, cell_cancel_event: asyncio.Event | None = None) -> "McpPhysicalOperationPermit":
-        return await self._slot.acquire_operation(self, cell_cancel_event=cell_cancel_event)
-
-    def release(self) -> None:
-        if self.state is McpDispatchPermitState.RELEASED:
-            return
-        self._slot.release_dispatch(self)
-
-
-class McpPhysicalOperationPermit:
-    def __init__(
-        self,
-        permit: McpDispatchAdmissionPermit,
-        semaphore: asyncio.Semaphore,
-        host_semaphore: asyncio.Semaphore,
-    ) -> None:
-        self.permit = permit
-        self._semaphore = semaphore
-        self._host_semaphore = host_semaphore
-        self._released = False
-
-    async def __aenter__(self) -> "McpPhysicalOperationPermit":
-        return self
-
-    async def __aexit__(self, *exc: object) -> None:
-        self.release()
-
-    def release(self) -> None:
-        if self._released:
-            return
-        self._released = True
-        self._host_semaphore.release()
-        self._semaphore.release()
-        self.permit._slot.release_operation(self.permit)  # noqa: SLF001
-
-
-class McpConnectionSlot:
-    def __init__(
-        self,
-        *,
-        server_id: str,
-        supervisor_epoch: str,
-        connection_generation: int,
-        runtime_config_fingerprint: str,
-        client: BoundedMcpSdkClient,
-        concurrency_kind: McpPhysicalConcurrencyKind,
-        maximum_in_flight: int,
-        host_lane: asyncio.Semaphore,
-        failure_reporter: Callable[["McpConnectionSlot", str, bool], None],
-        physical_lifetime_anchor: object | None = None,
-    ) -> None:
-        self.slot_id = random_id("slot")
-        self.server_id = server_id
-        self.supervisor_epoch = require_id(supervisor_epoch, "epoch")
-        self.connection_generation = connection_generation
-        self.runtime_config_fingerprint = runtime_config_fingerprint
-        self.client = client
-        self.concurrency_kind = concurrency_kind
-        self.execution_binding_fingerprint = context_fingerprint(
-            "mcp-slot-execution-binding:v1",
-            {
-                "slot_id": self.slot_id,
-                "server_id": server_id,
-                "supervisor_epoch": supervisor_epoch,
-                "connection_generation": connection_generation,
-                "runtime_config_fingerprint": runtime_config_fingerprint,
-                "concurrency_kind": concurrency_kind.value,
-            },
-        )
-        self._lock = RLock()
-        self._lease_authority = object()
-        self._permit_authority = object()
-        self._lane = asyncio.Semaphore(maximum_in_flight)
-        self._host_lane = host_lane
-        self._failure_reporter = failure_reporter
-        self._physical_lifetime_anchor = physical_lifetime_anchor
-        self._dirty_generation = 0
-        self._dispatch_fence = McpDispatchFenceState.OPEN
-        self._accepting_new_leases = True
-        self._leases: set[McpSlotLease] = set()
-        self._permits: dict[str, McpDispatchAdmissionPermit] = {}
-        self._active_operation_count = 0
-
-    def close_physical_lifetime(self) -> None:
-        anchor = self._physical_lifetime_anchor
-        if anchor is None:
-            return
-        self._physical_lifetime_anchor = None
-        _close_physical_lifetime_anchor(anchor)
-
-    @property
-    def dispatch_fence_state(self) -> McpDispatchFenceState:
-        with self._lock:
-            return self._dispatch_fence
-
-    def report_transport_failure(
-        self, category: str, *, retryable: bool
-    ) -> None:
-        # The exact physical slot is fenced even when a newer candidate has
-        # already become the supervisor's reconnect target.  Global status is
-        # updated only if this slot is still current.
-        self.mark_dirty()
-        self._failure_reporter(self, category, retryable)
-
-    def configure_physical_concurrency(
-        self,
-        *,
-        concurrency_kind: McpPhysicalConcurrencyKind,
-        maximum_in_flight: int,
-    ) -> None:
-        """Freeze the negotiated lane before discovery leases are issued."""
-
-        with self._lock:
-            if self._leases or self._permits or self._active_operation_count:
-                raise RuntimeError("MCP physical lane is already in use")
-            if maximum_in_flight < 1:
-                raise ValueError("MCP physical lane bound must be positive")
-            self.concurrency_kind = concurrency_kind
-            self._lane = asyncio.Semaphore(maximum_in_flight)
-            self.execution_binding_fingerprint = context_fingerprint(
-                "mcp-slot-execution-binding:v1",
-                {
-                    "slot_id": self.slot_id,
-                    "server_id": self.server_id,
-                    "supervisor_epoch": self.supervisor_epoch,
-                    "connection_generation": self.connection_generation,
-                    "runtime_config_fingerprint": self.runtime_config_fingerprint,
-                    "concurrency_kind": concurrency_kind.value,
-                },
-            )
-
-    @property
-    def dirty_generation(self) -> int:
-        with self._lock:
-            return self._dirty_generation
-
-    @property
-    def active_slot_lease_count(self) -> int:
-        with self._lock:
-            return len(self._leases)
-
-    @property
-    def active_operation_count(self) -> int:
-        with self._lock:
-            return self._active_operation_count
-
-    @property
-    def active_dispatch_count(self) -> int:
-        with self._lock:
-            return len(self._permits)
-
-    def issue_lease(self, discovery_generation: int) -> McpSlotLease:
-        with self._lock:
-            if not self._accepting_new_leases or self._dispatch_fence is McpDispatchFenceState.CLOSED:
-                raise RuntimeError("MCP slot refuses new leases")
-            lease = McpSlotLease(
-                slot=self,
-                authority=self._lease_authority,
-                admitted_discovery_generation=discovery_generation,
-            )
-            self._leases.add(lease)
-            return lease
-
-    def prepare_refresh_lease(self, discovery_generation: int) -> McpSlotLease:
-        """Prepare a candidate while the current slot remains dirty-fenced."""
-        with self._lock:
-            if (self._dispatch_fence is not McpDispatchFenceState.DIRTY_FENCED
-                    or discovery_generation != self._dirty_generation):
-                raise McpSnapshotStale("MCP_SNAPSHOT_STALE")
-            lease = McpSlotLease(slot=self, authority=self._lease_authority,
-                                 admitted_discovery_generation=discovery_generation)
-            self._leases.add(lease)
-            return lease
-
-    def complete_refresh(self, lease: McpSlotLease) -> None:
-        """Reopen only the observed generation; old leases remain stale."""
-        with self._lock:
-            if (not lease.exactly_joins(self) or lease not in self._leases
-                    or lease.admitted_discovery_generation != self._dirty_generation
-                    or self._dispatch_fence is not McpDispatchFenceState.DIRTY_FENCED):
-                raise McpSnapshotStale("MCP_SNAPSHOT_STALE")
-            self._dispatch_fence = McpDispatchFenceState.OPEN
-            self._accepting_new_leases = True
-
-    @asynccontextmanager
-    async def catalog_operation(self, *, discovery_reservation: asyncio.Semaphore):
-        # SDK listings mutate its output-schema cache. Drain every pre-fence
-        # admission before listing, including bounded HTTP calls, then own the
-        # existing lane. Do not duplicate SDK caches or result validators.
-        while self.active_dispatch_count or self.active_operation_count:
-            await asyncio.sleep(0.01)
-        # Waiting for discovery memory is also queueing, not physical I/O.
-        # Semaphore contexts unwind every partial acquisition in reverse order.
-        async with self._lane, discovery_reservation, self._host_lane:
-            with self._lock:
-                if self._dispatch_fence is McpDispatchFenceState.CLOSED:
-                    raise McpSnapshotStale("MCP_SNAPSHOT_STALE")
-                self._active_operation_count += 1
-            try:
-                yield
-            finally:
-                with self._lock:
-                    self._active_operation_count -= 1
-
-    def release_lease(self, lease: McpSlotLease) -> None:
-        with self._lock:
-            if lease._slot is not self or lease._authority is not self._lease_authority:  # noqa: SLF001
-                raise RuntimeError("MCP slot lease authority conflicts")
-            self._leases.discard(lease)
-
-    @asynccontextmanager
-    async def user_prompt_operation(self, lease: McpSlotLease):
-        """User template reads share physical lanes without inventing a tool call."""
-        async with self._lane, self._host_lane:
-            with self._lock:
-                if not self.lease_is_current(lease):
-                    raise McpSnapshotStale("MCP_SNAPSHOT_STALE")
-                self._active_operation_count += 1
-            try:
-                yield
-            finally:
-                with self._lock:
-                    self._active_operation_count -= 1
-
-    def mark_dirty(self) -> int:
-        with self._lock:
-            if self._dispatch_fence is McpDispatchFenceState.CLOSED:
-                return self._dirty_generation
-            self._dirty_generation += 1
-            self._dispatch_fence = McpDispatchFenceState.DIRTY_FENCED
-            self._accepting_new_leases = False
-            return self._dirty_generation
-
-    def begin_retire(self) -> None:
-        """Stop new leases while existing runtime generations drain normally."""
-
-        with self._lock:
-            self._accepting_new_leases = False
-
-    def lease_is_current(self, lease: McpSlotLease) -> bool:
-        with self._lock:
-            return (
-                lease.exactly_joins(self)
-                and self._dispatch_fence is McpDispatchFenceState.OPEN
-                and lease.admitted_discovery_generation == self._dirty_generation
-            )
-
-    def admit_dispatch(
-        self,
-        *,
-        lease: McpSlotLease,
-        session_id: str,
-        scope_kind: ModelInputScopeKind,
-        turn_id: str,
-        tool_call_id: str,
-        descriptor_fingerprint: str,
-        policy_fingerprint: str,
-        runtime_generation_id: int,
-    ) -> McpDispatchAdmissionPermit:
-        with self._lock:
-            if (
-                not lease.exactly_joins(self)
-                or self._dispatch_fence is not McpDispatchFenceState.OPEN
-                or lease.admitted_discovery_generation != self._dirty_generation
-            ):
-                raise McpSnapshotStale("MCP_SNAPSHOT_STALE")
-            permit_id = random_id("permit")
-            while permit_id in self._permits:
-                permit_id = random_id("permit")
-            permit = McpDispatchAdmissionPermit(
-                permit_id=permit_id,
-                session_id=session_id,
-                scope_kind=scope_kind,
-                turn_id=turn_id,
-                tool_call_id=tool_call_id,
-                descriptor_fingerprint=descriptor_fingerprint,
-                policy_fingerprint=policy_fingerprint,
-                runtime_generation_id=runtime_generation_id,
-                admitted_dirty_generation=self._dirty_generation,
-                lease=lease,
-                _slot=self,
-                _authority=self._permit_authority,
-            )
-            self._permits[permit.permit_id] = permit
-            return permit
-
-    def _require_permit(self, permit: McpDispatchAdmissionPermit) -> None:
-        if (
-            permit._slot is not self
-            or permit._authority is not self._permit_authority
-            or self._permits.get(permit.permit_id) is not permit
-            or permit.lease._slot is not self  # noqa: SLF001
-        ):
-            raise RuntimeError("MCP dispatch permit authority conflicts")
-
-    def mark_attempt_accepted(self, permit: McpDispatchAdmissionPermit) -> None:
-        with self._lock:
-            self._require_permit(permit)
-            if permit.state is not McpDispatchPermitState.ADMITTED:
-                raise RuntimeError("MCP dispatch permit is not admissible")
-            permit.state = McpDispatchPermitState.ATTEMPT_ACCEPTED
-
-    async def acquire_operation(
-        self, permit: McpDispatchAdmissionPermit, *, cell_cancel_event: asyncio.Event | None = None
-    ) -> McpPhysicalOperationPermit:
-        with self._lock:
-            self._require_permit(permit)
-            if permit.state is not McpDispatchPermitState.ATTEMPT_ACCEPTED:
-                raise RuntimeError("MCP attempt is not accepted")
-        # A request waiting on its server must not reserve capacity that an
-        # unrelated ready server can use for actual physical I/O.
-        await _acquire_dispatch_lane(self._lane, cell_cancel_event)
-        try:
-            await _acquire_dispatch_lane(self._host_lane, cell_cancel_event)
-        except BaseException:
-            self._lane.release()
-            raise
-        with self._lock:
-            try:
-                self._require_permit(permit)
-                if cell_cancel_event is not None and cell_cancel_event.is_set():
-                    raise _McpDispatchCancelledBeforeStart
-                if permit.state is not McpDispatchPermitState.ATTEMPT_ACCEPTED:
-                    raise RuntimeError("MCP operation permit raced settlement")
-                permit.state = McpDispatchPermitState.LANE_ACQUIRED
-                self._active_operation_count += 1
-            except BaseException:
-                self._host_lane.release()
-                self._lane.release()
-                raise
-        return McpPhysicalOperationPermit(permit, self._lane, self._host_lane)
-
-    def release_dispatch(self, permit: McpDispatchAdmissionPermit) -> None:
-        with self._lock:
-            self._require_permit(permit)
-            if permit.state is McpDispatchPermitState.LANE_ACQUIRED:
-                raise RuntimeError("MCP lane permit must settle the operation")
-            permit.state = McpDispatchPermitState.RELEASED
-            self._permits.pop(permit.permit_id, None)
-
-    def release_operation(self, permit: McpDispatchAdmissionPermit) -> None:
-        with self._lock:
-            self._require_permit(permit)
-            if permit.state is not McpDispatchPermitState.LANE_ACQUIRED:
-                raise RuntimeError("MCP operation permit is not active")
-            self._active_operation_count -= 1
-            permit.state = McpDispatchPermitState.RELEASED
-            self._permits.pop(permit.permit_id, None)
-
-    def begin_close(self) -> None:
-        with self._lock:
-            self._accepting_new_leases = False
-            self._dispatch_fence = McpDispatchFenceState.CLOSED
-            for permit in tuple(self._permits.values()):
-                if permit.state is McpDispatchPermitState.ADMITTED:
-                    permit.state = McpDispatchPermitState.RELEASED
-                    self._permits.pop(permit.permit_id, None)
-
-
-@dataclass(frozen=True, slots=True)
-class McpKnownToolResult:
-    """Known tool observation, including delivery failure with remote outcome unknown."""
-
-    state: str
-    content: bytes
-    remote_identity: str
-    remote_identity_verification: str
-
-    def __post_init__(self) -> None:
-        require_id(self.remote_identity, "mcp-tool")
-        if re.fullmatch(r"sha256:[0-9a-f]{64}", self.remote_identity_verification) is None:
-            raise ValueError("MCP remote identity verification is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -870,69 +389,6 @@ class McpBoundToolExecutor:
                 raise
             finally:
                 input_owner.close()
-
-
-def _aggregate_provider_projection(
-    candidates: tuple[McpInstallationCandidate, ...],
-    scope: ModelInputScopeKind,
-) -> tuple[
-    tuple[McpToolSemanticFact, ...],
-    tuple[McpProviderNameCollisionFact, ...],
-]:
-    visible_semantics = tuple(
-        semantic
-        for candidate in candidates
-        for semantic in candidate.discovery_snapshot.tools
-        if (
-            semantic.root_visible
-            if scope is ModelInputScopeKind.ROOT
-            else semantic.subagent_visible
-        )
-    )
-    return _provider_projection_from_semantics(visible_semantics)
-
-
-def _provider_projection_from_semantics(
-    semantics: tuple[McpToolSemanticFact, ...],
-) -> tuple[
-    tuple[McpToolSemanticFact, ...],
-    tuple[McpProviderNameCollisionFact, ...],
-]:
-    groups: dict[str, list[McpToolSemanticFact]] = {}
-    for semantic in semantics:
-        groups.setdefault(semantic.provider_tool_name, []).append(semantic)
-    survivors: list[McpToolSemanticFact] = []
-    collisions: list[McpProviderNameCollisionFact] = []
-    for provider_name in sorted(groups):
-        members = groups[provider_name]
-        if len(members) == 1:
-            survivors.append(members[0])
-            continue
-        collisions.append(
-            McpProviderNameCollisionFact(
-                provider_name=provider_name,
-                members=tuple(
-                    sorted(
-                        (
-                            McpProviderNameCollisionMember(
-                                server_id=item.server_id,
-                                remote_tool_name=item.remote_tool_name,
-                                discovered_tool_identity=(
-                                    item.descriptor_fingerprint
-                                ),
-                            )
-                            for item in members
-                        ),
-                        key=lambda item: (
-                            item.server_id,
-                            item.remote_tool_name,
-                            item.discovered_tool_identity,
-                        ),
-                    )
-                ),
-            )
-        )
-    return tuple(survivors), tuple(collisions)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1224,75 +680,68 @@ class McpInstalledRuntimeGeneration:
             )
 
 
-async def _invoke_standard_remote_result(
-    *,
-    client: BoundedMcpSdkClient,
-    candidate: McpInstallationCandidate,
-    tool_name: str,
-    arguments: Mapping[str, object],
-    input_owner: McpInputRequiredRoundOwner,
-) -> types.ReadResourceResult | types.GetPromptResult:
-    from .sdk_facade import types
 
-    request_state: str | None = None
-    if tool_name == "read_mcp_resource":
-        uri = _standard_resource_uri(arguments, candidate.discovery_snapshot)
-        while True:
-            result = await client.session.read_resource(
-                uri,
-                input_responses={} if request_state is not None else None,
-                request_state=request_state,
-                allow_input_required=True,
-            )
-            result_type = client.require_closed_result_type(result)
-            if result_type == "complete":
-                if not isinstance(result, types.ReadResourceResult):
-                    raise McpProtocolConformanceError(
-                        "MCP_RESULT_TYPE_PAYLOAD_CONTRADICTION"
-                    )
-                return result
-            if not isinstance(result, types.InputRequiredResult):
-                raise McpProtocolConformanceError(
-                    "MCP_RESULT_TYPE_PAYLOAD_CONTRADICTION"
-                )
-            request_state = input_owner.prepare_state_only_continuation(result)
-    raise RuntimeError("unknown MCP standard operation")
-
-
-def user_prompt_text(result):
-    """Only plain user text has a lossless representation in the current composer."""
-    if any(message.role != "user" or message.content.type != "text" for message in result.messages):
-        return {"state": "unsupported_content", "message": "此提示词包含暂不支持的消息内容。"}
-    text = "\n\n".join(message.content.text for message in result.messages)
-    if not text.strip():
-        return {"state": "empty", "message": "提示词内容为空。"}
-    return {"state": "ready", "text": text}
-
-
-async def _get_prompt_result(client, prompt_name, prompt_arguments, input_owner):
-    from .sdk_facade import types
-
-    request_state = None
-    while True:
-        result = await client.session.get_prompt(
-            prompt_name,
-            prompt_arguments,
-            input_responses={} if request_state is not None else None,
-            request_state=request_state,
-            allow_input_required=True,
+def _aggregate_provider_projection(
+    candidates: tuple[McpInstallationCandidate, ...],
+    scope: ModelInputScopeKind,
+) -> tuple[
+    tuple[McpToolSemanticFact, ...],
+    tuple[McpProviderNameCollisionFact, ...],
+]:
+    visible_semantics = tuple(
+        semantic
+        for candidate in candidates
+        for semantic in candidate.discovery_snapshot.tools
+        if (
+            semantic.root_visible
+            if scope is ModelInputScopeKind.ROOT
+            else semantic.subagent_visible
         )
-        result_type = client.require_closed_result_type(result)
-        if result_type == "complete":
-            if not isinstance(result, types.GetPromptResult):
-                raise McpProtocolConformanceError(
-                    "MCP_RESULT_TYPE_PAYLOAD_CONTRADICTION"
-                )
-            return result
-        if not isinstance(result, types.InputRequiredResult):
-            raise McpProtocolConformanceError(
-                "MCP_RESULT_TYPE_PAYLOAD_CONTRADICTION"
+    )
+    return _provider_projection_from_semantics(visible_semantics)
+
+
+def _provider_projection_from_semantics(
+    semantics: tuple[McpToolSemanticFact, ...],
+) -> tuple[
+    tuple[McpToolSemanticFact, ...],
+    tuple[McpProviderNameCollisionFact, ...],
+]:
+    groups: dict[str, list[McpToolSemanticFact]] = {}
+    for semantic in semantics:
+        groups.setdefault(semantic.provider_tool_name, []).append(semantic)
+    survivors: list[McpToolSemanticFact] = []
+    collisions: list[McpProviderNameCollisionFact] = []
+    for provider_name in sorted(groups):
+        members = groups[provider_name]
+        if len(members) == 1:
+            survivors.append(members[0])
+            continue
+        collisions.append(
+            McpProviderNameCollisionFact(
+                provider_name=provider_name,
+                members=tuple(
+                    sorted(
+                        (
+                            McpProviderNameCollisionMember(
+                                server_id=item.server_id,
+                                remote_tool_name=item.remote_tool_name,
+                                discovered_tool_identity=(
+                                    item.descriptor_fingerprint
+                                ),
+                            )
+                            for item in members
+                        ),
+                        key=lambda item: (
+                            item.server_id,
+                            item.remote_tool_name,
+                            item.discovered_tool_identity,
+                        ),
+                    )
+                ),
             )
-        request_state = input_owner.prepare_state_only_continuation(result)
+        )
+    return tuple(survivors), tuple(collisions)
 
 
 def _mcp_config_source_kind(config: McpServerConfig) -> str:
@@ -3107,773 +2556,6 @@ def _duplicate_physical_lifetime_anchor(anchor: object | None) -> object | None:
     return duplicate()
 
 
-def _close_physical_lifetime_anchor(anchor: object) -> None:
-    close = getattr(anchor, "close", None)
-    if not callable(close):
-        raise TypeError("MCP physical lifetime anchor is not closable")
-    close()
-
-
-async def discover_mcp_catalog(
-    client: BoundedMcpSdkClient,
-    config: McpServerConfig,
-) -> tuple[McpDiscoverySnapshot, tuple[McpToolExecutionPolicyFact, ...]]:
-    budget = _DiscoveryBudget(
-        remaining_items=MAXIMUM_DISCOVERY_ITEMS_PER_SERVER,
-        remaining_bytes=(
-            DEFAULT_MCP_WIRE_BOUNDS.maximum_discovery_candidate_bytes_per_server
-        ),
-    )
-    advertised = client.advertised_capabilities
-    if not isinstance(advertised, McpAdvertisedCapabilities):
-        raise McpProtocolConformanceError("MCP_SERVER_CAPABILITIES_MISSING")
-    tools = (
-        await _list_pages(client, client.session.list_tools, "tools", budget=budget)
-        if advertised.tools
-        else ()
-    )
-    resources = (
-        await _list_pages(
-            client, client.session.list_resources, "resources", budget=budget
-        )
-        if advertised.resources
-        else ()
-    )
-    templates = (
-        await _list_optional_resource_templates(client, budget=budget)
-        if advertised.resources
-        else ()
-    )
-    prompts = (
-        await _list_pages(
-            client, client.session.list_prompts, "prompts", budget=budget
-        )
-        if advertised.prompts
-        else ()
-    )
-    if len(tools) > MAXIMUM_DISCOVERED_TOOLS_PER_SERVER:
-        raise ValueError("MCP discovered tool bound exceeded")
-    if len(tools) + len(resources) + len(templates) + len(prompts) > MAXIMUM_DISCOVERY_ITEMS_PER_SERVER:
-        raise ValueError("MCP discovery item bound exceeded")
-    remote_names = tuple(item.name for item in tools)
-    names = mangle_mcp_tool_names(config.server_id, remote_names)
-    include = config.exposure_policy.include_tool_names
-    excluded = set(config.exposure_policy.exclude_tool_names)
-    selected = tuple(
-        item
-        for item in tools
-        if (include is None or item.name in include) and item.name not in excluded
-    )
-    unknown_effect = set(dict(config.effect_policy.tool_effect_overrides)) - set(remote_names)
-    unknown_timeout = set(dict(config.per_tool_timeout_ms)) - set(remote_names)
-    unknown_include = (set(include) - set(remote_names)) if include is not None else set()
-    if unknown_effect or unknown_timeout or unknown_include:
-        raise ValueError("MCP config references an unknown remote tool")
-    semantics: list[McpToolSemanticFact] = []
-    policies: list[McpToolExecutionPolicyFact] = []
-    invalid_tool_count = 0
-    for item in selected:
-        try:
-            validate_schema(item.input_schema, DEFAULT_MCP_WIRE_BOUNDS)
-            if item.input_schema.get("type") != "object":
-                raise ValueError("MCP tool input schema is not an object")
-            input_dialect = _mcp_schema_dialect(item.input_schema)
-            mcp_schema_validator(item.input_schema)
-            frozen = freeze_json(item.input_schema)
-            if not isinstance(frozen, FrozenJsonObjectFact):
-                raise TypeError("MCP tool schema did not freeze to an object")
-            output_schema = None
-            if item.output_schema is not None:
-                validate_schema(item.output_schema, DEFAULT_MCP_WIRE_BOUNDS)
-                _mcp_schema_dialect(item.output_schema)
-                mcp_schema_validator(item.output_schema)
-                output_schema = freeze_json(item.output_schema)
-                if not isinstance(output_schema, FrozenJsonObjectFact):
-                    raise TypeError("MCP output schema did not freeze to an object")
-        except Exception:
-            if (
-                config.exposure_policy.invalid_tool_policy
-                is McpInvalidToolPolicy.FAIL_SERVER
-            ):
-                raise
-            invalid_tool_count += 1
-            continue
-        provider_name = names[item.name]
-        public_description = _sanitize_text(item.description or "", 8 * 1024)
-        descriptor = context_fingerprint(
-            "mcp-tool-semantic:v1",
-            {
-                "server_id": config.server_id,
-                "remote_tool_name": item.name,
-                "provider_tool_name": provider_name,
-                "description": public_description,
-                "input_schema": frozen,
-                "output_schema": output_schema,
-                "schema_dialect": input_dialect,
-                "scope_policy": config.scope_policy.value,
-            },
-        )
-        semantic = McpToolSemanticFact(
-            server_id=config.server_id,
-            remote_tool_name=item.name,
-            provider_tool_name=provider_name,
-            description=public_description,
-            input_schema=frozen,
-            output_schema=output_schema,
-            schema_dialect=input_dialect,
-            descriptor_fingerprint=descriptor,
-            root_visible=True,
-            subagent_visible=(
-                config.scope_policy is McpScopePolicy.ROOT_AND_SUBAGENTS
-            ),
-        )
-        semantics.append(semantic)
-        effect, source = _effect(config, item)
-        timeout = dict(config.per_tool_timeout_ms).get(
-            item.name, config.default_tool_timeout_ms
-        )
-        policies.append(
-            McpToolExecutionPolicyFact(
-                server_id=config.server_id,
-                remote_tool_name=item.name,
-                provider_tool_name=provider_name,
-                tool_semantic_fingerprint=descriptor,
-                effect_kind=effect,
-                timeout_ms=timeout,
-                parallel_safe=config.supports_parallel_tool_calls,
-                classification_source=source,
-            )
-        )
-    semantic_tuple = tuple(sorted(semantics, key=lambda item: item.provider_tool_name))
-    policy_tuple = tuple(sorted(policies, key=lambda item: item.provider_tool_name))
-    resource_facts = tuple(
-        _resource(config.server_id, item) for item in sorted(resources, key=lambda item: str(item.uri))
-    )
-    template_facts = tuple(
-        _resource_template(config.server_id, item)
-        for item in sorted(templates, key=lambda item: item.uri_template)
-    )
-    prompt_facts = tuple(
-        _prompt(config.server_id, item) for item in sorted(prompts, key=lambda item: item.name)
-    )
-    instructions = _sanitize_text(client.server_instructions, MAXIMUM_MCP_INSTRUCTIONS_BYTES)
-    tool_fp = context_fingerprint(
-        "mcp-server-tool-surface:v1",
-        tuple(item.descriptor_fingerprint for item in semantic_tuple),
-    )
-    catalog_fp = context_fingerprint(
-        "mcp-server-catalog:v1",
-        {
-            "server_id": config.server_id,
-            "display_name": config.display_name,
-            "instructions": instructions,
-            "tools": tuple(item.descriptor_fingerprint for item in semantic_tuple),
-            "resources": tuple(item.semantic_fingerprint for item in resource_facts),
-            "templates": tuple(item.semantic_fingerprint for item in template_facts),
-            "prompts": tuple(item.semantic_fingerprint for item in prompt_facts),
-        },
-    )
-    snapshot = McpDiscoverySnapshot(
-        server_id=config.server_id,
-        display_name=config.display_name,
-        protocol_version=client.protocol_version,
-        sanitized_instructions=instructions,
-        discovered_tool_count=len(tools),
-        invalid_tool_count=invalid_tool_count,
-        tools=semantic_tuple,
-        resources=resource_facts,
-        resource_templates=template_facts,
-        prompts=prompt_facts,
-        tool_surface_semantic_fingerprint=tool_fp,
-        catalog_semantic_fingerprint=catalog_fp,
-        presentation_fingerprint=context_fingerprint(
-            "mcp-server-presentation:v1",
-            (config.server_id, config.display_name, len(semantic_tuple)),
-        ),
-        sdk_conformance_contract_fingerprint=context_fingerprint(
-            "mcp-sdk-conformance:v2",
-            (
-                "mcp==2.1.0",
-                "mcp-types==2.1.0",
-                "modern-explicit-result-type",
-                "negotiated-legacy-implicit-complete",
-            ),
-        ),
-    )
-    if _discovery_snapshot_physical_bytes(snapshot) > (
-        DEFAULT_MCP_WIRE_BOUNDS.maximum_discovery_candidate_bytes_per_server
-    ):
-        raise ValueError("MCP discovery candidate byte bound exceeded")
-    client.complete_tool_catalog(tools)
-    return snapshot, policy_tuple
-
-
-@dataclass(slots=True)
-class _DiscoveryBudget:
-    remaining_items: int
-    remaining_bytes: int
-
-    def charge(self, item: object) -> None:
-        if self.remaining_items <= 0:
-            raise ValueError("MCP discovery item bound exceeded")
-        model_dump = getattr(item, "model_dump", None)
-        if not callable(model_dump):
-            raise ValueError("MCP discovery item carrier is invalid")
-        physical_bytes = len(
-            canonical_json_bytes(
-                model_dump(by_alias=True, mode="json", exclude_none=True)
-            )
-        )
-        if physical_bytes > self.remaining_bytes:
-            raise ValueError("MCP discovery candidate byte bound exceeded")
-        self.remaining_items -= 1
-        self.remaining_bytes -= physical_bytes
-
-
-async def _list_pages(
-    client: BoundedMcpSdkClient,
-    method: object,
-    field_name: str,
-    *,
-    budget: _DiscoveryBudget,
-    optional_method: bool = False,
-) -> tuple[object, ...]:
-    from .sdk_facade import MCPError, types
-
-    cursor: str | None = None
-    items: list[object] = []
-    seen: set[str] = set()
-    for _ in range(MAXIMUM_DISCOVERY_PAGES_PER_METHOD):
-        params = (
-            types.PaginatedRequestParams(cursor=cursor)
-            if cursor is not None
-            else None
-        )
-        try:
-            result = await method(params=params)  # type: ignore[operator]
-        except MCPError as exc:
-            # A server can expose concrete resources without a template-list
-            # method in either protocol era. Only its first-page -32601 proves
-            # absence; all other errors (including mid-pagination) must fail.
-            if optional_method and cursor is None and exc.code == types.METHOD_NOT_FOUND:
-                return ()
-            raise
-        if client.require_closed_result_type(result) != "complete":
-            raise RuntimeError("MCP listing cannot require input")
-        page = getattr(result, field_name)
-        if not isinstance(page, list):
-            raise ValueError("MCP discovery page shape is invalid")
-        for item in page:
-            budget.charge(item)
-        items.extend(page)
-        cursor = result.next_cursor
-        if cursor is None:
-            return tuple(items)
-        if cursor in seen or len(cursor.encode("utf-8")) > 4096:
-            raise ValueError("MCP discovery cursor is invalid")
-        seen.add(cursor)
-    raise ValueError("MCP discovery page bound exceeded")
-
-
-async def _list_optional_resource_templates(
-    client: BoundedMcpSdkClient,
-    *,
-    budget: _DiscoveryBudget,
-) -> tuple[object, ...]:
-    return await _list_pages(
-        client,
-        client.session.list_resource_templates,
-        "resource_templates",
-        budget=budget,
-        optional_method=True,
-    )
-
-
-def _candidate(
-    *,
-    config: McpServerConfig,
-    epoch: str,
-    attempt_generation: int,
-    lease: McpSlotLease,
-    snapshot: McpDiscoverySnapshot,
-    policies: tuple[McpToolExecutionPolicyFact, ...],
-) -> McpInstallationCandidate:
-    normalized_physical_bytes = _discovery_snapshot_physical_bytes(snapshot)
-    fingerprint = context_fingerprint(
-        "mcp-installation-candidate:v1",
-        {
-            "server_id": config.server_id,
-            "epoch": epoch,
-            "semantic_config": config.semantic_config_fingerprint,
-            "runtime_config": config.runtime_config_fingerprint,
-            "resolved_config": config.resolved_config_identity,
-            "attempt_generation": attempt_generation,
-            "slot_lease_identity": lease.lease_identity,
-            "tool_surface": snapshot.tool_surface_semantic_fingerprint,
-            "catalog": snapshot.catalog_semantic_fingerprint,
-            "conformance": snapshot.sdk_conformance_contract_fingerprint,
-            "policies": tuple(execution_policy_fingerprint(item) for item in policies),
-            "standard_read_timeout_ms": config.default_tool_timeout_ms,
-            "normalized_physical_bytes": normalized_physical_bytes,
-        },
-    )
-    return McpInstallationCandidate(
-        candidate_id=derive_id("mcp-candidate", "installation", fingerprint),
-        server_id=config.server_id,
-        expected_supervisor_epoch=epoch,
-        expected_semantic_config_fingerprint=config.semantic_config_fingerprint,
-        expected_runtime_config_fingerprint=config.runtime_config_fingerprint,
-        expected_resolved_config_identity=config.resolved_config_identity,
-        attempt_generation=attempt_generation,
-        slot_lease=lease,
-        discovery_snapshot=snapshot,
-        ordered_tool_execution_policies=policies,
-        standard_read_timeout_ms=config.default_tool_timeout_ms,
-        normalized_physical_bytes=normalized_physical_bytes,
-    )
-
-
-def _remaining_mcp_timeout(deadline: float) -> float:
-    remaining = deadline - asyncio.get_running_loop().time()
-    if remaining <= 0:
-        raise TimeoutError("MCP tool operation deadline expired")
-    return remaining
-
-
-def _effect(
-    config: McpServerConfig, tool: types.Tool
-) -> tuple[McpEffectKind, McpPolicyClassificationSource]:
-    overrides = dict(config.effect_policy.tool_effect_overrides)
-    if tool.name in overrides:
-        return McpEffectKind(overrides[tool.name].value), McpPolicyClassificationSource.TOOL_OVERRIDE
-    if config.effect_policy.default_effect is not McpConfiguredEffect.AUTO:
-        return McpEffectKind(config.effect_policy.default_effect.value), McpPolicyClassificationSource.SERVER_OVERRIDE
-    # Server hints describe tools; they do not grant Host execution permission.
-    # With no explicit Host override, AUTO remains conservatively external.
-    return McpEffectKind.EXTERNAL_EFFECT, McpPolicyClassificationSource.HOST_DEFAULT
-
-
-def _resource(server_id: str, item: types.Resource) -> McpResourceSemanticFact:
-    payload = {
-        "server_id": server_id,
-        "uri": _bounded_public_identity(str(item.uri), 32 * 1024),
-        "name": _bounded_public_identity(item.name, 8 * 1024),
-        "description": _sanitize_text(item.description or "", 8 * 1024),
-        "mime_type": (
-            _bounded_public_identity(item.mime_type, 1024)
-            if item.mime_type is not None
-            else None
-        ),
-    }
-    fact = McpResourceSemanticFact(
-        **payload,
-        semantic_fingerprint=context_fingerprint("mcp-resource:v1", payload),
-    )
-    _assert_catalog_item_bound(mcp_resource_public_item(server_id, fact))
-    return fact
-
-
-def _resource_template(
-    server_id: str, item: types.ResourceTemplate
-) -> McpResourceTemplateSemanticFact:
-    payload = {
-        "server_id": server_id,
-        "uri_template": _bounded_public_identity(item.uri_template, 32 * 1024),
-        "name": _bounded_public_identity(item.name, 8 * 1024),
-        "description": _sanitize_text(item.description or "", 8 * 1024),
-        "mime_type": (
-            _bounded_public_identity(item.mime_type, 1024)
-            if item.mime_type is not None
-            else None
-        ),
-    }
-    fact = McpResourceTemplateSemanticFact(
-        **payload,
-        semantic_fingerprint=context_fingerprint("mcp-resource-template:v1", payload),
-    )
-    _assert_catalog_item_bound(mcp_resource_template_public_item(server_id, fact))
-    return fact
-
-
-def _prompt(server_id: str, item: types.Prompt) -> McpPromptSemanticFact:
-    arguments = tuple(
-        (
-            _bounded_public_identity(arg.name, 8 * 1024),
-            _sanitize_text(arg.description or "", 8 * 1024),
-            bool(arg.required),
-        )
-        for arg in (item.arguments or [])
-    )
-    payload = {
-        "server_id": server_id,
-        "name": _bounded_public_identity(item.name, 8 * 1024),
-        "description": _sanitize_text(item.description or "", 8 * 1024),
-        "arguments": arguments,
-    }
-    fact = McpPromptSemanticFact(
-        **payload,
-        semantic_fingerprint=context_fingerprint("mcp-prompt:v1", payload),
-    )
-    _assert_catalog_item_bound(mcp_prompt_public_item(server_id, fact))
-    return fact
-
-
-def _assert_catalog_item_bound(item: object) -> None:
-    if len(canonical_json_bytes({"items": [item]})) > (
-        MAXIMUM_MCP_CATALOG_RESULT_BYTES
-    ):
-        raise ValueError("MCP catalog item exceeds the product result bound")
-
-
-def _bounded_public_identity(value: str, maximum_bytes: int) -> str:
-    if not value or len(value.encode("utf-8")) > maximum_bytes:
-        raise ValueError("MCP public identity exceeds its product bound")
-    if any(
-        ord(character) < 0x20
-        or 0x7F <= ord(character) <= 0x9F
-        for character in value
-    ):
-        raise ValueError("MCP public identity contains terminal controls")
-    return value
-
-
-def _mcp_schema_dialect(value: Mapping[str, object]) -> str:
-    raw = value.get("$schema", _DEFAULT_MCP_SCHEMA_DIALECT)
-    if not isinstance(raw, str) or raw not in _SUPPORTED_MCP_SCHEMA_DIALECTS:
-        raise ValueError("unsupported MCP JSON Schema dialect")
-    return raw
-
-
-_URI_TEMPLATE_VARIABLE = re.compile(
-    r"^[A-Za-z0-9_.%]+(?::[1-9][0-9]{0,3}|\*)?$"
-)
-
-
-def _standard_operation_target(tool_name, arguments):
-    target = arguments.get("target")
-    if not isinstance(target, Mapping):
-        raise ValueError("MCP standard operation requires a target")
-    kind = target.get("kind")
-    if tool_name == "read_mcp_resource" and kind in {"MCP_RESOURCE", "MCP_RESOURCE_TEMPLATE"}:
-        identity = "uri" if kind == "MCP_RESOURCE" else "uri_template"
-        allowed = {"target"} if kind == "MCP_RESOURCE" else {"target", "uri"}
-        if set(arguments) != allowed:
-            raise ValueError("MCP resource fields do not match its target kind")
-    else:
-        raise ValueError("MCP standard target kind is unsupported")
-    if set(target) != {"kind", "server_id", identity}:
-        raise ValueError("MCP standard target fields are incomplete or unsupported")
-    for identity_field, maximum in (("server_id", 256), (identity, 8192 if identity == "name" else 32768)):
-        value = target[identity_field]
-        if not isinstance(value, str) or not value or len(value) > maximum:
-            raise ValueError("MCP standard target identity is invalid")
-    return target
-
-
-def _standard_resource_uri(arguments, snapshot):
-    target = _standard_operation_target("read_mcp_resource", arguments)
-    if target["kind"] == "MCP_RESOURCE":
-        uri = target["uri"]
-        admitted = _resource_uri_in_snapshot(uri, snapshot)
-    else:
-        uri = arguments["uri"]
-        template = target["uri_template"]
-        admitted = (
-            isinstance(uri, str)
-            and any(item.uri_template == template for item in snapshot.resource_templates)
-            and _resource_uri_matches_template(uri, template)
-        )
-    if not admitted:
-        raise ValueError("MCP resource URI is absent from the exact snapshot or selected template")
-    return uri
-
-
-def _resource_uri_in_snapshot(
-    uri: str, snapshot: McpDiscoverySnapshot
-) -> bool:
-    """Join a resource URI to one exact static entry or RFC6570 template.
-
-    This is an admission check, not a second resource authority: the template
-    itself remains part of the immutable discovery generation and the remote
-    server still decides whether the concrete resource exists.  Unsupported or
-    malformed template syntax stays visible as catalog metadata but cannot
-    authorize an open-ended read.
-    """
-
-    try:
-        encoded = uri.encode("utf-8")
-    except UnicodeEncodeError:
-        return False
-    if not encoded or len(encoded) > 32 * 1024 or any(ord(char) < 0x20 for char in uri):
-        return False
-    if uri in {item.uri for item in snapshot.resources}:
-        return True
-    return any(
-        _resource_uri_matches_template(uri, item.uri_template)
-        for item in snapshot.resource_templates
-    )
-
-
-def _resource_uri_matches_template(uri: str, template: str) -> bool:
-    """Linearly match a conservative, bounded RFC6570 subset.
-
-    Regex wildcards are deliberately absent: each literal is consumed once and
-    each expansion is validated once.  Adjacent expressions are rejected
-    because their split is not uniquely provable without backtracking.  Named
-    query and matrix expansions admit only their advertised variable names.
-    """
-
-    try:
-        if (
-            not uri
-            or len(uri.encode("utf-8")) > 32 * 1024
-            or len(template.encode("utf-8")) > 32 * 1024
-        ):
-            return False
-    except UnicodeEncodeError:
-        return False
-    if any(ord(character) < 0x20 for character in uri + template):
-        return False
-    parsed = _parse_resource_uri_template(template)
-    if parsed is None:
-        return False
-    expressions, tail = parsed
-    position = 0
-    for index, (literal, operator, variables) in enumerate(expressions):
-        if not uri.startswith(literal, position):
-            return False
-        position += len(literal)
-        next_literal = (
-            expressions[index + 1][0]
-            if index + 1 < len(expressions)
-            else tail
-        )
-        if next_literal:
-            end = uri.find(next_literal, position)
-            if end < 0:
-                return False
-        else:
-            end = len(uri)
-        if not _match_uri_template_expansion(
-            uri[position:end], operator=operator, variables=variables
-        ):
-            return False
-        position = end
-    return uri.startswith(tail, position) and position + len(tail) == len(uri)
-
-
-def _parse_resource_uri_template(
-    template: str,
-) -> tuple[tuple[tuple[str, str, tuple[str, ...]], ...], str] | None:
-    expressions: list[tuple[str, str, tuple[str, ...]]] = []
-    cursor = 0
-    while cursor < len(template):
-        opening = template.find("{", cursor)
-        closing_without_open = template.find("}", cursor)
-        if opening < 0:
-            if closing_without_open >= 0:
-                return None
-            break
-        if closing_without_open >= 0 and closing_without_open < opening:
-            return None
-        literal = template[cursor:opening]
-        # Without a literal separator there is no unique linear split between
-        # two expansions, so the conservative admission answer is false.
-        if expressions and not literal:
-            return None
-        closing = template.find("}", opening + 1)
-        if closing < 0 or "{" in template[opening + 1 : closing]:
-            return None
-        expression = template[opening + 1 : closing]
-        if not expression or len(expressions) >= 128:
-            return None
-        operator = expression[0] if expression[0] in "+#./;?&" else ""
-        variable_list = expression[1:] if operator else expression
-        variables = tuple(variable_list.split(","))
-        if (
-            not variables
-            or len(variables) > 128
-            or any(
-                _URI_TEMPLATE_VARIABLE.fullmatch(variable) is None
-                for variable in variables
-            )
-        ):
-            return None
-        expressions.append((literal, operator, variables))
-        cursor = closing + 1
-    tail = template[cursor:]
-    if "{" in tail or "}" in tail:
-        return None
-    return tuple(expressions), tail
-
-
-def _match_uri_template_expansion(
-    expansion: str,
-    *,
-    operator: str,
-    variables: tuple[str, ...],
-) -> bool:
-    names = tuple(_uri_template_variable_name(variable) for variable in variables)
-    exploded = {
-        _uri_template_variable_name(variable)
-        for variable in variables
-        if variable.endswith("*")
-    }
-    if operator in {"?", "&"}:
-        return _match_named_uri_expansion(
-            expansion,
-            prefix=operator,
-            separator="&",
-            names=names,
-            exploded=exploded,
-        )
-    if operator == ";":
-        return _match_named_uri_expansion(
-            expansion,
-            prefix=";",
-            separator=";",
-            names=names,
-            exploded=exploded,
-        )
-    if not expansion:
-        return True
-    if operator == "+":
-        return "#" not in expansion
-    if operator == "#":
-        return expansion.startswith("#") and "#" not in expansion[1:]
-    if operator in {".", "/"}:
-        if not expansion.startswith(operator) or any(
-            character in "?#" for character in expansion
-        ):
-            return False
-        values = expansion[1:].split(operator)
-        return all(values) and (
-            len(values) <= len(variables) or bool(exploded)
-        )
-    if any(character in "?#" for character in expansion):
-        return False
-    if exploded:
-        # A simple exploded variable is used by common resource templates for
-        # a path tail.  It may cross '/', but never query or fragment syntax.
-        return True
-    if any(character in ":/" for character in expansion):
-        return False
-    values = expansion.split(",")
-    return len(values) <= len(variables)
-
-
-def _match_named_uri_expansion(
-    expansion: str,
-    *,
-    prefix: str,
-    separator: str,
-    names: tuple[str, ...],
-    exploded: set[str],
-) -> bool:
-    if not expansion:
-        return True
-    if not expansion.startswith(prefix) or "#" in expansion:
-        return False
-    fields = expansion[1:].split(separator)
-    if not fields or any(not field for field in fields):
-        return False
-    seen: set[str] = set()
-    allowed = set(names)
-    for parameter in fields:
-        name, _separator_found, _value = parameter.partition("=")
-        if not name or name not in allowed:
-            return False
-        if name in seen and name not in exploded:
-            return False
-        # Matrix parameters may omit '=value'; query parameters may too.  In
-        # both cases admission depends on the exact advertised key, not value.
-        seen.add(name)
-    return True
-
-
-def _uri_template_variable_name(variable: str) -> str:
-    raw = variable[:-1] if variable.endswith("*") else variable
-    return raw.split(":", 1)[0]
-
-
-def _sanitize_text(value: str, maximum_bytes: int) -> str:
-    safe = "".join(
-        character
-        if character in {"\n", "\t"}
-        or (ord(character) >= 0x20 and not 0x7F <= ord(character) <= 0x9F)
-        else "�"
-        for character in value
-    )
-    encoded = safe.encode("utf-8")
-    if len(encoded) <= maximum_bytes:
-        return safe
-    return encoded[:maximum_bytes].decode("utf-8", "ignore")
-
-
-def _discovery_snapshot_physical_bytes(snapshot: McpDiscoverySnapshot) -> int:
-    """Quote the immutable normalized candidate before installation."""
-
-    return len(
-        canonical_json_bytes(
-            {
-                "server_id": snapshot.server_id,
-                "display_name": snapshot.display_name,
-                "protocol_version": snapshot.protocol_version,
-                "instructions": snapshot.sanitized_instructions,
-                "discovered_tool_count": snapshot.discovered_tool_count,
-                "invalid_tool_count": snapshot.invalid_tool_count,
-                "tools": tuple(
-                    {
-                        "server_id": item.server_id,
-                        "remote_name": item.remote_tool_name,
-                        "provider_name": item.provider_tool_name,
-                        "description": item.description,
-                        "input_schema": item.input_schema,
-                        "output_schema": item.output_schema,
-                        "descriptor": item.descriptor_fingerprint,
-                    }
-                    for item in snapshot.tools
-                ),
-                "resources": tuple(
-                    (
-                        item.server_id,
-                        item.uri,
-                        item.name,
-                        item.description,
-                        item.mime_type,
-                        item.semantic_fingerprint,
-                    )
-                    for item in snapshot.resources
-                ),
-                "resource_templates": tuple(
-                    (
-                        item.server_id,
-                        item.uri_template,
-                        item.name,
-                        item.description,
-                        item.mime_type,
-                        item.semantic_fingerprint,
-                    )
-                    for item in snapshot.resource_templates
-                ),
-                "prompts": tuple(
-                    (
-                        item.server_id,
-                        item.name,
-                        item.description,
-                        item.arguments,
-                        item.semantic_fingerprint,
-                    )
-                    for item in snapshot.prompts
-                ),
-                "tool_surface": snapshot.tool_surface_semantic_fingerprint,
-                "catalog": snapshot.catalog_semantic_fingerprint,
-                "conformance": snapshot.sdk_conformance_contract_fingerprint,
-            }
-        )
-    )
-
-
 def _render_typed_result(result: types.CallToolResult) -> bytes:
     payload = result.model_dump(by_alias=True, mode="json", exclude_none=True)
     if (
@@ -3888,135 +2570,6 @@ def _render_typed_result(result: types.CallToolResult) -> bytes:
     if len(data) > MAXIMUM_MCP_REMOTE_BODY_BYTES:
         raise RuntimeError("MCP_REMOTE_BODY_BOUND_EXCEEDED")
     return data
-
-
-def _mcp_remote_identity(
-    *, semantic: McpToolSemanticFact, connection_generation: int
-) -> tuple[str, str]:
-    """Freeze the short identity and full cross-restart verification fact."""
-    return (
-        derive_id(
-            "mcp-tool", "remote-tool", semantic.server_id,
-            str(connection_generation), semantic.remote_tool_name,
-        ),
-        context_fingerprint(
-            "pulsara:mcp-remote-tool-identity:v1",
-            {
-                "server_id": semantic.server_id,
-                "connection_generation": connection_generation,
-                "remote_tool_name": semantic.remote_tool_name,
-            },
-        ),
-    )
-
-
-def _mcp_standard_operation_identity(
-    *, server_id: str, connection_generation: int, tool_name: str
-) -> tuple[str, str]:
-    return (
-        derive_id(
-            "mcp-tool", "standard-operation", server_id,
-            str(connection_generation), tool_name,
-        ),
-        context_fingerprint(
-            "pulsara:mcp-standard-operation-identity:v1",
-            {
-                "server_id": server_id,
-                "connection_generation": connection_generation,
-                "tool_name": tool_name,
-            },
-        ),
-    )
-
-
-def mcp_failure_required_facts(effect_kind: McpEffectKind) -> dict[str, object]:
-    """The same bounded uncertain-outcome facts used before and after dispatch."""
-    guidance = (
-        "No reliable observation was received. You may continue with another "
-        "source or retry this read when the connection is available."
-        if effect_kind is McpEffectKind.READ_ONLY
-        else "The remote operation may have executed. Do not assume success or "
-        "that nothing happened. Before repeating an operation with side effects, "
-        "verify its outcome or idempotency; otherwise ask the user. You may "
-        "continue with independent work or another read-only source."
-    )
-    return {"error": "MCP_CALL_FAILED", "remote_outcome": "UNKNOWN",
-            "retry_performed": False, "guidance": guidance}
-
-
-def _mcp_invocation_failure(
-    *,
-    error: Exception,
-    client: BoundedMcpSdkClient,
-    remote_identity: str,
-    remote_identity_verification: str,
-    effect_kind: McpEffectKind,
-) -> McpKnownToolResult:
-    # The failed observation is known; the remote operation's outcome is not.
-    # Settle without replaying tools/call or claiming an effect did not happen.
-    return McpKnownToolResult(
-        state="SYSTEM_ERROR",
-        content=canonical_json_bytes({
-            **mcp_failure_required_facts(effect_kind),
-            "message": client.diagnostic_message(error),
-        }),
-        remote_identity=remote_identity,
-        remote_identity_verification=remote_identity_verification,
-    )
-
-
-def _mcp_error_is_transport_failure(error: MCPError) -> bool:
-    from .sdk_facade import types
-
-    # SDK 2.1.0 uses these same public codes for local dispatcher close/timeout
-    # and peer replies. Keep those ambiguous codes conservative; its other
-    # request errors represent a received JSON-RPC ErrorData, not dead I/O.
-    return error.code in {types.CONNECTION_CLOSED, types.REQUEST_TIMEOUT}
-
-
-def _known_mcp_remote_error(
-    *, error: MCPError, client: BoundedMcpSdkClient, remote_identity: str,
-    remote_identity_verification: str,
-) -> McpKnownToolResult:
-    # The response and its data already crossed the transport's exact-secret
-    # scrub boundary. Keep its diagnostic payload, without replaying the call
-    # or treating a server rejection as a reason to retire a healthy slot.
-    return McpKnownToolResult(
-        state="SYSTEM_ERROR",
-        content=canonical_json_bytes(
-            {
-                "error": "MCP_REMOTE_ERROR",
-                "remote_error": {
-                    "code": error.code,
-                    "message": client.diagnostic_message(error),
-                    **({"data": error.data} if error.data is not None else {}),
-                },
-                "retry_performed": False,
-            }
-        ),
-        remote_identity=remote_identity,
-        remote_identity_verification=remote_identity_verification,
-    )
-
-
-def _known_mcp_system_failure(
-    *, error_code: str, remote_identity: str, remote_identity_verification: str,
-    message: str | None = None,
-) -> McpKnownToolResult:
-    return McpKnownToolResult(
-        state="SYSTEM_ERROR",
-        content=canonical_json_bytes(
-            {
-                "error": error_code,
-                "retry_performed": False,
-                **({"guidance": "The remote request was not sent."}
-                   if error_code == "MCP_TRANSPORT_UNWRITTEN" else {}),
-                **({"message": message} if message is not None else {}),
-            }
-        ),
-        remote_identity=remote_identity,
-        remote_identity_verification=remote_identity_verification,
-    )
 
 
 __all__ = [

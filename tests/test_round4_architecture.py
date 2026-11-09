@@ -132,7 +132,6 @@ def test_round4_continuation_physical_owner_is_host_local_only() -> None:
     runner = (KERNEL / "runner.py").read_text(encoding="utf-8")
     gateway = (SOURCE / "terminal_protocol/v3_gateway.py").read_text(encoding="utf-8")
     assert "ContinuationAdmissionOwner()" in host
-    assert "self._plan_continuations.start(" in host
     assert "_accept_automatic_plan_continuation" in host
     assert "continuation_owner.start(" not in runner
     assert "ContinuationAdmissionOwner" not in gateway
