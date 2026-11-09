@@ -137,15 +137,21 @@ def test_motion_fixed_analysis_window_is_independent_of_page_budget_and_cancel(t
         read(path, "motion", cancelled=lambda: True)
 
 
-def test_overview_full_range_sparse_not_prefix(tmp_path):
+@pytest.mark.parametrize(
+    "bounds,expected_range,expected_times",
+    [
+        ({}, [0, 1], [0, 0.99]),
+        ({"start": 0.2, "end": 0.8}, [0.2, 0.8], [0.2, 0.79]),
+    ],
+)
+def test_overview_range_sparse_not_prefix(tmp_path, bounds, expected_range, expected_times):
     path = video(tmp_path / "long.mkv", ["red"] * 50 + ["blue"] * 50)
-    result = read(path)
+    result = read(path, **bounds)
     body = json.loads(result.text)
-    assert body["processed_range"] == pytest.approx([0, 1])
-    assert body["frames"][0]["t"] == 0
-    assert body["frames"][-1]["t"] == pytest.approx(0.99)
+    assert body["processed_range"] == pytest.approx(expected_range)
+    assert [body["frames"][0]["t"], body["frames"][-1]["t"]] == pytest.approx(expected_times)
     assert body["sampling"] == "sparse"
-    assert "无音轨" in body["metadata"] and "无文字字幕" in body["metadata"]
+    assert "metadata" not in body
     assert body["scanned_ranges"] == [] and body["observed_cut_times"] == []
     assert all(0 <= v <= 1 for f in body["frames"] for v in f["cell_rect"])
 

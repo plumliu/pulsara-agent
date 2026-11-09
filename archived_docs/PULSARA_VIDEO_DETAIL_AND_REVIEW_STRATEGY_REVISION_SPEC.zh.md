@@ -169,7 +169,7 @@ detail 复用现有有限计划位置：continuation 的 `position` 只含 `next
 
 主工具描述必须同时传达默认入口、三种用途、detail 硬约束、三个目标与条件式续读。建议英文正文如下，可直接作为实现基准：
 
-> ROOT direct only. Read local video as attached images with time indices. target alone gives a sparse full-video overview with basic media facts. Use overview on any range to locate content; detail to inspect text, objects or local states; motion to examine changes, order or brief events. detail requires explicit from/to seconds with 0 < to - from <= 2 and samples the start, midpoint and just before the end; targets on the same source frame are returned once. Decimal seconds and normalized crop are supported. If remaining evidence is needed, copy the complete next call; stop when the question is answered.
+> ROOT direct only. Read local video as attached images with time indices. target alone gives a sparse full-video overview. Use overview on any range to locate content; detail to inspect text, objects or local states; motion to examine changes, order or brief events. detail requires explicit from/to seconds with 0 < to - from <= 2 and samples the start, midpoint and just before the end; targets on the same source frame are returned once. Decimal seconds and normalized crop are supported. If remaining evidence is needed, copy the complete next call; stop when the question is answered.
 
 from/to 的字段说明应标明 overview/motion 的原默认行为与 detail 的显式范围要求；mode 说明应标明两秒是 detail 单次请求边界。超限说明必须同时出现在工具描述和第 3 节的实际 tool result 中，不能仅藏在 Skill。
 

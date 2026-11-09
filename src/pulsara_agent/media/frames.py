@@ -741,14 +741,6 @@ def render_frame_page(
         "probe_count": plan.probe_count,
         "maximum_probe_gap": plan.max_probe_gap,
     }
-    if plan.mode == "overview":
-        duration = "unknown" if info.duration is None else f"{info.duration:g}s"
-        body["metadata"] = (
-            f"{duration} · {info.width}×{info.height} · "
-            + ("有音轨" if info.audio_stream_index is not None else "无音轨")
-            + " · "
-            + ("有文字字幕" if info.subtitle_stream_indices else "无文字字幕")
-        )
     source.assert_unchanged()
     return FrameReadResult(
         tuple(images),

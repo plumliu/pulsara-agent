@@ -7,7 +7,9 @@ description: Review videos, read screen details, inspect actions and changes, us
 
 Use the direct media tools in the main conversation. Keep the original PATH target and use seconds on the source timeline, including decimal seconds.
 
-Start directly with `read_video_frames`: its first actual read of a video automatically opens that video in the sidebar. This already shows the video to the user, so there is no need to call `open_in_pulsara` before reviewing or again when you finish. Use `open_in_pulsara` for a separate report or other new artifact that the user should see. The user controls playback and can keep browsing independently while you read.
+Before reviewing a video, you can use the terminal tool with FFmpeg/ffprobe to check its duration, dimensions, and audio or subtitle tracks when that context helps choose what to inspect.
+
+The first actual read of a video with `read_video_frames` automatically opens that video in the sidebar. This already shows the video to the user, so there is no need to call `open_in_pulsara` before reviewing or again when you finish. Use `open_in_pulsara` for a separate report or other new artifact that the user should see. The user controls playback and can keep browsing independently while you read.
 
 ## Choose the tool by the question
 
@@ -18,7 +20,7 @@ Start directly with `read_video_frames`: its first actual read of a video automa
 | Examine an action, order, appearance/disappearance, repetition or A→B→A change | `mode="motion"` over the relevant sequence |
 | Understand spoken arguments or explanations | `read_transcript`; check whether the text comes from subtitles or ASR |
 
-For a whole-video summary, start with a target-only overview to get the duration and a map of the content. Use further overviews on the passages you need to explore, including ranges in the middle of the video. Follow the topics through to the ending, narrowing the range around dense material and carrying unfinished questions between passages. Inspect particular text or actions as they become relevant.
+For a whole-video summary, start with a target-only overview to get a map of the content. Use further overviews on the passages you need to explore, including ranges in the middle of the video. Follow the topics through to the ending, narrowing the range around dense material and carrying unfinished questions between passages. Inspect particular text or actions as they become relevant.
 
 For a targeted question, begin at the supplied time or the best candidate location. “What is the amount at 30 seconds?” calls for detail. “What happened around 30 seconds?” calls for motion. “Which screen is this section about?” calls for a local overview. Choose the next action from what remains to be answered.
 
