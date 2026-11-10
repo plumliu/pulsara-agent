@@ -1988,8 +1988,6 @@ class ToolBatchExecutor:
                     _close_surface_borrow=False,
                 )
                 total += result.tool_call_count
-                if result.terminal is not None:
-                    return ToolBatchExecutionResult(total, result.terminal)
                 index += 1
                 continue
             end = index + 1
