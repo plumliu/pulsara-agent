@@ -4377,7 +4377,16 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       todo,
       mediaRanges: this.scopeKind === 'ROOT' ? projectMediaRanges(this.liveControl) : [],
       mediaReadStarts: this.scopeKind === 'ROOT' ? this.mediaReadStarts : [],
-      mediaAnnotationsRevision: canonical.filter(entry => entry.tool_result?.tool_name === 'annotate_media').at(-1)?.entry_id,
+      mediaAnnotationsRevision: canonical.findLast(entry => {
+        const result = entry.tool_result;
+        if (entry.entry_kind !== 'TOOL_RESULT' || result?.source_kind !== 'MODEL_TOOL_CALL'
+          || result.result_state !== 'SUCCESS' || !result.assistant_entry_id) return false;
+        // Native tool names belong to the referenced assistant tool-call block.
+        return this.entries.get(result.assistant_entry_id)?.blocks?.some(block => (
+          block.block_kind === 'TOOL_CALL' && block.tool_call_id === result.tool_call_id
+          && block.tool_name === 'annotate_media'
+        ));
+      })?.entry_id,
       eventSequence: this.eventSequence,
       liveOwnerEpoch: this.liveOwnerEpoch,
       liveRevision: this.liveRevision,

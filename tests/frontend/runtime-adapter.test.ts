@@ -3352,6 +3352,47 @@ it('refreshes TODOs once per live batch without jumping interaction state or its
   expect(fetch).toHaveBeenCalledTimes(4);
 });
 
+it('refreshes committed native annotations using the referenced tool-call block', async () => {
+  const id = (kind: 'entry' | 'block' | 'turn', role: string) => deriveIdentity(kind, 'annotation-refresh', role);
+  const assistant = {
+    entry_id: id('entry', 'assistant'), turn_id: id('turn', 'review'), entry_sequence: '1',
+    entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT', entry_owner_kind: 'EXECUTED_TURN',
+    blocks: [
+      {block_id: id('block', 'first-note'), block_kind: 'TOOL_CALL', tool_call_id: 'provider-note-1', tool_name: 'annotate_media'},
+      {block_id: id('block', 'file'), block_kind: 'TOOL_CALL', tool_call_id: 'provider-file', tool_name: 'read_file'},
+      {block_id: id('block', 'second-note'), block_kind: 'TOOL_CALL', tool_call_id: 'provider-note-2', tool_name: 'annotate_media'},
+    ],
+  };
+  const result = (role: string, sequence: number, call: string, state = 'SUCCESS') => ({
+    entry_id: id('entry', role), turn_id: assistant.turn_id, entry_sequence: String(sequence),
+    entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT', entry_owner_kind: 'EXECUTED_TURN',
+    content: inlineContent(JSON.stringify({media_annotation: 'added'})),
+    tool_result: {
+      assistant_entry_id: assistant.entry_id, tool_call_id: call, result_state: state,
+      source_kind: 'MODEL_TOOL_CALL', tool_name: '',
+    },
+  });
+  const first = result('first-result', 2, 'provider-note-1');
+  const unrelated = result('file-result', 3, 'provider-file');
+  const failed = result('failed-result', 4, 'provider-note-2', 'APPLICATION_ERROR');
+  const second = result('second-result', 5, 'provider-note-2');
+  const frames = [
+    connectPayload([assistant]),
+    ...[first, unrelated, failed, second].map(entry => ({observation: {
+      through_event_sequence: entry.entry_sequence,
+      committed: [{projection_kind: 'IMMUTABLE_ENTRY', event_sequence: entry.entry_sequence, entry}],
+    }})),
+  ];
+  stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(frames.shift()), {status: 200})));
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  expect(connection.current().mediaAnnotationsRevision).toBeUndefined();
+  expect((await connection.observe()).mediaAnnotationsRevision).toBe(first.entry_id);
+  expect((await connection.observe()).mediaAnnotationsRevision).toBe(first.entry_id);
+  expect((await connection.observe()).mediaAnnotationsRevision).toBe(first.entry_id);
+  expect((await connection.observe()).mediaAnnotationsRevision).toBe(second.entry_id);
+  await connection.close();
+});
+
 it('presents only fresh authenticated complete root results, without history replay or blocking observe', async () => {
   const assistant = {entry_id:'open-call',turn_id:'turn-open',entry_sequence:'1',entry_kind:'ASSISTANT',scope_kind:'ROOT',blocks:[{block_id:'b',block_kind:'TOOL_CALL',tool_call_id:'open-1',tool_name:'open_in_pulsara'}]};
   const result = {entry_id:'open-result',turn_id:'turn-open',entry_sequence:'2',entry_kind:'TOOL_RESULT',scope_kind:'ROOT',content:inlineContent(JSON.stringify({targets:[{target:{kind:'PANEL',name:'capabilities'}}],errors:[{index:1,message:'invalid'}]})),tool_result:{assistant_entry_id:'open-call',tool_call_id:'open-1',result_state:'SUCCESS',source_coverage:'COMPLETE',output_omitted:false}};

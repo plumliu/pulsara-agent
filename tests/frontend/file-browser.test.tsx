@@ -1,4 +1,5 @@
 import { useContext, type ReactElement } from "react";
+import { deriveIdentity } from '../../frontend/lib/identity';
 import { FileMediaContext } from "../../frontend/components/file-link-context";
 import {
   DesktopWorkspace,
@@ -155,6 +156,43 @@ it('shares video tabs across local links and the native picker and restores play
   expect(reader.close).toHaveBeenCalledWith('preview-1');
   await act(async () => latePicker.resolve(['/project/late.mp4']));
   expect(reader.open).toHaveBeenCalledTimes(beforeClose);
+});
+
+it('refreshes annotations in an already open video without resetting playback', async () => {
+  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+  vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+  vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {});
+  const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+  const reader = api();
+  vi.mocked(reader.open).mockResolvedValue({...file('clip.mp4'), kind: 'video', modified_ns: '123'});
+  const ui = (revision?: string) => <FilePreviewProvider api={reader} ownerKey="one" onNotify={notify} mediaAnnotationsRevision={revision}>
+    <MarkdownBody body="[视频](clip.mp4)" onNotify={notify} />
+  </FilePreviewProvider>;
+  const view = render(ui());
+  fireEvent.click(screen.getByRole('link', {name: '视频'}));
+  await waitFor(() => expect(reader.annotations).toHaveBeenCalledExactlyOnceWith('clip.mp4', null, expect.any(AbortSignal)));
+  expect(view.container.querySelector('.video-notes')).toBeNull();
+  const video = view.container.querySelector('video')!;
+  Object.defineProperty(video, 'duration', {value: 60, configurable: true});
+  fireEvent.loadedMetadata(video);
+  video.currentTime = 20;
+  fireEvent.timeUpdate(video);
+  const note = {
+    resultId: deriveIdentity('entry', 'annotation-refresh', 'result'),
+    entryId: deriveIdentity('entry', 'annotation-refresh', 'call'),
+    sessionId: deriveIdentity('session', 'annotation-refresh', 'source'),
+    from: 12.5, to: 14, text: '这段展示了数据分析任务的完整要求。',
+  };
+  vi.mocked(reader.annotations).mockResolvedValue({items: [note], next: null});
+  view.rerender(ui(note.resultId));
+  await screen.findByText(note.text);
+  expect(reader.annotations).toHaveBeenCalledTimes(2);
+  expect(view.container.querySelector('.video-note-range')).not.toBeNull();
+  expect(view.container.querySelector('video')).toBe(video);
+  expect(video.currentTime).toBe(20);
+  expect(play).not.toHaveBeenCalled();
+  expect(reader.open).toHaveBeenCalledOnce();
+  expect(reader.close).not.toHaveBeenCalled();
 });
 
 it("keeps file actions in one navigation row and copies the actual native path", async () => {
