@@ -71,7 +71,7 @@ function schedule() {
         if (cell.sourceCharge) { release(cell, cell.sourceCharge); cell.sourceCharge = 0; }
       } else if (message.type === 'terminal') {
         terminal(cell, message.state, message.error);
-      } else if (!cell.terminal || ['output','call','prepare','delivered','discard_preparation'].includes(message.type)) {
+      } else if (!cell.terminal || ['output','call','prepare','name_hint','delivered','discard_preparation'].includes(message.type)) {
         if (message.type === 'discard_preparation') {
           const charge = cell.preparations.get(message.preparation);
           if (charge !== undefined) { release(cell, charge); cell.preparations.delete(message.preparation); }

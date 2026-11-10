@@ -27,6 +27,36 @@ def _port(tmp_path):
     return port
 
 
+@pytest.mark.parametrize("arguments,path,field", [
+    ({"target": {"kind": "PATH", "path": "a"}, "limti": 10}, "$", "limit"),
+    ({"target": {"kind": "PATH", "paht": "a"}}, "$.target", "path"),
+])
+def test_cell_parameter_typo_reports_schema_location_without_changing_arguments(tmp_path, arguments, path, field):
+    from copy import deepcopy
+    from pulsara_agent.conversation_kernel.tool_contracts import KernelToolAuthorizationKind
+
+    async def scenario():
+        port = _port(tmp_path)
+        borrow = None
+        original = deepcopy(arguments)
+        try:
+            surface = prepare_test_direct_tool_surface(port, effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
+            directory = port.freeze_code_mode_tool_directory(surface,
+                effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
+            borrow = port.borrow_code_mode_surface(directory, cell_id=random_id("cell"))
+            result = port.prepare_resolved_invocation(tool_name="read_file", arguments=arguments, surface_borrow=borrow)
+            assert result.authorization.kind is KernelToolAuthorizationKind.INVALID_ARGUMENTS
+            assert f"At {path}: unknown parameter" in result.authorization.public_message
+            assert f"Did you mean {field!r}?" in result.authorization.public_message
+            assert arguments == original
+            assert not (tmp_path / "a").exists()
+        finally:
+            if borrow is not None:
+                borrow.close()
+            await port.aclose()
+    asyncio.run(scenario())
+
+
 def test_root_native_and_cell_directories_select_sealed_owners_independently(tmp_path):
     async def scenario():
         port = _port(tmp_path)

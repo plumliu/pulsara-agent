@@ -224,6 +224,7 @@ try {
     const invoke = vm.newFunction('pulsaraInvoke', (name, json, preparation) =>
       newRequest('call', name.toString(), json.toString(), preparation.isNull ? null : preparation.toString()));
     const prepare = vm.newFunction('pulsaraPrepare', json => newRequest('prepare', '', json.toString(), null));
+    const nameHint = vm.newFunction('pulsaraNameHint', json => newRequest('name_hint', '', json.toString(), null));
     const discard = vm.newFunction('pulsaraDiscard', id => {
       const key = id.toString();
       if (!isCanonicalIdentity(key, 'request')) throw new Error('Invalid Code Mode preparation request identity');
@@ -240,8 +241,8 @@ try {
     const valueLimit = vm.newNumber(limits.value_bytes);
     const diagnosticChars = vm.newNumber(Math.max(1, Math.floor((diagnosticBytes - 1024) / 4)));
     const install = vm.evalCode(guest, 'pulsara-guest.js');
-    try { helper = vm.callFunction(install, vm.undefined, invoke, prepare, discard, output, names, valueLimit, diagnosticChars, availability, assignmentFields); }
-    finally { install.dispose(); names.dispose(); availability.dispose(); assignmentFields.dispose(); valueLimit.dispose(); diagnosticChars.dispose(); invoke.dispose(); prepare.dispose(); discard.dispose(); output.dispose(); }
+    try { helper = vm.callFunction(install, vm.undefined, invoke, prepare, discard, output, names, valueLimit, diagnosticChars, availability, assignmentFields, nameHint); }
+    finally { install.dispose(); nameHint.dispose(); names.dispose(); availability.dispose(); assignmentFields.dispose(); valueLimit.dispose(); diagnosticChars.dispose(); invoke.dispose(); prepare.dispose(); discard.dispose(); output.dispose(); }
     owned.push(helper);
     for (const [key, assign] of [
       ['deferred', h => deferredFactory = h], ['parse', h => parse = h], ['render', h => render = h],

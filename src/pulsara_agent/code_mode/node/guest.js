@@ -1,5 +1,5 @@
 // Evaluated only by QuickJS; potentially user-controlled getters/toJSON stay timed.
-((invokeHost, prepareHost, discardHost, outputHost, names, valueLimit, diagnosticChars, decisionAvailable, runAgentFields) => {
+((invokeHost, prepareHost, discardHost, outputHost, names, valueLimit, diagnosticChars, decisionAvailable, runAgentFields, nameHintHost) => {
   'use strict';
   if (typeof decisionAvailable !== 'boolean') throw new TypeError('Code Mode Decision availability must be a boolean');
   const stringify = JSON.stringify, parse = JSON.parse, apply = Reflect.apply;
@@ -7,6 +7,7 @@
   const getPrototypeOf = Object.getPrototypeOf, create = Object.create;
   const setPrototypeOf = Object.setPrototypeOf, freeze = Object.freeze;
   const defineProperty = Object.defineProperty;
+  const hasOwn = Object.hasOwn;
   const arrayIsArray = Array.isArray, numberFinite = Number.isFinite;
   const numberInteger = Number.isInteger, numberSafe = Number.isSafeInteger;
   const objectPrototype = Object.prototype;
@@ -96,6 +97,15 @@
     requireToolSubmission();
     return invokeHost(name, encode(parameters), preparation);
   }
+  async function rejectUnknownName(kind, name) {
+    requireToolSubmission();
+    const label = kind === 'tool' ? 'tool' : 'run_agent assignment field';
+    // Capture the calling source before awaiting the host's pure diagnostic.
+    const error = new NativeTypeError(`Unknown ${label} ${stringify(name)}.`);
+    const match = await nameHintHost(encode({kind, name}));
+    if(match !== null) error.message += ` Did you mean ${stringify(match)}?`;
+    throw error;
+  }
   const tools = create(null);
   each(names, name => tools[name] = parameters => call(name, parameters));
   defineProperty(tools.decide, 'available', {value: freeze(() => decisionAvailable), enumerable: true});
@@ -124,9 +134,11 @@
             || (getPrototypeOf(member) !== objectPrototype && getPrototypeOf(member) !== null))
           throw new NativeTypeError('run_agent members must be configuration objects');
         const parameters = create(null);
+        let invalidField;
         each(ownKeys(member), field => {
-          if(typeof field !== 'string' || !apply(setHas, allowedFields, [field]))
-            throw new NativeTypeError('Unknown run_agent assignment field');
+          if(invalidField !== undefined) return;
+          if(typeof field !== 'string') throw new NativeTypeError('Unknown run_agent assignment field');
+          if(!apply(setHas, allowedFields, [field])) { invalidField = field; return; }
           const value = member[field];
           if(typeof value === 'function' && (field === 'instruction' || field === 'depends_on')
               && getPrototypeOf(value) === asyncFunctionPrototype) {
@@ -136,6 +148,7 @@
           parameters[field] = typeof value === 'function' && (field === 'instruction' || field === 'depends_on')
             ? value : parse(encode(value));
         });
+        if(invalidField !== undefined) return rejectUnknownName('assignment', invalidField);
         captured[index] = parameters;
         identities[index] = parameters.target === undefined ? {} : {target: parameters.target};
       }
@@ -175,7 +188,12 @@
   }
   each(names, name => freeze(tools[name]));
   freeze(tools);
-  defineProperty(globalThis, 'tools', {value: tools});
+  defineProperty(globalThis, 'tools', {value: new Proxy(tools, {get(target, name) {
+    if(hasOwn(target, name)) return target[name];
+    // Promise assimilation, JSON rendering and symbol introspection aren't tool lookups.
+    if(typeof name !== 'string' || name === 'then' || name === 'toJSON') return undefined;
+    return freeze(() => rejectUnknownName('tool', name));
+  }})});
   defineProperty(globalThis, 'console', {value: freeze({log(...values) {
     const rendered = [];
     each(values, value => rendered[rendered.length] = render(value));

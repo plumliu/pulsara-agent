@@ -68,6 +68,7 @@ from .mcp.schema import McpSchemaEvaluationFailure, validate_mcp_arguments
 from .mcp.meta import McpToolRefConsumerKind, NewMcpToolRef
 from .tool_runtime_surface import _mcp_executor_capability_version
 from .tool_runtime_schema import (
+    _tool_argument_error_message,
     _validate_builtin_call_schema as _validate_builtin_call_schema,
     _json_schema_value as _json_schema_value,
 )
@@ -180,7 +181,7 @@ class _ToolAuthorizationOperations:
             return KernelToolAuthorization(
                 KernelToolAuthorizationKind.INVALID_ARGUMENTS,
                 f"descriptor:{entry.descriptor.id}",
-                f"invalid tool arguments: {exc.message}",
+                f"invalid tool arguments: {_tool_argument_error_message(exc)}",
             )
         if decision:
             if permission_snapshot.effective_mode is not PermissionMode.BYPASS_PERMISSIONS:
@@ -531,7 +532,7 @@ class _ToolAuthorizationOperations:
             return KernelToolAuthorization(
                 KernelToolAuthorizationKind.INVALID_ARGUMENTS,
                 f"mcp-meta:{executor.semantic.descriptor_fingerprint}",
-                f"invalid MCP tool arguments: {exc.message}",
+                f"invalid MCP tool arguments: {_tool_argument_error_message(exc)}",
             )
         mode = permission_snapshot.effective_mode
         if (
@@ -632,7 +633,7 @@ class _ToolAuthorizationOperations:
             return KernelToolAuthorization(
                 KernelToolAuthorizationKind.INVALID_ARGUMENTS,
                 f"mcp-descriptor:{binding.descriptor_fingerprint}",
-                f"invalid MCP tool arguments: {exc.message}",
+                f"invalid MCP tool arguments: {_tool_argument_error_message(exc)}",
             )
         runtime, _current_generation = self._current_mcp_runtime_for_borrow(surface_borrow)
         generation = surface_borrow.prepared.access.surface_generation

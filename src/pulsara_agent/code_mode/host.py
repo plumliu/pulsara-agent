@@ -19,6 +19,7 @@ from types import MappingProxyType
 from pulsara_agent.identity import random_id, require_id
 from pulsara_agent.ports.tool_execution import thaw_tool_json_object, encode_tool_public_json
 from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+from pulsara_agent.primitives.name_suggestion import suggest_name
 
 from .contracts import (
     CellParticipationReference, CellState, CodeModeError, CodeModeInvocation, CodeModeInvoke, CodeModeLimits,
@@ -296,7 +297,7 @@ class CodeModeHost:
                         await self._safe_send({"type": "release", "cell_id": cell.cell_id, "bytes": message["charge"]})
                     else:
                         self._append_output(cell, _Output(message["record"], message["charge"]))
-                elif kind in ("call", "prepare"):
+                elif kind in ("call", "prepare", "name_hint"):
                     self._accept_request(cell, message)
                 elif kind == "retained":
                     self._complete_retention(cell, message)
@@ -436,13 +437,22 @@ class CodeModeHost:
         result: CodeModeToolResult | None = None
         try:
             arguments = json.loads(str(message["arguments_json"]))
-            expected = list if pending.sequence is None else dict
+            expected = list if message["type"] == "prepare" else dict
             if type(arguments) is not expected:
                 raise CodeModeError("invalid_arguments", "Preparation requires an array; tool arguments require an object")
             _json(arguments)
             if cell.cancelled.is_set() or cell.state in _TERMINAL:
                 raise CodeModeError("not_dispatched", "Cell stopped before tool submission")
-            if pending.sequence is None:
+            if message["type"] == "name_hint":
+                # Pure diagnostics over this Cell's own directory: no tool
+                # executor, preparation, Agent identity or canonical write.
+                if (set(arguments) != {"kind", "name"} or type(arguments["name"]) is not str
+                        or arguments["kind"] not in ("tool", "assignment")):
+                    raise CodeModeError("invalid_arguments", "Invalid name hint request")
+                candidates = (cell.tool_catalog if arguments["kind"] == "tool" else
+                    cell.tool_catalog["run_agent"]["parameters"]["properties"]["members"]["items"]["properties"]["parameters"]["properties"])
+                result = CodeModeToolResult(value=suggest_name(arguments["name"], candidates))
+            elif message["type"] == "prepare":
                 if "run_agent" not in cell.tool_catalog:
                     raise CodeModeError("tool_unavailable", "run_agent is not in this cell's frozen catalog")
                 refs = cell.prepare_batch(arguments)
@@ -544,7 +554,7 @@ class CodeModeHost:
         else:
             await self._safe_send({"type": "resume", "cell_id": cell.cell_id,
                                    "request_id": pending.request_id,
-                                   "keep_preparation": pending.sequence is None and result.error_code is None})
+                                   "keep_preparation": pending.request_id in cell.preparations and result.error_code is None})
 
     @staticmethod
     def _complete_retention(cell: _Cell, message: Mapping[str, object]) -> None:

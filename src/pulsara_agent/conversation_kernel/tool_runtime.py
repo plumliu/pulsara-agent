@@ -260,6 +260,7 @@ from .tool_runtime_results import (
 from .tool_runtime_surface import _ToolSurfaceOperations, _mcp_executor_capability_version
 
 from .tool_runtime_schema import (
+    _tool_argument_error_message,
     _validate_builtin_call_schema as _validate_builtin_call_schema,
     _json_schema_value as _json_schema_value,
     _thaw_json as _thaw_json,
@@ -994,7 +995,7 @@ class DirectKernelToolPort(
                 return reject(
                     KernelToolAuthorizationKind.INVALID_ARGUMENTS,
                     f"descriptor:{entry.descriptor.id}",
-                    f"invalid tool arguments: {exc.message}",
+                    f"invalid tool arguments: {_tool_argument_error_message(exc)}",
                 )
         if tool_name == "use_new_mcp_tool":
             target = arguments.get("target")
@@ -1040,7 +1041,7 @@ class DirectKernelToolPort(
                 return reject(
                     KernelToolAuthorizationKind.INVALID_ARGUMENTS,
                     f"mcp-meta:{executor.semantic.descriptor_fingerprint}",
-                    f"invalid MCP tool arguments: {exc.message}",
+                    f"invalid MCP tool arguments: {_tool_argument_error_message(exc)}",
                     post_name=resolved_name,
                     post_arguments=frozen_inner,
                 )
@@ -1072,7 +1073,7 @@ class DirectKernelToolPort(
                 return reject(
                     KernelToolAuthorizationKind.INVALID_ARGUMENTS,
                     f"mcp-descriptor:{binding.descriptor_fingerprint}",
-                    f"invalid MCP tool arguments: {exc.message}",
+                    f"invalid MCP tool arguments: {_tool_argument_error_message(exc)}",
                 )
         return PreparedResolvedToolInvocation(
             requested_tool_name=tool_name,

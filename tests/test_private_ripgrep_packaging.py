@@ -128,13 +128,13 @@ async def main():
     requests, output = [], []
     original = host._accept_request
     def accept(cell, message):
-        requests.append(message['request_id'])
+        requests.append((message['type'], message['request_id']))
         original(cell, message)
     host._accept_request = accept
     async def invoke(call):
         return CodeModeToolResult(value=call.sequence)
     try:
-        cell_id = await host.start(source='return await tools.read_file({});',
+        cell_id = await host.start(source='try { await tools.read_flie({}); } catch (error) { console.log(error.message); } return await tools.read_file({});',
             source_exec_attempt_id=random_id('attempt'), turn_id=random_id('turn'),
             snapshot=object(), tool_catalog={'decide': {}, 'read_file': {}}, invoke=invoke,
             decision_available=False)
@@ -149,8 +149,13 @@ async def main():
                     break
                 await asyncio.sleep(.001)
         assert cell.state == 'completed', cell.error
-        assert output == [{'kind': 'return', 'text': '1'}], output
-        assert len(requests) == 1 and is_valid_id(requests[0], 'request'), requests
+        assert output == [
+            {'kind': 'log', 'text': 'Unknown tool "read_flie". Did you mean "read_file"?'},
+            {'kind': 'return', 'text': '1'},
+        ], output
+        assert [kind for kind, _ in requests] == ['name_hint', 'call'], requests
+        assert all(is_valid_id(identity, 'request') for _, identity in requests), requests
+        assert len({identity for _, identity in requests}) == 2, requests
     finally:
         await host.aclose()
 asyncio.run(main())

@@ -59,6 +59,159 @@ async def _finish(host, cell):
             await asyncio.sleep(.001)
 
 
+@pytest.mark.parametrize("misspelled", ["read_flie", "readfile", "read_fille", "read_fyle"])
+def test_unknown_tool_suggests_current_name_without_dispatch_or_retry(misspelled):
+    async def run():
+        host, calls = CodeModeHost(), []
+        async def invoke(call):
+            calls.append(call.tool_name)
+            return CodeModeToolResult(value="read explicitly")
+        try:
+            page, records = await _finish(host, await _start(host, f'''
+              try {{ await tools[{json.dumps(misspelled)}]({{}}); }}
+              catch (error) {{ console.log(error.message); }}
+              return await tools.read_file({{}});
+            ''', invoke))
+            assert page.state == "completed", page.error
+            assert f'Unknown tool "{misspelled}".' in records[0]["text"]
+            assert 'Did you mean "read_file"?' in records[0]["text"]
+            assert calls == ["read_file"]
+            assert records[-1] == {"kind": "return", "text": "read explicitly"}
+        finally:
+            await host.aclose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("name,catalog", [
+    ("exec_proces", {"read_file": {}}),
+    ("read_filk", {"read_file": {}, "read_film": {}}),
+])
+def test_unknown_tool_does_not_suggest_unavailable_or_ambiguous_names(name, catalog):
+    async def run():
+        host, calls = CodeModeHost(), []
+        async def invoke(call):
+            calls.append(call)
+            return CodeModeToolResult(value={})
+        try:
+            page, _ = await _finish(host, await _start(host,
+                f'await tools[{json.dumps(name)}]({{}});', invoke, catalog))
+            assert page.state == "failed"
+            assert page.error["name"] == "TypeError"
+            assert page.error["message"] == f'Unknown tool "{name}".'
+            assert "cell.js:" in page.error["stack"]
+            assert not calls
+        finally:
+            await host.aclose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("name,candidates,expected", [
+    ("instrution", ["instruction"], "instruction"),
+    ("instrcton", ["instruction"], "instruction"),
+    ("read_filk", ["read_file", "read_film"], None),
+    ("totally_unrelated", ["instruction"], None),
+])
+def test_tool_and_parameter_diagnostics_choose_the_same_suggestion(name, candidates, expected):
+    from jsonschema import ValidationError
+    from pulsara_agent.conversation_kernel.mcp.schema import validate_mcp_arguments
+    from pulsara_agent.conversation_kernel.tool_runtime_schema import _tool_argument_error_message
+
+    schema = {"type": "object", "properties": {candidate: {} for candidate in candidates},
+              "additionalProperties": False}
+    with pytest.raises(ValidationError) as rejected:
+        validate_mcp_arguments(schema, {name: True})
+    parameter_error = _tool_argument_error_message(rejected.value)
+
+    async def run():
+        host, calls = CodeModeHost(), []
+        async def invoke(call):
+            calls.append(call)
+            return CodeModeToolResult(value={})
+        try:
+            page, records = await _finish(host, await _start(host, f'''
+              try {{ await tools[{json.dumps(name)}]({{}}); }}
+              catch (error) {{ return error.message; }}
+            ''', invoke, {candidate: {} for candidate in candidates}))
+            assert page.state == "completed", page.error
+            tool_error = records[-1]["text"]
+            if expected is None:
+                assert "Did you mean" not in tool_error
+                assert "Did you mean" not in parameter_error
+            else:
+                assert f'Did you mean "{expected}"?' in tool_error
+                assert f"Did you mean {expected!r}?" in parameter_error
+            assert not calls and not host._test_cells[next(iter(host._test_cells))].preparations
+        finally:
+            await host.aclose()
+    asyncio.run(run())
+
+
+def test_tool_lookup_diagnostics_preserve_frozen_directory_and_js_protocols():
+    async def run():
+        host = CodeModeHost()
+        try:
+            page, records = await _finish(host, await _start(host, '''
+              return {same: (await tools) === tools, json: JSON.stringify(tools),
+                frozen: Object.isFrozen(tools), names: Object.keys(tools),
+                missing: 'read_flie' in tools, symbol: tools[Symbol.iterator] === undefined};
+            '''))
+            assert page.state == "completed", page.error
+            assert json.loads(records[-1]["text"]) == {
+                "same": True, "json": "{}", "frozen": True,
+                "names": ["decide", "read_file"], "missing": False, "symbol": True,
+            }
+        finally:
+            await host.aclose()
+    asyncio.run(run())
+
+
+def test_repeated_name_hints_release_bridge_data_without_dispatch():
+    async def run():
+        host = CodeModeHost(limits=replace(CodeModeLimits(), value_bytes=8192,
+            cell_bytes=32768, host_bytes=65536, control_bytes=12288, page_bytes=8192))
+        calls = []
+        async def invoke(call):
+            calls.append(call)
+            return CodeModeToolResult(value={})
+        try:
+            cell = await _start(host, '''
+              for (let i = 0; i < 200; i++) {
+                try { await tools.read_flie({}); }
+                catch (error) {
+                  if (!error.message.includes('Did you mean "read_file"?')) throw error;
+                }
+              }
+              return 'all hints released';
+            ''', invoke)
+            page, records = await _finish(host, cell)
+            assert page.state == "completed", page.error
+            assert records == [{"kind": "return", "text": "all hints released"}]
+            assert not calls and not host._test_cells[cell].preparations
+        finally:
+            await host.aclose()
+    asyncio.run(run())
+
+
+def test_assignment_field_typo_is_catchable_before_preparation_or_dispatch():
+    async def run():
+        host, calls = CodeModeHost(), []
+        async def invoke(call):
+            calls.append(call)
+            return CodeModeToolResult(value={})
+        try:
+            page, records = await _finish(host, await _start(host, '''
+              try { await tools.run_agent([{instrution: "inspect"}]); }
+              catch (error) { return error.message; }
+            ''', invoke, {"run_agent": {}}))
+            assert page.state == "completed", page.error
+            assert 'Unknown run_agent assignment field "instrution".' in records[-1]["text"]
+            assert 'Did you mean "instruction"?' in records[-1]["text"]
+            assert not calls and not host._test_cells[next(iter(host._test_cells))].preparations
+        finally:
+            await host.aclose()
+    asyncio.run(run())
+
+
 def test_decide_availability_is_local_sync_and_does_not_block_other_tools():
     async def run():
         calls = []
@@ -592,7 +745,16 @@ def test_dispatch_rejects_invalid_public_arrays_before_preparation(expression):
                 invoke, {'run_agent': {}}))
             assert page.state == 'completed', page.error
             assert output == [{'kind': 'return', 'text': 'rejected'}]
-            assert not requests and not calls
+            invalid_field = {
+                '[{instruction:"x", name:"old title"}]': "name",
+                '[{instruction:"x", unknown:true}]': "unknown",
+            }.get(expression)
+            # An advisory lookup may cross IPC, but invalid arrays must never
+            # allocate batch identities or reach the tool executor.
+            expected = ([] if invalid_field is None else
+                [("name_hint", {"kind": "assignment", "name": invalid_field})])
+            assert [(message["type"], json.loads(message["arguments_json"])) for message in requests] == expected
+            assert not calls and not host._test_cells[next(iter(host._test_cells))].preparations
         finally:
             await host.aclose()
     asyncio.run(run())

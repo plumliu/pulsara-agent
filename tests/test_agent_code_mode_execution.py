@@ -250,6 +250,9 @@ await Promise.all([
 const read = await tools.read_file({target:{kind:"PATH",path:"source.txt"}});
 await tools.edit_file({target:{kind:"PATH",path:"source.txt"},base_revision:read.content_revision,
   operations:[{kind:"replace_lines",start_line:1,end_line:1,lines:["after-source-final"]}]});
+try { await tools.read_flie({}); } catch (error) { console.log({tool_hint:error.message}); }
+try { await tools.read_file({target:{kind:"PATH",path:"source.txt"},limti:1}); }
+catch (error) { console.log({parameter_hint:error.message}); }
 try { await tools.read_file({unknown: true}); } catch (error) { console.log({rejected:error.code}); }
 console.log({order});
 return {finished:true};
@@ -283,11 +286,13 @@ return {finished:true};
             await session.update_model_call_binding(test_model_binding(runtime))
             first = await session.run_turn(PromptContent.text('launch the background script'), requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
             assert first.final_text == 'FIRST_SOURCE_FINAL'
-            records = await _settled_formal_records(session, expected=3)
+            records = await _settled_formal_records(session, expected=5)
             assert (tmp_path / 'source.txt').read_text().startswith('after-source-final\n')
             texts = [record.get('text','') for record in records]
             assert json.dumps({'order':['fast','slow']},separators=(',',':')) in texts
             assert any('INVALID_ARGUMENTS' in text for text in texts)
+            assert any('Did you mean \\"read_file\\"?' in text for text in texts)
+            assert any("Did you mean 'limit'?" in text for text in texts)
             assert records[-1] == {'kind':'return','text':'{"finished":true}'}
             assert len(post_diagnostics) == 1 and post_diagnostics[0]['tool_name'] == 'edit_file'
         finally:

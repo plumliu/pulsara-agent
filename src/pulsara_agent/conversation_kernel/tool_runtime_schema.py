@@ -2,8 +2,30 @@
 
 from __future__ import annotations
 
+import re
 from typing import Mapping
-from jsonschema import validators
+from jsonschema import ValidationError, validators
+from pulsara_agent.primitives.name_suggestion import suggest_name
+
+
+def _tool_argument_error_message(error: ValidationError) -> str:
+    """Render the validator's facts; suggestions never alter admission or arguments."""
+    hints = {}
+    pending = [error]
+    while pending:
+        item = pending.pop()
+        pending.extend(reversed(item.context))
+        if item.validator != "additionalProperties":
+            continue
+        properties = item.schema.get("properties", {})
+        patterns = item.schema.get("patternProperties", {})
+        for name in item.instance:
+            if name in properties or any(re.search(pattern, name) for pattern in patterns):
+                continue
+            match = suggest_name(name, properties)
+            if match is not None:
+                hints[f"At {item.json_path}: unknown parameter {name!r}. Did you mean {match!r}?"] = None
+    return " ".join((f"{error.json_path}: {error.message}", *hints))
 
 
 def _validate_builtin_call_schema(
