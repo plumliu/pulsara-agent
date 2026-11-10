@@ -30,6 +30,7 @@ def validate_model_context_shape_for_call(
     fact = call.fact
     if context.ephemeral_wire_input is not None and fact.purpose not in {
         ModelCallPurpose.SESSION_TITLE, ModelCallPurpose.CONVERSATION_SUGGESTION,
+        ModelCallPurpose.CONVERSATION_CACHE_WARMING,
     }:
         raise ModelContextIdentityMismatch("ephemeral wire input requires advisory purpose")
     target_fact = call.target.fact

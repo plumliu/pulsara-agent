@@ -204,6 +204,7 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
   const [catalog, setCatalog] = useState<ModelCatalogReadModel>();
   const [loading, setLoading] = useState(true);
   const [savingSuggestions, setSavingSuggestions] = useState(false);
+  const [savingWarming, setSavingWarming] = useState(false);
   const [catalogRefreshing, setCatalogRefreshing] = useState(false);
   const [error, setError] = useState<string>();
   const [adding, setAdding] = useState(false);
@@ -247,6 +248,19 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
     } catch (saveError) {
       onNotify('输入框建议设置未能完成', saveError instanceof Error ? saveError.message : '请重试。', 'warning');
     } finally { setSavingSuggestions(false); }
+  };
+
+  const setCacheWarming = async (enabled: boolean) => {
+    setSavingWarming(true);
+    try {
+      const result = await adapter.setCacheWarmingEnabled(enabled);
+      setSettings(current => current ? { ...current, local_settings: {
+        ...current.local_settings, cache_warming_enabled: result.enabled,
+      } } : current);
+      await onConfigurationChanged();
+    } catch (saveError) {
+      onNotify('缓存保温设置未能完成', saveError instanceof Error ? saveError.message : '请重试。', 'warning');
+    } finally { setSavingWarming(false); }
   };
 
   const load = async () => {
@@ -590,14 +604,6 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
             </>
               : <div className="settings-empty"><Bot size={18} /><strong>还没有模型配置</strong><span>添加后，在每个会话的输入框下方显式选择要使用的连接。</span></div>}
           </section>
-          <section className="settings-group input-suggestions-settings" aria-labelledby="input-suggestions-title">
-            <header><MessageSquare size={16} /><div><h2 id="input-suggestions-title">输入框建议</h2><p id="input-suggestions-detail">回答结束后，使用当前模型生成下一条提问建议。</p></div>
-              <button type="button" role="switch" className="settings-switch" aria-labelledby="input-suggestions-title" aria-describedby="input-suggestions-detail"
-                aria-checked={settings?.local_settings.input_suggestions_enabled ?? true}
-                disabled={loading || !settings || settings.local_settings.state === 'unavailable' || savingSuggestions || runtimeStatus !== 'online'}
-                onClick={() => void setInputSuggestions(!settings?.local_settings.input_suggestions_enabled)}><span /></button>
-            </header>
-          </section>
           {adding && <ModelFormContainer editing={Boolean(editingConfiguration)} busy={savingModel || testingModel} onClose={closeModelForm}><section className="settings-group model-add-panel"><header>{editingConfiguration ? <Pencil size={16} /> : <Plus size={16} />}<div><h2>{editingConfiguration ? '修改模型配置' : '添加模型配置'}</h2><p>保存与测试相互独立；只有测试会发送一次极短模型请求。</p></div>{configurationSource === 'models_dev' && <button className="settings-header-action" disabled={catalogRefreshing} onClick={() => void refreshCatalog()}><RefreshCw size={13} />刷新目录</button>}<button className="settings-header-action" aria-label={editingConfiguration ? '关闭修改模型配置' : '关闭添加模型配置'} onClick={closeModelForm}><X size={15} /></button></header>
             {editingConfiguration ? <div className="model-edit-notice"><strong>{configurationSource === 'models_dev' ? 'Models.dev 目录' : '自定义服务'}</strong><p>修改后会保留这条配置。更改模型、地址、协议、能力或推理请求形状后，请在相关会话空闲时重新载入运行时；已有会话不会自动切换，后续请求可能因配置不匹配而停止。</p></div> : <div className="model-source-picker" role="group" aria-label="模型配置来源"><button className={configurationSource === 'models_dev' ? 'is-active' : ''} onClick={() => { resetModelDraft(); setConfigurationSource('models_dev'); }}>Models.dev 目录</button><button className={configurationSource === 'user_declared' ? 'is-active' : ''} onClick={() => { resetModelDraft(); setConfigurationSource('user_declared'); }}>自定义服务</button></div>}
             {modelFormError && <p role="alert" className="settings-alert settings-alert--inside">{modelFormError}</p>}
@@ -636,6 +642,22 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
             setSettings(current => current ? { ...current, local_settings: { ...current.local_settings, memory_retrieval } } : current);
             void onConfigurationChanged();
           }} />}
+          <section className="settings-group input-suggestions-settings" aria-labelledby="input-suggestions-title">
+            <header><MessageSquare size={16} /><div><h2 id="input-suggestions-title">输入框建议</h2><p id="input-suggestions-detail">回答结束后，使用当前模型生成下一条提问建议。</p></div>
+              <button type="button" role="switch" className="settings-switch" aria-labelledby="input-suggestions-title" aria-describedby="input-suggestions-detail"
+                aria-checked={settings?.local_settings.input_suggestions_enabled ?? true}
+                disabled={loading || !settings || settings.local_settings.state === 'unavailable' || savingSuggestions || runtimeStatus !== 'online'}
+                onClick={() => void setInputSuggestions(!settings?.local_settings.input_suggestions_enabled)}><span /></button>
+            </header>
+          </section>
+          <section className="settings-group input-suggestions-settings" aria-labelledby="cache-warming-title">
+            <header><RefreshCw size={16} /><div><h2 id="cache-warming-title">缓存保温（实验性）</h2><p id="cache-warming-detail">会话空闲后，已载入的会话会在接下来 20 分钟内，每 4 分钟尝试保活。会产生额外模型请求，效果取决于模型供应商。</p></div>
+              <button type="button" role="switch" className="settings-switch" aria-labelledby="cache-warming-title" aria-describedby="cache-warming-detail"
+                aria-checked={settings?.local_settings.cache_warming_enabled ?? false}
+                disabled={loading || !settings || settings.local_settings.state === 'unavailable' || savingWarming || runtimeStatus !== 'online'}
+                onClick={() => void setCacheWarming(!settings?.local_settings.cache_warming_enabled)}><span /></button>
+            </header>
+          </section>
         </>}
 
       </div>

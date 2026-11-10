@@ -743,6 +743,7 @@ class _HostPromptOperations:
         )
 
         self._ephemeral.invalidate(preserve_running=True)
+        self._ephemeral.invalidate_cache_warming(preserve_running=True)
 
         if delivery_mode is PromptDeliveryMode.STEER_ACTIVE_TURN:
             await self._notify_accepted_supplement(outcome)

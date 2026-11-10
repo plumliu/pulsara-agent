@@ -582,21 +582,35 @@ def test_failed_embedding_confirmation_does_not_partially_save_or_enable(tmp_pat
     asyncio.run(exercise())
 
 
-def test_input_suggestions_preference_defaults_and_round_trips(tmp_path):
+@pytest.mark.parametrize("field,default", [("input_suggestions_enabled", True), ("cache_warming_enabled", False)])
+def test_ephemeral_preferences_default_and_round_trip(tmp_path, field, default):
     payload = local_settings_to_dict(LocalSettings())
-    payload.pop("input_suggestions_enabled")
-    assert local_settings_from_dict(payload).input_suggestions_enabled is True
+    payload.pop(field)
+    assert getattr(local_settings_from_dict(payload), field) is default
     for invalid in (None, 0, 1, "false"):
         with pytest.raises(ValueError, match="boolean"):
-            local_settings_from_dict({**payload, "input_suggestions_enabled": invalid})
+            local_settings_from_dict({**payload, field: invalid})
 
     async def scenario():
         store = LocalSettingsStore(tmp_path / "home" / "local-settings.yaml")
         before = store.read()
         for enabled in (False, True):
-            await store.set_input_suggestions_enabled(enabled)
+            await getattr(store, "set_" + field)(enabled)
             assert LocalSettingsStore(store.path).read() == replace(
-                before, input_suggestions_enabled=enabled
+                before, **{field: enabled}
             )
+
+    asyncio.run(scenario())
+
+
+def test_connection_changes_preserve_warming_preference(tmp_path):
+    async def scenario():
+        store = LocalSettingsStore(tmp_path / "home" / "local-settings.yaml")
+        await store.set_cache_warming_enabled(True)
+        connection = _connection("warming")
+        await store.add_model_connection(connection=connection, api_key="fixture-key")
+        assert store.read().cache_warming_enabled is True
+        await store.delete_model_connection(connection.id)
+        assert store.read().cache_warming_enabled is True
 
     asyncio.run(scenario())

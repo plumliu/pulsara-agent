@@ -20,9 +20,11 @@ import psycopg
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
 
+from pulsara_agent.primitives.model_call import ModelCallPurpose
+
 from pulsara_agent.capability.pulsara_home import require_pulsara_home
 from pulsara_agent.conversation_kernel.ephemeral import SUGGESTION_PROMPT
-from pulsara_agent.conversation_kernel.direct_model import prepare_suggestion_request
+from pulsara_agent.conversation_kernel.direct_model import prepare_conversation_ephemeral_request
 from pulsara_agent.conversation_kernel.host import KernelHostCore
 from pulsara_agent.llm.adapters.openai.chat_completions import (
     build_chat_completions_payload,
@@ -289,7 +291,8 @@ async def run():
                     # Use this real accepted native response and prefix, with a
                     # narrower test-only input allowance. No huge online prompt.
                     source = first.final_source
-                    prepared = prepare_suggestion_request(
+                    prepared = prepare_conversation_ephemeral_request(
+                        purpose=ModelCallPurpose.CONVERSATION_SUGGESTION,
                         runtime=runtime,
                         source=source,
                         prompt=SUGGESTION_PROMPT,
@@ -316,7 +319,8 @@ async def run():
                     capacity_before, _ = _snapshot(admin, session.session_id)
                     opened = len(records)
                     try:
-                        prepare_suggestion_request(
+                        prepare_conversation_ephemeral_request(
+                            purpose=ModelCallPurpose.CONVERSATION_SUGGESTION,
                             runtime=runtime,
                             source=narrow,
                             prompt=SUGGESTION_PROMPT,

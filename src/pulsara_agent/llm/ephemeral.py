@@ -56,6 +56,7 @@ EPHEMERAL_PURPOSES = frozenset(
         ModelCallPurpose.CONNECTION_PROBE,
         ModelCallPurpose.SESSION_TITLE,
         ModelCallPurpose.CONVERSATION_SUGGESTION,
+        ModelCallPurpose.CONVERSATION_CACHE_WARMING,
     }
 )
 
@@ -102,10 +103,13 @@ class PreparedEphemeralRequest:
         ):
             raise ValueError("title request cannot advertise tools")
         if (
-            self.call_target.purpose is ModelCallPurpose.CONVERSATION_SUGGESTION
+            self.call_target.purpose in {
+                ModelCallPurpose.CONVERSATION_SUGGESTION,
+                ModelCallPurpose.CONVERSATION_CACHE_WARMING,
+            }
             and self.context.tool_choice != "auto"
         ):
-            raise ValueError("suggestion preserves automatic tool choice")
+            raise ValueError("conversation advisory request preserves automatic tool choice")
 
 
 def validate_ephemeral_text(text: str) -> str | None:

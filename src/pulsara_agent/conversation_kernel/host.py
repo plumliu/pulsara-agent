@@ -1379,7 +1379,11 @@ class KernelHostSession(
             deadline_monotonic=self._canonical_deadline(),
         )
         self._ephemeral.invalidate()
+        self._ephemeral.invalidate_cache_warming()
         return result
+
+    def invalidate_cache_warming(self) -> None:
+        self._ephemeral.invalidate_cache_warming()
 
     def invalidate_input_suggestion(self) -> None:
         self._ephemeral.invalidate(preserve_running=True)
@@ -1569,6 +1573,7 @@ class KernelHostSession(
                     or self._compaction.has_active_work()
                 ):
                     return CompactionOutcome(CompactionDisposition.REJECTED_BUSY, "idle", None, None, "SESSION_BUSY")
+                self._ephemeral.invalidate_cache_warming()
                 task = self._compaction.start_owned(
                     self._prepare_idle_manual_compaction(command_id),
                     name=f"kernel-idle-compaction:{command_id}",

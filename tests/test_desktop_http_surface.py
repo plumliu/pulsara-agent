@@ -2167,14 +2167,16 @@ def test_custom_model_discovery_is_user_level_and_never_saves_drafts(tmp_path, m
     asyncio.run(exercise())
 
 
-def test_input_suggestions_setting_is_user_level_and_validated(tmp_path):
+@pytest.mark.parametrize("preference,route", [("input_suggestions", "input-suggestions"), ("cache_warming", "cache-warming")])
+def test_ephemeral_setting_is_user_level_and_validated(tmp_path, preference, route):
     async def exercise():
         (tmp_path / "index.html").write_text("Pulsara")
         deps = _model_server_dependencies()
         store = LocalSettingsStore(tmp_path / "home" / "local-settings.yaml")
         deps["settings"] = store
         sessions = _Sessions()
-        sessions.invalidate_input_suggestions = AsyncMock()
+        invalidate = AsyncMock()
+        setattr(sessions, "invalidate_" + preference, invalidate)
         server = LocalHttpServer(
             sessions=cast(LocalSessionController, sessions),
             bridge=cast(RendererBridge, _Bridge()), static_root=tmp_path,
@@ -2187,19 +2189,19 @@ def test_input_suggestions_setting_is_user_level_and_validated(tmp_path):
                 "X-Pulsara-Connection-Id": "connection-1",
                 "X-Pulsara-Connection-Generation": "1",
             }) as client:
-                url = server.origin + "/api/local-settings/input-suggestions"
+                url = server.origin + "/api/local-settings/" + route
                 for enabled in (False, True):
                     async with client.put(url, json={"enabled": enabled}) as response:
                         assert response.status == 200
                         assert await response.json() == {"enabled": enabled}
-                    assert store.read().input_suggestions_enabled is enabled
+                    assert getattr(store.read(), preference + "_enabled") is enabled
                     async with client.get(server.origin + "/api/local-settings") as response:
-                        assert (await response.json())["local_settings"]["input_suggestions_enabled"] is enabled
-                sessions.invalidate_input_suggestions.assert_awaited_once_with()
+                        assert (await response.json())["local_settings"][preference + "_enabled"] is enabled
+                invalidate.assert_awaited_once_with()
                 for malformed in ({}, {"enabled": 0}, {"enabled": "false"}, {"enabled": False, "extra": True}):
                     async with client.put(url, json=malformed) as response:
                         assert response.status == 400
-                    assert store.read().input_suggestions_enabled is True
+                    assert getattr(store.read(), preference + "_enabled") is True
         finally:
             await server.aclose()
 

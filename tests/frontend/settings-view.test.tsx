@@ -26,7 +26,7 @@ function modelConfiguration(index: number): ModelConfigurationSummary {
 
 function setup(configurations: ModelConfigurationSummary[] = [], detail?: ModelConfigurationDetail, catalog: ModelCatalogReadModel = { status: 'ready', routes: [] }) {
   let settings: LocalSettingsReadModel = {
-    local_settings: { input_suggestions_enabled: true, pulsara_home: '/custom/pulsara-home', memory_retrieval: { embedding: null, embedding_enabled: false, history_enabled: true, rerank: null, decision: null, ranking_mode: 'off' } },
+    local_settings: { input_suggestions_enabled: true, cache_warming_enabled: false, pulsara_home: '/custom/pulsara-home', memory_retrieval: { embedding: null, embedding_enabled: false, history_enabled: true, rerank: null, decision: null, ranking_mode: 'off' } },
     database_state: 'database_reset_required', model_configurations: configurations,
   };
   const reset = vi.fn(async () => {
@@ -61,9 +61,14 @@ function setup(configurations: ModelConfigurationSummary[] = [], detail?: ModelC
     settings = { ...settings, local_settings: { ...settings.local_settings, input_suggestions_enabled: enabled } };
     return { enabled };
   });
+  const setCacheWarming = vi.fn(async (enabled: boolean) => {
+    settings = { ...settings, local_settings: { ...settings.local_settings, cache_warming_enabled: enabled } };
+    return { enabled };
+  });
   const modelCatalog = vi.fn(async (_refresh?: boolean) => catalog);
   const adapter = {
     setInputSuggestionsEnabled: setInputSuggestions,
+    setCacheWarmingEnabled: setCacheWarming,
     localSettings: async () => settings,
     modelCatalog,
     resetPostgres: reset,
@@ -76,7 +81,7 @@ function setup(configurations: ModelConfigurationSummary[] = [], detail?: ModelC
     discoverModels,
   } as unknown as RuntimeAdapter;
   render(<SettingsView adapter={adapter} theme="light" runtimeStatus="online" onThemeChange={() => {}} onConfigurationChanged={refresh} onNotify={notify} sessionRevision={0} onSessionsChanged={refresh} onDeleteSession={() => {}} />);
-  return { setInputSuggestions, reset, refresh, notify, check, deleteModel, addModel, readModel, updateModel, probeModel, discoverModels, modelCatalog };
+  return { setInputSuggestions, setCacheWarming, reset, refresh, notify, check, deleteModel, addModel, readModel, updateModel, probeModel, discoverModels, modelCatalog };
 }
 
 it('refreshes the directory and global configuration directly from the models page', async () => {
@@ -463,4 +468,27 @@ it('saves the user-level input suggestion toggle and retains the saved value on 
   expect(toggle.getAttribute('aria-checked')).toBe('false');
   fireEvent.click(toggle);
   await waitFor(() => expect(toggle.getAttribute('aria-checked')).toBe('true'));
+});
+
+
+it('keeps both optional toggles last and saves warming independently', async () => {
+  const { setCacheWarming, setInputSuggestions, notify } = setup();
+  fireEvent.click(screen.getByRole('button', { name: '模型' }));
+  const warming = await screen.findByRole('switch', { name: '缓存保温（实验性）' });
+  await waitFor(() => expect(warming).toHaveProperty('disabled', false));
+  const suggestion = screen.getByRole('switch', { name: '输入框建议' });
+  const sections = [...warming.closest('section')!.parentElement!.children];
+  expect(sections.slice(-2)).toEqual([suggestion.closest('section'), warming.closest('section')]);
+  expect(warming.closest('section')!.className).toBe(suggestion.closest('section')!.className);
+  expect(screen.getByText('会话空闲后，已载入的会话会在接下来 20 分钟内，每 4 分钟尝试保活。会产生额外模型请求，效果取决于模型供应商。')).toBeTruthy();
+  expect(warming.getAttribute('aria-checked')).toBe('false');
+  fireEvent.click(warming);
+  await waitFor(() => expect(warming.getAttribute('aria-checked')).toBe('true'));
+  expect(setCacheWarming).toHaveBeenCalledExactlyOnceWith(true);
+  expect(setInputSuggestions).not.toHaveBeenCalled();
+  expect(suggestion.getAttribute('aria-checked')).toBe('true');
+  setCacheWarming.mockRejectedValueOnce(new Error('保存失败'));
+  fireEvent.click(warming);
+  await waitFor(() => expect(notify).toHaveBeenCalledWith('缓存保温设置未能完成', '保存失败', 'warning'));
+  expect(warming.getAttribute('aria-checked')).toBe('true');
 });

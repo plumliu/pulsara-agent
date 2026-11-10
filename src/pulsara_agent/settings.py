@@ -88,6 +88,7 @@ class LocalModelApiKey:
 class LocalSettings:
     postgres: LocalPostgresConfig | None = None
     input_suggestions_enabled: bool = True
+    cache_warming_enabled: bool = False
     model_connections: tuple[ModelConnectionConfig, ...] = ()
     model_api_keys: tuple[LocalModelApiKey, ...] = field(default=(), repr=False)
     memory_retrieval: MemoryRetrievalSettings = field(
@@ -100,6 +101,8 @@ class LocalSettings:
     def __post_init__(self) -> None:
         if type(self.input_suggestions_enabled) is not bool:
             raise ValueError("input_suggestions_enabled must be a boolean")
+        if type(self.cache_warming_enabled) is not bool:
+            raise ValueError("cache_warming_enabled must be a boolean")
         bindings = tuple(item.binding for item in self.mcp_credentials)
         owners = tuple(item.owner for item in self.mcp_oauth)
         if len(bindings) != len(set(bindings)) or len(owners) != len(set(owners)):
@@ -217,6 +220,7 @@ def local_settings_to_dict(settings: LocalSettings) -> dict[str, object]:
     return {
         "schema": LOCAL_SETTINGS_SCHEMA,
         "input_suggestions_enabled": settings.input_suggestions_enabled,
+        "cache_warming_enabled": settings.cache_warming_enabled,
         "model_connections": [
             {
                 **model_connection_to_dict(item),
@@ -262,8 +266,8 @@ def local_settings_from_dict(value: object) -> LocalSettings:
         raise LocalSettingsSchemaUnsupported(
             "本机设置版本需显式转换，请勿以空配置覆盖。"
         )
-    # This optional preference defaults to enabled when the user has not set it.
-    if not isinstance(value, dict) or set(value) - {"input_suggestions_enabled", "asr"} != {
+    # Optional user preferences have their product defaults when absent.
+    if not isinstance(value, dict) or set(value) - {"input_suggestions_enabled", "cache_warming_enabled", "asr"} != {
         "schema",
         "model_connections",
         "memory_retrieval",
@@ -292,6 +296,7 @@ def local_settings_from_dict(value: object) -> LocalSettings:
             model_api_keys.append(LocalModelApiKey(connection.id, api_key))
     return LocalSettings(
         input_suggestions_enabled=value.get("input_suggestions_enabled", True),
+        cache_warming_enabled=value.get("cache_warming_enabled", False),
         model_connections=tuple(connections),
         model_api_keys=tuple(model_api_keys),
         memory_retrieval=MemoryRetrievalSettings.from_dict(value["memory_retrieval"]),
@@ -463,6 +468,15 @@ class LocalSettingsStore:
         )
         return updated
 
+    async def set_cache_warming_enabled(self, enabled: bool) -> LocalSettings:
+        if type(enabled) is not bool:
+            raise ValueError("cache_warming_enabled must be a boolean")
+        updated, _ = await self._run_mutation(
+            lambda current: (replace(current, cache_warming_enabled=enabled), None),
+            name="publish-cache-warming", repair=False,
+        )
+        return updated
+
     def resolve_mcp_secret(self, binding: McpCredentialBinding) -> str | None:
         return self.read().mcp_secret(binding)
 
@@ -597,6 +611,7 @@ class LocalSettingsStore:
             LocalSettings(
                 postgres=current.postgres,
                 input_suggestions_enabled=current.input_suggestions_enabled,
+                cache_warming_enabled=current.cache_warming_enabled,
                 model_connections=(*current.model_connections, connection),
                 model_api_keys=(*current.model_api_keys, *key),
                 memory_retrieval=current.memory_retrieval,
@@ -615,6 +630,7 @@ class LocalSettingsStore:
                 LocalSettings(
                     postgres=current.postgres,
                     input_suggestions_enabled=current.input_suggestions_enabled,
+                    cache_warming_enabled=current.cache_warming_enabled,
                     model_connections=tuple(
                         item
                         for item in current.model_connections

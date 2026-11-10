@@ -14,7 +14,7 @@ import pytest
 from pulsara_agent.conversation_kernel.direct_model import (
     AcceptedProviderFinalSource,
     DirectKernelModelPort,
-    prepare_suggestion_request,
+    prepare_conversation_ephemeral_request,
 )
 from pulsara_agent.llm.ephemeral import (
     EphemeralRequestFailure,
@@ -109,13 +109,15 @@ def _final_source(port, request, text="The accepted answer."):
 
 
 @pytest.mark.parametrize("api", ("openai_chat_completions", "openai_responses"))
-def test_suggestion_exact_prefix_native_final_once_and_main_request_unchanged(api):
+@pytest.mark.parametrize("purpose", (ModelCallPurpose.CONVERSATION_SUGGESTION, ModelCallPurpose.CONVERSATION_CACHE_WARMING))
+def test_conversation_ephemeral_exact_prefix_native_final_once_and_main_request_unchanged(api, purpose):
     port = _port(api=api)
     request, _ = _prepared_execution(port)
     try:
         source = _final_source(port, request)
         original = request.wire_input_plan.materialization
-        prepared = prepare_suggestion_request(
+        prepared = prepare_conversation_ephemeral_request(
+            purpose=purpose,
             runtime=port.model_runtime,
             source=source,
             prompt="Which next question?",
@@ -140,14 +142,15 @@ def test_suggestion_exact_prefix_native_final_once_and_main_request_unchanged(ap
         assert "Which next question?" not in str(
             thaw_json(original.context_bearing_projection)
         )
-        assert prepared.call_target.purpose is ModelCallPurpose.CONVERSATION_SUGGESTION
+        assert prepared.call_target.purpose is purpose
         assert not port.model_runtime._active_borrows
     finally:
         request.surface_borrow.close()
 
 
 @pytest.mark.parametrize("api", ("openai_chat_completions", "openai_responses"))
-def test_suffix_over_budget_is_rejected_before_provider_open(api):
+@pytest.mark.parametrize("purpose", (ModelCallPurpose.CONVERSATION_SUGGESTION, ModelCallPurpose.CONVERSATION_CACHE_WARMING))
+def test_suffix_over_budget_is_rejected_before_provider_open(api, purpose):
     port = _port(api=api)
     request, _ = _prepared_execution(port)
     try:
@@ -164,7 +167,8 @@ def test_suffix_over_budget_is_rejected_before_provider_open(api):
             ),
         )
         with pytest.raises(ValueError, match="exceeds model budget"):
-            prepare_suggestion_request(
+            prepare_conversation_ephemeral_request(
+                purpose=purpose,
                 runtime=port.model_runtime,
                 source=source,
                 prompt="What follows?",
@@ -234,7 +238,7 @@ class _Runtime:
 
 @pytest.mark.parametrize(
     "purpose",
-    (ModelCallPurpose.SESSION_TITLE, ModelCallPurpose.CONVERSATION_SUGGESTION),
+    (ModelCallPurpose.SESSION_TITLE, ModelCallPurpose.CONVERSATION_SUGGESTION, ModelCallPurpose.CONVERSATION_CACHE_WARMING),
 )
 @pytest.mark.parametrize(
     ("items", "status", "text"),
@@ -272,7 +276,7 @@ def test_executor_complete_empty_incomplete_and_mixed_tools_close_once(
 ):
     port = _port()
     prepared = _title(port.model_runtime, port.transport_timeout_policy)
-    if purpose is ModelCallPurpose.CONVERSATION_SUGGESTION:
+    if purpose is not ModelCallPurpose.SESSION_TITLE:
         prepared = replace(
             prepared,
             call_target=replace(prepared.call_target, purpose=purpose),
@@ -434,7 +438,7 @@ class _HttpHandler(BaseHTTPRequestHandler):
 @pytest.mark.parametrize("fail", (False, True, "context_exceeded"))
 @pytest.mark.parametrize(
     "purpose",
-    (ModelCallPurpose.SESSION_TITLE, ModelCallPurpose.CONVERSATION_SUGGESTION),
+    (ModelCallPurpose.SESSION_TITLE, ModelCallPurpose.CONVERSATION_SUGGESTION, ModelCallPurpose.CONVERSATION_CACHE_WARMING),
 )
 def test_saved_advisory_uses_real_sdk_http_single_attempt_and_closes(
     api, fail, purpose
@@ -457,7 +461,8 @@ def test_saved_advisory_uses_real_sdk_http_single_attempt_and_closes(
     else:
         request, _ = _prepared_execution(port)
         source = _final_source(port, request)
-        prepared = prepare_suggestion_request(
+        prepared = prepare_conversation_ephemeral_request(
+            purpose=purpose,
             runtime=runtime,
             source=source,
             prompt="What follows?",
@@ -557,7 +562,8 @@ def test_missing_terminal_is_failure_and_physically_closed():
 
 
 @pytest.mark.parametrize("api", ("openai_chat_completions", "openai_responses"))
-def test_suggestion_retains_previous_opaque_native_replay_and_final_native_replay(api):
+@pytest.mark.parametrize("purpose", (ModelCallPurpose.CONVERSATION_SUGGESTION, ModelCallPurpose.CONVERSATION_CACHE_WARMING))
+def test_conversation_ephemeral_retains_previous_opaque_native_replay_and_final_native_replay(api, purpose):
     from pulsara_agent.llm.input import LLMTextPart
     from pulsara_agent.model_input.contracts import (
         CanonicalInputOriginKind,
@@ -673,7 +679,8 @@ def test_suggestion_retains_previous_opaque_native_replay_and_final_native_repla
         )
         request = replace(request, wire_input_plan=plan)
         source = _final_source(port, request)
-        prepared = prepare_suggestion_request(
+        prepared = prepare_conversation_ephemeral_request(
+            purpose=purpose,
             runtime=port.model_runtime,
             source=source,
             prompt="What follows?",

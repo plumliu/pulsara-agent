@@ -1215,6 +1215,11 @@ class LocalSessionController(SessionCapabilities):
             for handle in self._by_session.values():
                 handle.session.invalidate_input_suggestion()
 
+    async def invalidate_cache_warming(self) -> None:
+        async with self._lock:
+            for handle in self._by_session.values():
+                handle.session.invalidate_cache_warming()
+
     async def read_ephemeral_results(self, session_id: str) -> dict[str, object]:
         # Permission checked against user-level data, without activating a Host.
         summary = await self.core.read_resumable_session(

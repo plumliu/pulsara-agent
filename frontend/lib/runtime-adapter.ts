@@ -274,6 +274,7 @@ export interface LocalSettingsSummary {
   memory_retrieval: MemoryRetrievalSettings;
   asr?: AsrConnection | null;
   input_suggestions_enabled: boolean;
+  cache_warming_enabled: boolean;
 }
 
 export interface LocalSettingsReadModel {
@@ -596,6 +597,7 @@ export interface RuntimeAdapter {
   discoverModels(input: ModelDiscoveryInput, signal?: AbortSignal): Promise<{ model_ids: string[] }>;
   localSettings(): Promise<LocalSettingsReadModel>;
   setInputSuggestionsEnabled(enabled: boolean): Promise<{ enabled: boolean }>;
+  setCacheWarmingEnabled(enabled: boolean): Promise<{ enabled: boolean }>;
   addModelConfiguration(input: ModelConfigurationInput): Promise<{ model_configuration: ModelConfigurationSummary; wire_shape_warning: boolean }>;
   modelConfiguration(connectionId: string): Promise<ModelConfigurationDetail>;
   updateModelConfiguration(connectionId: string, input: ModelConfigurationInput): Promise<{ model_configuration: ModelConfigurationSummary; wire_shape_warning: boolean }>;
@@ -1336,6 +1338,12 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
   async discoverModels(input: ModelDiscoveryInput, signal?: AbortSignal) {
     return apiRequest<{ model_ids: string[] }>('/api/model-configurations/discover', {
       method: 'POST', body: JSON.stringify(input), signal,
+    });
+  }
+
+  async setCacheWarmingEnabled(enabled: boolean): Promise<{ enabled: boolean }> {
+    return apiRequest('/api/local-settings/cache-warming', {
+      method: 'PUT', body: JSON.stringify({ enabled }),
     });
   }
 

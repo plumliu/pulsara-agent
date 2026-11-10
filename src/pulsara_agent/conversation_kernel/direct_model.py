@@ -2108,16 +2108,22 @@ def quote_provider_followup_wire_resources(
     )[1]
 
 
-def prepare_suggestion_request(
+def prepare_conversation_ephemeral_request(
     *,
     runtime: ModelRuntime,
     source: AcceptedProviderFinalSource,
+    purpose: ModelCallPurpose,
     prompt: str,
     timeout_policy: OpenAITransportTimeoutPolicy,
 ) -> PreparedEphemeralRequest:
     from pulsara_agent.llm.ephemeral import PreparedEphemeralRequest
     from pulsara_agent.llm.resolution import with_call_output_cap
 
+    if purpose not in {
+        ModelCallPurpose.CONVERSATION_SUGGESTION,
+        ModelCallPurpose.CONVERSATION_CACHE_WARMING,
+    }:
+        raise ValueError("conversation ephemeral purpose is invalid")
     target = runtime.resolve_frozen_target_bundle(
         source.call_target.target_bundle,
         binding=source.call_target.model_call_binding,
@@ -2129,7 +2135,7 @@ def prepare_suggestion_request(
     call = resolve_model_call(
         target=target,
         binding=source.call_target.model_call_binding,
-        purpose=ModelCallPurpose.CONVERSATION_SUGGESTION,
+        purpose=purpose,
     )
     if target.fact.wire_api == "openai_responses" and source.provider_replay is None:
         raise ValueError("Responses final answer lacks accepted native replay")
@@ -2152,7 +2158,7 @@ def prepare_suggestion_request(
     compiled = source.compiled_input
     messages = (*compiled.messages, source.final_message, *suffix)
     if messages[: len(compiled.messages)] != compiled.messages:
-        raise ValueError("suggestion semantic prefix changed")
+        raise ValueError("conversation ephemeral semantic prefix changed")
     tools = tuple(
         ToolSpec(item.name, item.description, thaw_json(item.parameters))
         for item in compiled.tools
@@ -2191,7 +2197,7 @@ def prepare_suggestion_request(
 
 __all__ = [
     "AcceptedProviderFinalSource",
-    "prepare_suggestion_request",
+    "prepare_conversation_ephemeral_request",
     "DirectKernelModelPort",
     "KernelModelExecutionRequest",
     "KernelModelPreparationRequest",

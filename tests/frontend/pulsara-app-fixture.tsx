@@ -74,7 +74,7 @@ const bootstrap: RuntimeBootstrap = {
   model_catalog_loading: false,
   model_catalog_recovering: false,
   model_catalog_error: null,
-  local_settings: { input_suggestions_enabled: true, pulsara_home: '/Users/test/custom-pulsara-home',
+  local_settings: { input_suggestions_enabled: true, cache_warming_enabled: false, pulsara_home: '/Users/test/custom-pulsara-home',
     state: 'ready',
     postgres: { runtime_dsn: 'postgresql://pulsara@localhost/pulsara', admin_dsn: null },
     memory_retrieval: { embedding: null, embedding_enabled: false, history_enabled: true, rerank: null, decision: null, ranking_mode: 'off' },
@@ -602,14 +602,20 @@ class FakeAdapter implements RuntimeAdapter {
   });
 
   inputSuggestionsEnabled = true;
+  cacheWarmingEnabled = false;
 
   async setInputSuggestionsEnabled(enabled: boolean) {
     this.inputSuggestionsEnabled = enabled;
     return { enabled };
   }
 
+  async setCacheWarmingEnabled(enabled: boolean) {
+    this.cacheWarmingEnabled = enabled;
+    return { enabled };
+  }
+
   async bootstrap() {
-    return { ...bootstrap, local_settings: { ...bootstrap.local_settings, input_suggestions_enabled: this.inputSuggestionsEnabled }, model_configurations: this.modelConfigurations };
+    return { ...bootstrap, local_settings: { ...bootstrap.local_settings, input_suggestions_enabled: this.inputSuggestionsEnabled, cache_warming_enabled: this.cacheWarmingEnabled }, model_configurations: this.modelConfigurations };
   }
 
   async modelCatalog(): Promise<ModelCatalogReadModel> {
@@ -645,7 +651,7 @@ class FakeAdapter implements RuntimeAdapter {
 
   async localSettings() {
     return {
-      local_settings: { ...bootstrap.local_settings, input_suggestions_enabled: this.inputSuggestionsEnabled },
+      local_settings: { ...bootstrap.local_settings, input_suggestions_enabled: this.inputSuggestionsEnabled, cache_warming_enabled: this.cacheWarmingEnabled },
       model_configurations: this.modelConfigurations,
       database_state: bootstrap.database_state,
     };

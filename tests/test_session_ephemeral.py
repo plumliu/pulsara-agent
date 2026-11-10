@@ -31,6 +31,7 @@ def _host():
 
     host = SimpleNamespace(
         session_id="session:test",
+        root_session_id=None,
         host_session_id="host:test",
         _memory_domain_id="u_local",
         _lease=SimpleNamespace(guard=object()),
@@ -89,7 +90,7 @@ def test_reads_never_start_work_and_completion_waits_for_admission(monkeypatch):
             lambda **kw: prepared.append(kw) or "title",
         )
         monkeypatch.setattr(
-            "pulsara_agent.conversation_kernel.direct_model.prepare_suggestion_request",
+            "pulsara_agent.conversation_kernel.direct_model.prepare_conversation_ephemeral_request",
             lambda **kw: prepared.append(kw) or "suggestion",
         )
         execute = AsyncMock(
@@ -181,7 +182,7 @@ def test_next_root_rejects_late_result_even_if_provider_ignores_cancellation(
             "pulsara_agent.llm.ephemeral.execute_ephemeral_request", execute
         )
         monkeypatch.setattr(
-            "pulsara_agent.conversation_kernel.direct_model.prepare_suggestion_request",
+            "pulsara_agent.conversation_kernel.direct_model.prepare_conversation_ephemeral_request",
             lambda **kw: object(),
         )
         owner.activate("turn:origin")
@@ -310,7 +311,7 @@ def test_disabled_suggestions_preserve_titles_and_reject_late_results(monkeypatc
             lambda **kw: "title",
         )
         monkeypatch.setattr(
-            "pulsara_agent.conversation_kernel.direct_model.prepare_suggestion_request",
+            "pulsara_agent.conversation_kernel.direct_model.prepare_conversation_ephemeral_request",
             lambda **kw: "suggestion",
         )
 

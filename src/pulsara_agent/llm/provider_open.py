@@ -290,6 +290,7 @@ class SavedEphemeralProviderOpenPermit(_OneShotPermit):
             not in {
                 ModelCallPurpose.SESSION_TITLE,
                 ModelCallPurpose.CONVERSATION_SUGGESTION,
+                ModelCallPurpose.CONVERSATION_CACHE_WARMING,
             }
             or not resolved_model_call_id
         ):

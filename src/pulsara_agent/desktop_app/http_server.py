@@ -500,6 +500,9 @@ class LocalHttpServer:
         self._app.router.add_put(
             "/api/local-settings/input-suggestions", self._set_input_suggestions
         )
+        self._app.router.add_put(
+            "/api/local-settings/cache-warming", self._set_cache_warming
+        )
         self._app.router.add_post(
             "/api/local-settings/postgres/check", self._check_postgres
         )
@@ -1385,6 +1388,17 @@ class LocalHttpServer:
             await self.sessions.invalidate_input_suggestions()
         return web.json_response({"enabled": updated.input_suggestions_enabled})
 
+    async def _set_cache_warming(self, request):
+        body = await self._json_body(request)
+        if set(body) != {"enabled"} or type(body["enabled"]) is not bool:
+            raise HttpPublicError(
+                "INVALID_CACHE_WARMING", "缓存保温开关值无效。", status=400
+            )
+        updated = await self.settings.set_cache_warming_enabled(body["enabled"])
+        if not updated.cache_warming_enabled:
+            await self.sessions.invalidate_cache_warming()
+        return web.json_response({"enabled": updated.cache_warming_enabled})
+
     async def _read_asr(self, _request):
         config = self.settings.read().asr
         return web.json_response(None if config is None else config.public())
@@ -1572,6 +1586,7 @@ class LocalHttpServer:
                 "memory_retrieval": settings.memory_retrieval.public(),
                 "asr": None if settings.asr is None else settings.asr.public(),
                 "input_suggestions_enabled": settings.input_suggestions_enabled,
+                "cache_warming_enabled": settings.cache_warming_enabled,
             },
             "model_configurations": await self._connection_summaries(settings),
             "database_state": self._database_state(),

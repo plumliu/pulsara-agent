@@ -20,6 +20,7 @@ class ModelCallPurpose(StrEnum):
     CONNECTION_PROBE = "connection_probe"
     SESSION_TITLE = "session_title"
     CONVERSATION_SUGGESTION = "conversation_suggestion"
+    CONVERSATION_CACHE_WARMING = "conversation_cache_warming"
 
 
 class ModelContextMode(StrEnum):

@@ -94,6 +94,7 @@ def sdk_max_retries_for_transport(
         ModelCallPurpose.CONNECTION_PROBE,
         ModelCallPurpose.SESSION_TITLE,
         ModelCallPurpose.CONVERSATION_SUGGESTION,
+        ModelCallPurpose.CONVERSATION_CACHE_WARMING,
     }:
         return 0
     # Preserve the existing non-agent policy, including its explicitly disabled

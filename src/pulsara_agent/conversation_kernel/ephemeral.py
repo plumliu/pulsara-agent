@@ -1,4 +1,4 @@
-"""Best-effort session products; no replay, jobs or idle generation.
+"""Disposable session products; no replay, durable jobs or recovery.
 
 The Host calls admission/completion edges. HTTP only observes this memory.
 The shared LLM executor owns transport; this owner alone may adopt a title.
@@ -15,8 +15,10 @@ from pulsara_agent.llm.model_connections import (
     ModelCallBinding,
     model_call_binding_to_dict,
 )
+from pulsara_agent.primitives.model_call import ModelCallPurpose
 
 if TYPE_CHECKING:
+    from pulsara_agent.conversation_kernel.direct_model import AcceptedProviderFinalSource
     from pulsara_agent.conversation_kernel.host import KernelHostSession
     from pulsara_agent.conversation_kernel.runner import KernelRunResult
 
@@ -36,6 +38,13 @@ SUGGESTION_PROMPT = (
     'question on one line, without quotes or explanation. Do not answer, continue the '
     'task, or call tools.'
 )
+CACHE_WARMING_PROMPT = (
+    "This is a cache keep-alive request. Do not perform any work or call tools. "
+    "Reply with exactly: OK."
+)
+# Optional warming policy, not limits on normal execution or session lifetime.
+CACHE_WARMING_INTERVAL_SECONDS = 4 * 60
+CACHE_WARMING_DURATION_SECONDS = 20 * 60
 
 @dataclass(frozen=True, slots=True)
 class AcceptedUserOrigin:
@@ -67,6 +76,8 @@ class SessionEphemeralProducts:
         self._title_state = "absent"
         self._title_attempted = False
         self._closed = False
+        self._warming_origin_turn_id: str | None = None
+        self._warming_task: asyncio.Task | None = None
 
     def _start(self, coroutine, name: str) -> asyncio.Task:
         task = asyncio.create_task(coroutine, name=name)
@@ -87,6 +98,13 @@ class SessionEphemeralProducts:
         self._cancel(slot.request)
 
     def activate(self, turn_id: str) -> None:
+        self.invalidate_cache_warming()
+        if (
+            not self._closed
+            and self._host.root_session_id is None
+            and self._warming_enabled()
+        ):
+            self._warming_origin_turn_id = turn_id
         self.invalidate()
         if not self._closed:
             # Installed before any canonical completion notification. This is
@@ -158,7 +176,6 @@ class SessionEphemeralProducts:
             prepare_text_ephemeral_request,
             validate_ephemeral_text,
         )
-        from pulsara_agent.primitives.model_call import ModelCallPurpose
 
         host = self._host
         adopted = False
@@ -205,6 +222,7 @@ class SessionEphemeralProducts:
             return False
 
     def completed(self, origin_turn_id: str, result: KernelRunResult | None) -> None:
+        self._complete_warming(origin_turn_id, result)
         slot = self._suggestion
         if self._closed or slot is None or slot.origin_turn_id != origin_turn_id:
             return
@@ -227,7 +245,7 @@ class SessionEphemeralProducts:
 
     async def _generate_suggestion(self, slot: _Suggestion, source) -> None:
         from pulsara_agent.conversation_kernel.direct_model import (
-            prepare_suggestion_request,
+            prepare_conversation_ephemeral_request,
         )
         from pulsara_agent.llm.ephemeral import (
             execute_ephemeral_request,
@@ -240,7 +258,8 @@ class SessionEphemeralProducts:
             slot.binding = source.call_target.model_call_binding
             if slot.origin is None or not await self._current(slot, source):
                 return
-            prepared = prepare_suggestion_request(
+            prepared = prepare_conversation_ephemeral_request(
+                purpose=ModelCallPurpose.CONVERSATION_SUGGESTION,
                 runtime=host._model_runtime,
                 source=source,
                 prompt=SUGGESTION_PROMPT,
@@ -264,21 +283,123 @@ class SessionEphemeralProducts:
             if slot.state != "ready":
                 slot.state = "absent"
 
+    def _warming_enabled(self) -> bool:
+        from pulsara_agent.settings import LocalSettingsUnavailable
+
+        try:
+            return self._host._model_runtime.settings.read().cache_warming_enabled
+        except (LocalSettingsUnavailable, OSError, ValueError):
+            return False
+
+    def invalidate_cache_warming(self, *, preserve_running: bool = False) -> None:
+        if not preserve_running:
+            self._warming_origin_turn_id = None
+        # Keep the task reference until physical close; a new window can be
+        # dropped rather than overlap a cancelled request still settling.
+        self._cancel(self._warming_task)
+
+    def _complete_warming(
+        self, origin_turn_id: str, result: KernelRunResult | None
+    ) -> None:
+        if self._warming_origin_turn_id != origin_turn_id:
+            return
+        self._warming_origin_turn_id = None
+        if (
+            self._closed
+            or self._host.root_session_id is not None
+            or not self._warming_enabled()
+            or result is None
+            or result.pending_plan_interaction_id
+            or result.final_source is None
+            or (self._warming_task is not None and not self._warming_task.done())
+        ):
+            return
+        self._warming_task = self._start(
+            self._warm(result.final_source, asyncio.get_running_loop().time()),
+            f"ephemeral-warming:{origin_turn_id}",
+        )
+
+    async def _warming_current(self, source: AcceptedProviderFinalSource) -> bool:
+        task = asyncio.current_task()
+
+        def current():
+            return (
+                not self._closed
+                and self._host.root_session_id is None
+                and self._warming_task is task
+                and not task.cancelling()
+                and self._warming_enabled()
+            )
+
+        return current() and await self._source_current(source) and current()
+
+    async def _warm(self, source: AcceptedProviderFinalSource, started: float) -> None:
+        from pulsara_agent.conversation_kernel.direct_model import (
+            prepare_conversation_ephemeral_request,
+        )
+        from pulsara_agent.llm.ephemeral import execute_ephemeral_request
+
+        host = self._host
+        loop = asyncio.get_running_loop()
+        deadline = started + CACHE_WARMING_DURATION_SECONDS
+        due = started + CACHE_WARMING_INTERVAL_SECONDS
+        try:
+            if not await self._warming_current(source):
+                return
+            while due <= deadline:
+                await asyncio.sleep(max(0, due - loop.time()))
+                if loop.time() > deadline or not await self._warming_current(source):
+                    return
+                prepared = prepare_conversation_ephemeral_request(
+                    runtime=host._model_runtime,
+                    source=source,
+                    purpose=ModelCallPurpose.CONVERSATION_CACHE_WARMING,
+                    prompt=CACHE_WARMING_PROMPT,
+                    timeout_policy=host._model.transport_timeout_policy,
+                )
+                if not await self._warming_current(source) or loop.time() > deadline:
+                    return
+                result = await execute_ephemeral_request(
+                    runtime=host._model_runtime, prepared=prepared
+                )
+                if result.status != "COMPLETED" or asyncio.current_task().cancelling():
+                    return
+                # Only the next future slot; never catch up missed pings.
+                due = started + (
+                    int((loop.time() - started) // CACHE_WARMING_INTERVAL_SECONDS) + 1
+                ) * CACHE_WARMING_INTERVAL_SECONDS
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Warming has no retry or recovery; normal conversation is unrelated.
+            pass
+        finally:
+            if self._warming_task is asyncio.current_task():
+                self._warming_task = None
+
     async def _current(self, slot: _Suggestion, source) -> bool:
+        def current():
+            return (
+                not self._closed
+                and self._suggestions_enabled()
+                and self._suggestion is slot
+            )
+
+        return current() and await self._source_current(source) and current()
+
+    async def _source_current(self, source: AcceptedProviderFinalSource) -> bool:
         from pulsara_agent.model_input.continuity import ProviderInputContinuityScope
         from pulsara_agent.model_input.contracts import ModelInputScopeKind
 
         host = self._host
         if (
             self._closed
-            or not self._suggestions_enabled()
-            or self._suggestion is not slot
             or host._closing
             or host._active_task is not None
         ):
             return False
         binding = await host.model_call_binding()
-        if self._suggestion is not slot or binding != slot.binding:
+        if binding != source.call_target.model_call_binding:
             return False
         pending = await host._io.run(
             host.repository.has_pending_prompt,
@@ -291,9 +412,8 @@ class SessionEphemeralProducts:
         cohort = host._input_continuity.current_cohort(scope)
         return (
             not pending
-            and self._suggestions_enabled()
             and not self._closed
-            and self._suggestion is slot
+            and not host._closing
             and host._active_task is None
             and cohort is not None
             and cohort.view.wire_input_plan is source.wire_input_plan
@@ -329,6 +449,7 @@ class SessionEphemeralProducts:
 
     async def aclose(self) -> None:
         self._closed = True
+        self.invalidate_cache_warming()
         self.invalidate()
         tasks = tuple(self._tasks)
         for task in tasks:
