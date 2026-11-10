@@ -32,8 +32,6 @@ export interface FilePreviewPage {
 }
 export interface MediaNote {
   resultId: string;
-  entryId: string;
-  sessionId: string;
   from: number;
   to: number;
   text: string;

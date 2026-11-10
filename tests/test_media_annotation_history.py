@@ -117,6 +117,7 @@ def test_committed_annotations_keyset_source_forks_and_permissions(repo, monkeyp
         if after is None:
             break
     assert len(notes) == 2
+    assert all(set(n) == {"resultId", "from", "to", "text"} for n in notes)
     assert {n["resultId"] for n in notes} == {first, second}
     assert all(n["text"] == text and (n["from"], n["to"]) == (1, 2) for n in notes)
 

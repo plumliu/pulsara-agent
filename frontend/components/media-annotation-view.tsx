@@ -1,8 +1,6 @@
-import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { FilePreview, FilePreviewApi, MediaNote } from '../lib/file-preview';
 import type { VideoAnnotation } from './file-video-content';
-
-export const OpenMediaNoteSource = createContext<((note: MediaNote) => void) | undefined>(undefined);
 
 export function MediaAnnotationView({ file, api, revision, children }: {
   file: FilePreview;
@@ -10,7 +8,6 @@ export function MediaAnnotationView({ file, api, revision, children }: {
   revision: string | number;
   children: (notes: readonly VideoAnnotation[]) => ReactNode;
 }) {
-  const openSource = useContext(OpenMediaNoteSource);
   const [notes, setNotes] = useState<readonly MediaNote[]>([]);
   const [status, setStatus] = useState('');
   const [failed, setFailed] = useState(false);
@@ -50,8 +47,7 @@ export function MediaAnnotationView({ file, api, revision, children }: {
     void read(null);
     return () => { controller.abort(); };
   }, [api, file.read_token, revision]);
-  const annotations = useMemo(() => notes.map(note => ({...note, openSource: openSource && (() => openSource(note))})), [notes, openSource]);
-  return <>{children(annotations)}
+  return <>{children(notes)}
     {status && <div role="status">{status}{failed && <button onClick={() => retry.current()}>重新读取批注</button>}</div>}
     {next !== null && !failed && <button className="media-notes-more" disabled={busy} onClick={() => more.current()}>加载更多批注</button>}
   </>;

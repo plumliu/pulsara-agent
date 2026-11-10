@@ -129,8 +129,7 @@ it('shares controls and analysis with hidden native audio while observing its vi
   const observed: Element[] = [];
   let changed!: IntersectionObserverCallback;
   vi.stubGlobal('IntersectionObserver', class { constructor(callback: IntersectionObserverCallback) { changed = callback; } observe(element: Element) { observed.push(element); } disconnect() {} });
-  const source = vi.fn();
-  const note = { resultId: deriveIdentity('result', 'audio-note'), from: 8, to: 24, text: '音频证据', openSource: source };
+  const note = { resultId: deriveIdentity('result', 'audio-note'), from: 8, to: 24, text: '音频证据' };
   const view = render(<StrictMode><FileVideoContent {...props} kind="audio" annotations={[note]} /></StrictMode>);
   const audio = view.container.querySelector('audio')!;
   expect(audio.hidden).toBe(true);
@@ -145,8 +144,7 @@ it('shares controls and analysis with hidden native audio while observing its vi
   expect(audio.paused).toBe(true);
   fireEvent.click(screen.getByRole('button', { name: /查看批注 1/ }));
   expect(audio.currentTime).toBe(8);
-  fireEvent.click(screen.getByRole('button', { name: '定位来源调用' }));
-  expect(source).toHaveBeenCalledOnce();
+  expect(screen.queryByRole('button', { name: '定位来源调用' })).toBeNull();
   view.unmount();
   expect(audio.getAttribute('src')).toBeNull();
 });
@@ -161,6 +159,77 @@ it('keeps an annotation outside the current duration readable and selected witho
   expect(video.currentTime).toBe(40);
   expect(screen.getByText(note.text)).toBeDefined();
   expect(screen.getAllByRole('button', { pressed: true })).toHaveLength(2);
+});
+
+it.each(['video', 'audio'] as const)('follows actual %s playback and seeking after a clicked note, without seeking or pausing on automatic selection', async kind => {
+  const notes = [
+    { resultId: deriveIdentity('result', 'follow-first'), from: 4, to: 9, text: '开场' },
+    { resultId: deriveIdentity('result', 'follow-second'), from: 12, to: 14, text: '问题' },
+    { resultId: deriveIdentity('result', 'follow-third'), from: 16, to: 33, text: '执行过程' },
+  ];
+  const view = render(<FileVideoContent {...props} kind={kind} annotations={notes} />);
+  const player = view.container.querySelector(kind)!;
+  Object.defineProperty(player, 'duration', { value: 60, configurable: true });
+  fireEvent.loadedMetadata(player);
+  const cards = view.container.querySelectorAll<HTMLElement>('.video-note-card');
+  const markers = view.container.querySelectorAll('.video-note-range');
+  const list = view.container.querySelector<HTMLElement>('.video-note-list')!;
+  Object.defineProperty(list, 'clientHeight', { value: 100, configurable: true });
+  Object.defineProperty(cards[2], 'offsetTop', { value: 500, configurable: true });
+  Object.defineProperty(cards[2], 'offsetHeight', { value: 80, configurable: true });
+  fireEvent.click(cards[1]);
+  fireEvent.seeked(player);
+  await player.play();
+  const advance = (time: number) => { player.currentTime = time; fireEvent.timeUpdate(player); };
+  advance(14);
+  expect(cards[1].getAttribute('aria-pressed')).toBe('true'); // Gap retains note 2.
+  advance(18);
+  expect(cards[1].getAttribute('aria-pressed')).toBe('false');
+  expect(cards[2].getAttribute('aria-pressed')).toBe('true');
+  expect(markers[2].getAttribute('aria-pressed')).toBe('true');
+  expect(list.scrollTop).toBe(500);
+  expect(player.currentTime).toBe(18);
+  expect(player.paused).toBe(false);
+  expect(view.container.querySelector(kind)).toBe(player);
+  fireEvent.change(screen.getByRole('slider', { name: `${kind === 'audio' ? '音频' : '视频'}预览位置` }), { target: { value: '5' } });
+  expect(cards[2].getAttribute('aria-pressed')).toBe('true'); // Wait for the native observation.
+  fireEvent.seeked(player);
+  expect(cards[0].getAttribute('aria-pressed')).toBe('true');
+  player.pause();
+  fireEvent.keyDown(view.container.querySelector('.video-layout')!, { key: 'Escape' });
+  fireEvent.timeUpdate(player);
+  fireEvent.pause(player);
+  expect(screen.queryAllByRole('button', { pressed: true })).toHaveLength(0);
+  advance(5.5);
+  expect(cards[0].getAttribute('aria-pressed')).toBe('true');
+  expect(player.paused).toBe(true);
+});
+
+it('keeps the selected note through overlaps and gaps, then selects a containing note when its range ends', () => {
+  const notes = [[0, 10], [5, 15], [5, 15], [20, 22]].map(([from, to], index) => ({
+    resultId: deriveIdentity('result', `follow-overlap-${index}`), from, to, text: `批注 ${index + 1}`,
+  }));
+  const view = render(<FileVideoContent {...props} annotations={notes} />);
+  const player = view.container.querySelector('video')!;
+  metadata(player);
+  const cards = view.container.querySelectorAll('.video-note-card');
+  const advance = (time: number, selected: number) => {
+    player.currentTime = time; fireEvent.timeUpdate(player);
+    expect(cards[selected].getAttribute('aria-pressed')).toBe('true');
+    expect(view.container.querySelectorAll('.video-note-card.is-selected')).toHaveLength(1);
+    expect(player.currentTime).toBe(time);
+  };
+  advance(2, 0);
+  advance(6, 0);
+  advance(10, 1);
+  fireEvent.click(cards[2]);
+  fireEvent.seeked(player);
+  advance(12, 2);
+  advance(15, 2);
+  advance(21, 3);
+  advance(25, 3);
+  advance(7, 1); // Backward seek with equal starts uses the existing list order.
+  advance(0, 0);
 });
 
 it('places dense overlaps without repeated index lookups and keeps every loaded annotation selectable', () => {

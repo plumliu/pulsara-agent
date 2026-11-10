@@ -39,8 +39,8 @@ def read_media_annotations(
         rows.itersize = SESSION_QUERY_MAX_ITEMS
         rows.execute(
             """
-            SELECT DISTINCT ON (e.origin_entry_id) e.origin_entry_id, r.tool_call_entry_id,
-                   r.session_id, a.tool_arguments, r.workspace_id, r.output_body_blob_id,
+            SELECT DISTINCT ON (e.origin_entry_id) e.origin_entry_id, a.tool_arguments,
+                   r.workspace_id, r.output_body_blob_id,
                    r.output_body_inline_content, r.output_body_digest, r.output_body_size,
                    r.output_body_media_type, r.output_body_codec, r.output_unavailability_reason
               FROM pulsara_v3.sessions s
@@ -75,8 +75,6 @@ def read_media_annotations(
             items.append(
                 {
                     "resultId": row["origin_entry_id"],
-                    "entryId": row["tool_call_entry_id"],
-                    "sessionId": row["session_id"],
                     "from": args["from"],
                     "to": args["to"],
                     "text": args["text"],

@@ -626,7 +626,6 @@ export interface RuntimeAdapter {
   }>;
   closeSession(sessionId: string): Promise<{ status: 'closing' }>;
   connect(sessionId: string, takeover?: boolean): Promise<RuntimeConnection | CanonicalHistoryView>;
-  openHistoryReader(sessionId: string, signal?: AbortSignal): Promise<AgentConversationReader>;
   openAgentReader(rootSessionId: string, agentSessionId: string, signal?: AbortSignal): Promise<AgentConversationReader>;
   createAgentContentReader(rootSessionId: string, agentSessionId: string): AgentContentReader;
   createSession(selection: SessionWorkspaceSelection, modelCallBinding?: ModelCallBindingPayload): Promise<SessionSummary>;
@@ -1904,19 +1903,6 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     await connection.initialize();
     if (attempt === this.connectAttempt) this.chatConnection = connection;
     return connection;
-  }
-
-  async openHistoryReader(sessionId: string, signal?: AbortSignal): Promise<AgentConversationReader> {
-    const frame = await apiRequest<{snapshot?: {snapshot?: ProtocolCanonicalSnapshot}; error?: ProtocolError}>(
-      `/api/sessions/${encodeURIComponent(sessionId)}/history-snapshot`, {signal});
-    assertProtocolFrame(frame);
-    const snapshot = frame.snapshot?.snapshot;
-    if (!snapshot || snapshot.session_id !== sessionId) throw new RuntimeApiError('PROTOCOL_RESPONSE_INVALID', '来源会话记录不完整。', true);
-    // As with the existing detached content reader, this reader has no workspace
-    // attachment. The cold history endpoints independently authorize every read.
-    const reader = new CanonicalHistoryView(sessionId, {path:'', outcome:'UNAVAILABLE', reason:null}, snapshot);
-    try { await reader.initialize(); signal?.throwIfAborted(); return reader; }
-    catch (error) { await reader.close(); throw error; }
   }
 
   async openAgentReader(rootSessionId: string, agentSessionId: string, signal?: AbortSignal): Promise<AgentConversationReader> {

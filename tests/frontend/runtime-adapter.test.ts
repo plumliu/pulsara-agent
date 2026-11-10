@@ -3841,25 +3841,3 @@ it('restores media ranges without automatic display and opens only new actual re
   expect(late.mediaRanges).toEqual([]);
   expect(late.mediaReadStarts).toEqual([]);
 });
-
-it('opens archived ROOT history through cold authorized reads without attaching or restoring runtime', async () => {
-  const session='session:archived-source';
-  const fetch=vi.fn(async (input:RequestInfo|URL) => {
-    const url=String(input);
-    if(url.endsWith('/history-snapshot'))return new Response(JSON.stringify({snapshot:{snapshot:{session_id:session,entries:[],control:{},event_sequence_cut:'0'}}}));
-    throw new Error(`Unexpected mutation or attachment: ${url}`);
-  });
-  vi.stubGlobal('fetch',fetch);
-  const reader=await new LocalHttpRuntimeAdapter().openHistoryReader(session);
-  expect(reader.view).toBe('history');
-  expect(reader.sessionId).toBe(session);
-  await reader.snapshot();
-  expect(fetch.mock.calls.map(call=>String(call[0]))).toEqual([`/api/sessions/${encodeURIComponent(session)}/history-snapshot`,`/api/sessions/${encodeURIComponent(session)}/history-snapshot`]);
-  await reader.close();
-});
-it('propagates cold source access denial and rejects a foreign source snapshot identity', async () => {
-  vi.stubGlobal('fetch',vi.fn().mockResolvedValue(new Response(JSON.stringify({error:{code:'NOT_FOUND',message:'Session not found'}}),{status:404})));
-  await expect(new LocalHttpRuntimeAdapter().openHistoryReader('session:foreign')).rejects.toMatchObject({code:'NOT_FOUND'});
-  vi.stubGlobal('fetch',vi.fn().mockResolvedValue(new Response(JSON.stringify({snapshot:{snapshot:{session_id:'session:wrong',entries:[],control:{}}}}))));
-  await expect(new LocalHttpRuntimeAdapter().openHistoryReader('session:expected')).rejects.toMatchObject({code:'PROTOCOL_RESPONSE_INVALID'});
-});

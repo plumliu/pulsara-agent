@@ -75,7 +75,6 @@
 .video-note-body { display: grid; gap: 3px; min-width: 0; flex: 1; font-size: 13px; line-height: 1.55; }
 .video-note-meta { display: flex; align-items: center; gap: 10px; font-size: 12px; line-height: 1.5; color: #76501e; }
 .video-note-meta b { font: 550 12px var(--mono); }
-.video-note-meta svg { margin-left: auto; }
 .video-note-card > svg { align-self: center; }
 
 .video-layout.is-plain { grid-template: 'viewer' minmax(0, 1fr) / minmax(0, 1fr); }
@@ -89,10 +88,6 @@
 .audio-player-source .video-media-error { position: relative; color: var(--ink); background: var(--paper-raised); }
 .audio-player-source .video-loading { position: relative; display: block; bottom: auto; left: auto; margin: 0 16px; }
 
-.video-note-row { position: relative; flex: none; display: flex; gap: 5px; }
-.video-note-row .video-note-card { flex: 1; min-width: 0; }
-.video-note-source { flex: none; align-self: center; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 6px; color: var(--ink-soft); }
-.video-note-source:hover { background: var(--paper-deep); }
 /* The timeline is a viewport over loaded notes, not a bound on annotation count. */
 .video-note-track { max-height: var(--video-note-track-height, min(160px, 20vh)); overflow-y: auto; overscroll-behavior: contain; }
 .media-notes-more { align-self: center; flex: none; margin: 4px 12px 10px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 6px; color: var(--ink); background: var(--paper-solid); }

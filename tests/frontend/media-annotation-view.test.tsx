@@ -4,7 +4,7 @@ import { MediaAnnotationView } from '../../frontend/components/media-annotation-
 import type { FilePreview, FilePreviewApi } from '../../frontend/lib/file-preview';
 
 const file:FilePreview={read_token:'source',path:'/project/media.wav',reading_root:'/project',name:'media.wav',kind:'audio',modified_ns:'1',size:1,notice:null,content_url:'/audio',document_url:null,images_url:null,can_open:false};
-const note=(id:number)=>({resultId:`entry:${id}`,entryId:`entry:${id}`,sessionId:'session:source',from:1,to:2,text:`批注原文 ${id}`});
+const note=(id:number)=>({resultId:`entry:${id}`,from:1,to:2,text:`批注原文 ${id}`});
 const api=():FilePreviewApi=>({open:vi.fn(),close:vi.fn(),snapshot:vi.fn(),page:vi.fn(),action:vi.fn(),annotations:vi.fn()});
 const children=(notes:readonly {resultId:string;text:string}[])=><div>{notes.map(note=><p key={note.resultId}>{note.text}</p>)}</div>;
 afterEach(()=>{cleanup();vi.clearAllMocks();});

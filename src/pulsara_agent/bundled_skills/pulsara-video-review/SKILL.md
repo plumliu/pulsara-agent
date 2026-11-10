@@ -42,6 +42,8 @@ If the user asks whether a brief event occurred anywhere within a specified inte
 
 ## Decide after reading
 
+Naturally incorporate a Markdown link to the reviewed video into the final answer, such as `[brief video description](/absolute/path/to/video)`, even when no video was modified.
+
 Read the actual pictures and time index, then decide what is still needed:
 
 - **Answer is ready:** respond using the relevant times. Stop even if an optional `next` remains.
