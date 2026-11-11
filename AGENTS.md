@@ -78,6 +78,14 @@ Outside the conversation page and its session-scoped controls, pages must use us
 - Allocate at the existing creation boundary and reuse the same ID for the same object. Stable derivation uses explicit roles and canonical semantic inputs. Validate the expected kind at acceptance boundaries without coercion or format repair. ID changes must not alter ownership, permissions, lifecycle, ordering, deduplication, or settlement.
 - External/provider-owned identifiers, sequence counters, content revisions, and full verification digests retain their existing meanings. They must neither become alternate Pulsara object IDs nor be rewritten merely to resemble one.
 
+## 10. Do not introduce internal version labels
+
+- Do not add fields that declare an internal format, implementation, or policy version, such as `schema_version`, `format_version`, `contract_version`, or `estimator_version`. This applies to DTOs, database columns, configuration, persisted bodies, tool results, and test/dogfood reports. Use the single current structure and validate its actual fields and business constraints.
+- Do not recreate these labels through fixed `contract_id`/`schema` strings, generations, fingerprints, registries, compatibility wrappers, or negotiation. A label entering a hash or crossing a process/storage boundary does not independently justify it.
+- Remove redundant labels together with their producers, consumers, constraints, and dedicated tests; do not replace those tests with assertions that the removed fields are absent. Preserve tests of actual product behavior and data validity.
+- Actual content revisions, concurrency/lifecycle counters, external protocol versions, and real package/dependency versions retain their independent meanings. Necessary content digests, MACs, and stable identity or durable trust derivation constants follow section 4; they must not become carried internal version fields.
+- Follow [the internal version subtraction specification](PULSARA_INTERNAL_VERSION_LABEL_SUBTRACTION_HARD_CUT_DRAFT.zh.md) for the concrete deletion and retention boundaries.
+
 ## Execution discipline
 
 - Read the active specification and current production code before changing behavior. Do not treat historical implementation details as current authority.
