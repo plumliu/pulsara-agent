@@ -86,7 +86,7 @@ async def run():
             c.execute(sql.SQL("CREATE DATABASE {} TEMPLATE template0").format(sql.Identifier(database)))
         created = True
         report = PostgresMigrationRunner(admin_dsn=admin, runtime_dsn=runtime_dsn).migrate(deadline_monotonic=monotonic() + 240)
-        assert report.migration_head_version == 0
+        assert report.baseline_commit_confirmation == "FULL"
         with TemporaryDirectory(prefix="pulsara-mcp-network-") as temporary:
             base = Path(temporary).resolve()
             test_home, workspace = base / "home", base / "workspace"

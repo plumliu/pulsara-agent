@@ -368,8 +368,8 @@ def test_memory_graph_and_project_survive_unchanged_with_user_edit(repo, tmp_pat
         connection.execute(
             """INSERT INTO pulsara_v3.memory_embeddings
                (memory_domain_id,fact_id,fact_semantic_digest,
-                embedding_contract_id,embedding_contract_version,embedding)
-               SELECT memory_domain_id,id,fact_semantic_digest,'deletion-test',1,
+                embedding_contract_id,embedding)
+               SELECT memory_domain_id,id,fact_semantic_digest,'deletion-test',
                       ('[' || repeat('0,',1023) || '0]')::public.vector
                FROM pulsara_v3.memory_facts WHERE id=ANY(%s)""", (ids,),
         )

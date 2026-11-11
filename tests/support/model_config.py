@@ -30,7 +30,6 @@ from pulsara_agent.llm.model_connections import (
 from pulsara_agent.llm.model_target import RouteWireRegistry
 from pulsara_agent.llm.normalized_transport import NormalizedLLMTransportRegistry
 from pulsara_agent.llm.provider import RouteWireProfile
-from pulsara_agent.llm.provider_replay import provider_replay_contract_fingerprint
 from pulsara_agent.llm.provider_replay import (
     ProviderReplayTargetCompatibilityFact,
     build_provider_replay_target_compatibility,
@@ -214,9 +213,6 @@ def test_model_runtime(
         replace(
             base_contract,
             model_identity_policy=profile.model_identity_policy,
-            assistant_replay_contract=provider_replay_contract_fingerprint(
-                profile.assistant_replay_codec_kind
-            ),
             profile=profile,
         ),
     )

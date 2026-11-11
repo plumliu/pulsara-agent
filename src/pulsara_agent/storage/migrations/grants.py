@@ -21,9 +21,7 @@ class CleanRuntimeGrantPolicy:
     policy_fingerprint: str
 
 
-def build_postgres_runtime_grant_policy(
-    _through_version: int = 0,
-) -> CleanRuntimeGrantPolicy:
+def build_postgres_runtime_grant_policy() -> CleanRuntimeGrantPolicy:
     payload = json.loads(
         files("pulsara_agent.storage.migrations.resources")
         .joinpath("0000_conversation_kernel_runtime_grants_v1.json")

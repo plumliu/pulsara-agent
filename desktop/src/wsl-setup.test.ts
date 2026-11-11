@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { loadWslPayload, parseWslDistributions, wslResourcePaths } from './wsl-setup';
+import { loadWslPayload, parseWslDistributions, wslResourcePaths, WslSetup } from './wsl-setup';
 
 test('WSL discovery joins actual names to localized version/default observations', () => {
   const names = ['Ubuntu','Ubuntu  中文','Legacy'];
@@ -33,4 +33,17 @@ test('payload manifest carries only the fixed archive content boundary', async (
       await assert.rejects(loadWslPayload(root),/无效/);
     }
   } finally { await rm(root,{recursive:true,force:true}); }
+});
+
+test('WSL preparation reports an unloadable helper before preparing guest resources', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'pulsara-helper-load-'));
+  try {
+    const target = { distro: 'Ubuntu', user: 'pulsara', uid: 1001, home: '/home/pulsara' };
+    const setup = new WslSetup(path.join(root, 'selection.json'));
+    setup.inspect = async () => target;
+    await assert.rejects(setup.prepare(target, {
+      archive: path.join(root, 'payload.tar'), sha256: 'a'.repeat(64), version: '0.1.3-alpha.1',
+      interopHelper: path.join(root, 'missing-helper.exe'),
+    }), { code: 'ENOENT' });
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

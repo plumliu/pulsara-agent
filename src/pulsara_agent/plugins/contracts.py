@@ -21,7 +21,6 @@ PLUGIN_MANIFEST_SCHEMA_ID = (
     "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
 )
 PLUGIN_MCP_SCHEMA_ID = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json"
-PLUGIN_INSTANCE_STATE_CONTRACT_ID = "pulsara.plugin-instance-state.v1"
 
 
 class VisiblePackageId(TypedDict):
@@ -611,7 +610,6 @@ class PluginInstanceState:
     enabled: bool
     workspace_state_key: str | None = None
     mcp_connection_overlays: tuple[PluginMcpConnectionOverlay, ...] = ()
-    contract_id: str = field(default=PLUGIN_INSTANCE_STATE_CONTRACT_ID, init=False)
 
     def __post_init__(self) -> None:
         if not _valid_plugin_id(self.plugin_id) or not _valid_package_install_id(

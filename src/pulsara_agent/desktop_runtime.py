@@ -113,7 +113,6 @@ def prepare_database(postgres: LocalPostgresConfig, *, initialize: bool) -> None
 
 def database_diagnostic(postgres: LocalPostgresConfig, *, command: str,
                         deadline_seconds: float, deep: bool = False) -> dict:
-    from pulsara_agent.storage.migrations.registry import POSTGRES_MIGRATION_REGISTRY
     from pulsara_agent.storage.migrations.runner import _read_identity_from_connection, read_migration_ledger
     from pulsara_agent.storage.migrations.verifier import classify_migration_history
     from pulsara_agent.storage.postgres_connection_provider import PostgresRuntimeConnectionFactory
@@ -132,18 +131,15 @@ def database_diagnostic(postgres: LocalPostgresConfig, *, command: str,
             "status": classify_migration_history(rows).value,
             "database_name": identity.database_name,
             "runtime_role": identity.runtime_role,
-            "migration_head_version": rows[-1].version if rows else None,
-            "expected_head_version": POSTGRES_MIGRATION_REGISTRY.latest_version,
-            "observed_registry_prefix_fingerprint": rows[-1].registry_prefix_fingerprint if rows else None,
-            "expected_registry_prefix_fingerprint": POSTGRES_MIGRATION_REGISTRY.registry_fingerprint,
         }
     if deep:
         return factory.verify_deep(deadline_monotonic=deadline).result.to_dict()
     bundle = factory.verify(deadline_monotonic=deadline)
-    return {"status": "verified", "database_name": bundle.binding.database_name,
-            "runtime_role": bundle.binding.runtime_role,
-            "migration_head_version": bundle.binding.migration_head_version,
-            "result_fingerprint": bundle.result.result_fingerprint}
+    return {
+        "status": "verified",
+        "database_name": bundle.binding.database_name,
+        "runtime_role": bundle.binding.runtime_role,
+    }
 
 
 def request_database_diagnostic(*, command: str, deadline_seconds: float, deep: bool = False) -> dict:

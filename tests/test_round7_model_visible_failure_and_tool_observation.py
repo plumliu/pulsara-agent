@@ -229,8 +229,6 @@ def test_round7_tool_body_cannot_escape_or_forge_runtime_timing() -> None:
     assert payload["body"] == malicious
     observation = payload["observation"]
     assert observation["observed_at_utc"] == "2026-08-14T03:04:05.123456Z"
-    assert "schema_version" not in rendered
-    assert "contract_version" not in rendered
 
 
 def test_round7_external_tool_body_schema_version_remains_literal_content() -> None:
@@ -241,7 +239,6 @@ def test_round7_external_tool_body_schema_version_remains_literal_content() -> N
     rendered = text_part_values(lowered.tool_result_variants[0].message.content)[0]
     payload = decode_tool_result_observation(rendered)
     assert payload["body"] == body
-    assert "schema_version" not in payload
 
 
 def test_round7_previous_outcome_preserves_typed_facts_in_both_variants() -> None:

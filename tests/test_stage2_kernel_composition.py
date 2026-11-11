@@ -29,9 +29,7 @@ from pulsara_agent.capability.bundled_skills import (
     EXPECTED_BUNDLED_SKILL_NAMES,
 )
 from pulsara_agent.capability.local_skills import (
-    AGENT_SKILLS_CONTRACT_ID,
     LOOSE_SKILL_ROOT_ORDER,
-    SKILL_PLACEMENT_CONTRACT_ID,
     LooseSkillDefinitionProducer,
 )
 from pulsara_agent.capability.provider import SkillProjectionOutput
@@ -153,10 +151,8 @@ def _skill_view(composer: KernelSkillProjectionComposer):
         registration_set=registration_set,
         source_snapshots=(builtin_snapshot, owner.source_snapshot),
     )
-    native_contract = context_fingerprint("test:native-contract:v1", "empty")
     native = FrozenNativeToolWireEligibilitySet(
         conversation_scope_kind=ModelInputScopeKind.ROOT,
-        native_function_tool_wire_contract_fingerprint=native_contract,
         entries=(),
     )
     mcp = FrozenMcpCapabilityProjectionInput(
@@ -238,8 +234,6 @@ def test_kernel_composition_preserves_root_catalog_and_active_skill_prompt(
             context_fingerprint(
                 "skill-source-contract:v6-local-enablement",
                 {
-                    "parser_contract": AGENT_SKILLS_CONTRACT_ID,
-                    "placement_contract": SKILL_PLACEMENT_CONTRACT_ID,
                     "producer_kinds": ("LOOSE", "PLUGIN", "BUNDLED"),
                     "precedence": (
                         *(item.value for item in LOOSE_SKILL_ROOT_ORDER),

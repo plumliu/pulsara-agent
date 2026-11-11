@@ -5619,7 +5619,7 @@ function projectScheduledInput(value: ProtocolEntry['scheduled_input']): Message
 
 function decodeCellOutput(content: ProtocolContent | undefined): { source: NonNullable<Message['cellOutput']>; text: string } {
   const value = JSON.parse(decodeContent(content)) as Record<string, unknown>;
-  if (value.schema_version !== 'cell_output.v1' || typeof value.cell_id !== 'string' || typeof value.source_turn_id !== 'string'
+  if (typeof value.cell_id !== 'string' || typeof value.source_turn_id !== 'string'
     || typeof value.source_exec_attempt_id !== 'string' || typeof value.record_sequence !== 'number' || !value.record || typeof value.record !== 'object') {
     throw new RuntimeApiError('CONTENT_INTEGRITY_INVALID', '脚本输出格式无效。', true);
   }

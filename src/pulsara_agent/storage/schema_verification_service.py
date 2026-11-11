@@ -120,15 +120,10 @@ class PostgresSchemaVerificationService:
             factory,
             deadline_monotonic=deadline_monotonic,
         )
-        from pulsara_agent.storage.migrations.registry import (
-            POSTGRES_MIGRATION_REGISTRY,
-        )
-
         key = (
             preflight.database_target_fingerprint,
             preflight.database_identity.database_oid,
             preflight.database_identity.runtime_role,
-            POSTGRES_MIGRATION_REGISTRY.registry_fingerprint,
         )
         with self._lock:
             if self._closing:

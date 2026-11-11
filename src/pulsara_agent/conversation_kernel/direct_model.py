@@ -38,7 +38,7 @@ from pulsara_agent.llm.adapters.openai.chat_completions import (
 from pulsara_agent.llm.adapters.openai.function_tools import (
     freeze_openai_native_tool_eligibility,
     materialize_openai_native_tool_projection_set,
-    openai_native_function_tool_contract_fingerprint,
+    _materialize_openai_function_wire,
 )
 from pulsara_agent.llm.adapters.openai.responses import (
     materialize_responses_context_bearing_wire_projection,
@@ -157,7 +157,6 @@ class PreparedKernelModelTarget:
     call: ResolvedModelCall = field(repr=False)
     maximum_input_tokens: int
     effective_input_budget_tokens: int
-    native_function_tool_wire_contract_fingerprint: str
     transport_timeout_policy_fingerprint: str
     epoch_call_target: FrozenEpochModelCallTarget
 
@@ -178,11 +177,6 @@ class PreparedKernelModelTarget:
             or self.epoch_call_target.target_bundle.target_fact != self.target.fact
         ):
             raise ValueError("prepared model target facts do not exact-join")
-        expected_contract = openai_native_function_tool_contract_fingerprint(
-            self.target.model_profile.route_wire_profile.wire_api
-        )
-        if self.native_function_tool_wire_contract_fingerprint != expected_contract:
-            raise ValueError("prepared model target native contract drifted")
 
 
 @dataclass(frozen=True, slots=True)
@@ -881,9 +875,6 @@ class DirectKernelModelPort:
         input_budget = target.context_budget.input_budget_tokens
         if request.maximum_input_tokens is not None:
             input_budget = min(request.maximum_input_tokens, input_budget)
-        native_contract = openai_native_function_tool_contract_fingerprint(
-            target.model_profile.route_wire_profile.wire_api
-        )
         epoch_call_target = _freeze_epoch_model_call_target(
             request=request,
             target=target,
@@ -899,7 +890,6 @@ class DirectKernelModelPort:
             call=call,
             maximum_input_tokens=input_budget,
             effective_input_budget_tokens=input_budget,
-            native_function_tool_wire_contract_fingerprint=native_contract,
             transport_timeout_policy_fingerprint=(
                 self._transport_timeout_policy_fingerprint
             ),
@@ -1010,9 +1000,7 @@ class DirectKernelModelPort:
         ):
             raise ValueError("resolved model target does not support prepared tools")
         if (
-            native_projection_set.native_function_tool_wire_contract_fingerprint
-            != prepared_target.native_function_tool_wire_contract_fingerprint
-            or native_projection_set.conversation_scope_kind
+            native_projection_set.conversation_scope_kind
             is not surface.conversation_scope_kind
         ):
             raise ValueError("native projection set does not join resolved target")
@@ -1072,9 +1060,7 @@ class DirectKernelModelPort:
         ):
             raise ValueError("resolved model target does not support prepared tools")
         if (
-            native_projection_set.native_function_tool_wire_contract_fingerprint
-            != prepared_target.native_function_tool_wire_contract_fingerprint
-            or native_projection_set.conversation_scope_kind
+            native_projection_set.conversation_scope_kind
             is not tool_surface.conversation_scope_kind
         ):
             raise ValueError("native projection set does not join resolved target")
@@ -1294,10 +1280,6 @@ def provider_wire_profile_fingerprint(call: ResolvedModelCall) -> str:
                 )
                 for item in profile.chat_replay_fields
             ),
-            "assistant_replay": profile.assistant_replay_contract_fingerprint,
-            "function_tools": openai_native_function_tool_contract_fingerprint(
-                profile.wire_api
-            ),
         },
     )
 
@@ -1458,16 +1440,20 @@ def _semantic_wire_groups(
         )
     else:  # pragma: no cover - resolved transport registry is closed
         raise ValueError("provider wire API is unsupported")
-    expected_contract = openai_native_function_tool_contract_fingerprint(
-        profile.wire_api
-    )
     if (
-        native_projection_set.native_function_tool_wire_contract_fingerprint
-        != expected_contract
-        or tuple(item.name for item in semantic_input.tools)
+        tuple(item.name for item in semantic_input.tools)
         != tuple(item.provider_name for item in native_projection_set.tool_versions)
     ):
         raise ValueError("native tool projection set does not join compiled tools")
+    if any(
+        projection.wire_tool != _materialize_openai_function_wire(
+            wire_api=profile.wire_api, canonical_spec=spec
+        )
+        for spec, projection in zip(
+            semantic_input.tools, native_projection_set.projections, strict=True
+        )
+    ):
+        raise ValueError("native tool projection differs from its target wire API")
     tools = tuple(
         thaw_json(item.wire_tool) for item in native_projection_set.projections
     )

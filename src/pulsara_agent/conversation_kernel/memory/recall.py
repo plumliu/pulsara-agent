@@ -658,7 +658,7 @@ class PostgresMemoryQuery:
                  AND f.fact_semantic_digest=e.fact_semantic_digest
                 WHERE f.memory_domain_id=%s AND f.lifecycle='ACTIVE'
                   AND e.embedding_contract_id=%s
-                  AND e.embedding_contract_version=%s AND ({conditions})
+                  AND ({conditions})
                   AND (%s = false OR f.fact_kind <> 'RESPONSE_PREFERENCE')
                 ORDER BY e.embedding <=> %s::public.vector ASC LIMIT %s
                 """,
@@ -666,7 +666,6 @@ class PostgresMemoryQuery:
                     literal,
                     read_binding.memory_domain_id,
                     embedding_contract.contract_id,
-                    embedding_contract.contract_version,
                     *parameters,
                     automatic,
                     literal,

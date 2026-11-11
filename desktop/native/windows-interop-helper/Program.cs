@@ -400,7 +400,7 @@ internal static class Program
         Console.InputEncoding = Utf8; Console.OutputEncoding = Utf8;
         try
         {
-            if (args.Length == 1 && args[0] == "--version") { Console.WriteLine("pulsara-interop 1"); return 0; }
+            if (args.Length == 1 && args[0] == "--version") { return 0; }
             if (args.Length == 1 && args[0] == "--probe") return Probe();
             if (args.Length == 1 && args[0] == "--scope") return Scope();
             if (args.Length == 3 && args[0] == "--monitor") return Monitor(args);

@@ -478,16 +478,8 @@ class _SubagentOperations:
                 ).fetchone()["latest_prompt_queue_sequence"]
                 connection.execute(
                     """INSERT INTO pulsara_v3.prompt_queue_items
-                    (id,session_id,workspace_id,queue_sequence,delivery_mode,input_origin,
-                     source_session_id,source_turn_id,source_tool_attempt_id,
-                     initial_context,work_inputs,work_title,model_call_binding,status,
-                     inline_content,blob_id,content_digest,content_size,content_media_type,content_codec,
-                     permission_snapshot_id,requested_permission_mode,effective_permission_mode,permission_admission_source,
-                     permission_overlay,permission_plan_context_ordinal,permission_plan_workflow_id,
-                     permission_plan_revision_at_admission,permission_inherited_from_turn_id,permission_contract_id,
-                     permission_contract_fingerprint,permission_snapshot_fingerprint)
-                    VALUES (%s,%s,%s,%s,'NEW_TURN','AGENT_INSTRUCTION',%s,%s,%s,%s,%s,%s,%s,'PENDING',
-                    %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (id, session_id, workspace_id, queue_sequence, delivery_mode, input_origin, source_session_id, source_turn_id, source_tool_attempt_id, initial_context, work_inputs, work_title, model_call_binding, status, inline_content, blob_id, content_digest, content_size, content_media_type, content_codec, permission_snapshot_id, requested_permission_mode, effective_permission_mode, permission_admission_source, permission_overlay, permission_plan_context_ordinal, permission_plan_workflow_id, permission_plan_revision_at_admission, permission_inherited_from_turn_id, permission_snapshot_fingerprint)
+                    VALUES (%s, %s, %s, %s, 'NEW_TURN', 'AGENT_INSTRUCTION', %s, %s, %s, %s, %s, %s, %s, 'PENDING', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                     (
                         req.work_id,
                         req.agent_id,

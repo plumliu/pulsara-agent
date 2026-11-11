@@ -37,8 +37,6 @@ from pulsara_agent.primitives.context import (
     thaw_json,
 )
 from pulsara_agent.primitives.permission import (
-    PERMISSION_PRESET_CONTRACT_FINGERPRINT,
-    PERMISSION_PRESET_CONTRACT_ID,
     PermissionMode,
 )
 from pulsara_agent.primitives.run_permission import (
@@ -52,7 +50,6 @@ from pulsara_agent.primitives.plan_workflow import (
     PlanDraftTextChunk,
     PlanDraftDecision,
     PlanHandoffKind,
-    PlanInteractionBinding,
     PlanInteractionKind,
     PlanQuestionAnswerKind,
     PlanQuestionContent,
@@ -140,11 +137,6 @@ def _plan_question_result_values(
         raise ConversationKernelConflict("Plan question arguments are invalid")
     content = extract_plan_question(
         interaction_id=str(interaction["id"]),
-        binding=PlanInteractionBinding(
-            str(interaction["request_contract_id"]),
-            str(interaction["request_contract_version"]),
-            str(interaction["request_contract_fingerprint"]),
-        ),
         arguments=frozen,
     )
     response = ({"cancelled_by": "USER_CANCELLED", "message": "用户取消了问题"} if answer is None
@@ -182,10 +174,6 @@ def _freeze_active_plan_workflow_fact(
         "workflow_status": PlanWorkflowStatus.ACTIVE,
         "entered_by": PlanWorkflowEnteredBy(str(row["entered_by"])),
         "resume_permission_mode": PermissionMode(str(row["resume_permission_mode"])),
-        "permission_contract_id": str(row["permission_contract_id"]),
-        "permission_contract_fingerprint": str(
-            row["permission_contract_fingerprint"]
-        ),
     }
     provisional = FrozenPlanWorkflowCompileFact.__new__(
         FrozenPlanWorkflowCompileFact
@@ -961,8 +949,6 @@ class _PlanOperations:
             SELECT i.*, w.status AS workflow_status,
                    w.workflow_revision, w.workflow_ordinal,
                    w.resume_permission_mode, w.entered_by,
-                   w.permission_contract_id,
-                   w.permission_contract_fingerprint,
                    b.tool_arguments, t.permission_snapshot_fingerprint,
                    (
                      SELECT COUNT(*) - 1
@@ -1281,12 +1267,11 @@ class _PlanOperations:
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.session_commands (
-                    session_id, command_id, command_kind,
-                    request_schema_version, semantic_digest,
-                    target_kind, target_plan_interaction_id
-                ) VALUES (%s, %s, 'RESOLVE_PLAN_INTERACTION',
-                          'resolve_plan_question.v1', %s,
-                          'PLAN_INTERACTION', %s)
+                session_id, command_id, command_kind, semantic_digest, target_kind,
+                target_plan_interaction_id
+            ) VALUES (
+                %s, %s, 'RESOLVE_PLAN_INTERACTION', %s, 'PLAN_INTERACTION', %s
+            )
                 """,
                 (guard.session_id, command_id, semantic_digest, interaction_id),
             )
@@ -1498,23 +1483,22 @@ class _PlanOperations:
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.session_commands (
-                    session_id, command_id, command_kind,
-                    request_schema_version, semantic_digest,
-                    target_kind, target_plan_workflow_id
-                ) VALUES (%s, %s, 'ENTER_PLAN', 'enter_plan.v1', %s,
-                          'PLAN_WORKFLOW', %s)
+                session_id, command_id, command_kind, semantic_digest, target_kind,
+                target_plan_workflow_id
+            ) VALUES (
+                %s, %s, 'ENTER_PLAN', %s, 'PLAN_WORKFLOW', %s
+            )
                 """,
                 (guard.session_id, command_id, semantic_digest, workflow_id),
             )
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.plan_workflows (
-                    id, session_id, workspace_id, workflow_ordinal,
-                    status, entered_by, entry_reason, entry_command_id,
-                    resume_permission_mode, permission_contract_id,
-                    permission_contract_fingerprint, workflow_revision
-                ) VALUES (%s, %s, %s, %s, 'ACTIVE', 'USER', %s, %s,
-                          %s, %s, %s, 1)
+                id, session_id, workspace_id, workflow_ordinal, status, entered_by, entry_reason,
+                entry_command_id, resume_permission_mode, workflow_revision
+            ) VALUES (
+                %s, %s, %s, %s, 'ACTIVE', 'USER', %s, %s, %s, 1
+            )
                 """,
                 (
                     workflow_id,
@@ -1524,8 +1508,6 @@ class _PlanOperations:
                     entry_reason,
                     command_id,
                     resume_permission_mode.value,
-                    PERMISSION_PRESET_CONTRACT_ID,
-                    PERMISSION_PRESET_CONTRACT_FINGERPRINT,
                 ),
             )
             self._append_events(
@@ -1806,11 +1788,11 @@ class _PlanOperations:
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.session_commands (
-                    session_id, command_id, command_kind,
-                    request_schema_version, semantic_digest,
-                    target_kind, target_plan_workflow_id
-                ) VALUES (%s, %s, %s, 'plan_exit.v1', %s,
-                          'PLAN_WORKFLOW', %s)
+                session_id, command_id, command_kind, semantic_digest, target_kind,
+                target_plan_workflow_id
+            ) VALUES (
+                %s, %s, %s, %s, 'PLAN_WORKFLOW', %s
+            )
                 """,
                 (
                     guard.session_id,
@@ -1878,8 +1860,6 @@ class _PlanOperations:
             SELECT i.*, w.status AS workflow_status,
                    w.workflow_revision, w.workflow_ordinal,
                    w.resume_permission_mode, w.entered_by,
-                   w.permission_contract_id,
-                   w.permission_contract_fingerprint,
                    b.tool_arguments, t.permission_snapshot_fingerprint,
                    t.model_call_binding AS origin_model_call_binding
             FROM pulsara_v3.plan_interactions AS i
@@ -2017,11 +1997,6 @@ class _PlanOperations:
                     interaction_id=interaction_id,
                     assistant_entry_id=str(interaction["assistant_entry_id"]),
                     tool_call_id=str(interaction["tool_call_id"]),
-                    binding=PlanInteractionBinding(
-                        str(interaction["request_contract_id"]),
-                        str(interaction["request_contract_version"]),
-                        str(interaction["request_contract_fingerprint"]),
-                    ),
                     request_semantic_digest=str(interaction["request_semantic_digest"]),
                     arguments=frozen,
                 )
@@ -2135,12 +2110,11 @@ class _PlanOperations:
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.session_commands (
-                    session_id, command_id, command_kind,
-                    request_schema_version, semantic_digest,
-                    target_kind, target_plan_interaction_id
-                ) VALUES (%s, %s, 'RESOLVE_PLAN_INTERACTION',
-                          'resolve_plan_draft.v2', %s,
-                          'PLAN_INTERACTION', %s)
+                session_id, command_id, command_kind, semantic_digest, target_kind,
+                target_plan_interaction_id
+            ) VALUES (
+                %s, %s, 'RESOLVE_PLAN_INTERACTION', %s, 'PLAN_INTERACTION', %s
+            )
                 """,
                 (guard.session_id, command_id, semantic_digest, interaction_id),
             )
@@ -2372,11 +2346,6 @@ class _PlanOperations:
                 raise ConversationKernelConflict("Plan question arguments are invalid")
             return extract_plan_question(
                 interaction_id=interaction_id,
-                binding=PlanInteractionBinding(
-                    str(row["request_contract_id"]),
-                    str(row["request_contract_version"]),
-                    str(row["request_contract_fingerprint"]),
-                ),
                 arguments=arguments,
             )
 
@@ -2410,11 +2379,6 @@ class _PlanOperations:
                 interaction_id=interaction_id,
                 assistant_entry_id=str(row["assistant_entry_id"]),
                 tool_call_id=str(row["tool_call_id"]),
-                binding=PlanInteractionBinding(
-                    str(row["request_contract_id"]),
-                    str(row["request_contract_version"]),
-                    str(row["request_contract_fingerprint"]),
-                ),
                 request_semantic_digest=str(row["request_semantic_digest"]),
                 arguments=arguments,
             )
@@ -2465,7 +2429,6 @@ class _PlanOperations:
             )
         try:
             reason = extract_plan_entry_reason(
-                binding=candidate.request_binding,
                 arguments=candidate.selected_arguments,
             )
         except ValueError as exc:
@@ -2483,13 +2446,12 @@ class _PlanOperations:
         connection.execute(
             """
             INSERT INTO pulsara_v3.plan_workflows (
-                id, session_id, workspace_id, workflow_ordinal,
-                status, entered_by, entry_reason, entry_turn_id,
-                entry_assistant_entry_id, entry_tool_call_id,
-                resume_permission_mode, permission_contract_id,
-                permission_contract_fingerprint, workflow_revision
-            ) VALUES (%s, %s, %s, %s, 'ACTIVE', 'AGENT', %s,
-                      %s, %s, %s, %s, %s, %s, 1)
+                id, session_id, workspace_id, workflow_ordinal, status, entered_by, entry_reason,
+                entry_turn_id, entry_assistant_entry_id, entry_tool_call_id, resume_permission_mode,
+                workflow_revision
+            ) VALUES (
+                %s, %s, %s, %s, 'ACTIVE', 'AGENT', %s, %s, %s, %s, %s, 1
+            )
             """,
             (
                 candidate.workflow_id,
@@ -2501,8 +2463,6 @@ class _PlanOperations:
                 candidate.assistant_entry_id,
                 selected.tool_call_id,
                 candidate.permission_snapshot.requested_mode.value,
-                candidate.permission_snapshot.permission_contract_id,
-                candidate.permission_snapshot.permission_contract_fingerprint,
             ),
         )
         return ordinal, 1
@@ -2588,11 +2548,6 @@ class _PlanOperations:
         request_digest = canonical_digest(
             "pulsara:plan-interaction-request:v1",
             {
-                "binding": {
-                    "id": candidate.request_binding.contract_id,
-                    "version": candidate.request_binding.contract_version,
-                    "fingerprint": candidate.request_binding.contract_fingerprint,
-                },
                 "arguments": thaw_json(candidate.selected_arguments),
             },
         )
@@ -2600,7 +2555,6 @@ class _PlanOperations:
         if candidate.control_kind is PlanToolControlKind.QUESTION:
             question = extract_plan_question(
                 interaction_id=candidate.interaction_id,
-                binding=candidate.request_binding,
                 arguments=candidate.selected_arguments,
             )
             draft = None
@@ -2612,7 +2566,6 @@ class _PlanOperations:
                 interaction_id=candidate.interaction_id,
                 assistant_entry_id=candidate.assistant_entry_id,
                 tool_call_id=selected.tool_call_id,
-                binding=candidate.request_binding,
                 request_semantic_digest=request_digest,
                 arguments=candidate.selected_arguments,
             )
@@ -2621,14 +2574,12 @@ class _PlanOperations:
         connection.execute(
             """
             INSERT INTO pulsara_v3.plan_interactions (
-                id, session_id, workspace_id, plan_workflow_id,
-                interaction_ordinal, kind, status, origin_turn_id,
-                assistant_entry_id, tool_call_id,
-                request_contract_id, request_contract_version,
-                request_contract_fingerprint, request_semantic_digest,
+                id, session_id, workspace_id, plan_workflow_id, interaction_ordinal, kind, status,
+                origin_turn_id, assistant_entry_id, tool_call_id, request_semantic_digest,
                 control_tool_result_id
-            ) VALUES (%s, %s, %s, %s, %s, %s, 'OPEN', %s, %s,
-                      %s, %s, %s, %s, %s, %s)
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, 'OPEN', %s, %s, %s, %s, %s
+            )
             """,
             (
                 candidate.interaction_id,
@@ -2640,9 +2591,6 @@ class _PlanOperations:
                 candidate.origin_turn_id,
                 candidate.assistant_entry_id,
                 selected.tool_call_id,
-                candidate.request_binding.contract_id,
-                candidate.request_binding.contract_version,
-                candidate.request_binding.contract_fingerprint,
                 request_digest,
                 control_result_id,
             ),
@@ -2675,17 +2623,15 @@ class _PlanOperations:
         connection.execute(
             """
             INSERT INTO pulsara_v3.turns (
-                id, session_id, workspace_id,                 model_call_binding, status, initial_entry_id,
-                current_context_binding_revision_id,
-                permission_snapshot_id, requested_permission_mode,
-                effective_permission_mode, permission_admission_source,
-                permission_overlay, permission_plan_context_ordinal,
-                permission_plan_workflow_id,
-                permission_plan_revision_at_admission,
-                permission_inherited_from_turn_id, permission_contract_id,
-                permission_contract_fingerprint, permission_snapshot_fingerprint
-            ) VALUES (%s, %s, %s, %s, 'RUNNING', %s, %s,
-                      %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                id, session_id, workspace_id, model_call_binding, status, initial_entry_id,
+                current_context_binding_revision_id, permission_snapshot_id,
+                requested_permission_mode, effective_permission_mode, permission_admission_source,
+                permission_overlay, permission_plan_context_ordinal, permission_plan_workflow_id,
+                permission_plan_revision_at_admission, permission_inherited_from_turn_id,
+                permission_snapshot_fingerprint
+            ) VALUES (
+                %s, %s, %s, %s, 'RUNNING', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            )
             """,
             (
                 candidate.continuation_turn_id,
@@ -3114,7 +3060,6 @@ class _PlanOperations:
                 workflow_revision = int(key_row["workflow_revision"])
             else:
                 expected_reason = extract_plan_entry_reason(
-                    binding=candidate.request_binding,
                     arguments=candidate.selected_arguments,
                 )
                 if (
@@ -3129,10 +3074,6 @@ class _PlanOperations:
                     != candidate.calls[candidate.selected_call_ordinal].tool_call_id
                     or str(key_row["resume_permission_mode"])
                     != candidate.permission_snapshot.requested_mode.value
-                    or str(key_row["permission_contract_id"])
-                    != candidate.permission_snapshot.permission_contract_id
-                    or str(key_row["permission_contract_fingerprint"])
-                    != candidate.permission_snapshot.permission_contract_fingerprint
                     or int(key_row["workflow_revision"]) != 1
                     or key_row["accepted_plan_interaction_id"] is not None
                 ):
@@ -3155,11 +3096,6 @@ class _PlanOperations:
             request_digest = canonical_digest(
                 "pulsara:plan-interaction-request:v1",
                 {
-                    "binding": {
-                        "id": candidate.request_binding.contract_id,
-                        "version": candidate.request_binding.contract_version,
-                        "fingerprint": (candidate.request_binding.contract_fingerprint),
-                    },
                     "arguments": thaw_json(candidate.selected_arguments),
                 },
             )
@@ -3182,12 +3118,6 @@ class _PlanOperations:
                 != candidate.calls[candidate.selected_call_ordinal].tool_call_id
                 or str(key_row["kind"]) != expected_interaction_kind.value
                 or str(key_row["status"]) != "OPEN"
-                or str(key_row["request_contract_id"])
-                != candidate.request_binding.contract_id
-                or str(key_row["request_contract_version"])
-                != candidate.request_binding.contract_version
-                or str(key_row["request_contract_fingerprint"])
-                != candidate.request_binding.contract_fingerprint
                 or str(key_row["request_semantic_digest"]) != request_digest
                 or key_row["control_tool_result_id"] != expected_control_result_id
                 or key_row["resolution_command_id"] is not None
@@ -3220,7 +3150,6 @@ class _PlanOperations:
             if interaction_kind is PlanInteractionKind.QUESTION:
                 question = extract_plan_question(
                     interaction_id=str(key_row["id"]),
-                    binding=candidate.request_binding,
                     arguments=selected_arguments,
                 )
             else:
@@ -3228,7 +3157,6 @@ class _PlanOperations:
                     interaction_id=str(key_row["id"]),
                     assistant_entry_id=candidate.assistant_entry_id,
                     tool_call_id=str(key_row["tool_call_id"]),
-                    binding=candidate.request_binding,
                     request_semantic_digest=str(key_row["request_semantic_digest"]),
                     arguments=selected_arguments,
                 )
@@ -3400,17 +3328,15 @@ class _PlanOperations:
         connection.execute(
             """
             INSERT INTO pulsara_v3.turns (
-                id, session_id, workspace_id,                 model_call_binding, status, initial_entry_id,
-                current_context_binding_revision_id,
-                permission_snapshot_id, requested_permission_mode,
-                effective_permission_mode, permission_admission_source,
-                permission_overlay, permission_plan_context_ordinal,
-                permission_plan_workflow_id,
-                permission_plan_revision_at_admission,
-                permission_inherited_from_turn_id, permission_contract_id,
-                permission_contract_fingerprint, permission_snapshot_fingerprint
-            ) VALUES (%s, %s, %s, %s, 'RUNNING', %s, %s,
-                      %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                id, session_id, workspace_id, model_call_binding, status, initial_entry_id,
+                current_context_binding_revision_id, permission_snapshot_id,
+                requested_permission_mode, effective_permission_mode, permission_admission_source,
+                permission_overlay, permission_plan_context_ordinal, permission_plan_workflow_id,
+                permission_plan_revision_at_admission, permission_inherited_from_turn_id,
+                permission_snapshot_fingerprint
+            ) VALUES (
+                %s, %s, %s, %s, 'RUNNING', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            )
             """,
             (
                 turn_id,
@@ -3545,8 +3471,6 @@ class _PlanOperations:
                    i.control_tool_result_id,
                    i.origin_turn_id, i.workspace_id,
                    i.assistant_entry_id, i.tool_call_id,
-                   i.request_contract_id, i.request_contract_version,
-                   i.request_contract_fingerprint,
                    i.answer_kind, i.selected_option_ordinal,
                    w.status AS workflow_status, w.resume_permission_mode,
                    w.workflow_revision,

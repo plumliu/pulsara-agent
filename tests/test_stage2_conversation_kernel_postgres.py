@@ -30,9 +30,6 @@ from pulsara_agent.conversation_kernel.blob import (
 from pulsara_agent.conversation_kernel.memory import PostgresMemoryQuery
 from tests.support.round3 import new_test_provider_input_continuity_owner
 from pulsara_agent.conversation_kernel.compaction.contracts import (
-    COMPACTION_MODEL_CONTRACT,
-    COMPACTION_SNAPSHOT_COMPILER_CONTRACT,
-    COMPACTION_SUMMARY_PROMPT_CONTRACT,
     CONTEXT_SNAPSHOT_CODEC,
     CONTEXT_SNAPSHOT_MEDIA_TYPE,
     CompactionCanonicalAdoptionFactoryInput,
@@ -2165,9 +2162,9 @@ def test_round3_1_steer_consume_rejects_canonical_base_drift_without_mutation(
             ),
             snapshot_content=_snapshot_content(snapshot_carrier),
             snapshot_carrier=snapshot_carrier,
-            compiler_contract=COMPACTION_SNAPSHOT_COMPILER_CONTRACT,
-            prompt_contract=COMPACTION_SUMMARY_PROMPT_CONTRACT,
-            model_contract=COMPACTION_MODEL_CONTRACT,
+
+
+
             occurred_at=datetime.now(timezone.utc),
             actor_id="runtime:test",
         )
@@ -2227,9 +2224,9 @@ def test_round3_1_steer_consume_rejects_canonical_base_drift_without_mutation(
             ),
             snapshot_content=_snapshot_content(conflicting_carrier),
             snapshot_carrier=conflicting_carrier,
-            compiler_contract=COMPACTION_SNAPSHOT_COMPILER_CONTRACT,
-            prompt_contract=COMPACTION_SUMMARY_PROMPT_CONTRACT,
-            model_contract=COMPACTION_MODEL_CONTRACT,
+
+
+
             occurred_at=compaction_candidate.event.occurred_at,
             actor_id="runtime:test",
         )
@@ -2404,9 +2401,9 @@ def test_round5b_first_compaction_can_cut_before_turn_genesis_marker(
             source_digest=canonical_compaction_range_digest(lineage, canonical_range),
             snapshot_content=_snapshot_content(snapshot_carrier),
             snapshot_carrier=snapshot_carrier,
-            compiler_contract=COMPACTION_SNAPSHOT_COMPILER_CONTRACT,
-            prompt_contract=COMPACTION_SUMMARY_PROMPT_CONTRACT,
-            model_contract=COMPACTION_MODEL_CONTRACT,
+
+
+
             occurred_at=datetime.now(timezone.utc),
             actor_id="runtime:test",
         )
@@ -2593,9 +2590,9 @@ def test_round5b_next_exact_scope_turn_inherits_latest_snapshot_base(
             ),
             snapshot_content=_snapshot_content(snapshot_carrier),
             snapshot_carrier=snapshot_carrier,
-            compiler_contract=COMPACTION_SNAPSHOT_COMPILER_CONTRACT,
-            prompt_contract=COMPACTION_SUMMARY_PROMPT_CONTRACT,
-            model_contract=COMPACTION_MODEL_CONTRACT,
+
+
+
             occurred_at=datetime.now(timezone.utc),
             actor_id="runtime:test",
         )

@@ -68,16 +68,13 @@ from pulsara_agent.primitives.tool_result_projection import (
     MAXIMUM_TOOL_RESULT_MEMORY_PROVENANCE_UTF8_BYTES,
 )
 from pulsara_agent.primitives.plan_workflow import (
-    PLAN_ENTRY_CONTRACT,
     ExtractedPlanDraft,
     PlanDraftDecision,
     PlanHandoffKind,
-    PlanInteractionBinding,
     PlanInteractionKind,
     PlanQuestionAnswerKind,
     PlanQuestionContent,
     PlanWorkflowStatus,
-    require_plan_interaction_contract,
 )
 from pulsara_agent.conversation_kernel.vocabulary import CommittedEventType, SubjectSlot
 from pulsara_agent.conversation_kernel.steer import PromptIngressWriteRejection, StartedTurnInputGroup
@@ -678,7 +675,6 @@ class PreparedPlanToolBatch:
     selected_call_ordinal: int
     control_kind: PlanToolControlKind
     selected_arguments: FrozenJsonObjectFact
-    request_binding: PlanInteractionBinding
     permission_snapshot: FrozenRunPermissionSnapshot
     workflow_id: str | None
     expected_workflow_revision: int | None
@@ -708,13 +704,6 @@ class PreparedPlanToolBatch:
         }[self.control_kind]
         if selected.tool_name != expected_name:
             raise ValueError("prepared Plan selected call kind conflicts")
-        if self.control_kind is PlanToolControlKind.ENTER:
-            if self.request_binding.identity != PLAN_ENTRY_CONTRACT:
-                raise ValueError("Plan entry contract is unavailable")
-        else:
-            require_plan_interaction_contract(
-                self.request_binding, expected_tool_name=expected_name
-            )
         if len({item.tool_call_id for item in self.calls}) != len(self.calls):
             raise ValueError("prepared Plan batch call identity is duplicated")
         rejected = self.selected_disposition is not PlanToolBatchDisposition.APPLY
@@ -777,11 +766,6 @@ class PreparedPlanToolBatch:
             "selected_call_ordinal": self.selected_call_ordinal,
             "control_kind": self.control_kind.value,
             "selected_arguments": thaw_json(self.selected_arguments),
-            "request_binding": {
-                "id": self.request_binding.contract_id,
-                "version": self.request_binding.contract_version,
-                "fingerprint": self.request_binding.contract_fingerprint,
-            },
             "permission_snapshot": self.permission_snapshot.snapshot_fingerprint,
             "workflow_id": self.workflow_id,
             "expected_workflow_revision": self.expected_workflow_revision,

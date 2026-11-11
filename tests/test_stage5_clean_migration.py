@@ -1,4 +1,4 @@
-"""Stage 5 clean-universe migration, binding-v2, and reset-only gates."""
+"""Clean baseline installation, verification, and reset-only gates."""
 
 from __future__ import annotations
 
@@ -17,16 +17,13 @@ from pulsara_agent.storage.migrations.contracts import (
     BASELINE_RESOURCE,
     CATALOG_RESOURCE,
     GRANT_RESOURCE,
-    UNIVERSE_GENERATION,
-    UNIVERSE_ID,
-    build_migration_universe_identity,
 )
 from pulsara_agent.storage.migrations.errors import (
     PostgresSchemaError,
     PostgresSchemaFailureCode,
 )
 from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
-from pulsara_agent.storage.migrations.registry import POSTGRES_MIGRATION_REGISTRY
+from pulsara_agent.storage.migrations.registry import POSTGRES_BASELINE
 from pulsara_agent.storage.migrations.runner import (
     BaselineCommitConfirmation,
     PostgresMigrationRunner,
@@ -111,8 +108,8 @@ class _CommitFaultConnection:
                 with psycopg.connect(self._admin_dsn) as observer:
                     observer.execute(
                         "UPDATE public.pulsara_schema_migrations "
-                        "SET registry_prefix_fingerprint = %s WHERE version = 0",
-                        ("sha256:" + "0" * 64,),
+                        "SET resource_sha256 = %s",
+                        ("0" * 64,),
                     )
                     observer.commit()
         raise OSError("injected lost commit acknowledgement")
@@ -139,24 +136,7 @@ class _CommitFaultFactory:
             )
 
 
-def test_clean_migration_identity_golden_and_resource_tree_are_exact() -> None:
-    identity = build_migration_universe_identity(
-        baseline_sql_sha256="11" * 32,
-        catalog_sha256="22" * 32,
-        grant_sha256="33" * 32,
-    )
-    assert identity.baseline_contract_fingerprint == (
-        "sha256:8390ab92c98ed167b03a3fd73943750bd23b148538c4eb5f75714b5398cbd240"
-    )
-    assert identity.universe_fingerprint == (
-        "sha256:9f3b3cc41831e3dd7ddff91ff9b0c4f35d421745c25a3d346331c95a2073ca19"
-    )
-    assert identity.genesis_registry_prefix_fingerprint == (
-        "sha256:62c84b5c8e9dec93c3c76f1ba4da1892983dd431bc1be51d6d3d9cb12d7cdcc4"
-    )
-    assert UNIVERSE_ID == "pulsara.conversation-kernel.v1"
-    assert UNIVERSE_GENERATION == 1
-    assert POSTGRES_MIGRATION_REGISTRY.latest_version == 0
+def test_clean_baseline_resource_tree_is_exact() -> None:
     root = files("pulsara_agent.storage.migrations")
     sql_names = tuple(
         item.name
@@ -172,18 +152,15 @@ def test_clean_migration_identity_golden_and_resource_tree_are_exact() -> None:
     )
     assert sql_names == (BASELINE_RESOURCE,)
     assert resource_names == tuple(sorted((CATALOG_RESOURCE, GRANT_RESOURCE)))
-    definition = POSTGRES_MIGRATION_REGISTRY.definition(0)
+    definition = POSTGRES_BASELINE
     assert sha256(definition.resource_bytes()).hexdigest() == definition.expected_sha256
 
 
-def test_empty_install_second_migrate_and_binding_v2_checkout() -> None:
+def test_empty_install_second_migrate_and_verified_checkout() -> None:
     with _empty_database() as database:
         runner = _runner(database)
         first = runner.migrate(deadline_monotonic=monotonic() + 60)
-        second = runner.migrate(deadline_monotonic=monotonic() + 60)
-        assert first.applied_versions == (0,)
-        assert second.applied_versions == ()
-        assert first.universe_fingerprint == second.universe_fingerprint
+        runner.migrate(deadline_monotonic=monotonic() + 60)
         assert first.baseline_commit_confirmation == "FULL"
 
         with acquire_verified_postgres_access_sync(
@@ -191,9 +168,6 @@ def test_empty_install_second_migrate_and_binding_v2_checkout() -> None:
             deadline_monotonic=monotonic() + 30,
         ) as access:
             binding = access.schema_binding
-            assert binding.migration_universe_id == UNIVERSE_ID
-            assert binding.migration_universe_generation == 1
-            assert binding.migration_head_version == 0
             assert not hasattr(binding, "runtime_write_epoch")
             assert not hasattr(binding, "guard_secret")
             provider = access.connection_provider
@@ -310,28 +284,7 @@ def test_runtime_connection_accepts_far_future_deadline_without_guc_overflow() -
             assert connection.execute("SELECT 1").fetchone() == (1,)
 
 
-def test_old_ledger_and_unmanaged_object_require_reset_without_advancing_ddl() -> None:
-    with _empty_database() as database:
-        with psycopg.connect(database.admin_dsn) as connection:
-            connection.execute(
-                "CREATE TABLE public.pulsara_schema_migrations "
-                "(version integer PRIMARY KEY, name text NOT NULL)"
-            )
-            connection.execute(
-                "INSERT INTO public.pulsara_schema_migrations VALUES (13, 'old_head')"
-            )
-            connection.commit()
-        with pytest.raises(PostgresSchemaError) as caught:
-            _runner(database).migrate(deadline_monotonic=monotonic() + 30)
-        assert caught.value.code is (
-            PostgresSchemaFailureCode.MIGRATION_UNIVERSE_RESET_REQUIRED
-        )
-        with psycopg.connect(database.admin_dsn) as connection:
-            assert connection.execute(
-                "SELECT to_regnamespace('pulsara_v3'), count(*) "
-                "FROM public.pulsara_schema_migrations"
-            ).fetchone() == (None, 1)
-
+def test_unmanaged_object_requires_reset_without_advancing_ddl() -> None:
     with _empty_database() as database:
         with psycopg.connect(database.admin_dsn) as connection:
             connection.execute("CREATE TABLE public.sessions (id text PRIMARY KEY)")
@@ -382,8 +335,8 @@ def test_baseline_confirmation_is_closed_full_none_conflict() -> None:
         with psycopg.connect(database.admin_dsn) as connection:
             connection.execute(
                 "UPDATE public.pulsara_schema_migrations "
-                "SET registry_prefix_fingerprint = %s WHERE version = 0",
-                ("sha256:" + "0" * 64,),
+                "SET resource_sha256 = %s",
+                ("0" * 64,),
             )
             connection.commit()
             assert classify_clean_baseline_confirmation(
@@ -419,7 +372,6 @@ def test_lost_baseline_commit_ack_is_exactly_confirmed(
         if expected_code is None:
             report = runner.migrate(deadline_monotonic=monotonic() + 60)
             assert report.baseline_commit_confirmation == "FULL"
-            assert report.applied_versions == (0,)
             return
         with pytest.raises(PostgresSchemaError) as caught:
             runner.migrate(deadline_monotonic=monotonic() + 60)

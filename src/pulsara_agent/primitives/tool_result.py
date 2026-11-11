@@ -50,16 +50,6 @@ class ToolResultRenderVariantCode(StrEnum):
     EXTERNAL_TERMINAL_RESULT = "external_terminal_result"
 
 
-def _validate_fingerprint(
-    model: FrozenContextFact, namespace: str, field_name: str
-) -> None:
-    expected = context_fingerprint(
-        namespace, model.model_dump(mode="json", exclude={field_name})
-    )
-    if getattr(model, field_name) != expected:
-        raise ValueError(f"{field_name} mismatch")
-
-
 class CapabilityResultRenderVariantFact(FrozenContextFact):
     variant_code: ToolResultRenderVariantCode
     operational_kind: ToolResultOperationalKind
@@ -88,41 +78,10 @@ def capability_result_render_variant_identity_payload(
     }
 
 
-class ToolResultSemanticsBuilderContractFact(FrozenContextFact):
-    schema_version: Literal["tool-result-semantics-builder-contract:v1"] = (
-        "tool-result-semantics-builder-contract:v1"
-    )
-    builder_id: str = Field(min_length=1)
-    builder_version: str = Field(min_length=1)
-    input_schema_fingerprints: tuple[str, ...]
-    output_schema_fingerprint: str = Field(min_length=1)
-    variant_table_fingerprint: str = Field(min_length=1)
-    classifier_policy_fingerprint: str = Field(min_length=1)
-    normalization_contract_versions: tuple[str, ...]
-    contract_fingerprint: str = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def _contract(self) -> "ToolResultSemanticsBuilderContractFact":
-        if len(self.input_schema_fingerprints) != 6:
-            raise ValueError("semantics builder requires six input schemas")
-        if not self.normalization_contract_versions:
-            raise ValueError("semantics builder normalization versions are required")
-        _validate_fingerprint(
-            self, "tool-result-semantics-builder-contract:v1", "contract_fingerprint"
-        )
-        return self
-
-
 class CapabilityResultRenderContractFact(FrozenContextFact):
     allowed_operational_kinds: tuple[ToolResultOperationalKind, ...]
     allowed_essential_envelope_kinds: tuple[ToolResultEssentialEnvelopeKind, ...]
     allowed_variants: tuple[CapabilityResultRenderVariantFact, ...]
-    semantics_builder_id: str = Field(min_length=1)
-    semantics_builder_version: str = Field(min_length=1)
-    semantics_builder_contract: ToolResultSemanticsBuilderContractFact
-    rollup_renderer_id: str = Field(min_length=1)
-    rollup_renderer_version: str = Field(min_length=1)
-    rollup_renderer_contract_fingerprint: str = Field(min_length=1)
     pre_execution_denial_variant_code: ToolResultRenderVariantCode
     contract_fingerprint: str = Field(min_length=1)
 
@@ -144,20 +103,6 @@ class CapabilityResultRenderContractFact(FrozenContextFact):
             raise ValueError("allowed operational kinds drifted")
         if self.allowed_essential_envelope_kinds != essential:
             raise ValueError("allowed essential kinds drifted")
-        builder = self.semantics_builder_contract
-        if (self.semantics_builder_id, self.semantics_builder_version) != (
-            builder.builder_id,
-            builder.builder_version,
-        ):
-            raise ValueError("render builder identity mismatch")
-        if builder.variant_table_fingerprint != context_fingerprint(
-            "tool-result-variant-table:v1",
-            [
-                capability_result_render_variant_identity_payload(variant)
-                for variant in self.allowed_variants
-            ],
-        ):
-            raise ValueError("builder variant table mismatch")
         denial = next(
             (
                 variant
@@ -192,7 +137,7 @@ def capability_result_render_contract_identity_payload(
     *,
     include_contract_fingerprint: bool = True,
 ) -> dict[str, object]:
-    """Reproduce the historical descriptor identity without nested hash fields."""
+    """Return the render behavior used by capability descriptor identity."""
 
     payload: dict[str, object] = {
         "allowed_operational_kinds": tuple(
@@ -204,19 +149,6 @@ def capability_result_render_contract_identity_payload(
         "allowed_variants": tuple(
             capability_result_render_variant_identity_payload(item)
             for item in contract.allowed_variants
-        ),
-        "semantics_builder_id": contract.semantics_builder_id,
-        "semantics_builder_version": contract.semantics_builder_version,
-        "semantics_builder_contract": (
-            contract.semantics_builder_contract.model_dump(mode="json")
-        ),
-        "semantics_builder_contract_fingerprint": (
-            contract.semantics_builder_contract.contract_fingerprint
-        ),
-        "rollup_renderer_id": contract.rollup_renderer_id,
-        "rollup_renderer_version": contract.rollup_renderer_version,
-        "rollup_renderer_contract_fingerprint": (
-            contract.rollup_renderer_contract_fingerprint
         ),
         "pre_execution_denial_variant_code": (
             contract.pre_execution_denial_variant_code.value
@@ -233,7 +165,6 @@ __all__ = [
     "ToolResultEssentialEnvelopeKind",
     "ToolResultOperationalKind",
     "ToolResultRenderVariantCode",
-    "ToolResultSemanticsBuilderContractFact",
     "ToolResultStateFact",
     "capability_result_render_contract_identity_payload",
     "capability_result_render_variant_identity_payload",

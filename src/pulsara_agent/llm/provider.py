@@ -10,9 +10,7 @@ from typing import Any
 
 from pulsara_agent.llm.provider_replay import (
     ProviderAssistantReplayCodecKind,
-    provider_replay_contract_fingerprint,
 )
-from pulsara_agent.primitives.context import context_fingerprint
 
 
 class ProviderChatFieldAccumulationMode(StrEnum):
@@ -136,15 +134,6 @@ class RouteWireProfile:
             overrides.get(item.field_name, item)
             for item in CHAT_CLOSED_REASONING_FIELD_CONTRACTS
         )
-
-    @property
-    def assistant_replay_contract_fingerprint(self) -> str:
-        codec = self.assistant_replay_codec_kind
-        if codec is ProviderAssistantReplayCodecKind.NONE:
-            return context_fingerprint(
-                "pulsara.provider-replay-contract:unsupported:v1", self.wire_api
-            )
-        return provider_replay_contract_fingerprint(codec)
 
 def _freeze_provider_value(value: Any) -> Any:
     if isinstance(value, Mapping):

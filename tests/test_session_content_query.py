@@ -249,7 +249,7 @@ def test_query_only_calls_do_not_match_or_consume_search_limit(repo, context):
     assert hit["items"][0]["target"]["entry_id"] != old
 
 
-def test_long_unicode_call_arguments_cursor_only_and_content_v4_hard_cut(repo, context):
+def test_long_unicode_call_arguments_cursor_only(repo, context):
     _, new, query = context
     target = new()
     arguments = {"z": ['引号"😀\\\n' * 6000], "a": {"β": False, "null": None}}
@@ -264,11 +264,6 @@ def test_long_unicode_call_arguments_cursor_only_and_content_v4_hard_cut(repo, c
         + '\nTool call: read_file\nArguments: {"path":"last"}'
     )
     page = query(target={'kind': 'SESSION_ENTRY', 'session_id': target.guard.session_id, 'entry_id': anchor}, include_tools=True, limit=1, max_chars=32000)
-    first_cursor = _cursor(page)
-    assert (
-        _decode(first_cursor, "read_session_content")["operation"]
-        == "read_session_content.v4"
-    )
     chunks = []
     while True:
         assert page["items"][0]["target"]["entry_id"] == anchor and _fits(page, "call:history")
@@ -277,23 +272,12 @@ def test_long_unicode_call_arguments_cursor_only_and_content_v4_hard_cut(repo, c
             break
         page = query(cursor=_cursor(page), limit=1, max_chars=12345)
     assert "".join(chunks) == expected
-    old = _decode(first_cursor, "read_session_content")
-    old["operation"] = "read_session_content.v2"
-    with pytest.raises(SessionQueryError) as error:
-        query(cursor=_encode(old))
-    assert error.value.code == "CURSOR_INVALID"
     other = new()
     turn(repo, other.guard, "needle", answer="needle")
     turn(repo, other.guard, "needle again", answer="needle answer")
     page = query('search_session_content', target={'kind': 'SESSION', 'session_id': other.guard.session_id}, query='needle', limit=1)
     new_cursor = _cursor(page)
-    old = _decode(new_cursor, "search_session_content")
-    assert old["operation"] == "search_session_content.bm25.v3"
     assert query("search_session_content", cursor=new_cursor)["items"]
-    old["operation"] = "search_session_content"
-    with pytest.raises(SessionQueryError) as error:
-        query("search_session_content", cursor=_encode(old))
-    assert error.value.code == "CURSOR_INVALID"
 
 
 @pytest.mark.parametrize(

@@ -154,7 +154,6 @@ ProviderAdapterStreamItem: TypeAlias = (
 class ProviderAdapterTransport(Protocol):
     api: str
     binding_id: str
-    contract_version: str
 
     def stream(
         self,

@@ -111,8 +111,6 @@ def estimate_image_visual_tokens(*, width: int, height: int) -> int:
 class PulsaraHeuristicTokenEstimatorV3:
     def __init__(self) -> None:
         payload = {
-            "estimator_id": "pulsara_heuristic",
-            "estimator_version": "v3",
             "constants": {
                 "text_utf8_bytes_per_token": TEXT_UTF8_BYTES_PER_TOKEN,
                 "request_envelope_tokens": REQUEST_ENVELOPE_TOKENS,
@@ -148,21 +146,13 @@ class PulsaraHeuristicTokenEstimatorV3:
                 "scale_numerator": IMAGE_SCALE_NUMERATOR,
                 "scale_denominator": IMAGE_SCALE_DENOMINATOR,
                 "minimum_tokens": IMAGE_MIN_TOKENS,
-                "wire_accounting": (
-                    "formal_user_image_parts:v1-payload-elided-per-item-rounding"
-                ),
             },
         }
         self.fact = TokenEstimatorFact(
-            estimator_id="pulsara_heuristic",
-            estimator_version="v3",
             image_grid_pixels=IMAGE_GRID_PIXELS,
             image_scale_numerator=IMAGE_SCALE_NUMERATOR,
             image_scale_denominator=IMAGE_SCALE_DENOMINATOR,
             image_min_tokens=IMAGE_MIN_TOKENS,
-            image_wire_accounting_contract=(
-                "formal_user_image_parts:v1-payload-elided-per-item-rounding"
-            ),
             estimator_fingerprint=sha256_fingerprint("token-estimator:v3", payload),
         )
 

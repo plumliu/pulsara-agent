@@ -308,7 +308,7 @@ class _ConversationOperations:
             session = self._require_writer(connection, guard, lock=False)
             existing = connection.execute(
                 """
-                SELECT command_kind, request_schema_version, semantic_digest,
+                SELECT command_kind, semantic_digest,
                        target_turn_id
                 FROM pulsara_v3.session_commands
                 WHERE session_id = %s AND command_id = %s
@@ -353,7 +353,6 @@ class _ConversationOperations:
                 )
                 if (
                     existing["command_kind"] != "SUBMIT_PROMPT"
-                    or existing["request_schema_version"] != "submit_prompt.v3"
                     or existing["semantic_digest"] != prepared.semantic_digest
                     or existing["target_turn_id"] != intent.turn_id
                     or entry is None
@@ -439,19 +438,15 @@ class _ConversationOperations:
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.turns (
-                    id, session_id, workspace_id,
-                    model_call_binding, status, initial_entry_id,
-                    current_context_binding_revision_id,
-                    permission_snapshot_id, requested_permission_mode,
-                    effective_permission_mode, permission_admission_source,
-                    permission_overlay, permission_plan_context_ordinal,
-                    permission_plan_workflow_id,
-                    permission_plan_revision_at_admission,
-                    permission_inherited_from_turn_id, permission_contract_id,
-                    permission_contract_fingerprint,
-                    permission_snapshot_fingerprint
-                ) VALUES (%s, %s, %s, %s, 'RUNNING', %s, %s,
-                          %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                id, session_id, workspace_id, model_call_binding, status, initial_entry_id,
+                current_context_binding_revision_id, permission_snapshot_id,
+                requested_permission_mode, effective_permission_mode, permission_admission_source,
+                permission_overlay, permission_plan_context_ordinal, permission_plan_workflow_id,
+                permission_plan_revision_at_admission, permission_inherited_from_turn_id,
+                permission_snapshot_fingerprint
+            ) VALUES (
+                %s, %s, %s, %s, 'RUNNING', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            )
                 """,
                 (
                     intent.turn_id,
@@ -498,11 +493,10 @@ class _ConversationOperations:
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.session_commands (
-                    session_id, command_id, command_kind,
-                    request_schema_version, semantic_digest,
-                    target_kind, target_turn_id
-                ) VALUES (%s, %s, 'SUBMIT_PROMPT',
-                          'submit_prompt.v3', %s, 'TURN', %s)
+                session_id, command_id, command_kind, semantic_digest, target_kind, target_turn_id
+            ) VALUES (
+                %s, %s, 'SUBMIT_PROMPT', %s, 'TURN', %s
+            )
                 """,
                 (
                     guard.session_id,
@@ -620,7 +614,6 @@ class _ConversationOperations:
                 return TurnAdmissionConfirmation(TurnAdmissionConfirmationKind.CONFLICT)
             matches = (
                 str(command["command_kind"]) == "SUBMIT_PROMPT"
-                and str(command["request_schema_version"]) == "submit_prompt.v3"
                 and str(command["semantic_digest"]) == candidate.semantic_digest
                 and str(command["target_kind"]) == "TURN"
                 and str(command["target_turn_id"]) == candidate.turn_id
@@ -1017,7 +1010,6 @@ class _ConversationOperations:
                 return CompactionConfirmationKind.CONFLICT
             if (
                 str(command["command_kind"]) != "COMPACT_CONTEXT"
-                or str(command["request_schema_version"]) != "compact_context.v1"
                 or str(command["semantic_digest"]) != candidate.semantic_digest
                 or str(command["target_kind"]) != "TURN"
                 or str(command["target_turn_id"]) != candidate.target_turn_id
@@ -1047,7 +1039,6 @@ class _ConversationOperations:
             if existing is not None:
                 if (
                     str(existing["command_kind"]) != "COMPACT_CONTEXT"
-                    or str(existing["request_schema_version"]) != "compact_context.v1"
                     or str(existing["semantic_digest"]) != candidate.semantic_digest
                     or str(existing["target_kind"]) != "TURN"
                     or str(existing["target_turn_id"]) != candidate.target_turn_id
@@ -1093,11 +1084,10 @@ class _ConversationOperations:
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.session_commands (
-                    session_id, command_id, command_kind,
-                    request_schema_version, semantic_digest,
-                    target_kind, target_turn_id
-                ) VALUES (%s, %s, 'COMPACT_CONTEXT', 'compact_context.v1',
-                          %s, 'TURN', %s)
+                session_id, command_id, command_kind, semantic_digest, target_kind, target_turn_id
+            ) VALUES (
+                %s, %s, 'COMPACT_CONTEXT', %s, 'TURN', %s
+            )
                 """,
                 (
                     guard.session_id,
@@ -1173,12 +1163,12 @@ class _ConversationOperations:
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.context_snapshots (
-                    id, session_id, workspace_id, source_through_sequence,
-                    source_digest, compiler_contract, prompt_contract,
-                    model_contract, inline_content, blob_id, content_digest,
-                    content_size, content_media_type, content_codec
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
-                          %s, %s, %s, %s, %s, %s)
+                id, session_id, workspace_id, source_through_sequence, source_digest,
+                inline_content, blob_id, content_digest, content_size, content_media_type,
+                content_codec
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            )
                 """,
                 (
                     snapshot.snapshot_id,
@@ -1186,9 +1176,6 @@ class _ConversationOperations:
                     snapshot.workspace_id,
                     snapshot.source_through_sequence,
                     snapshot.source_digest,
-                    snapshot.compiler_contract,
-                    snapshot.prompt_contract,
-                    snapshot.model_contract,
                     *_content_columns(snapshot.content),
                 ),
             )
@@ -1575,9 +1562,6 @@ class _ConversationOperations:
             and str(row["workspace_id"]) == snapshot.workspace_id
             and int(row["source_through_sequence"]) == snapshot.source_through_sequence
             and str(row["source_digest"]) == snapshot.source_digest
-            and str(row["compiler_contract"]) == snapshot.compiler_contract
-            and str(row["prompt_contract"]) == snapshot.prompt_contract
-            and str(row["model_contract"]) == snapshot.model_contract
             and canonical_snapshot_owner_is_exact(
                 connection,
                 row=row,

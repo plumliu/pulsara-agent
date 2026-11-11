@@ -303,7 +303,6 @@ async def _run(args, saved, secrets):
     )
     database, _, admin, runtime_dsn = _create_database(saved)
     report = {
-        "schema_version": "pr04-prompt-queue-dogfood.v1",
         "status": "running",
         "package_path": pulsara_agent.__file__,
         "saved_home": str(require_pulsara_home()),

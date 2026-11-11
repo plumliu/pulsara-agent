@@ -624,7 +624,6 @@ def test_scheduled_steer_keeps_provenance_through_shared_plan_drain(source):
             "timezone": "UTC",
             "permission_mode": PermissionMode.READ_ONLY.value,
             "schedule": {
-                "contract": "scheduled-rule:v1",
                 "kind": "interval",
                 "anchor_at_utc": "2020-01-01T00:00:00+00:00",
                 "seconds": 3600,

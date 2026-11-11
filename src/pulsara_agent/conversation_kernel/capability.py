@@ -29,10 +29,8 @@ from pulsara_agent.capability.contracts import (
     skill_capability_fact_fingerprint,
 )
 from pulsara_agent.capability.local_skills import (
-    AGENT_SKILLS_CONTRACT_ID,
     FrozenLooseSkillDefinitions,
     LOOSE_SKILL_ROOT_ORDER,
-    SKILL_PLACEMENT_CONTRACT_ID,
     LooseSkillDefinitionsDisposition,
     LooseSkillDefinitionProducer,
     check_skill_deadline,
@@ -166,8 +164,6 @@ class KernelSkillProjectionComposer:
             source_contract_fingerprint=context_fingerprint(
                 "skill-source-contract:v6-local-enablement",
                 {
-                    "parser_contract": AGENT_SKILLS_CONTRACT_ID,
-                    "placement_contract": SKILL_PLACEMENT_CONTRACT_ID,
                     "producer_kinds": ("LOOSE", "PLUGIN", "BUNDLED"),
                     "precedence": (
                         *(item.value for item in LOOSE_SKILL_ROOT_ORDER),

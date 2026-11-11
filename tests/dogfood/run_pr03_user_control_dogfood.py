@@ -51,7 +51,6 @@ from tests.dogfood.run_model_switch_handover_dogfood import (
 )
 
 
-SCHEMA_VERSION = "pr03-user-control-dogfood.v1"
 
 
 class _Pr03RecordingTransport(_RecordingTransport):
@@ -568,7 +567,6 @@ async def _run(connection_id: str) -> dict[str, object]:
                 stop_race = await _run_stop_race(session)
                 background = await _run_background_controls(session)
                 return {
-                    "schema_version": SCHEMA_VERSION,
                     "status": "passed",
                     "completed_at_utc": datetime.now(timezone.utc).isoformat(),
                     "connection_id": connection.id.value,
@@ -602,7 +600,6 @@ def main() -> int:
         report = asyncio.run(_run(args.connection_id))
     except BaseException as exc:
         report = {
-            "schema_version": SCHEMA_VERSION,
             "status": "failed",
             "completed_at_utc": datetime.now(timezone.utc).isoformat(),
             "failure_type": type(exc).__name__,

@@ -337,7 +337,6 @@ def provider_wire_input_plan_identity_fingerprint(
             "model_id": target_fact.model_id,
             "canonical_endpoint_base_url": target_fact.canonical_endpoint_base_url,
             "transport_binding_id": target_fact.transport_binding_id,
-            "transport_contract_version": target_fact.transport_contract_version,
             "model_identity_policy": target_fact.model_identity_policy,
             "input_modalities": target_fact.input_modalities,
             "limits": target_fact.limits.model_dump(mode="json"),

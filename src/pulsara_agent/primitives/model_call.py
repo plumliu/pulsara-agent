@@ -84,15 +84,10 @@ class ModelContextLimits(BaseModel):
 class TokenEstimatorFact(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    estimator_id: str = Field(min_length=1)
-    estimator_version: str = Field(min_length=1)
     image_grid_pixels: int = Field(ge=1)
     image_scale_numerator: int = Field(ge=1)
     image_scale_denominator: int = Field(ge=1)
     image_min_tokens: int = Field(ge=1)
-    image_wire_accounting_contract: Literal[
-        "formal_user_image_parts:v1-payload-elided-per-item-rounding"
-    ]
     estimator_fingerprint: str = Field(min_length=1)
 
 
@@ -165,13 +160,11 @@ class ModelTokenUsageFact(BaseModel):
 class ResolvedModelTargetFact(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    contract_version: Literal["resolved-model-target:v9"] = "resolved-model-target:v9"
     route_id: str = Field(min_length=1)
     wire_api: Literal["openai_chat_completions", "openai_responses"]
     model_id: str = Field(min_length=1)
     canonical_endpoint_base_url: str = Field(min_length=1)
     transport_binding_id: str = Field(min_length=1)
-    transport_contract_version: str = Field(min_length=1)
     reasoning_wire_profile: Literal[
         "provider_default",
         "effort",
@@ -224,7 +217,6 @@ class ResolvedModelTargetFact(BaseModel):
 class ResolvedModelCallFact(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    contract_version: Literal["resolved-model-call:v2"] = "resolved-model-call:v2"
     resolved_model_call_id: str = Field(pattern=r"^call:[a-z2-7]{25}[aeimquy4]$")
     purpose: ModelCallPurpose
     context_mode: ModelContextMode
@@ -264,11 +256,6 @@ class ProviderModelStreamErrorCode(StrEnum):
 class ProviderErrorSanitizationContractFact(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: Literal["provider_error_sanitization_contract.v1"] = (
-        "provider_error_sanitization_contract.v1"
-    )
-    contract_id: str = Field(min_length=1)
-    contract_version: str = Field(min_length=1)
     stable_code_mapping_fingerprint: str = Field(min_length=1)
     sensitive_key_policy_fingerprint: str = Field(min_length=1)
     secret_pattern_policy_fingerprint: str = Field(min_length=1)
@@ -329,7 +316,6 @@ class ProviderRetryAttemptSummaryFact(BaseModel):
 class ProviderRetrySummaryFact(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: Literal["provider_retry_summary.v1"] = "provider_retry_summary.v1"
     enabled: bool
     final_attempt: int = Field(ge=1, le=32)
     max_attempts: int = Field(ge=1, le=32)
@@ -396,7 +382,10 @@ def _legacy_retry_attempt_payload(
 def _legacy_retry_summary_payload(
     summary: ProviderRetrySummaryFact,
 ) -> dict[str, object]:
-    semantic = summary.model_dump(mode="json", exclude={"attempts"})
+    semantic = {
+        "schema_version": "provider_retry_summary.v1",
+        **summary.model_dump(mode="json", exclude={"attempts"}),
+    }
     payload = {
         **semantic,
         "attempts": tuple(
@@ -426,13 +415,31 @@ def _legacy_diagnostic_payload(
     }
 
 
+def _provider_error_sanitization_identity_payload(
+    contract: ProviderErrorSanitizationContractFact,
+) -> dict[str, object]:
+    # This public failure identity retains its established derivation locally.
+    payload = {
+        "schema_version": "provider_error_sanitization_contract.v1",
+        "contract_version": "v3",
+        "contract_id": "pulsara.provider-error-sanitizer",
+        **contract.model_dump(mode="json", exclude={"contract_fingerprint"}),
+    }
+    return {
+        **payload,
+        "contract_fingerprint": sha256_fingerprint(
+            "provider-error-sanitization-contract:v1", payload
+        ),
+    }
+
+
 def provider_sanitized_error_identity_fingerprint(
     error: "ProviderSanitizedErrorFact",
 ) -> str:
     """Preserve the public stable failure identity without nested DTO hashes."""
 
     payload = {
-        "schema_version": error.schema_version,
+        "schema_version": "provider_sanitized_error.v2",
         "code": error.code.value,
         "message": error.message,
         "diagnostics": tuple(
@@ -440,7 +447,9 @@ def provider_sanitized_error_identity_fingerprint(
         ),
         "redaction_count": error.redaction_count,
         "truncated": error.truncated,
-        "sanitization_contract": error.sanitization_contract.model_dump(mode="json"),
+        "sanitization_contract": _provider_error_sanitization_identity_payload(
+            error.sanitization_contract
+        ),
         "retry_summary": (
             None
             if error.retry_summary is None
@@ -453,9 +462,6 @@ def provider_sanitized_error_identity_fingerprint(
 class ProviderSanitizedErrorFact(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: Literal["provider_sanitized_error.v2"] = (
-        "provider_sanitized_error.v2"
-    )
     code: ProviderModelStreamErrorCode
     message: str
     diagnostics: tuple[ProviderSanitizedDiagnosticFact, ...]

@@ -220,7 +220,6 @@ def test_memory_suffix_quote_prices_only_actual_wire_items(api, project):
                     trust_class=desired.trust_class,
                     lifecycle=lifecycle,
                     presence=presence,
-                    contract_version=desired.source_contract_version,
                     body="",
                 )
                 invalidations.append(message)

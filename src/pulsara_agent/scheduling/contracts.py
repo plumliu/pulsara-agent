@@ -40,8 +40,8 @@ def validate_rule(rule: object, timezone_name: str) -> dict:
         ZoneInfo(timezone_name)
     except (ValueError, TypeError, ZoneInfoNotFoundError) as exc:
         raise ScheduledTaskError("INVALID_TIMEZONE", "时区名称无效。") from exc
-    if not isinstance(rule, dict) or rule.get("contract") != "scheduled-rule:v1":
-        raise ScheduledTaskError("INVALID_SCHEDULE", "时间规则版本无效。")
+    if not isinstance(rule, dict):
+        raise ScheduledTaskError("INVALID_SCHEDULE", "时间规则字段无效。")
     fields = {
         "once": {"run_at_utc"},
         "interval": {"anchor_at_utc", "seconds"},
@@ -53,7 +53,7 @@ def validate_rule(rule: object, timezone_name: str) -> dict:
     if (
         not isinstance(kind, str)
         or kind not in fields
-        or set(rule) != fields[kind] | {"contract", "kind"}
+        or set(rule) != fields[kind] | {"kind"}
     ):
         raise ScheduledTaskError("INVALID_SCHEDULE", "时间规则字段无效。")
     value = dict(rule)

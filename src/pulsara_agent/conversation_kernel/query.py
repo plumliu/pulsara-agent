@@ -95,7 +95,7 @@ class CanonicalInspectorView:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "inspect_kind": "canonical_conversation_kernel.v3",
+            "inspect_kind": "canonical_conversation_kernel",
             "conversation": self.conversation.to_dict(),
             "turns": [_public_row(item) for item in self.turns],
             "tool_attempts": [_public_row(item) for item in self.tool_attempts],
@@ -379,7 +379,7 @@ class CanonicalConversationQuery:
                 (fact["memory_domain_id"], memory_id, memory_id),
             ).fetchall()
         return {
-            "inspect_kind": "canonical_memory.v3",
+            "inspect_kind": "canonical_memory",
             "fact": _public_row(fact),
             "relations": [_public_row(item) for item in relations],
             "index_freshness": [],
@@ -407,17 +407,13 @@ class CanonicalConversationQuery:
             queue = grouped("prompt_queue_items", "status")
             memory_facts = grouped("memory_facts", "lifecycle")
         return {
-            "inspect_kind": "canonical_kernel_health.v3",
+            "inspect_kind": "canonical_kernel_health",
             "conversation_authority": "pulsara_v3",
-            "protocol_major": 3,
             "sessions": sessions,
             "prompt_queue": queue,
             "memory_facts": memory_facts,
-            "runtime_limit_contract": "stage2_runtime_limits.v1",
             "runtime_limits": asdict(STAGE2_LIMITS),
-            "execution_watchdog_contract": "kernel_execution_watchdogs.v1",
             "execution_watchdogs": asdict(self._watchdog_policy),
-            "structural_budget_contract": "stage2_structural_budgets.v1",
             "structural_budgets": asdict(STAGE2_STRUCTURAL_BUDGETS),
         }
 

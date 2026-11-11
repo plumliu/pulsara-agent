@@ -147,7 +147,7 @@ it('keeps accepted input facts current without injecting the tail into an old re
   ]});
   fixture((url, body) => {
     if (url.endsWith('/connections')) return payload([
-      entry('accepted', 999, {entry_kind: 'USER_MESSAGE', input_source: {command_id:'command:accepted', queue_item_id:'queue:accepted', delivery_mode:'NEW_TURN'}, blocks:[], content:{media_type:'application/vnd.pulsara.prompt+json',...inline(JSON.stringify({schema:'pulsara.prompt/v2',parts:[{type:'text',text:'已接受的输入'}]}))}}),
+      entry('accepted', 999, {entry_kind: 'USER_MESSAGE', input_source: {command_id:'command:accepted', queue_item_id:'queue:accepted', delivery_mode:'NEW_TURN'}, blocks:[], content:{media_type:'application/vnd.pulsara.prompt+json',...inline(JSON.stringify({parts:[{type:'text',text:'已接受的输入'}]}))}}),
       entry('latest-tail', 1000),
     ]);
     if (url.endsWith('/window')) return {session_id:'session:test',cut_sequence:'1000',event_sequence_cut:'2000',entries:[creator]};

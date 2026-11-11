@@ -1,6 +1,6 @@
 # Pulsara 内部版本标签与校验减法 Hard-Cut 草案
 
-状态：实施规格，待实施验收。日期：2026-11-11。
+状态：已实施，已完成逐项语义复核；验证结果与基线问题见[复核记录](PULSARA_INTERNAL_VERSION_LABEL_SUBTRACTION_REVIEW.zh.md)。日期：2026-11-11。
 
 本文覆盖本轮扫描确认的生产代码、数据库和配套测试。按用户授权在文档基线提交后实施；验收前不声明完成，不修改用户保存的生产设置。
 
@@ -134,7 +134,7 @@ Chat 与 Responses 的实际 wire projection 仍不能混用。planner 当前输
 | --- | --- | --- |
 | Embedding | `EmbeddingSemanticContract.contract_version = 1`、SQL `embedding_contract_version`、过滤／写入／更新参数 | `retrieval/config.py`、`conversation_kernel/_repository/memory.py`、`conversation_kernel/memory/recall.py`。保留由真实 endpoint、model、shape、dimensions 和文本处理语义得到的 contract_id，防止不兼容向量混用。 |
 | Memory hint／dense policy | 只作标签的固定 `contract_id`／`policy_id` | `conversation_kernel/memory/hints.py`、`retrieval/config.py`。保留 opt-out 识别、规则和实际阈值。 |
-| 查询诊断 | `inspect_kind.v3`、`stage2_runtime_limits.v1`、`kernel_execution_watchdogs.v1`、`stage2_structural_budgets.v1` 等固定标签 | `conversation_kernel/query.py`。保留查询类别和实际诊断数据，不以删标签为由改动预算或 watchdog 语义。 |
+| 查询诊断 | `inspect_kind.v3`、`stage2_runtime_limits.v1`、`kernel_execution_watchdogs.v1`、`stage2_structural_budgets.v1` 等固定标签，以及 health 中没有消费者的固定 `protocol_major=3` | `conversation_kernel/query.py`。保留查询类别和实际诊断数据，不以删标签为由改动预算或 watchdog 语义。 |
 | 会话搜索 cursor | `search_session_content.bm25.v3`、operation 后拼接的 `.v4` 这类格式版本后缀 | `conversation_kernel/session_content.py`。保留真实 operation 区分、位置、范围及 token 真实性检查，不把不同用途 cursor 混用。 |
 | Skills | 无独立用途的固定 core／placement 标签 | `capability/local_skills.py`。保留真实 frontmatter、内容与放置规则；不删除外部 manifest 自己的发布版本。 |
 | Plugin 本地实例状态 | `PLUGIN_INSTANCE_STATE_CONTRACT_ID`、`PluginInstanceState.contract_id`、本地 state JSON 的 `contract_id=pulsara.plugin-instance-state.v1`、必填键与固定比较 | `plugins/contracts.py`、`plugins/package_store.py`。保留 enabled 类型、实际 plugin／scope／package／overlay／路径身份与原子保存；不重置启用状态或连接配置。外部插件 schema URL 不属于这项内部标签。 |
@@ -264,7 +264,7 @@ SQL 触发器内某个标签比较被删除，不等于删除整个触发器；�
 
 `tests/test_responses_completed_field_union.py` 等用例验证真实完成事件合并，应保留；其中 provider 返回正文的 `format: "openai-responses-v1"` 不属于内部标签，不改写。durable replay 相关测试去掉内部标签依赖，继续验证 endpoint／model／binding／API 隔离、payload exactness、opaque reasoning 和 public projection 一致性。
 
-活跃 dogfood／fixture 若依赖已删除生产字段，去掉这些依赖；不伪造运行结果。历史报告、归档规格和无关实验产物不做批量重写；不为清零文本搜索结果删除历史证据。
+活跃 dogfood／fixture 若依赖已删除生产字段，去掉这些依赖；自有报告 writer 没有消费者的固定 schema 标签与专属常量也一起删除，不伪造运行结果。历史报告、归档规格和无关实验产物不做批量重写；不为清零文本搜索结果删除历史证据。
 
 ## 6. 摘要、稳定身份和真实兼容性
 

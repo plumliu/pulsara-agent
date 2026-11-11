@@ -20,7 +20,6 @@ import pytest
 
 from pulsara_agent.llm.input import FrozenPromptContent
 
-from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
 from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     CONTEXT_SNAPSHOT_CODEC,
@@ -81,7 +80,6 @@ from pulsara_agent.primitives.plan_workflow import (
     PlanApprovedMaterializationDisposition,
     PlanDraftDecision,
     PlanHandoffKind,
-    PlanInteractionBinding,
     PlanQuestionAnswerKind,
     PlanWorkflowStatus,
 )
@@ -261,7 +259,6 @@ def _commit_plan_batch(
                 ),
             )
         )
-    binding = builtin_tool_catalog_entry(selected_tool_name).binding_contract.base
     fresh_enter = control_kind is PlanToolControlKind.ENTER
     interaction_id = None if fresh_enter else _id("plan-interaction")
     continuation_turn_id = _id("turn") if fresh_enter else None
@@ -275,11 +272,6 @@ def _commit_plan_batch(
         selected_call_ordinal=selected_ordinal,
         control_kind=control_kind,
         selected_arguments=frozen_arguments,
-        request_binding=PlanInteractionBinding(
-            binding.contract_id,
-            binding.contract_version,
-            binding.binding_fingerprint,
-        ),
         permission_snapshot=_permission(repository, lease, turn_id),
         workflow_id=workflow_id,
         expected_workflow_revision=expected_workflow_revision,
@@ -1477,9 +1469,6 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
                 codec=CONTEXT_SNAPSHOT_CODEC,
             ),
             snapshot_carrier=snapshot_carrier,
-            compiler_contract="test.compiler.v1",
-            prompt_contract="test.prompt.v1",
-            model_contract="test.model.v1",
             occurred_at=_now(),
             actor_id="test:compaction",
         )

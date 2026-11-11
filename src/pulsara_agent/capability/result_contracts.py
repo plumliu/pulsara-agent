@@ -5,16 +5,12 @@ from __future__ import annotations
 from functools import lru_cache
 
 from pulsara_agent.primitives.context import context_fingerprint
-from pulsara_agent.primitives.long_horizon import (
-    default_observation_rollup_renderer_contract,
-)
 from pulsara_agent.primitives.tool_result import (
     CapabilityResultRenderContractFact,
     CapabilityResultRenderVariantFact,
     ToolResultEssentialEnvelopeKind,
     ToolResultOperationalKind,
     ToolResultRenderVariantCode,
-    ToolResultSemanticsBuilderContractFact,
     ToolResultStateFact,
     capability_result_render_variant_identity_payload,
 )
@@ -42,51 +38,9 @@ def _variant(
 
 def _contract(
     *,
-    builder_id: str,
-    builder_version: str,
     variants: tuple[CapabilityResultRenderVariantFact, ...],
     denial: ToolResultRenderVariantCode,
 ) -> CapabilityResultRenderContractFact:
-    rollup_renderer = default_observation_rollup_renderer_contract()
-    builder_payload = {
-        "schema_version": "tool-result-semantics-builder-contract:v1",
-        "builder_id": builder_id,
-        "builder_version": builder_version,
-        "input_schema_fingerprints": (
-            "schema:frozen-json-object:v1",
-            "schema:tool-result-runtime-input:v1",
-            "schema:tool-result-domain-submission:v1",
-            "schema:tool-observation-timing:v1",
-            "schema:terminal-payload-timing:v1",
-            "schema:tool-result-essential-capture-policy:v1",
-        ),
-        "output_schema_fingerprint": "schema:tool-result-execution-semantics:v2",
-        "variant_table_fingerprint": context_fingerprint(
-            "tool-result-variant-table:v1",
-            [capability_result_render_variant_identity_payload(item) for item in variants],
-        ),
-        "classifier_policy_fingerprint": context_fingerprint(
-            "tool-result-classifier-policy:v1",
-            [
-                builder_id,
-                builder_version,
-                tuple(item.variant_code for item in variants),
-            ],
-        ),
-        "normalization_contract_versions": (
-            "arguments:v1",
-            "terminal-domain:v1",
-            "capture:v1",
-            "profile:v1",
-            "rollup-semantics:v1",
-        ),
-    }
-    builder = ToolResultSemanticsBuilderContractFact(
-        **builder_payload,
-        contract_fingerprint=context_fingerprint(
-            "tool-result-semantics-builder-contract:v1", builder_payload
-        ),
-    )
     operational = tuple(sorted({item.operational_kind for item in variants}, key=str))
     essential = tuple(
         sorted({item.essential_envelope_kind for item in variants}, key=str)
@@ -95,17 +49,9 @@ def _contract(
         "allowed_operational_kinds": operational,
         "allowed_essential_envelope_kinds": essential,
         "allowed_variants": variants,
-        "semantics_builder_id": builder_id,
-        "semantics_builder_version": builder_version,
-        "semantics_builder_contract": builder,
-        "rollup_renderer_id": rollup_renderer.renderer_id,
-        "rollup_renderer_version": rollup_renderer.renderer_version,
-        "rollup_renderer_contract_fingerprint": (
-            rollup_renderer.renderer_contract_fingerprint
-        ),
         "pre_execution_denial_variant_code": denial,
     }
-    legacy_payload = {
+    identity_payload = {
         **payload,
         "allowed_operational_kinds": tuple(item.value for item in operational),
         "allowed_essential_envelope_kinds": tuple(item.value for item in essential),
@@ -113,14 +59,12 @@ def _contract(
             capability_result_render_variant_identity_payload(item)
             for item in variants
         ),
-        "semantics_builder_contract": builder.model_dump(mode="json"),
-        "semantics_builder_contract_fingerprint": builder.contract_fingerprint,
         "pre_execution_denial_variant_code": denial.value,
     }
     return CapabilityResultRenderContractFact(
         **payload,
         contract_fingerprint=context_fingerprint(
-            "capability-result-render-contract:v1", legacy_payload
+            "capability-result-render-contract:v1", identity_payload
         ),
     )
 
@@ -162,8 +106,6 @@ def generic_result_render_contract() -> CapabilityResultRenderContractFact:
         ),
     )
     return _contract(
-        builder_id="tool-result-semantics:generic",
-        builder_version="2",
         variants=variants,
         denial=ToolResultRenderVariantCode.GENERIC_DENIED,
     )
@@ -222,8 +164,6 @@ def terminal_result_render_contract() -> CapabilityResultRenderContractFact:
         ),
     )
     return _contract(
-        builder_id="tool-result-semantics:terminal-command",
-        builder_version="2",
         variants=variants,
         denial=ToolResultRenderVariantCode.TERMINAL_COMMAND_DENIED,
     )
@@ -278,8 +218,6 @@ def terminal_process_result_render_contract() -> CapabilityResultRenderContractF
         ),
     )
     return _contract(
-        builder_id="tool-result-semantics:terminal-process",
-        builder_version="3",
         variants=variants,
         denial=ToolResultRenderVariantCode.TERMINAL_PROCESS_ERROR,
     )

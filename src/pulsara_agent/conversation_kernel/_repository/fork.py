@@ -13,7 +13,6 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from pulsara_agent.conversation_kernel.compaction.contracts import (
-    COMPACTION_SNAPSHOT_COMPILER_CONTRACT,
     CompactionContinuationMode,
     FrozenCompactionSummary,
 )
@@ -436,7 +435,6 @@ class _ForkOperations:
                         active_request_entry_id=None,
                     )
                     snapshot_id = derive_id("snapshot", "fork", child_session_id, anchor_entry_id)
-                    source = material.snapshot
                     body = materialize_compaction_snapshot(
                         connection,
                         publisher=self._canonical_content_publisher,
@@ -457,14 +455,8 @@ class _ForkOperations:
                                     "session_id": child_session_id,
                                     "source_through_sequence": floor,
                                     "content_digest": carrier.content_digest,
-                                    "compiler_contract": COMPACTION_SNAPSHOT_COMPILER_CONTRACT,
-                                    "prompt_contract": source["prompt_contract"],
-                                    "model_contract": source["model_contract"],
                                 },
                             ),
-                            "compiler_contract": COMPACTION_SNAPSHOT_COMPILER_CONTRACT,
-                            "prompt_contract": source["prompt_contract"],
-                            "model_contract": source["model_contract"],
                             "inline_content": (
                                 body.canonical_bytes
                                 if isinstance(body, InlineContent)

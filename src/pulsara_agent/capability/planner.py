@@ -222,9 +222,16 @@ class KernelToolCapabilityPlanner:
             # never promotes current late MCP facts into this cohort.
             direct_tool_surface = predecessor.tool_surface
             direct_tool_versions = predecessor.direct_projection_set.tool_versions
-            if (
-                predecessor.direct_projection_set.native_function_tool_wire_contract_fingerprint
-                == view.planning_input.native_wire.native_function_tool_wire_contract_fingerprint
+            if all(
+                isinstance(
+                    quote := eligibility.get(projection.version),
+                    FrozenNativeToolWireEligibilityQuote,
+                )
+                and quote.wire_utf8_bytes == projection.wire_utf8_bytes
+                and quote.wire_tool_fingerprint == context_fingerprint(
+                    "native-tool-wire-value:v1", projection.wire_tool
+                )
+                for projection in predecessor.direct_projection_set.projections
             ):
                 reusable_direct_projection_set = predecessor.direct_projection_set
             else:
@@ -422,8 +429,6 @@ class KernelToolCapabilityPlanner:
         if (
             direct_projection_set.conversation_scope_kind
             is not selection.conversation_scope_kind
-            or direct_projection_set.native_function_tool_wire_contract_fingerprint
-            != selection.native_function_tool_wire_contract_fingerprint
             or direct_projection_set.tool_versions != selection.direct_tool_versions
         ):
             raise CapabilityPlanningError(

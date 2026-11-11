@@ -67,7 +67,6 @@ def _require_bounded_planner_framing(
     for item in tools.native_wire.entries:
         add(tool_capability_version_identity_digest(item.version))
         add(item.canonical_tool_spec_fingerprint)
-        add(item.native_function_tool_wire_contract_fingerprint)
         if isinstance(item, FrozenNativeToolWireEligibilityQuote):
             add(item.wire_tool_fingerprint)
         else:

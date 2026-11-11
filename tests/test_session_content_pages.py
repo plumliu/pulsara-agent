@@ -45,7 +45,7 @@ def read_page(owner, budget, *, offset=0, maximum=32_000):
         3,
         offset,
         5,
-        lambda sequence, start: _encode({"operation": "read_session_content.v4", "sequence": sequence, "offset": start}),
+        lambda sequence, start: _encode({"operation": "read_session_content", "sequence": sequence, "offset": start}),
         1,
         maximum,
         "call:history",

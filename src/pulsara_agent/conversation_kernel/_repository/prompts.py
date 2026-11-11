@@ -246,7 +246,7 @@ class _PromptOperations:
 
     def _apply_queued_prompt_action_in_connection(self, connection, guard, *, candidate, occurred_at, actor_id):
         existing = connection.execute(
-            """SELECT command_kind, request_schema_version, semantic_digest,
+            """SELECT command_kind, semantic_digest,
                       target_queue_item_id
                FROM pulsara_v3.session_commands
                WHERE session_id=%s AND command_id=%s""",
@@ -255,7 +255,6 @@ class _PromptOperations:
         if existing is not None:
             if (
                 existing["command_kind"] != candidate.command_kind
-                or existing["request_schema_version"] != "queued_prompt_action.v1"
                 or existing["semantic_digest"] != candidate.semantic_digest
                 or existing["target_queue_item_id"] != candidate.target_queue_item_id
             ):
@@ -293,9 +292,11 @@ class _PromptOperations:
                 raise QueuedPromptActionRejected("STEER_TARGET_CLOSED")
         connection.execute(
             """INSERT INTO pulsara_v3.session_commands (
-                   session_id, command_id, command_kind, request_schema_version,
-                   semantic_digest, target_kind, target_queue_item_id
-               ) VALUES (%s, %s, %s, 'queued_prompt_action.v1', %s, 'QUEUE_ITEM', %s)""",
+                session_id, command_id, command_kind, semantic_digest, target_kind,
+                target_queue_item_id
+            ) VALUES (
+                %s, %s, %s, %s, 'QUEUE_ITEM', %s
+            )""",
             (candidate.session_id, candidate.command_id, candidate.command_kind,
              candidate.semantic_digest, candidate.target_queue_item_id),
         )
@@ -496,7 +497,7 @@ class _PromptOperations:
         ) as connection:
             command = connection.execute(
                 """
-                SELECT command_kind, request_schema_version, semantic_digest,
+                SELECT command_kind, semantic_digest,
                        target_queue_item_id
                 FROM pulsara_v3.session_commands
                 WHERE session_id = %s AND command_id = %s
@@ -547,7 +548,6 @@ class _PromptOperations:
             command is not None
             and queue is not None
             and str(command["command_kind"]) == candidate.command_kind
-            and str(command["request_schema_version"]) == candidate.schema_version
             and str(command["semantic_digest"]) == expected_semantic_digest
             and str(command["target_queue_item_id"]) == candidate.queue_item_id
             and str(queue["command_id"]) == candidate.command_id
@@ -632,7 +632,7 @@ class _PromptOperations:
         new_turn = candidate.delivery_mode is PromptDeliveryMode.NEW_TURN
         existing = connection.execute(
             """
-            SELECT command_kind, request_schema_version, semantic_digest,
+            SELECT command_kind, semantic_digest,
                    target_queue_item_id
             FROM pulsara_v3.session_commands
             WHERE session_id = %s AND command_id = %s
@@ -666,7 +666,6 @@ class _PromptOperations:
                 frozen_binding = None
             if (
                 existing["command_kind"] != candidate.command_kind
-                or existing["request_schema_version"] != candidate.schema_version
                 or existing["semantic_digest"] != digest
                 or existing["target_queue_item_id"] != candidate.queue_item_id
             ):
@@ -822,16 +821,16 @@ class _PromptOperations:
         connection.execute(
             """
             INSERT INTO pulsara_v3.session_commands (
-                session_id, command_id, command_kind,
-                request_schema_version, semantic_digest,
-                target_kind, target_queue_item_id
-            ) VALUES (%s, %s, %s, %s, %s, 'QUEUE_ITEM', %s)
+                session_id, command_id, command_kind, semantic_digest, target_kind,
+                target_queue_item_id
+            ) VALUES (
+                %s, %s, %s, %s, 'QUEUE_ITEM', %s
+            )
             """,
             (
                 guard.session_id,
                 candidate.command_id,
                 candidate.command_kind,
-                candidate.schema_version,
                 digest,
                 candidate.queue_item_id,
             ),
@@ -847,27 +846,20 @@ class _PromptOperations:
         connection.execute(
             """
             INSERT INTO pulsara_v3.prompt_queue_items (
-                id, session_id, workspace_id, queue_sequence,
-                command_id, client_submission_id, delivery_mode, input_origin, scheduled_task_id, scheduled_task_revision, scheduled_due_at, scheduled_trigger_source,
-                model_call_binding, target_turn_id, status, inline_content, blob_id,
-                content_digest, content_size, content_media_type,
-                content_codec, permission_snapshot_id,
-                requested_permission_mode, effective_permission_mode,
-                permission_admission_source, permission_overlay,
-                permission_plan_context_ordinal,
-                permission_plan_workflow_id,
-                permission_plan_revision_at_admission,
-                permission_inherited_from_turn_id,
-                permission_contract_id,
-                permission_contract_fingerprint,
-                permission_snapshot_fingerprint,
-                pending_plan_handoff_workflow_id,
-                pending_plan_handoff_interaction_id,
-                pending_plan_handoff_kind
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDING',
-                      %s, %s, %s, %s, %s, %s,
-                      %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                      %s, %s, %s)
+                id, session_id, workspace_id, queue_sequence, command_id, client_submission_id,
+                delivery_mode, input_origin, scheduled_task_id, scheduled_task_revision,
+                scheduled_due_at, scheduled_trigger_source, model_call_binding, target_turn_id,
+                status, inline_content, blob_id, content_digest, content_size, content_media_type,
+                content_codec, permission_snapshot_id, requested_permission_mode,
+                effective_permission_mode, permission_admission_source, permission_overlay,
+                permission_plan_context_ordinal, permission_plan_workflow_id,
+                permission_plan_revision_at_admission, permission_inherited_from_turn_id,
+                permission_snapshot_fingerprint, pending_plan_handoff_workflow_id,
+                pending_plan_handoff_interaction_id, pending_plan_handoff_kind
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDING', %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            )
             """,
             (
                 candidate.queue_item_id,
@@ -890,12 +882,12 @@ class _PromptOperations:
                 candidate.target_turn_id,
                 *_content_columns(publication.body),
                 *(
-                    (None,) * 12
+                    (None,) * 10
                     if permission is None
                     else (
                         self._permission_columns(permission)
                         if candidate.scheduled is not None
-                        else (None, permission.requested_mode.value, *((None,) * 10))
+                        else (None, permission.requested_mode.value, *((None,) * 8))
                     )
                 ),
                 None if handoff is None else handoff.workflow_id,
@@ -1213,19 +1205,15 @@ class _PromptOperations:
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.turns (
-                    id, session_id, workspace_id,
-                    model_call_binding, status, initial_entry_id,
-                    current_context_binding_revision_id,
-                    permission_snapshot_id, requested_permission_mode,
-                    effective_permission_mode, permission_admission_source,
-                    permission_overlay, permission_plan_context_ordinal,
-                    permission_plan_workflow_id,
-                    permission_plan_revision_at_admission,
-                    permission_inherited_from_turn_id, permission_contract_id,
-                    permission_contract_fingerprint,
-                    permission_snapshot_fingerprint
-                ) VALUES (%s, %s, %s, %s, 'RUNNING', %s, %s,
-                          %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                id, session_id, workspace_id, model_call_binding, status, initial_entry_id,
+                current_context_binding_revision_id, permission_snapshot_id,
+                requested_permission_mode, effective_permission_mode, permission_admission_source,
+                permission_overlay, permission_plan_context_ordinal, permission_plan_workflow_id,
+                permission_plan_revision_at_admission, permission_inherited_from_turn_id,
+                permission_snapshot_fingerprint
+            ) VALUES (
+                %s, %s, %s, %s, 'RUNNING', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            )
                 """,
                 (
                     candidate.exact_turn_id,
@@ -1899,8 +1887,6 @@ class _PromptOperations:
                        permission_plan_workflow_id,
                        permission_plan_revision_at_admission,
                        permission_inherited_from_turn_id,
-                       permission_contract_id,
-                       permission_contract_fingerprint,
                        permission_snapshot_fingerprint
                 FROM pulsara_v3.turns
                 WHERE session_id = %s AND id = %s FOR UPDATE
@@ -1929,8 +1915,7 @@ class _PromptOperations:
                     """
                     SELECT id, session_id, workspace_id, workflow_ordinal,
                            status, entered_by, resume_permission_mode,
-                           permission_contract_id,
-                           permission_contract_fingerprint, workflow_revision
+                           workflow_revision
                     FROM pulsara_v3.plan_workflows
                     WHERE session_id = %s AND id = %s
                     FOR UPDATE
@@ -1948,10 +1933,6 @@ class _PromptOperations:
                     or str(workflow["entered_by"]) != expected_workflow.entered_by.value
                     or str(workflow["resume_permission_mode"])
                     != expected_workflow.resume_permission_mode.value
-                    or str(workflow["permission_contract_id"])
-                    != expected_workflow.permission_contract_id
-                    or str(workflow["permission_contract_fingerprint"])
-                    != expected_workflow.permission_contract_fingerprint
                     or int(workflow["workflow_revision"])
                     != expected_workflow.current_workflow_revision
                 ):

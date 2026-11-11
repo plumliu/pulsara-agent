@@ -50,7 +50,6 @@ from pulsara_agent.primitives.context import (
 )
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.plan_workflow import (
-    PlanInteractionBinding,
     extract_plan_draft,
     extract_plan_question,
 )
@@ -2232,11 +2231,6 @@ class CanonicalProtocolReader:
                 raise CanonicalProtocolResourceExhausted(
                     "open Plan content is not a canonical object"
                 )
-            binding = PlanInteractionBinding(
-                str(open_plan["request_contract_id"]),
-                str(open_plan["request_contract_version"]),
-                str(open_plan["request_contract_fingerprint"]),
-            )
             target = wire.PlanInteractionControl(
                 interaction_id=str(open_plan["id"]),
                 workflow_id=str(open_plan["plan_workflow_id"]),
@@ -2247,7 +2241,6 @@ class CanonicalProtocolReader:
             if str(open_plan["kind"]) == "QUESTION":
                 question = extract_plan_question(
                     interaction_id=str(open_plan["id"]),
-                    binding=binding,
                     arguments=frozen,
                 )
                 target.typed_content_fingerprint = question.typed_content_fingerprint
@@ -2258,7 +2251,6 @@ class CanonicalProtocolReader:
                     interaction_id=str(open_plan["id"]),
                     assistant_entry_id=str(open_plan["assistant_entry_id"]),
                     tool_call_id=str(open_plan["tool_call_id"]),
-                    binding=binding,
                     request_semantic_digest=str(open_plan["request_semantic_digest"]),
                     arguments=frozen,
                 )
@@ -2423,8 +2415,6 @@ def _permission_projection(row: Mapping[str, object]):
         plan_workflow_id=str(row["permission_plan_workflow_id"] or ""),
         plan_workflow_revision=int(row["permission_plan_revision_at_admission"] or 0),
         inherited_from_turn_id=str(row["permission_inherited_from_turn_id"] or ""),
-        contract_id=str(row["permission_contract_id"]),
-        contract_fingerprint=str(row["permission_contract_fingerprint"]),
         snapshot_fingerprint=str(row["permission_snapshot_fingerprint"]),
     )
 

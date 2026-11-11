@@ -261,7 +261,7 @@ function inlineContent(value: string) {
 }
 
 function promptBody(...texts: string[]): string {
-  return JSON.stringify({ schema: 'pulsara.prompt/v2', parts: texts.map((text) => ({ type: 'text', text })) });
+  return JSON.stringify({ parts: texts.map((text) => ({ type: 'text', text })) });
 }
 
 function inlinePrompt(...texts: string[]) {
@@ -855,7 +855,7 @@ describe('exact prompt projection', () => {
     const bytes = Uint8Array.from([0xff, 0x00, 0x89, 0x50, 0x4e, 0x47]);
     const digest = sha256Digest(bytes);
     const body = {
-      ...inlineContent(JSON.stringify({ schema: 'pulsara.prompt/v2', parts: [{
+      ...inlineContent(JSON.stringify({ parts: [{
         type: 'image', image_ref: 'image:aaaaaaaaaaaaaaaaaaaaaaaaaa', digest, encoded_bytes: bytes.length,
         media_type: 'image/png', width: 3, height: 2,
       }] })),
@@ -902,7 +902,7 @@ describe('exact prompt projection', () => {
         entry('prompt-a', 'A', 1, 'USER_MESSAGE'),
         entry('answer-a', 'A', 2, 'ASSISTANT_MESSAGE'),
         // B was started by Cell output, then interrupted before assistant output.
-        { ...entry('cell-b', 'B', 3, 'TERMINAL_OBSERVATION'), input_origin: 'CELL_OUTPUT', content: { media_type: 'application/vnd.pulsara.terminal-observation+json', inline_content: btoa(JSON.stringify({schema_version:'cell_output.v1',cell_id:'cell:b',source_turn_id:'turn:source',source_exec_attempt_id:'attempt:b',record_sequence:1,record:{kind:'log',text:'text'}})) } },
+        { ...entry('cell-b', 'B', 3, 'TERMINAL_OBSERVATION'), input_origin: 'CELL_OUTPUT', content: { media_type: 'application/vnd.pulsara.terminal-observation+json', inline_content: btoa(JSON.stringify({cell_id:'cell:b',source_turn_id:'turn:source',source_exec_attempt_id:'attempt:b',record_sequence:1,record:{kind:'log',text:'text'}})) } },
         entry('prompt-c', 'C', 4, 'USER_MESSAGE'),
         { ...entry('material', 'C', 5, 'USER_MESSAGE'), input_origin: 'AGENT_MATERIAL' },
       ], control: {} } },
@@ -952,7 +952,6 @@ describe('exact prompt projection', () => {
 
   it('hydrates canonical view_image content into its exact tool trace owner', async () => {
     const imageBody = JSON.stringify({
-      schema: 'pulsara.prompt/v2',
       parts: [
         { type: 'text', text: 'Image loaded.' },
         {
@@ -2371,7 +2370,6 @@ describe('source text fidelity hard cut', () => {
   it.each(['history', 'queue'])('projects %s images as typed owner-scoped content', async (location) => {
     const content = {
       ...inlineContent(JSON.stringify({
-        schema: 'pulsara.prompt/v2',
         parts: [{ type: 'text', text: '看图' }, {
           type: 'image', image_ref: 'image:aaaaaaaaaaaaaaaaaaaaaaaaaa', digest: `sha256:${'a'.repeat(64)}`, encoded_bytes: 4,
           media_type: 'image/png', width: 7, height: 5,
@@ -3686,7 +3684,7 @@ it.each(['controller','observer'] as const)('projects the scoped current retry s
  expect(connection.current().messages).toEqual([]);
 });
 it('keeps each Cell record in the real queue order and projects its source rather than an Agent identity',async()=>{
- const body=(sequence:number,text:string)=>({media_type:'application/vnd.pulsara.terminal-observation+json',inline_content:btoa(JSON.stringify({schema_version:'cell_output.v1',cell_id:'cell:one',source_turn_id:'turn:source',source_exec_attempt_id:'attempt:cell',record_sequence:sequence,record:{kind:sequence===2?'error':'log',...(sequence===2?{error:{message:text}}:{text})}}))});
+ const body=(sequence:number,text:string)=>({media_type:'application/vnd.pulsara.terminal-observation+json',inline_content:btoa(JSON.stringify({cell_id:'cell:one',source_turn_id:'turn:source',source_exec_attempt_id:'attempt:cell',record_sequence:sequence,record:{kind:sequence===2?'error':'log',...(sequence===2?{error:{message:text}}:{text})}}))});
  const queue=[{queue_item_id:'queue:b',queue_sequence:'2',status:'PENDING',delivery_mode:'NEW_TURN',input_origin:'CELL_OUTPUT',source_session_id:'session-1',source_turn_id:'turn:source',source_tool_attempt_id:'attempt:cell',content:body(1,'**one**')},{queue_item_id:'queue:c',queue_sequence:'3',status:'PENDING',delivery_mode:'NEW_TURN',input_origin:'CELL_OUTPUT',source_session_id:'session-1',source_turn_id:'turn:source',source_tool_attempt_id:'attempt:cell',content:body(2,'failure')},{queue_item_id:'queue:a',command_id:'command:a',queue_sequence:'1',status:'PENDING',delivery_mode:'NEW_TURN',input_origin:'USER_SUBMISSION',content:inlinePrompt('human')}];
  stubRuntimeFetch(vi.fn(async()=>new Response(JSON.stringify(connectPayload([],{prompt_queue:queue,prompt_queue_total_count:'3'},[],{})),{status:200})));
  const connection=await new LocalHttpRuntimeAdapter().connect('session-1');

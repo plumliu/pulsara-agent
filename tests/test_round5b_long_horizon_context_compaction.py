@@ -181,6 +181,7 @@ def _wire_quote(
 def _manual_host() -> KernelHostSession:
     host = object.__new__(KernelHostSession)
     host._session_scope_kind = ModelInputScopeKind.ROOT
+    host._ephemeral = SimpleNamespace(invalidate_cache_warming=lambda: None)
     host.root_session_id = None
     host._writer_renewal_failure = None
     host._closing = False
@@ -673,9 +674,6 @@ def test_round5b_first_full_history_adoption_uses_zero_effective_floor() -> None
                     codec=CONTEXT_SNAPSHOT_CODEC,
                 ),
                 snapshot_carrier=carrier,
-                compiler_contract="compiler:test",
-                prompt_contract="prompt:test",
-                model_contract="model:test",
                 occurred_at=datetime.now(timezone.utc),
                 actor_id="runtime:test",
             )
@@ -1293,8 +1291,6 @@ def test_compaction_wire_transition_joins_authority_before_numeric_reclaim(
     successor_estimator = (
         SimpleNamespace(
             fact=SimpleNamespace(
-                estimator_id="other",
-                estimator_version="v1",
                 estimator_fingerprint="sha256:" + ("1" * 64),
             )
         )
@@ -2038,7 +2034,6 @@ def test_round5b_retained_skill_proves_older_full_from_installed_message(
             trust_class=ContextTrustClass.UNTRUSTED_OBSERVATION,
             lifecycle=lifecycle,
             presence=presence,
-            contract_version="pulsara.skill-catalog.v2",
             body=body,
         )
 
@@ -2199,7 +2194,6 @@ def test_round5b_installed_retained_skill_is_inherited_only_within_same_turn() -
         trust_class=ContextTrustClass.UNTRUSTED_OBSERVATION,
         lifecycle=SourceObservationLifecycle.SNAPSHOT,
         presence=SourceObservationPresence.VALUE,
-        contract_version="pulsara.retained-skill-context.v1",
         body=body,
     )
     head = SimpleNamespace(

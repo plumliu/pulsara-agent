@@ -56,7 +56,6 @@ def test_codec_provider_intent_and_protocol_roundtrip():
     frozen = freeze_canonical_prompt(content)
     assert hydrate_canonical_prompt_body(body=frozen.body, image_payloads=()) == frozen
     raw = json.loads(frozen.body)
-    raw.pop("schema")
     assert _prompt_content_from_wire(_prompt_content_from_json(raw)) == PromptContent(
         content.parts
     )

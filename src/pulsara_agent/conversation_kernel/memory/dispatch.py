@@ -278,7 +278,6 @@ class MemoryDispatchSupport:
                     if item.absence_kind is ContextSourceAbsenceKind.EXPLICIT_EMPTY
                     else SourceObservationPresence.UNAVAILABLE
                 ),
-                contract_version=item.source_contract_version,
                 body="",
             )
             for item in (cleared, unavailable)

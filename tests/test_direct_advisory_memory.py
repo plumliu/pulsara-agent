@@ -253,8 +253,8 @@ def test_user_text_edit_preserves_identity_and_relations_but_refreshes_retrieval
         connection.execute(
             """INSERT INTO pulsara_v3.memory_embeddings
                (memory_domain_id, fact_id, fact_semantic_digest,
-                embedding_contract_id, embedding_contract_version, embedding)
-               SELECT memory_domain_id, id, fact_semantic_digest, 'test', 1,
+                embedding_contract_id, embedding)
+               SELECT memory_domain_id, id, fact_semantic_digest, 'test',
                       ('[' || repeat('0,', 1023) || '0]')::public.vector
                FROM pulsara_v3.memory_facts WHERE id=%s""",
             (current["target"]["memory_id"],),

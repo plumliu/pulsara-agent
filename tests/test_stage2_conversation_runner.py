@@ -495,7 +495,6 @@ class _CompactionScriptedModel(_ScriptedModel):
     def resolve_compaction_summary_call(self, **kwargs):
         call = super().resolve_compaction_summary_call(**kwargs)
         self.summary_transport.binding_id = call.target.transport.binding_id
-        self.summary_transport.contract_version = call.target.transport.contract_version
         resolved = replace(
             call,
             target=replace(call.target, transport=self.summary_transport),
@@ -683,7 +682,6 @@ class _PostCompactionHookContextCollector(StaticContextSourceCollector):
         )
         candidate = ContextSourceCandidate(
             source_kind=ContextSourceKind.HOOK_CONTEXT,
-            source_contract_version=binding.contract_version,
             source_contract_fingerprint=binding.contract_fingerprint,
             source_semantic_fingerprint=semantic,
             channel=binding.channel,
@@ -1332,7 +1330,6 @@ class _CompactionSequencedDirectKernelModel(_SequencedDirectKernelModel):
     def resolve_compaction_summary_call(self, **kwargs):
         call = super().resolve_compaction_summary_call(**kwargs)
         self.summary_transport.binding_id = call.target.transport.binding_id
-        self.summary_transport.contract_version = call.target.transport.contract_version
         resolved = replace(
             call,
             target=replace(call.target, transport=self.summary_transport),

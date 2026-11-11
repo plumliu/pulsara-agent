@@ -70,7 +70,6 @@ from pulsara_agent.model_input.contracts import (
 from pulsara_agent.model_input.continuity import (
     FrozenProviderInputAppendSemanticProjection,
     FrozenProviderInputEpochView,
-    PROVIDER_MESSAGE_LOWERING_CONTRACT,
     provider_input_logical_bytes,
 )
 from pulsara_agent.model_input.provider_replay import (
@@ -690,7 +689,6 @@ def build_synthetic_compaction_dispatch_read(
             "media_type": snapshot_content_media_type,
             "codec": snapshot_content_codec,
             "source_through_sequence": source_through_sequence,
-            "lowering": PROVIDER_MESSAGE_LOWERING_CONTRACT,
         },
     )
     binding_values = {

@@ -693,16 +693,16 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
             page, output = await _finish(host, await _start(host, '''
                 for (const profile of ["research_worker", null]) {
                   try { await tools.run_agent([{instruction:"single", profile}]); }
-                  catch (error) { console.log({operation:"single", code:error.code, message:error.message}); }
+                  catch (error) { console.log({operation:"single", name:error.name}); }
                   try { await tools.run_agent([{instruction:"valid"},
                     {instruction:"invalid", profile}]); }
-                  catch (error) { console.log({operation:"batch", code:error.code, message:error.message}); }
+                  catch (error) { console.log({operation:"batch", name:error.name}); }
                 }
             ''', invoke, {"run_agent": {}}))
             self.assertEqual(page.state, "completed")
             import json
             self.assertEqual([json.loads(item["text"]) for item in output], [
-                {"operation": operation, "message": "Unknown run_agent assignment field"}
+                {"operation": operation, "name": "TypeError"}
                 for _ in range(2)
                 for operation in ("single", "batch")
             ])

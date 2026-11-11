@@ -110,7 +110,6 @@ def resolve_observed_model_target(
     adapter = contract.route_wire
     if (
         transport.binding_id != adapter.transport_binding_id
-        or transport.contract_version != adapter.transport_contract_version
     ):
         raise ModelTransportUnavailable("route/wire transport contract drifted")
     limits = contract.target_facts.limits
@@ -137,7 +136,6 @@ def resolve_observed_model_target(
         "model_id": contract.key.model_id,
         "canonical_endpoint_base_url": canonical_endpoint,
         "transport_binding_id": adapter.transport_binding_id,
-        "transport_contract_version": adapter.transport_contract_version,
         "reasoning_wire_profile": contract.reasoning_wire.profile.value,
         "model_identity_policy": adapter.model_identity_policy.value,
         "input_modalities": contract.target_facts.input_modalities,

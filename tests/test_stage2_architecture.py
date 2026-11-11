@@ -21,7 +21,7 @@ from pulsara_agent.storage.migrations.manifest import (
     CONVERSATION_KERNEL_RELATIONS,
     CONVERSATION_KERNEL_RUNTIME_PRIVILEGES,
 )
-from pulsara_agent.storage.migrations.registry import POSTGRES_MIGRATION_REGISTRY
+from pulsara_agent.storage.migrations.registry import POSTGRES_BASELINE
 from pulsara_agent.storage.migrations.grants import (
     build_postgres_runtime_grant_policy,
 )
@@ -199,9 +199,8 @@ def test_stage2_repository_sql_is_schema_qualified_and_has_no_durable_stream() -
 
 
 def test_stage2_product_contract_survives_the_clean_migration_universe() -> None:
-    latest = POSTGRES_MIGRATION_REGISTRY.definition(0)
+    latest = POSTGRES_BASELINE
     manifest = build_postgres_schema_manifest()
-    assert POSTGRES_MIGRATION_REGISTRY.latest_version == 0
     assert manifest.product_relations == CONVERSATION_KERNEL_RELATIONS
     assert latest.resource_name == "0000_conversation_kernel_baseline.sql"
     assert all(value > 0 for value in asdict(STAGE2_LIMITS).values())

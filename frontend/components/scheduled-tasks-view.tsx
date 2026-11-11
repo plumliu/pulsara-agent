@@ -262,12 +262,11 @@ function TaskEditor({onNotify, modelConfigurations, modelCatalogLoading, onCreat
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const invalidatePreviewRequests = useCallback(() => { previewRevision.current++; }, []);
   const rule = async (signal?: AbortSignal): Promise<ScheduleRule> => {
-    const contract = 'scheduled-rule:v1' as const;
     if (kind === 'once') return current?.schedule.kind === 'once' && !onceChanged ? current.schedule : (await api.localOnce(once, timezone, signal)).schedule;
-    if (kind === 'interval') return { contract, kind, anchor_at_utc: anchor, seconds };
-    if (kind === 'weekly') return { contract,kind,start_date:start,time,weekdays:days };
-    if (kind === 'monthly') return { contract,kind,start_date:start,time,day };
-    return { contract,kind,start_date:start,time };
+    if (kind === 'interval') return { kind, anchor_at_utc: anchor, seconds };
+    if (kind === 'weekly') return {kind,start_date:start,time,weekdays:days };
+    if (kind === 'monthly') return {kind,start_date:start,time,day };
+    return {kind,start_date:start,time };
   };
   useEffect(() => {
     const controller = new AbortController();

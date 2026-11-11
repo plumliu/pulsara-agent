@@ -79,18 +79,14 @@ class ReasoningWireContract:
 @dataclass(frozen=True, slots=True)
 class RouteWireContract:
     transport_binding_id: str
-    transport_contract_version: str
     model_identity_policy: ModelIdentityPolicy
-    assistant_replay_contract: str
     profile: RouteWireProfile
     reasoning_profiles: Mapping[ReasoningWireProfile, ReasoningWireContract]
     default_reasoning_profile: ReasoningWireProfile
 
     def __post_init__(self) -> None:
-        if not self.transport_binding_id or not self.transport_contract_version:
+        if not self.transport_binding_id:
             raise ValueError("route/wire transport identity is incomplete")
-        if not self.assistant_replay_contract:
-            raise ValueError("route/wire replay contract is incomplete")
         if self.profile.model_identity_policy is not self.model_identity_policy:
             raise ValueError("route/wire model identity policy drifted")
         profiles = MappingProxyType(dict(self.reasoning_profiles))

@@ -30,9 +30,9 @@ def create_migrated_postgres_test_database() -> MigratedPostgresTestDatabase:
         )
         deadline = monotonic() + 240.0
         report = runner.migrate(deadline_monotonic=deadline)
-        if report.migration_head_version != 0:
+        if report.baseline_commit_confirmation != "FULL":
             raise RuntimeError(
-                "staged PostgreSQL test migration did not reach clean baseline 0"
+                "staged PostgreSQL test baseline installation was not confirmed"
             )
     except BaseException:
         drop_postgres_test_database(admin_root_dsn(), database.database_name)

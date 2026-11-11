@@ -72,7 +72,6 @@ from pulsara_agent.storage.postgres_connection_provider import (
 from pulsara_agent.workspace_identity import HostWorkspaceInput
 
 
-_SCHEMA_VERSION = "model-switch-handover-dogfood.v3"
 _SOURCE_MODEL = "openai/gpt-5.6-luna"
 _DESTINATION_MODEL = "gpt-5.5"
 
@@ -157,7 +156,6 @@ class _RecordingTransport:
         for name in (
             "api",
             "binding_id",
-            "contract_version",
             "sanitizer_contract_fingerprint",
             "boundary_contract_fingerprint",
         ):
@@ -313,7 +311,7 @@ def _create_database(settings: LocalSettings) -> tuple[str, str, str, str]:
         runner = PostgresMigrationRunner(admin_dsn=admin, runtime_dsn=runtime)
         first = runner.migrate(deadline_monotonic=monotonic() + 240)
         second = runner.migrate(deadline_monotonic=monotonic() + 240)
-        if first.applied_versions != (0,) or second.applied_versions != ():
+        if first.baseline_commit_confirmation != "FULL" or second.baseline_commit_confirmation != "FULL":
             raise RuntimeError("ephemeral clean-v0 migration was not repeatable")
     except BaseException:
         _drop_database(settings, name)
@@ -598,7 +596,6 @@ async def _run(
                 ) - int(before_switch_evidence["tool_result_count"])
                 expected_summary_models = (destination_model,)
                 report: dict[str, object] = {
-                    "schema_version": _SCHEMA_VERSION,
                     "completed_at_utc": datetime.now(timezone.utc).isoformat(),
                     "ephemeral_database": database_name,
                     "source": {
@@ -691,7 +688,6 @@ def main() -> int:
         )
     except BaseException as exc:
         report = {
-            "schema_version": _SCHEMA_VERSION,
             "completed_at_utc": datetime.now(timezone.utc).isoformat(),
             "passed": False,
             "failure_type": type(exc).__name__,

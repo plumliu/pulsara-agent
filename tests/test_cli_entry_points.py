@@ -20,11 +20,9 @@ def test_config_check_keeps_database_readiness_shape_through_desktop_diagnostics
     ))
     monkeypatch.setattr(desktop_runtime, "request_database_diagnostic", lambda **_: {
         "status": "verified", "database_name": "pulsara", "runtime_role": "pulsara_runtime",
-        "migration_head_version": 0, "result_fingerprint": "diagnostic-only",
     })
     assert asyncio.run(cli._config_check())["database"] == {
         "status": "ready", "database_name": "pulsara", "runtime_role": "pulsara_runtime",
-        "migration_head_version": 0,
     }
 
 

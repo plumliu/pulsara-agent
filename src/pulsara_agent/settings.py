@@ -40,8 +40,6 @@ from pulsara_agent.mcp_credentials import (
 from pulsara_agent.process_credential_boundary import ProcessCredentialScrubSet
 
 
-LOCAL_SETTINGS_SCHEMA = "pulsara-local-settings:v5"
-
 
 LOCAL_SETTINGS_FILE_NAME = "local-settings.yaml"
 MAXIMUM_LOCAL_SETTINGS_BYTES = 1 << 20
@@ -196,10 +194,6 @@ class LocalSettingsUnavailable(RuntimeError):
     pass
 
 
-class LocalSettingsSchemaUnsupported(LocalSettingsUnavailable, ValueError):
-    """An explicit offline conversion must preserve the existing document."""
-
-
 class LocalSettingsPublishIndeterminate(RuntimeError):
     pass
 
@@ -218,7 +212,6 @@ def default_local_settings_path() -> Path:
 
 def local_settings_to_dict(settings: LocalSettings) -> dict[str, object]:
     return {
-        "schema": LOCAL_SETTINGS_SCHEMA,
         "input_suggestions_enabled": settings.input_suggestions_enabled,
         "cache_warming_enabled": settings.cache_warming_enabled,
         "model_connections": [
@@ -258,25 +251,14 @@ def local_settings_from_dict(value: object) -> LocalSettings:
     # old endpoint, retaining it in memory, or publishing it on the next save.
     if isinstance(value, dict):
         value = {key: item for key, item in value.items() if key != "postgres"}
-    if (
-        isinstance(value, dict)
-        and isinstance(value.get("schema"), str)
-        and value["schema"] != LOCAL_SETTINGS_SCHEMA
-    ):
-        raise LocalSettingsSchemaUnsupported(
-            "本机设置版本需显式转换，请勿以空配置覆盖。"
-        )
     # Optional user preferences have their product defaults when absent.
     if not isinstance(value, dict) or set(value) - {"input_suggestions_enabled", "cache_warming_enabled", "asr"} != {
-        "schema",
         "model_connections",
         "memory_retrieval",
         "mcp_credentials",
         "mcp_oauth",
     }:
         raise ValueError("local settings have an invalid closed shape")
-    if value["schema"] != LOCAL_SETTINGS_SCHEMA:
-        raise ValueError("local settings schema is unsupported")
     raw_connections = value["model_connections"]
     if not isinstance(raw_connections, list):
         raise ValueError("model_connections must be an array")
@@ -388,8 +370,6 @@ def read_local_settings(path: Path | None = None) -> LocalSettings:
         decoded = yaml.safe_load(raw.decode("utf-8"))
         return local_settings_from_dict(decoded)
     except (UnicodeError, yaml.YAMLError, ValueError) as exc:
-        if isinstance(exc, LocalSettingsSchemaUnsupported):
-            raise
         raise LocalSettingsUnavailable("local settings are invalid") from exc
 
 
@@ -572,8 +552,6 @@ class LocalSettingsStore:
 
         try:
             return self.read()
-        except LocalSettingsSchemaUnsupported:
-            raise
         except LocalSettingsUnavailable:
             return LocalSettings(postgres=self._postgres)
 
@@ -922,7 +900,6 @@ def _validate_postgres_dsn(value: str) -> None:
 
 __all__ = [
     "LOCAL_SETTINGS_FILE_NAME",
-    "LOCAL_SETTINGS_SCHEMA",
     "LocalModelApiKey",
     "LocalPostgresConfig",
     "LocalSettings",
@@ -930,7 +907,6 @@ __all__ = [
     "LocalSettingsSecretMissing",
     "LocalSettingsStore",
     "LocalSettingsUnavailable",
-    "LocalSettingsSchemaUnsupported",
     "default_local_settings_path",
     "local_settings_from_dict",
     "local_settings_to_dict",

@@ -200,7 +200,7 @@ it('keeps a disconnected tool result and its gap until reading the intervening r
 
 it('preserves a reconnected pending queue body until its exact canonical entry is verified', async () => {
   const text = '重连时已知的输入🙂';
-  const encoded = JSON.stringify({ schema: 'pulsara.prompt/v2', parts: [{ type: 'text', text }] });
+  const encoded = JSON.stringify({ parts: [{ type: 'text', text }] });
   const reference = { ...blob(encoded), media_type: 'application/vnd.pulsara.prompt+json' };
   const queued = { queue_item_id: 'queue:one', command_id: 'command:one', queue_sequence: '1', status: 'PENDING', delivery_mode: 'NEW_TURN', content: { ...reference, ...inline(encoded) } };
   const consumed = entry('input', 21, { entry_kind: 'USER_MESSAGE', blocks: [], content: reference, input_source: { command_id: queued.command_id, queue_item_id: queued.queue_item_id, delivery_mode: 'NEW_TURN' } });

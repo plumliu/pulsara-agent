@@ -42,7 +42,6 @@ from tests.dogfood.run_model_switch_handover_dogfood import (
 )
 
 
-SCHEMA_VERSION = "content-revision-line-edit-dogfood.v1"
 DEFAULT_MODEL = "openai/gpt-5.6-luna"
 
 SYSTEM_PROMPT = """
@@ -363,7 +362,6 @@ async def _run(model_id: str) -> dict[str, object]:
                 if (workspace / "created.txt").read_bytes() != b"created\nEDITED\n":
                     raise RuntimeError("create-read-edit chain produced wrong bytes")
                 return {
-                    "schema_version": SCHEMA_VERSION,
                     "status": "passed",
                     "completed_at_utc": datetime.now(timezone.utc).isoformat(),
                     "model_id": model_id,
@@ -406,7 +404,6 @@ def main() -> int:
         report = asyncio.run(_run(args.model))
     except BaseException as exc:
         report = {
-            "schema_version": SCHEMA_VERSION,
             "status": "failed",
             "completed_at_utc": datetime.now(timezone.utc).isoformat(),
             "failure_type": type(exc).__name__,

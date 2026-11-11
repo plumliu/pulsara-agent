@@ -31,7 +31,6 @@ from pulsara_agent.local_source_binding import (
 )
 from pulsara_agent.memory.scope import workspace_context_key
 from pulsara_agent.plugins.contracts import (
-    PLUGIN_INSTANCE_STATE_CONTRACT_ID,
     PluginCancellationPort,
     PluginCleanupLocationStatus,
     PluginDiagnostic,
@@ -1864,7 +1863,6 @@ def _ensure_data_root(path: Path) -> None:
 def _state_payload(state: PluginInstanceState) -> bytes:
     return json.dumps(
         {
-            "contract_id": state.contract_id,
             "plugin_id": state.plugin_id,
             "scope": state.scope.value,
             "workspace_state_key": state.workspace_state_key,
@@ -1969,7 +1967,6 @@ def _read_state_at_with_evidence(
         reject_duplicate_keys=True,
     )
     if not isinstance(value, dict) or set(value) != {
-        "contract_id",
         "plugin_id",
         "scope",
         "workspace_state_key",
@@ -1978,10 +1975,8 @@ def _read_state_at_with_evidence(
         "mcp_connection_overlays",
     }:
         raise ValueError("Plugin state has an invalid shape")
-    if value["contract_id"] != PLUGIN_INSTANCE_STATE_CONTRACT_ID or not isinstance(
-        value["enabled"], bool
-    ):
-        raise ValueError("Plugin state contract is invalid")
+    if not isinstance(value["enabled"], bool):
+        raise ValueError("Plugin state enabled flag is invalid")
     if not isinstance(value["mcp_connection_overlays"], list):
         raise ValueError("Plugin MCP overlays must be a list")
     state = PluginInstanceState(

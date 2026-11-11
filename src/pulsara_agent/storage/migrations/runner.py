@@ -1,4 +1,4 @@
-"""Reset-only installer for the clean conversation-kernel migration universe."""
+"""Reset-only installer for the clean conversation-kernel baseline."""
 
 from __future__ import annotations
 
@@ -9,12 +9,9 @@ from hashlib import sha256
 
 from psycopg import Connection
 
-from pulsara_agent import __version__
 from pulsara_agent.storage.migrations.contracts import (
     BASELINE_NAME,
     PostgresMigrationLedgerRowFact,
-    UNIVERSE_GENERATION,
-    UNIVERSE_ID,
     canonical_utc,
 )
 from pulsara_agent.storage.migrations.errors import (
@@ -27,8 +24,7 @@ from pulsara_agent.storage.migrations.grants import (
 )
 from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
 from pulsara_agent.storage.migrations.registry import (
-    POSTGRES_MIGRATION_REGISTRY,
-    PostgresMigrationRegistry,
+    POSTGRES_BASELINE,
 )
 from pulsara_agent.storage.postgres_endpoint import ResolvedPostgresConnectionFactory
 
@@ -53,16 +49,8 @@ class PostgresMigrationReport:
     status: str
     database_name: str
     runtime_role: str
-    previous_head_version: int | None
-    migration_head_version: int
-    applied_versions: tuple[int, ...]
     added_grant_fingerprints: tuple[str, ...]
-    registry_prefix_fingerprint: str
-    universe_id: str
-    universe_generation: int
-    universe_fingerprint: str
     baseline_commit_confirmation: str
-    report_fingerprint: str
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -84,8 +72,6 @@ class PostgresMigrationRunner:
         *,
         admin_dsn: str,
         runtime_dsn: str,
-        registry: PostgresMigrationRegistry = POSTGRES_MIGRATION_REGISTRY,
-        application_version: str = __version__,
         grant_executor: PostgresRuntimeGrantExecutor | None = None,
     ) -> None:
         if not admin_dsn.strip():
@@ -104,8 +90,6 @@ class PostgresMigrationRunner:
                 PostgresSchemaFailureCode.DATABASE_IDENTITY_MISMATCH,
                 "admin and runtime DSNs must resolve to the same database target",
             )
-        self._registry = registry
-        self._application_version = application_version
         self._grant_executor = grant_executor or PostgresRuntimeGrantExecutor()
 
     def migrate(self, *, deadline_monotonic: float) -> PostgresMigrationReport:
@@ -133,8 +117,9 @@ class PostgresMigrationRunner:
         allow_none_retry: bool,
         reset: bool = False,
     ) -> PostgresMigrationReport:
-        self._registry.verify_resources()
-        definition = self._registry.definition(0)
+        definition = POSTGRES_BASELINE
+        definition.resource_bytes()
+        definition.verify_auxiliary_resources()
         runtime_identity = self._read_runtime_identity(deadline_monotonic)
         try:
             with self._admin.connect(
@@ -162,11 +147,8 @@ class PostgresMigrationRunner:
                     connection.rollback()
                     return _report(
                         identity=runtime_identity,
-                        applied=(),
                         grants=(),
-                        previous=0,
                         confirmation="FULL",
-                        registry=self._registry,
                     )
 
                 _require_empty_pulsara_world(connection)
@@ -176,23 +158,10 @@ class PostgresMigrationRunner:
                     _verify_vector_capability(connection)
                     connection.execute(
                         """
-                        INSERT INTO public.pulsara_schema_migrations (
-                            universe_id, universe_generation,
-                            universe_fingerprint, version, name,
-                            resource_sha256, migration_contract_fingerprint,
-                            registry_prefix_fingerprint, application_version
-                        ) VALUES (%s, %s, %s, 0, %s, %s, %s, %s, %s)
+                        INSERT INTO public.pulsara_schema_migrations (name, resource_sha256)
+                        VALUES (%s, %s)
                         """,
-                        (
-                            UNIVERSE_ID,
-                            UNIVERSE_GENERATION,
-                            definition.identity.universe_fingerprint,
-                            BASELINE_NAME,
-                            definition.expected_sha256,
-                            definition.migration_contract_fingerprint,
-                            definition.registry_prefix_fingerprint,
-                            self._application_version,
-                        ),
+                        (BASELINE_NAME, definition.expected_sha256),
                     )
                     grants = self._grant_executor.reconcile(
                         connection, runtime_role=runtime_identity.runtime_role
@@ -208,7 +177,7 @@ class PostgresMigrationRunner:
                     connection.rollback()
                     raise PostgresSchemaError(
                         PostgresSchemaFailureCode.MIGRATION_FAILED,
-                        f"clean version-0 baseline failed: {type(exc).__name__}",
+                        f"clean baseline failed: {type(exc).__name__}",
                     ) from exc
                 try:
                     connection.commit()
@@ -228,11 +197,8 @@ class PostgresMigrationRunner:
             if confirmation is BaselineCommitConfirmation.FULL:
                 return _report(
                     identity=runtime_identity,
-                    applied=(0,),
                     grants=(),
-                    previous=None,
                     confirmation="FULL",
-                    registry=self._registry,
                 )
             if confirmation is BaselineCommitConfirmation.NONE and allow_none_retry:
                 return self._migrate(
@@ -250,11 +216,8 @@ class PostgresMigrationRunner:
             ) from exc
         return _report(
             identity=runtime_identity,
-            applied=(0,),
             grants=grants,
-            previous=None,
             confirmation="FULL",
-            registry=self._registry,
         )
 
     def confirm_baseline(
@@ -273,7 +236,6 @@ class PostgresMigrationRunner:
             disposition = classify_clean_baseline_confirmation(
                 connection,
                 runtime_role=runtime_identity.runtime_role,
-                registry=self._registry,
             )
             connection.rollback()
             return disposition
@@ -302,44 +264,17 @@ def read_migration_ledger(
             """
         ).fetchall()
     )
-    expected = (
-        "universe_id",
-        "universe_generation",
-        "universe_fingerprint",
-        "version",
-        "name",
-        "resource_sha256",
-        "migration_contract_fingerprint",
-        "registry_prefix_fingerprint",
-        "applied_at",
-        "application_version",
-    )
+    expected = ("name", "resource_sha256", "applied_at")
     if columns != expected:
-        raise _reset_required("database contains a legacy migration ledger")
+        raise _reset_required("database does not contain the current baseline ledger")
     records = connection.execute(
-        """
-        SELECT universe_id, universe_generation, universe_fingerprint,
-               version, name, resource_sha256, migration_contract_fingerprint,
-               registry_prefix_fingerprint, applied_at, application_version
-        FROM public.pulsara_schema_migrations ORDER BY version
-        """
+        "SELECT name, resource_sha256, applied_at FROM public.pulsara_schema_migrations"
     ).fetchall()
     return tuple(
         PostgresMigrationLedgerRowFact(
-            universe_id=str(_cell(row, 0, "universe_id")),
-            universe_generation=int(_cell(row, 1, "universe_generation")),
-            universe_fingerprint=str(_cell(row, 2, "universe_fingerprint")),
-            version=int(_cell(row, 3, "version")),
-            name=str(_cell(row, 4, "name")),
-            resource_checksum=str(_cell(row, 5, "resource_sha256")),
-            migration_contract_fingerprint=str(
-                _cell(row, 6, "migration_contract_fingerprint")
-            ),
-            registry_prefix_fingerprint=str(
-                _cell(row, 7, "registry_prefix_fingerprint")
-            ),
-            applied_at_utc=canonical_utc(_cell(row, 8, "applied_at")),
-            application_version=str(_cell(row, 9, "application_version")),
+            name=str(_cell(row, 0, "name")),
+            resource_checksum=str(_cell(row, 1, "resource_sha256")),
+            applied_at_utc=canonical_utc(_cell(row, 2, "applied_at")),
         )
         for row in records
     )
@@ -349,7 +284,6 @@ def classify_clean_baseline_confirmation(
     connection: Connection,
     *,
     runtime_role: str,
-    registry: PostgresMigrationRegistry = POSTGRES_MIGRATION_REGISTRY,
 ) -> BaselineCommitConfirmation:
     """Classify a lost baseline commit ACK without mutating database state."""
 
@@ -359,7 +293,7 @@ def classify_clean_baseline_confirmation(
             _require_empty_pulsara_world(connection)
             _require_compatible_vector_if_present(connection)
             return BaselineCommitConfirmation.NONE
-        _validate_clean_ledger(rows, registry.definition(0))
+        _validate_clean_ledger(rows, POSTGRES_BASELINE)
         _verify_vector_capability(connection)
         _verify_product_relations(connection)
         _verify_runtime_grants(connection, runtime_role)
@@ -370,16 +304,9 @@ def classify_clean_baseline_confirmation(
 
 def _validate_clean_ledger(rows, definition) -> None:
     if len(rows) != 1:
-        raise _reset_required("migration ledger is not the clean version-0 genesis")
-    row = rows[0]
-    if (
-        row.universe_fingerprint != definition.identity.universe_fingerprint
-        or row.resource_checksum != definition.expected_sha256
-        or row.migration_contract_fingerprint
-        != definition.migration_contract_fingerprint
-        or row.registry_prefix_fingerprint != definition.registry_prefix_fingerprint
-    ):
-        raise _reset_required("migration universe identity does not match this binary")
+        raise _reset_required("migration ledger does not contain exactly one clean baseline")
+    if rows[0].resource_checksum != definition.expected_sha256:
+        raise _reset_required("installed baseline SQL does not match this binary")
 
 
 def _require_empty_pulsara_world(connection: Connection) -> None:
@@ -627,28 +554,13 @@ def _reset_required(detail: str) -> PostgresSchemaError:
     )
 
 
-def _report(*, identity, applied, grants, previous, confirmation, registry):
-    payload = {
-        "database_name": identity.database_name,
-        "runtime_role": identity.runtime_role,
-        "previous_head_version": previous,
-        "migration_head_version": 0,
-        "applied_versions": applied,
-        "added_grant_fingerprints": grants,
-        "registry_prefix_fingerprint": registry.registry_fingerprint,
-        "universe_id": UNIVERSE_ID,
-        "universe_generation": UNIVERSE_GENERATION,
-        "universe_fingerprint": registry.universe_fingerprint,
-        "baseline_commit_confirmation": confirmation,
-    }
-    from pulsara_agent.storage.migrations.contracts import postgres_schema_fingerprint
-
+def _report(*, identity, grants, confirmation):
     return PostgresMigrationReport(
         status="current",
-        **payload,
-        report_fingerprint=postgres_schema_fingerprint(
-            "pulsara:clean-migration-report:v1", payload
-        ),
+        database_name=identity.database_name,
+        runtime_role=identity.runtime_role,
+        added_grant_fingerprints=grants,
+        baseline_commit_confirmation=confirmation,
     )
 
 

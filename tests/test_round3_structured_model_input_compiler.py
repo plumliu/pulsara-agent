@@ -21,7 +21,6 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from pulsara_agent.capability.provider import SkillProjectionOutput
-from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
 from pulsara_agent.capability.contracts import (
     CapabilityKind,
     CapabilitySourceKind,
@@ -249,7 +248,6 @@ from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.plan_workflow import (
     PlanApprovedMaterializationDisposition,
     PlanHandoffKind,
-    PlanInteractionBinding,
     PlanWorkflowStatus,
     extract_plan_draft,
 )
@@ -394,7 +392,6 @@ def _collect_context_sources(
 
 _SOURCE_FACTS = {
     ContextSourceKind.BASE_SYSTEM: (
-        "pulsara.base-system.prefix-continuity.v10-runtime-state-handoff",
         ContextChannel.SYSTEM,
         ContextTrustClass.ROOT_INSTRUCTION,
         ContextBudgetClass.MUST_KEEP,
@@ -404,7 +401,6 @@ _SOURCE_FACTS = {
         ContextSourceLifecycle.EPOCH_ROOT,
     ),
     ContextSourceKind.RUNTIME_ENVIRONMENT: (
-        "pulsara.runtime-environment.v5-facts-only",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.TRUSTED_RUNTIME_FACT,
         ContextBudgetClass.MUST_KEEP,
@@ -414,7 +410,6 @@ _SOURCE_FACTS = {
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.RUNTIME_CLOCK: (
-        "pulsara.runtime-clock.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.TRUSTED_RUNTIME_FACT,
         ContextBudgetClass.OPTIONAL,
@@ -424,7 +419,6 @@ _SOURCE_FACTS = {
         ContextSourceLifecycle.CALL_APPEND,
     ),
     ContextSourceKind.RUN_PERMISSION: (
-        "pulsara.run-permission.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
         ContextBudgetClass.MUST_KEEP,
@@ -434,7 +428,6 @@ _SOURCE_FACTS = {
         ContextSourceLifecycle.TURN_APPEND,
     ),
     ContextSourceKind.USER_ACTIONS: (
-        "pulsara.user-actions.v1",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.TRUSTED_RUNTIME_FACT,
         ContextBudgetClass.OPTIONAL,
@@ -444,7 +437,6 @@ _SOURCE_FACTS = {
         ContextSourceLifecycle.ONE_SHOT,
     ),
     ContextSourceKind.SKILL_CATALOG: (
-        "pulsara.skill-catalog.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.IMPORTANT,
@@ -454,7 +446,6 @@ _SOURCE_FACTS = {
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.MCP_CATALOG: (
-        "pulsara.mcp-catalog.v4-tool-evolution",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.IMPORTANT,
@@ -464,7 +455,6 @@ _SOURCE_FACTS = {
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.PLAN_HANDOFF: (
-        "pulsara.plan-handoff.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
         ContextBudgetClass.MUST_KEEP,
@@ -474,7 +464,6 @@ _SOURCE_FACTS = {
         ContextSourceLifecycle.ONE_SHOT,
     ),
     ContextSourceKind.PLAN_WORKFLOW: (
-        "pulsara.plan-workflow.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
         ContextBudgetClass.MUST_KEEP,
@@ -484,7 +473,6 @@ _SOURCE_FACTS = {
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.ACTIVE_SKILL: (
-        "pulsara.active-skill.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.MUST_KEEP,
@@ -494,7 +482,6 @@ _SOURCE_FACTS = {
         ContextSourceLifecycle.ACTIVATION_SNAPSHOT,
     ),
     ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD: (
-        "pulsara.memory-response-preference-head.v1",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.IMPORTANT,
@@ -504,7 +491,6 @@ _SOURCE_FACTS = {
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.MEMORY_RECALL: (
-        "pulsara.memory-recall.v1",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.IMPORTANT,
@@ -514,7 +500,6 @@ _SOURCE_FACTS = {
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.MEMORY_WRITE_HINT: (
-        "pulsara.memory-write-hint.v1",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
         ContextBudgetClass.OPTIONAL,
@@ -524,7 +509,6 @@ _SOURCE_FACTS = {
         ContextSourceLifecycle.CALL_APPEND,
     ),
     ContextSourceKind.HOOK_CONTEXT: (
-        "pulsara.hook-context.v1",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.IMPORTANT,
@@ -534,7 +518,6 @@ _SOURCE_FACTS = {
         ContextSourceLifecycle.ONE_SHOT,
     ),
     ContextSourceKind.PREVIOUS_TURN_OUTCOME: (
-        "pulsara.previous-turn-outcome.v1",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
         ContextBudgetClass.MUST_KEEP,
@@ -544,7 +527,6 @@ _SOURCE_FACTS = {
         ContextSourceLifecycle.TURN_APPEND,
     ),
     ContextSourceKind.COMPACTION_RUNTIME_HANDOFF: (
-        "pulsara.compaction-runtime-handoff.v3-active-pca",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.MUST_KEEP,
@@ -554,7 +536,6 @@ _SOURCE_FACTS = {
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.RETAINED_SKILL_CONTEXT: (
-        "pulsara.retained-skill-context.v1",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.MUST_KEEP,
@@ -575,7 +556,6 @@ def _candidate(
     initial_mode: ContextRenderMode = ContextRenderMode.FULL,
 ) -> ContextSourceCandidate:
     (
-        version,
         expected_channel,
         expected_trust,
         budget,
@@ -602,7 +582,6 @@ def _candidate(
         "context-source-contract:v1",
         {
             "kind": kind.value,
-            "version": version,
             "channel": selected_channel.value,
             "trust": selected_trust.value,
             "budget": budget.value,
@@ -624,7 +603,6 @@ def _candidate(
     semantic = context_fingerprint("context-source-candidate:v1", semantic_payload)
     return ContextSourceCandidate(
         source_kind=kind,
-        source_contract_version=version,
         source_contract_fingerprint=contract,
         source_semantic_fingerprint=semantic,
         channel=selected_channel,
@@ -711,7 +689,6 @@ def _absent(
     absence_kind: ContextSourceAbsenceKind,
 ) -> ContextSourceAbsentFact:
     (
-        version,
         channel,
         trust,
         budget,
@@ -724,7 +701,6 @@ def _absent(
         "context-source-contract:v1",
         {
             "kind": kind.value,
-            "version": version,
             "channel": channel.value,
             "trust": trust.value,
             "budget": budget.value,
@@ -738,7 +714,6 @@ def _absent(
         source_kind=kind,
         lifecycle=lifecycle,
         absence_kind=absence_kind,
-        source_contract_version=version,
         source_contract_fingerprint=contract,
         trust_class=trust,
         budget_class=budget,
@@ -1299,12 +1274,6 @@ def _approved_plan_compile_facts(
     transition_digest: str = "sha256:" + "2" * 64,
 ) -> tuple[FrozenCanonicalCompileSnapshot, str]:
     plan = "PLAN_SENTINEL_EXACTLY_ONCE"
-    binding_contract = builtin_tool_catalog_entry("exit_plan").binding_contract.base
-    binding = PlanInteractionBinding(
-        binding_contract.contract_id,
-        binding_contract.contract_version,
-        binding_contract.binding_fingerprint,
-    )
     arguments = freeze_json({"plan": plan})
     assert isinstance(arguments, FrozenJsonObjectFact)
     assistant = FrozenProviderInputItem(
@@ -1372,7 +1341,6 @@ def _approved_plan_compile_facts(
         interaction_id=interaction_id,
         assistant_entry_id="entry:iucvuktd36hivez7ibvwjqibn4",
         tool_call_id="call:exit",
-        binding=binding,
         request_semantic_digest="sha256:" + "3" * 64,
         arguments=arguments,
     )
@@ -1384,9 +1352,6 @@ def _approved_plan_compile_facts(
         "interaction_id": interaction_id,
         "assistant_entry_id": "entry:iucvuktd36hivez7ibvwjqibn4",
         "tool_call_id": "call:exit",
-        "request_contract_id": binding.contract_id,
-        "request_contract_version": binding.contract_version,
-        "request_contract_fingerprint": binding.contract_fingerprint,
         "request_semantic_digest": "sha256:" + "3" * 64,
         "content_identity": extracted.identity,
         "exact_plan_utf8": extracted.exact_plan_utf8,
@@ -1781,27 +1746,6 @@ def test_round3_1_compiler_rejects_self_certified_absent_policy() -> None:
         )
     assert failure.value.kind is ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
 
-
-def test_source_kind_slots_preserve_semantic_fingerprint_vectors() -> None:
-    from pulsara_agent.conversation_kernel.context_sources import (
-        ContextSourceRegistry, build_memory_context_source, build_compaction_context_source,
-    )
-
-    collector = object.__new__(KernelContextSourceCollector)
-    collector._registry = ContextSourceRegistry()
-    candidates = (
-        collector._candidate(ContextSourceKind.BASE_SYSTEM, ("base",)),
-        build_memory_context_source(kind=ContextSourceKind.MEMORY_WRITE_HINT, texts=("memory",)),
-        build_compaction_context_source(
-            kind=ContextSourceKind.COMPACTION_RUNTIME_HANDOFF, texts=("handoff", "compact")
-        ),
-    )
-    assert [candidate.source_semantic_fingerprint for candidate in candidates] == [
-        "sha256:b9e3ec989658174fb3b3b44feaa753b3a1a430c3270e2ed1bdbc605609e60558",
-        "sha256:8d6ca0c13a68ecf7d65a641a8eb7ddfe2c48a29b22ce82b43d323b16890734b0",
-        "sha256:96c7ed082c45721932bc21b81fcb2d888d01b9e4cd6a107ff0641cdd79e4b18f",
-    ]
-    assert all(not hasattr(candidate, "source_instance_id") for candidate in candidates)
 
 
 def test_round3_source_identity_duplicate_and_variant_order_fail_closed() -> None:
@@ -2243,7 +2187,6 @@ def test_round3_internal_tool_closure_schema_is_not_provider_visible() -> None:
             LLMTextPart(
                 canonical_json_bytes(
                     {
-                        "schema_version": "provider_tool_result_closure.v1",
                         "tool_call_id": "call:closed",
                         "disposition": "interrupted_before_dispatch",
                     }
@@ -2260,7 +2203,6 @@ def test_round3_internal_tool_closure_schema_is_not_provider_visible() -> None:
     assert json.loads(join_text_content(lowered.fixed_message.content)) == {
         "disposition": "interrupted_before_dispatch"
     }
-    assert "schema_version" not in join_text_content(lowered.fixed_message.content)
 
 
 def test_round3_tool_result_bounds_cover_final_late_outcome_carrier() -> None:

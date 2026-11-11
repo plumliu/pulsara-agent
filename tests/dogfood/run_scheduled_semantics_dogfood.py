@@ -119,7 +119,6 @@ async def run(destination: Path):
                         "timezone": "Asia/Shanghai",
                         "permission_mode": "bypass-permissions",
                         "schedule": {
-                            "contract": "scheduled-rule:v1",
                             "kind": "interval",
                             "seconds": 600,
                             "anchor_at_utc": (
@@ -235,7 +234,6 @@ async def run(destination: Path):
                         "timezone": "Asia/Shanghai",
                         "permission_mode": "bypass-permissions",
                         "schedule": {
-                            "contract": "scheduled-rule:v1",
                             "kind": "interval",
                             "seconds": 604800,
                             "anchor_at_utc": (
@@ -309,7 +307,6 @@ async def run(destination: Path):
                         "timezone": "Asia/Shanghai",
                         "permission_mode": "bypass-permissions",
                         "schedule": {
-                            "contract": "scheduled-rule:v1",
                             "kind": "once",
                             "run_at_utc": (
                                 datetime.now(timezone.utc) + timedelta(seconds=3)

@@ -1,4 +1,4 @@
-"""Closed Plan workflow values and the sole historical content extractor."""
+"""Closed Plan workflow values and canonical content extraction."""
 
 from __future__ import annotations
 
@@ -65,68 +65,12 @@ class PlanApprovedMaterializationDisposition(StrEnum):
     MATERIALIZE_REFERENCED_BLOCK = "MATERIALIZE_REFERENCED_BLOCK"
 
 
-# Closed historical decoder registry.  These identities are copied from the
-# tool surface that was actually frozen for the originating model call.  A
-# replacement binary may add another explicitly supported tuple, but it must
-# never guess a historical payload from a current tool name.
-PLAN_INTERACTION_CONTRACTS: dict[tuple[str, str, str], str] = {
-    (
-        "pulsara.workflow.ask_plan_question",
-        "v1",
-        "sha256:d19178a8bc3eaa69f03ce3151b1803b760be6afa55f5f58f489e58e45d5420b9",
-    ): "ask_plan_question",
-    (
-        "pulsara.workflow.exit_plan",
-        "v2",
-        "sha256:9e77c16295c1ec7059729498b26c5665b494e49002113485bbebfa3d739165d1",
-    ): "exit_plan",
-}
-PLAN_ENTRY_CONTRACT = (
-    "pulsara.workflow.enter_plan",
-    "v1",
-    "sha256:d53f9ac13a86f6bdfc72812e1eb5693b3bb17e19d143c8a573b426d2f094dbaa",
-)
-
-
-@dataclass(frozen=True, slots=True)
-class PlanInteractionBinding:
-    contract_id: str
-    contract_version: str
-    contract_fingerprint: str
-
-    def __post_init__(self) -> None:
-        if not self.contract_id or not self.contract_version:
-            raise ValueError("Plan interaction binding is incomplete")
-        if not self.contract_fingerprint.startswith("sha256:"):
-            raise ValueError("Plan interaction binding fingerprint is invalid")
-
-    @property
-    def identity(self) -> tuple[str, str, str]:
-        return (
-            self.contract_id,
-            self.contract_version,
-            self.contract_fingerprint,
-        )
-
-
-def require_plan_interaction_contract(
-    binding: PlanInteractionBinding,
-    *,
-    expected_tool_name: str,
-) -> None:
-    if PLAN_INTERACTION_CONTRACTS.get(binding.identity) != expected_tool_name:
-        raise ValueError("Plan interaction contract is unavailable")
-
-
 def extract_plan_entry_reason(
     *,
-    binding: PlanInteractionBinding,
     arguments: FrozenJsonObjectFact,
 ) -> str:
     """Validate and extract the bounded semantic payload of ``enter_plan``."""
 
-    if binding.identity != PLAN_ENTRY_CONTRACT:
-        raise ValueError("Plan entry contract is unavailable")
     raw = thaw_json(arguments)
     if not isinstance(raw, dict) or set(raw) - {"reason"}:
         raise ValueError("Plan entry arguments are invalid")
@@ -149,9 +93,6 @@ class PlanQuestionOption:
 @dataclass(frozen=True, slots=True)
 class PlanQuestionContent:
     interaction_id: str
-    request_contract_id: str
-    request_contract_version: str
-    request_contract_fingerprint: str
     question: str
     options: tuple[PlanQuestionOption, ...]
     allow_free_text: bool
@@ -163,9 +104,6 @@ class PlanDraftContentIdentity:
     interaction_id: str
     assistant_entry_id: str
     tool_call_id: str
-    request_contract_id: str
-    request_contract_version: str
-    request_contract_fingerprint: str
     request_semantic_digest: str
     plan_utf8_size: int
     plan_utf8_digest: str
@@ -222,12 +160,9 @@ def plan_draft_utf8_digest(body: bytes) -> str:
 
 
 def parse_plan_question_arguments(
-    *, binding: PlanInteractionBinding, arguments: FrozenJsonObjectFact,
+    *, arguments: FrozenJsonObjectFact,
 ) -> tuple[str, tuple[PlanQuestionOption, ...], bool]:
     """Validate content before a workflow or interaction exists."""
-    require_plan_interaction_contract(
-        binding, expected_tool_name="ask_plan_question"
-    )
     raw = thaw_json(arguments)
     if not isinstance(raw, dict):
         raise ValueError("Plan question arguments must be an object")
@@ -283,17 +218,13 @@ def parse_plan_question_arguments(
 def extract_plan_question(
     *,
     interaction_id: str,
-    binding: PlanInteractionBinding,
     arguments: FrozenJsonObjectFact,
 ) -> PlanQuestionContent:
     question, options, allow_free_text = parse_plan_question_arguments(
-        binding=binding, arguments=arguments
+        arguments=arguments
     )
     payload = {
         "interaction_id": interaction_id,
-        "request_contract_id": binding.contract_id,
-        "request_contract_version": binding.contract_version,
-        "request_contract_fingerprint": binding.contract_fingerprint,
         "question": question,
         "options": [
             {
@@ -308,9 +239,6 @@ def extract_plan_question(
     }
     return PlanQuestionContent(
         interaction_id=interaction_id,
-        request_contract_id=binding.contract_id,
-        request_contract_version=binding.contract_version,
-        request_contract_fingerprint=binding.contract_fingerprint,
         question=question,
         options=tuple(options),
         allow_free_text=allow_free_text,
@@ -322,11 +250,9 @@ def extract_plan_question(
 
 def parse_plan_exit_arguments(
     *,
-    binding: PlanInteractionBinding,
     arguments: FrozenJsonObjectFact,
 ) -> tuple[bytes | None, str | None]:
     """A missing or blank proposal exits planning without a review interaction."""
-    require_plan_interaction_contract(binding, expected_tool_name="exit_plan")
     raw = thaw_json(arguments)
     if not isinstance(raw, dict) or set(raw) - {"plan", "summary"}:
         raise ValueError("Plan draft arguments are invalid")
@@ -358,10 +284,9 @@ def parse_plan_exit_arguments(
 
 def parse_plan_draft_arguments(
     *,
-    binding: PlanInteractionBinding,
     arguments: FrozenJsonObjectFact,
 ) -> tuple[bytes, str | None]:
-    body, summary = parse_plan_exit_arguments(binding=binding, arguments=arguments)
+    body, summary = parse_plan_exit_arguments(arguments=arguments)
     if body is None:
         raise ValueError("Plan draft requires a nonblank proposal")
     return body, summary
@@ -372,18 +297,14 @@ def extract_plan_draft(
     interaction_id: str,
     assistant_entry_id: str,
     tool_call_id: str,
-    binding: PlanInteractionBinding,
     request_semantic_digest: str,
     arguments: FrozenJsonObjectFact,
 ) -> ExtractedPlanDraft:
-    body, summary = parse_plan_draft_arguments(binding=binding, arguments=arguments)
+    body, summary = parse_plan_draft_arguments(arguments=arguments)
     identity = PlanDraftContentIdentity(
         interaction_id=interaction_id,
         assistant_entry_id=assistant_entry_id,
         tool_call_id=tool_call_id,
-        request_contract_id=binding.contract_id,
-        request_contract_version=binding.contract_version,
-        request_contract_fingerprint=binding.contract_fingerprint,
         request_semantic_digest=request_semantic_digest,
         plan_utf8_size=len(body),
         plan_utf8_digest=plan_draft_utf8_digest(body),
@@ -481,14 +402,11 @@ def project_plan_continuation_for_provider(
 __all__ = [
     "ExtractedPlanDraft",
     "MAXIMUM_PLAN_RESPONSE_BYTES",
-    "PLAN_ENTRY_CONTRACT",
-    "PLAN_INTERACTION_CONTRACTS",
     "PlanApprovedMaterializationDisposition",
     "PlanDraftContentIdentity",
     "PlanDraftDecision",
     "PlanDraftTextChunk",
     "PlanHandoffKind",
-    "PlanInteractionBinding",
     "PlanInteractionKind",
     "PlanQuestionAnswerKind",
     "PlanQuestionContent",
@@ -501,5 +419,4 @@ __all__ = [
     "plan_draft_utf8_digest",
     "project_plan_continuation_for_provider",
     "read_plan_draft_chunk",
-    "require_plan_interaction_contract",
 ]

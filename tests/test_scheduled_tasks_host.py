@@ -79,7 +79,7 @@ def test_complete_core_schedule_tools_execute_and_user_management_needs_no_ui_se
             arguments = {"action": "create", "values": {
                 "name": "Core-owned report", "prompt": "Inspect current changes.", "timezone": "UTC",
                 "permission_mode": "ask-permissions", "schedule": {
-                    "contract": "scheduled-rule:v1", "kind": "interval", "seconds": 60,
+                    "kind": "interval", "seconds": 60,
                     "anchor_at_utc": "2030-01-01T00:00:00Z",
                 },
             }}
@@ -309,14 +309,12 @@ async def setup(tmp_path, db, monkeypatch, port, *, runtime=None):
 
 async def create(service, session, prompt="Scheduled report", once=False):
     schedule = {
-        "contract": 'scheduled-rule:v1',
         "kind": "interval",
         "anchor_at_utc": "2020-01-01T00:00:00+00:00",
         "seconds": 60,
     }
     if once:
         schedule = {
-            "contract": 'scheduled-rule:v1',
             "kind": "once",
             "run_at_utc": (datetime.now(timezone.utc) + timedelta(hours=1))
             .replace(microsecond=0)
@@ -368,7 +366,6 @@ def test_quick_session_initial_model_is_ready_for_a_scheduled_task(
                     name="Quick scheduled report",
                     prompt="Inspect progress",
                     schedule={
-                        "contract": 'scheduled-rule:v1',
                         "kind": "daily",
                         "start_date": "2026-10-05",
                         "time": "08:00",
@@ -829,7 +826,6 @@ def test_scheduled_source_survives_real_compaction_fork_and_parent_deletion(
             def resolve_compaction_summary_call(self, **kwargs):
                 call = self._delegate.resolve_compaction_summary_call(**kwargs)
                 self.summary.binding_id = call.target.transport.binding_id
-                self.summary.contract_version = call.target.transport.contract_version
                 call = replace(call, target=replace(call.target, transport=self.summary))
                 self.model_runtime.register_test_call_override(call)
                 return call

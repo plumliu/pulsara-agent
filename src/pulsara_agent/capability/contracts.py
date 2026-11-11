@@ -354,7 +354,6 @@ class FrozenNativeToolWireEligibilityQuote:
 
     version: ToolCapabilityVersionRef
     canonical_tool_spec_fingerprint: str
-    native_function_tool_wire_contract_fingerprint: str
     wire_tool_fingerprint: str
     wire_utf8_bytes: int
     wire_estimated_tokens: int
@@ -372,7 +371,6 @@ class FrozenNativeToolWireEligibilityQuote:
 class FrozenNativeToolWireProjection:
     version: ToolCapabilityVersionRef
     canonical_tool_spec_fingerprint: str
-    native_function_tool_wire_contract_fingerprint: str
     wire_tool: FrozenJsonObjectFact = field(repr=False)
 
     def __post_init__(self) -> None:
@@ -388,7 +386,6 @@ class FrozenNativeToolWireProjection:
 class FrozenNativeToolWireIncompatibility:
     version: ToolCapabilityVersionRef
     canonical_tool_spec_fingerprint: str
-    native_function_tool_wire_contract_fingerprint: str
     reason: NativeToolWireIncompatibilityReason
 
     def __post_init__(self) -> None:
@@ -404,7 +401,6 @@ NativeToolWireEligibility = (
 @dataclass(frozen=True, slots=True)
 class FrozenNativeToolWireEligibilitySet:
     conversation_scope_kind: ModelInputScopeKind
-    native_function_tool_wire_contract_fingerprint: str
     entries: tuple[NativeToolWireEligibility, ...]
 
     def __post_init__(self) -> None:
@@ -420,18 +416,11 @@ class FrozenNativeToolWireEligibilitySet:
         )
         if keys != tuple(sorted(keys)) or len(versions) != len(set(versions)):
             raise ValueError("native eligibility entries are not sorted and unique")
-        if any(
-            item.native_function_tool_wire_contract_fingerprint
-            != self.native_function_tool_wire_contract_fingerprint
-            for item in self.entries
-        ):
-            raise ValueError("native eligibility contract drifted")
 
 
 @dataclass(frozen=True, slots=True)
 class FrozenNativeToolProjectionSet:
     conversation_scope_kind: ModelInputScopeKind
-    native_function_tool_wire_contract_fingerprint: str
     tool_versions: tuple[ToolCapabilityVersionRef, ...]
     projections: tuple[FrozenNativeToolWireProjection, ...] = field(repr=False)
     projection_set_fingerprint: str
@@ -446,11 +435,7 @@ class FrozenNativeToolProjectionSet:
         for version, projection in zip(
             self.tool_versions, self.projections, strict=True
         ):
-            if (
-                version != projection.version
-                or projection.native_function_tool_wire_contract_fingerprint
-                != self.native_function_tool_wire_contract_fingerprint
-            ):
+            if version != projection.version:
                 raise ValueError("native projection does not exact-join version")
         # Derived composition bound: builtins and MCP have separate admissions.
         if len(self.tool_versions) > (
@@ -463,7 +448,6 @@ class FrozenNativeToolProjectionSet:
             raise ValueError("native tool wire byte bound exceeded")
         expected = native_tool_projection_set_fingerprint(
             conversation_scope_kind=self.conversation_scope_kind,
-            native_function_tool_wire_contract_fingerprint=self.native_function_tool_wire_contract_fingerprint,
             tool_versions=self.tool_versions,
             projections=self.projections,
         )
@@ -474,7 +458,6 @@ class FrozenNativeToolProjectionSet:
 def native_tool_projection_set_fingerprint(
     *,
     conversation_scope_kind: ModelInputScopeKind,
-    native_function_tool_wire_contract_fingerprint: str,
     tool_versions: tuple[ToolCapabilityVersionRef, ...],
     projections: tuple[FrozenNativeToolWireProjection, ...],
 ) -> str:
@@ -482,7 +465,6 @@ def native_tool_projection_set_fingerprint(
         "native-tool-projection-set:v1",
         {
             "scope": conversation_scope_kind.value,
-            "contract": native_function_tool_wire_contract_fingerprint,
             "versions": tuple(
                 tool_capability_version_identity_digest(item) for item in tool_versions
             ),
@@ -495,9 +477,6 @@ def native_tool_projection_set_fingerprint(
                         ),
                         "canonical_tool_spec_fingerprint": (
                             item.canonical_tool_spec_fingerprint
-                        ),
-                        "native_function_tool_wire_contract_fingerprint": (
-                            item.native_function_tool_wire_contract_fingerprint
                         ),
                         "wire_tool": item.wire_tool,
                     },
@@ -1207,8 +1186,6 @@ class FrozenToolCapabilityExposureSelection:
         reusable = self.reusable_direct_projection_set
         if reusable is not None and (
             reusable.conversation_scope_kind is not native.conversation_scope_kind
-            or reusable.native_function_tool_wire_contract_fingerprint
-            != native.native_function_tool_wire_contract_fingerprint
             or reusable.tool_versions != self.direct_tool_versions
         ):
             raise ValueError("reusable native projection set does not join selection")
@@ -1216,11 +1193,6 @@ class FrozenToolCapabilityExposureSelection:
     @property
     def conversation_scope_kind(self) -> ModelInputScopeKind:
         return self.dispatch_view.planning_input.native_wire.conversation_scope_kind
-
-
-    @property
-    def native_function_tool_wire_contract_fingerprint(self) -> str:
-        return self.dispatch_view.planning_input.native_wire.native_function_tool_wire_contract_fingerprint
 
 
 @dataclass(frozen=True, slots=True)

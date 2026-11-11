@@ -197,7 +197,6 @@ def test_gateway_retains_revoked_attachment_until_old_stream_cleanup(
         def hello(client_instance_id=client_id):
             return wire.ClientFrame(
                 hello=wire.HelloRequest(
-                    protocol=gateway.protocol_identity(),
                     launch_id=server._launch_id,
                     launch_capability=server._launch_capability,
                     client_instance_id=client_instance_id,

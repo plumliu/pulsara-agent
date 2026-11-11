@@ -20,7 +20,7 @@ from pulsara_agent.storage.migrations.errors import (
     PostgresSchemaError,
     PostgresSchemaFailureCode,
 )
-from pulsara_agent.storage.migrations.registry import POSTGRES_MIGRATION_REGISTRY
+from pulsara_agent.storage.migrations.registry import POSTGRES_BASELINE
 from pulsara_agent.storage.migrations.runner import (
     PostgresDatabaseIdentity,
     _read_identity_from_connection,
@@ -273,22 +273,18 @@ class VerifiedPostgresConnectionProvider:
                     PostgresSchemaFailureCode.DATABASE_IDENTITY_MISMATCH,
                     "clean migration ledger disappeared",
                 )
-            _validate_clean_ledger(rows, POSTGRES_MIGRATION_REGISTRY.definition(0))
+            _validate_clean_ledger(rows, POSTGRES_BASELINE)
             mismatch = (
                 identity.database_name != self._binding.database_name
                 or identity.database_oid != self._binding.database_oid
                 or identity.runtime_role != self._binding.runtime_role
                 or identity.normalized_search_path != self._binding.normalized_search_path
                 or identity.server_version_num != self._binding.server_version_num
-                or rows[0].universe_fingerprint
-                != self._binding.migration_universe_fingerprint
-                or rows[0].registry_prefix_fingerprint
-                != self._binding.durable_registry_prefix_fingerprint
             )
             if mismatch:
                 raise PostgresSchemaError(
                     PostgresSchemaFailureCode.DATABASE_IDENTITY_MISMATCH,
-                    "physical PostgreSQL connection differs from binding v2",
+                    "physical PostgreSQL connection differs from binding",
                 )
             if connection.info.transaction_status.name != "IDLE":
                 connection.rollback()

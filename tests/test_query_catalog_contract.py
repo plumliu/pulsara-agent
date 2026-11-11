@@ -53,7 +53,7 @@ MEMORY = target("MEMORY", "memory_id", "memory")
 SCHEDULE_VALUES = {
     "name": "readout", "prompt": "Summarize the current status.",
     "timezone": "Asia/Shanghai", "permission_mode": "read-only",
-    "schedule": {"contract": "scheduled-rule:v1", "kind": "interval",
+    "schedule": {"kind": "interval",
                  "anchor_at_utc": "2026-10-30T00:00:00Z", "seconds": 60},
 }
 

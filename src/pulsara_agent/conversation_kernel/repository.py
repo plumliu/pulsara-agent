@@ -28,7 +28,6 @@ from pulsara_agent.primitives.plan_workflow import (
     ExtractedPlanDraft,
     PlanDraftDecision,
     PlanHandoffKind,
-    PlanInteractionBinding,
     PlanInteractionKind,
     PlanQuestionAnswerKind,
     PlanQuestionContent,

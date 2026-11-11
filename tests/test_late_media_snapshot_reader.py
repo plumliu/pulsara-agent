@@ -134,9 +134,6 @@ def adoption(repository, lease, turn_id, source_cut):
                 codec=CONTEXT_SNAPSHOT_CODEC,
             ),
             snapshot_carrier=carrier,
-            compiler_contract="compiler.v1",
-            prompt_contract="prompt.v1",
-            model_contract="model.v1",
             occurred_at=datetime.now(timezone.utc),
             actor_id="compactor",
         )

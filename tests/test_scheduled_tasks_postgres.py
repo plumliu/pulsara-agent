@@ -54,7 +54,7 @@ def scheduled_owner(database):
 
 def task(owner, kind="interval"):
     repo, lease, cut = owner
-    schedule = {"contract": 'scheduled-rule:v1', "kind": kind}
+    schedule = {"kind": kind}
     if kind == "once":
         schedule["run_at_utc"] = (
             (datetime.now(timezone.utc) + timedelta(hours=1))
@@ -860,7 +860,6 @@ def test_switch_failure_rolls_back_both_plans_and_pending(owner, monkeypatch, fa
             },
         }
         target["values"]["schedule"] = {
-            "contract": 'scheduled-rule:v1',
             "kind": "once",
             "run_at_utc": "2020-01-01T00:00:00+00:00",
         }
@@ -1292,7 +1291,7 @@ def test_paused_once_expiry_keeps_previously_accepted_steer(owner):
     request = admission(value, True, _name("command"))
     candidate, _ = enqueue(owner, request)
     task_values = {key: value[key] for key in ("name", "prompt", "schedule", "timezone", "permission_mode")}
-    task_values["schedule"] = {"contract": "scheduled-rule:v1", "kind": "once", "run_at_utc": (datetime.now(timezone.utc).replace(microsecond=0) + timedelta(hours=1)).isoformat()}
+    task_values["schedule"] = {"kind": "once", "run_at_utc": (datetime.now(timezone.utc).replace(microsecond=0) + timedelta(hours=1)).isoformat()}
     updated = mutate(owner, value, "update", task_values)
     paused = mutate(owner, updated, "pause")
     expired = expire_paused_once(owner, paused)

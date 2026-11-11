@@ -53,7 +53,6 @@ VALUES = {
     "timezone": "Asia/Shanghai",
     "permission_mode": "read-only",
     "schedule": {
-        "contract": "scheduled-rule:v1",
         "kind": "daily",
         "start_date": "2030-01-01",
         "time": "09:00",

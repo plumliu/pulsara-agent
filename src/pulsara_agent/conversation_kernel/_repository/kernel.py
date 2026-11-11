@@ -346,8 +346,6 @@ class _RepositoryKernel:
             snapshot.plan_workflow_id,
             snapshot.plan_workflow_revision_at_admission,
             snapshot.inherited_from_turn_id,
-            snapshot.permission_contract_id,
-            snapshot.permission_contract_fingerprint,
             snapshot.snapshot_fingerprint,
         )
 
@@ -379,8 +377,6 @@ class _RepositoryKernel:
                 if row["permission_inherited_from_turn_id"] is None
                 else str(row["permission_inherited_from_turn_id"])
             ),
-            permission_contract_id=str(row["permission_contract_id"]),
-            permission_contract_fingerprint=str(row["permission_contract_fingerprint"]),
             snapshot_fingerprint=str(row["permission_snapshot_fingerprint"]),
         )
 

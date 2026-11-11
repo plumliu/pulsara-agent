@@ -18,7 +18,7 @@ from pulsara_agent.storage.migrations.manifest import (
     CONVERSATION_KERNEL_RELATIONS,
     build_postgres_schema_manifest,
 )
-from pulsara_agent.storage.migrations.registry import POSTGRES_MIGRATION_REGISTRY
+from pulsara_agent.storage.migrations.registry import POSTGRES_BASELINE
 from pulsara_agent.storage.migrations.runner import (
     _read_identity_from_connection,
     _validate_clean_ledger,
@@ -43,7 +43,7 @@ def classify_migration_history(rows) -> PostgresMigrationHistoryStatus:
     if rows is None:
         return PostgresMigrationHistoryStatus.UNMANAGED
     try:
-        _validate_clean_ledger(rows, POSTGRES_MIGRATION_REGISTRY.definition(0))
+        _validate_clean_ledger(rows, POSTGRES_BASELINE)
     except (PostgresSchemaError, ValueError):
         return PostgresMigrationHistoryStatus.RESET_REQUIRED
     return PostgresMigrationHistoryStatus.UP_TO_DATE
@@ -52,11 +52,8 @@ def classify_migration_history(rows) -> PostgresMigrationHistoryStatus:
 @dataclass(frozen=True, slots=True)
 class CleanVerificationResult:
     status: str
-    universe_fingerprint: str
-    registry_prefix_fingerprint: str
     verified_catalog_fingerprint: str
     runtime_grant_policy_fingerprint: str
-    result_fingerprint: str
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -118,7 +115,7 @@ class PostgresSchemaVerifier:
                 PostgresSchemaFailureCode.UNMANAGED_DATABASE,
                 "clean migration ledger is absent",
             )
-        definition = POSTGRES_MIGRATION_REGISTRY.definition(0)
+        definition = POSTGRES_BASELINE
         _validate_clean_ledger(rows, definition)
         _verify_vector_capability(connection)
         from pulsara_agent.storage.migrations.runner import _verify_search_capability
@@ -148,15 +145,6 @@ class PostgresSchemaVerifier:
                 "observed conversation-kernel catalog differs from clean baseline",
             )
         grant_policy = build_postgres_runtime_grant_policy()
-        verification_contract = postgres_schema_fingerprint(
-            "pulsara:clean-schema-verification-contract:v1",
-            {
-                "universe_fingerprint": definition.identity.universe_fingerprint,
-                "relations": CONVERSATION_KERNEL_RELATIONS,
-                "required_extension": ("public", "vector", ">=0.5.0"),
-                "grant_policy_fingerprint": grant_policy.policy_fingerprint,
-            },
-        )
         binding = build_verified_postgres_schema_binding(
             database_target_fingerprint=database_target_fingerprint,
             database_name=identity.database_name,
@@ -165,31 +153,13 @@ class PostgresSchemaVerifier:
             runtime_role=identity.runtime_role,
             server_version_num=identity.server_version_num,
             pgvector_extension_version=str(extension[0]),
-            migration_universe_id="pulsara.conversation-kernel.v1",
-            migration_universe_generation=1,
-            migration_universe_fingerprint=definition.identity.universe_fingerprint,
-            migration_head_version=0,
-            durable_registry_prefix_fingerprint=definition.registry_prefix_fingerprint,
             verified_catalog_fingerprint=catalog_fingerprint,
             runtime_grant_policy_fingerprint=grant_policy.policy_fingerprint,
-            verification_contract_fingerprint=verification_contract,
         )
-        result_payload = {
-            "binding_fingerprint": binding.binding_fingerprint,
-            "universe_fingerprint": definition.identity.universe_fingerprint,
-            "registry_prefix_fingerprint": definition.registry_prefix_fingerprint,
-            "verified_catalog_fingerprint": catalog_fingerprint,
-            "runtime_grant_policy_fingerprint": grant_policy.policy_fingerprint,
-        }
         result = CleanVerificationResult(
             status="verified",
-            universe_fingerprint=definition.identity.universe_fingerprint,
-            registry_prefix_fingerprint=definition.registry_prefix_fingerprint,
             verified_catalog_fingerprint=catalog_fingerprint,
             runtime_grant_policy_fingerprint=grant_policy.policy_fingerprint,
-            result_fingerprint=postgres_schema_fingerprint(
-                "pulsara:clean-schema-verification-result:v1", result_payload
-            ),
         )
         return PostgresFastVerificationBundle(binding=binding, result=result)
 

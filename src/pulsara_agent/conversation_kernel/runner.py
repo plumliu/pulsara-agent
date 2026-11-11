@@ -707,7 +707,6 @@ def _completed_assistant_canonical_bytes(
 def _tool_result_closure_storage_text(tool_call_id: str) -> str:
     return canonical_json_bytes(
         {
-            "schema_version": "provider_tool_result_closure.v1",
             "tool_call_id": tool_call_id,
             "disposition": _LONGEST_TOOL_CLOSURE.value,
         }
@@ -742,7 +741,6 @@ def _ordinary_result_followup_upper(
     result_body = "\x01" * CANONICAL_TOOL_RESULT_PREVIEW_HARD_BYTES
     late_storage = canonical_json_bytes(
         {
-            "schema_version": "late_tool_outcome_observation.v1",
             "tool_call_id": call.tool_call_id,
             "result_state": _LONGEST_TOOL_RESULT_STATE,
             "result": result_body,
@@ -818,7 +816,6 @@ def _runtime_source_message_upper(
         trust_class=trust_class,
         lifecycle=lifecycle,
         presence=SourceObservationPresence.VALUE,
-        contract_version="post-response-resource-upper",
         # Catalog owners return compact canonical JSON. Its body has no literal
         # control chars: those were already escaped before the byte bound. Every
         # remaining character expands at most 2x in the observation JSON; the

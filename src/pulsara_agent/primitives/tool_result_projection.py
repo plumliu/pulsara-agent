@@ -35,12 +35,6 @@ from pulsara_agent.primitives.tool_observation import (
 )
 
 
-TOOL_RESULT_LOGICAL_PROJECTION_CONTRACT = (
-    "pulsara.provider-visible-tool-result.logical-projection.v5"
-)
-TOOL_RESULT_FULL_DELIVERY_CLASSIFIER_CONTRACT = (
-    "pulsara.tool-result-full-delivery-classifier.v2"
-)
 MAXIMUM_TOOL_RESULT_MEMORY_PROVENANCE_UTF8_BYTES = 8 * 1024
 MAXIMUM_TOOL_RESULT_MEMORY_PROVENANCE_ITEMS = 50
 
@@ -64,7 +58,6 @@ class ToolResultFullDeliveryReason(StrEnum):
 class FrozenToolResultDeliveryRequirement:
     requirement: ToolResultDeliveryRequirement
     reason: ToolResultFullDeliveryReason | None
-    classifier_contract: str = TOOL_RESULT_FULL_DELIVERY_CLASSIFIER_CONTRACT
 
     def __post_init__(self) -> None:
         if not isinstance(self.requirement, ToolResultDeliveryRequirement):
@@ -73,8 +66,6 @@ class FrozenToolResultDeliveryRequirement:
             self.reason, ToolResultFullDeliveryReason
         ):
             raise TypeError("tool result full-delivery reason is invalid")
-        if self.classifier_contract != TOOL_RESULT_FULL_DELIVERY_CLASSIFIER_CONTRACT:
-            raise ValueError("tool result delivery classifier contract drifted")
         if (self.requirement is ToolResultDeliveryRequirement.FULL_REQUIRED) != (
             self.reason is not None
         ):
@@ -526,8 +517,6 @@ __all__ = [
     "MAXIMUM_TOOL_RESULT_MEMORY_PROVENANCE_ITEMS",
     "MAXIMUM_TOOL_RESULT_MEMORY_PROVENANCE_UTF8_BYTES",
     "RenderedProviderToolResultLogicalMessage",
-    "TOOL_RESULT_FULL_DELIVERY_CLASSIFIER_CONTRACT",
-    "TOOL_RESULT_LOGICAL_PROJECTION_CONTRACT",
     "ToolResultDeliveryRequirement",
     "ToolResultFullDeliveryReason",
     "ToolResultLogicalMessageKind",

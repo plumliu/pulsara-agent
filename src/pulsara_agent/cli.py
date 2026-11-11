@@ -1903,7 +1903,7 @@ async def _config_check() -> dict[str, object]:
         )
         database = {"status": "ready", **{
             key: verified[key]
-            for key in ("database_name", "runtime_role", "migration_head_version")
+            for key in ("database_name", "runtime_role")
         }}
     except RuntimeError as exc:
         database = {"status": "unavailable", "detail": str(exc)}

@@ -41,11 +41,6 @@ from pulsara_agent.primitives.context import (
 )
 
 
-OPENAI_FUNCTION_TOOL_WIRE_CONTRACT_VERSION = (
-    "v2-explicit-non-strict-prevalidated-lowering"
-)
-
-
 class OpenAIFunctionSchemaIncompatible(ValueError):
     """A canonical object schema has no honest portable wire projection."""
 
@@ -393,18 +388,6 @@ def openai_responses_function_tool(tool: ToolSpec) -> dict[str, Any]:
     return {"type": "function", **openai_function_definition(tool)}
 
 
-def openai_native_function_tool_contract_fingerprint(wire_api: str) -> str:
-    if wire_api not in {"openai_chat_completions", "openai_responses"}:
-        raise ValueError("OpenAI function tool wire API is unsupported")
-    return context_fingerprint(
-        "openai-native-function-tool-contract:v1",
-        {
-            "wire_api": wire_api,
-            "contract_version": OPENAI_FUNCTION_TOOL_WIRE_CONTRACT_VERSION,
-        },
-    )
-
-
 def freeze_openai_native_tool_eligibility(
     *,
     conversation_scope_kind: ModelInputScopeKind,
@@ -423,7 +406,8 @@ def freeze_openai_native_tool_eligibility(
     only after the pure planner selects the bounded DIRECT cohort.
     """
 
-    contract = openai_native_function_tool_contract_fingerprint(wire_api)
+    if wire_api not in {"openai_chat_completions", "openai_responses"}:
+        raise ValueError("OpenAI function tool wire API is unsupported")
     estimator = PulsaraHeuristicTokenEstimatorV3()
     entries: list[
         FrozenNativeToolWireEligibilityQuote | FrozenNativeToolWireIncompatibility
@@ -469,7 +453,6 @@ def freeze_openai_native_tool_eligibility(
                 FrozenNativeToolWireEligibilityQuote(
                     version=version,
                     canonical_tool_spec_fingerprint=spec_fingerprint,
-                    native_function_tool_wire_contract_fingerprint=contract,
                     wire_tool_fingerprint=wire_fingerprint,
                     wire_utf8_bytes=wire_bytes,
                     wire_estimated_tokens=estimator.estimate_json(
@@ -490,7 +473,6 @@ def freeze_openai_native_tool_eligibility(
                 FrozenNativeToolWireIncompatibility(
                     version=version,
                     canonical_tool_spec_fingerprint=spec_fingerprint,
-                    native_function_tool_wire_contract_fingerprint=contract,
                     reason=reason,
                 )
             )
@@ -507,7 +489,6 @@ def freeze_openai_native_tool_eligibility(
     )
     return FrozenNativeToolWireEligibilitySet(
         conversation_scope_kind=conversation_scope_kind,
-        native_function_tool_wire_contract_fingerprint=contract,
         entries=ordered,
     )
 
@@ -523,11 +504,11 @@ def materialize_openai_native_tool_projection_set(
 ) -> FrozenNativeToolProjectionSet:
     """Materialize only the exact bounded cohort selected by the planner."""
 
-    contract = openai_native_function_tool_contract_fingerprint(wire_api)
+    if wire_api not in {"openai_chat_completions", "openai_responses"}:
+        raise ValueError("OpenAI function tool wire API is unsupported")
     estimator = PulsaraHeuristicTokenEstimatorV3()
     if (
         eligibility.conversation_scope_kind is not conversation_scope_kind
-        or eligibility.native_function_tool_wire_contract_fingerprint != contract
         or len(tool_versions) != len(tool_specs)
     ):
         raise ValueError("native materialization input does not exact-join quote")
@@ -561,7 +542,6 @@ def materialize_openai_native_tool_projection_set(
             FrozenNativeToolWireProjection(
                 version=version,
                 canonical_tool_spec_fingerprint=spec_fingerprint,
-                native_function_tool_wire_contract_fingerprint=contract,
                 wire_tool=frozen_wire,
             )
         )
@@ -569,12 +549,10 @@ def materialize_openai_native_tool_projection_set(
     projection_tuple = tuple(projections)
     return FrozenNativeToolProjectionSet(
         conversation_scope_kind=conversation_scope_kind,
-        native_function_tool_wire_contract_fingerprint=contract,
         tool_versions=tool_versions,
         projections=projection_tuple,
         projection_set_fingerprint=native_tool_projection_set_fingerprint(
             conversation_scope_kind=conversation_scope_kind,
-            native_function_tool_wire_contract_fingerprint=contract,
             tool_versions=tool_versions,
             projections=projection_tuple,
         ),
@@ -611,12 +589,10 @@ def _require_native_planning_deadline(deadline_monotonic: float | None) -> None:
 
 
 __all__ = [
-    "OPENAI_FUNCTION_TOOL_WIRE_CONTRACT_VERSION",
     "OpenAIFunctionSchemaIncompatible",
     "freeze_openai_native_tool_eligibility",
     "materialize_openai_native_tool_projection_set",
     "lower_openai_function_parameters",
-    "openai_native_function_tool_contract_fingerprint",
     "openai_chat_function_tool",
     "openai_function_definition",
     "openai_responses_function_tool",

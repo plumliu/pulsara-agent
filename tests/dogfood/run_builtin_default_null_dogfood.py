@@ -154,7 +154,6 @@ async def run(args, report, saved, save):
                         "timezone": "Asia/Shanghai",
                         "permission_mode": "read-only",
                         "schedule": {
-                            "contract": "scheduled-rule:v1",
                             "kind": "once",
                             "run_at_utc": future,
                         },

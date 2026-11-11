@@ -94,8 +94,8 @@ export function decodeCanonicalPromptContent(
   } catch {
     throw new Error('输入正文格式无效。');
   }
-  if (!isRecord(raw) || !hasExactKeys(raw, ['parts', 'schema'])
-    || raw.schema !== 'pulsara.prompt/v2' || !Array.isArray(raw.parts)
+  if (!isRecord(raw) || !hasExactKeys(raw, ['parts'])
+    || !Array.isArray(raw.parts)
     || raw.parts.length === 0) {
     throw new Error('输入正文格式无效。');
   }

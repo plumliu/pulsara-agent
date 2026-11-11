@@ -70,4 +70,3 @@ def test_wire_message_framing_is_preserved_with_cjk_text():
         ordered_input_items=(wire,), ordered_input_sources=(message,))
     assert quote.total_input_tokens == 4 + estimator.estimate_json(wire)
     assert quote.visual_image_tokens == 0
-    assert estimator.fact.estimator_version == "v3"

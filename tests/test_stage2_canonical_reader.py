@@ -962,9 +962,6 @@ def test_mid_turn_snapshot_revision_keeps_current_user_as_exact_delta(
                     codec=CONTEXT_SNAPSHOT_CODEC,
                 ),
                 snapshot_carrier=snapshot_carrier,
-                compiler_contract="compiler.v1",
-                prompt_contract="prompt.v1",
-                model_contract="model.v1",
                 occurred_at=datetime.now(timezone.utc),
                 actor_id="compactor",
             )
@@ -1040,17 +1037,15 @@ def test_inspector_reads_canonical_rows_and_selective_events_from_one_kernel(
         maximum_events=32,
         deadline_monotonic=monotonic() + 30,
     ).to_dict()
-    assert view["inspect_kind"] == "canonical_conversation_kernel.v3"
+    assert view["inspect_kind"] == "canonical_conversation_kernel"
     assert view["conversation"]["entries"][0]["turn_id"] == turn_id
     assert view["turns"][0]["status"] == "RUNNING"
     assert view["selective_events"][0]["event_type"] == "UserMessageAccepted"
     health = query.inspect_health(deadline_monotonic=monotonic() + 30)
     assert health["conversation_authority"] == "pulsara_v3"
-    assert health["runtime_limit_contract"] == "stage2_runtime_limits.v1"
     assert "host_close_hard_ms" not in health["runtime_limits"]
     assert "model_calls_per_turn_hard" not in health["runtime_limits"]
     assert all(value > 0 for value in health["runtime_limits"].values())
-    assert health["execution_watchdog_contract"] == "kernel_execution_watchdogs.v1"
     watchdogs = health["execution_watchdogs"]
     assert watchdogs["host_session_close_join_seconds"] == 120.0
     assert watchdogs["foreground_provider_total_seconds"] is None

@@ -175,7 +175,6 @@ class _HostCompactionModel(CallbackScriptedKernelModel):
     def resolve_compaction_summary_call(self, **kwargs):
         call = super().resolve_compaction_summary_call(**kwargs)
         self.summary_transport.binding_id = call.target.transport.binding_id
-        self.summary_transport.contract_version = call.target.transport.contract_version
         resolved = replace(call, target=replace(call.target, transport=self.summary_transport))
         self._model_runtime.register_test_call_override(resolved)
         return resolved

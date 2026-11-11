@@ -21,7 +21,6 @@ from pulsara_agent.terminal_protocol.canonical_v3 import MAXIMUM_CONTROL_ITEMS
 from pulsara_agent.terminal_protocol.v3_gateway import (
     MAXIMUM_FRAME_BYTES,
     TerminalKernelProtocolServer,
-    protocol_identity,
 )
 
 
@@ -115,7 +114,6 @@ class TerminalProtocolClient:
                 wire.ClientFrame(
                     hello=wire.HelloRequest(
                         request_id=_request_id(),
-                        protocol=protocol_identity(),
                         launch_id=server.launch_id,
                         launch_capability=server.launch_capability,
                         client_instance_id=client_instance_id,

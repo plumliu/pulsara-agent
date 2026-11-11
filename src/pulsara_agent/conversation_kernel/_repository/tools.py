@@ -1186,12 +1186,11 @@ class _ToolOperations:
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.session_commands (
-                    session_id, command_id, command_kind,
-                    request_schema_version, semantic_digest,
-                    target_kind, target_interaction_decision_id
-                ) VALUES (%s, %s, 'RESOLVE_INTERACTION',
-                          'resolve_tool_interaction.v1', %s,
-                          'INTERACTION_DECISION', %s)
+                session_id, command_id, command_kind, semantic_digest, target_kind,
+                target_interaction_decision_id
+            ) VALUES (
+                %s, %s, 'RESOLVE_INTERACTION', %s, 'INTERACTION_DECISION', %s
+            )
                 """,
                 (guard.session_id, command_id, semantic_digest, decision_id),
             )
@@ -1426,7 +1425,6 @@ class _ToolOperations:
         })
         if (
             command["command_kind"] != "RESOLVE_INTERACTION"
-            or command["request_schema_version"] != "resolve_tool_interaction.v1"
             or command["target_kind"] != "INTERACTION_DECISION"
             or command["semantic_digest"] != semantic_digest
             or command["target_interaction_decision_id"] != decision_id

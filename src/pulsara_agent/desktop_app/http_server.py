@@ -104,7 +104,6 @@ from pulsara_agent.settings import (
     LocalSettingsPublishIndeterminate,
     LocalSettingsStore,
     LocalSettingsUnavailable,
-    LocalSettingsSchemaUnsupported,
 )
 from pulsara_agent.storage.migrations.errors import (
     PostgresSchemaError,
@@ -818,10 +817,6 @@ class LocalHttpServer:
                 status=exc.status,
                 retryable=exc.status in {409, 504},
             )
-        except LocalSettingsSchemaUnsupported as exc:
-            return self._error_response(
-                "local_settings_schema_unsupported", str(exc), status=409, retryable=False
-            )
         except LocalSettingsUnavailable:
             return self._error_response(
                 "local_settings_unavailable",
@@ -1353,7 +1348,6 @@ class LocalHttpServer:
                 "status": "verified",
                 "database_name": result.binding.database_name,
                 "runtime_role": result.binding.runtime_role,
-                "migration_head_version": result.binding.migration_head_version,
             }
         )
 

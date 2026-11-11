@@ -8,9 +8,6 @@ import pytest
 from psycopg.rows import dict_row
 
 from pulsara_agent.conversation_kernel.compaction.contracts import (
-    COMPACTION_MODEL_CONTRACT,
-    COMPACTION_SNAPSHOT_COMPILER_CONTRACT,
-    COMPACTION_SUMMARY_PROMPT_CONTRACT,
     CONTEXT_SNAPSHOT_CODEC,
     CONTEXT_SNAPSHOT_MEDIA_TYPE,
     CompactionCanonicalAdoptionFactoryInput,
@@ -164,8 +161,8 @@ def adopt_predecessor(repository, lease, accepted, group):
         source_digest=canonical_compaction_range_digest(read.lineage_base, source_range),
         snapshot_content=InlineContent.from_bytes(carrier.body,
             media_type=CONTEXT_SNAPSHOT_MEDIA_TYPE, codec=CONTEXT_SNAPSHOT_CODEC),
-        snapshot_carrier=carrier, compiler_contract=COMPACTION_SNAPSHOT_COMPILER_CONTRACT,
-        prompt_contract=COMPACTION_SUMMARY_PROMPT_CONTRACT, model_contract=COMPACTION_MODEL_CONTRACT,
+        snapshot_carrier=carrier,
+
         occurred_at=now(), actor_id="test",
     ))
     result = repository.adopt_context_snapshot(

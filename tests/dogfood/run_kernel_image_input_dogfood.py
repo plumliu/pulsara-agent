@@ -113,7 +113,6 @@ class ObservedTransport:
         for name in (
             "api",
             "binding_id",
-            "contract_version",
             "sanitizer_contract_fingerprint",
             "boundary_contract_fingerprint",
         ):

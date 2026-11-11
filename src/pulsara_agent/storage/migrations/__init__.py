@@ -1,19 +1,11 @@
-"""Clean conversation-kernel PostgreSQL migration universe."""
+"""Clean conversation-kernel PostgreSQL baseline installation."""
 
 from pulsara_agent.storage.migrations.contracts import (
-    MigrationUniverseIdentity,
-    PostgresMigrationLedgerRowFact,
-    build_migration_universe_identity,
-    canonical_json_bytes,
-    postgres_schema_fingerprint,
+    PostgresMigrationLedgerRowFact, canonical_json_bytes, postgres_schema_fingerprint,
 )
-from pulsara_agent.storage.migrations.registry import POSTGRES_MIGRATION_REGISTRY
+from pulsara_agent.storage.migrations.registry import POSTGRES_BASELINE
 
 __all__ = [
-    "MigrationUniverseIdentity",
-    "POSTGRES_MIGRATION_REGISTRY",
-    "PostgresMigrationLedgerRowFact",
-    "build_migration_universe_identity",
-    "canonical_json_bytes",
-    "postgres_schema_fingerprint",
+    "POSTGRES_BASELINE", "PostgresMigrationLedgerRowFact",
+    "canonical_json_bytes", "postgres_schema_fingerprint",
 ]

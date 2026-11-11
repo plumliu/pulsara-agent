@@ -1,5 +1,4 @@
 {
-  "schema_version": "conversation_kernel_runtime_grants.v1",
   "schema_grants": {
     "pulsara_v3": [
       "USAGE"

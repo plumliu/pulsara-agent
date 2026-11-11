@@ -113,7 +113,6 @@ def scheduled_args(action):
                 "timezone": "Asia/Shanghai",
                 "permission_mode": "read-only",
                 "schedule": {
-                    "contract": "scheduled-rule:v1",
                     "kind": "interval",
                     "anchor_at_utc": "2026-10-07T00:00:00Z",
                     "seconds": 60,

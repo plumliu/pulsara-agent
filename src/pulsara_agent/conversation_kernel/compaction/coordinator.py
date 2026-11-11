@@ -60,9 +60,6 @@ from pulsara_agent.conversation_kernel.blob import (
 
 
 from pulsara_agent.conversation_kernel.compaction.contracts import (
-    COMPACTION_MODEL_CONTRACT,
-    COMPACTION_SNAPSHOT_COMPILER_CONTRACT,
-    COMPACTION_SUMMARY_PROMPT_CONTRACT,
     CONTEXT_SNAPSHOT_CODEC,
     CONTEXT_SNAPSHOT_MEDIA_TYPE,
     CompactionCanonicalAdoptionFactoryInput,
@@ -1994,9 +1991,6 @@ class CompactionCoordinator(CompactionAdmissionOperations, CompactionContextOper
                         source_digest=source_digest,
                         snapshot_content=content,
                         snapshot_carrier=carrier,
-                        compiler_contract=COMPACTION_SNAPSHOT_COMPILER_CONTRACT,
-                        prompt_contract=COMPACTION_SUMMARY_PROMPT_CONTRACT,
-                        model_contract=COMPACTION_MODEL_CONTRACT,
                         occurred_at=datetime.now(timezone.utc),
                         actor_id=self._writer_lease.guard.writer_owner_id,
                     )

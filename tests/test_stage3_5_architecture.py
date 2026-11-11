@@ -14,11 +14,8 @@ from pulsara_agent.storage.migrations.contracts import (
     BASELINE_RESOURCE,
     CATALOG_RESOURCE,
     GRANT_RESOURCE,
-    UNIVERSE_GENERATION,
-    UNIVERSE_ID,
 )
 from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
-from pulsara_agent.storage.migrations.registry import POSTGRES_MIGRATION_REGISTRY
 from pulsara_agent.storage.schema_contract import VerifiedPostgresSchemaBinding
 
 
@@ -127,9 +124,6 @@ def test_stage3_5_no_durable_stream_or_runtime_write_compatibility_surface() -> 
 
 
 def test_stage3_5_clean_migration_universe_is_the_only_packaged_universe() -> None:
-    assert UNIVERSE_ID == "pulsara.conversation-kernel.v1"
-    assert UNIVERSE_GENERATION == 1
-    assert POSTGRES_MIGRATION_REGISTRY.latest_version == 0
 
     sql_root = SOURCE / "storage" / "migrations" / "sql"
     resource_root = SOURCE / "storage" / "migrations" / "resources"
@@ -154,7 +148,7 @@ def test_stage3_5_clean_migration_universe_is_the_only_packaged_universe() -> No
         assert token not in baseline
 
 
-def test_stage3_5_binding_v2_has_only_the_closed_identity_fields() -> None:
+def test_stage3_5_binding_has_only_the_closed_identity_fields() -> None:
     assert tuple(item.name for item in fields(VerifiedPostgresSchemaBinding)) == (
         "database_target_fingerprint",
         "database_name",
@@ -163,15 +157,8 @@ def test_stage3_5_binding_v2_has_only_the_closed_identity_fields() -> None:
         "runtime_role",
         "server_version_num",
         "pgvector_extension_version",
-        "migration_universe_id",
-        "migration_universe_generation",
-        "migration_universe_fingerprint",
-        "migration_head_version",
-        "durable_registry_prefix_fingerprint",
         "verified_catalog_fingerprint",
         "runtime_grant_policy_fingerprint",
-        "verification_contract_fingerprint",
-        "binding_fingerprint",
         "_construction_guard",
     )
 

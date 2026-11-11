@@ -74,10 +74,9 @@ from pulsara_agent.conversation_kernel.mcp.supervisor import McpServerState
 from pulsara_agent.llm.adapters.openai.function_tools import (
     freeze_openai_native_tool_eligibility,
     materialize_openai_native_tool_projection_set,
-    openai_native_function_tool_contract_fingerprint,
 )
 from pulsara_agent.model_input.contracts import FrozenToolSpec, ModelInputScopeKind
-from pulsara_agent.primitives.context import context_fingerprint, freeze_json
+from pulsara_agent.primitives.context import context_fingerprint, freeze_json, thaw_json
 from pulsara_agent.primitives.tool_observation import (
     MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES,
 )
@@ -313,21 +312,12 @@ def _planning_view(
     return tool_view
 
 
-def _finalized_plan(*, view):
+def _finalized_plan(*, view, wire_api="openai_chat_completions"):
     planner = KernelToolCapabilityPlanner()
     selection = planner.select(view=view)
     native = view.planning_input.native_wire
     projection_set = selection.reusable_direct_projection_set
     if projection_set is None:
-        wire_api = next(
-            item
-            for item in (
-                "openai_chat_completions",
-                "openai_responses",
-            )
-            if openai_native_function_tool_contract_fingerprint(item)
-            == native.native_function_tool_wire_contract_fingerprint
-        )
         projection_set = materialize_openai_native_tool_projection_set(
             conversation_scope_kind=native.conversation_scope_kind,
             wire_api=wire_api,
@@ -614,6 +604,7 @@ def test_round9_provider_contract_reset_reprojects_only_installed_cohort() -> No
         schema={"type": "object", "properties": {}},
     )
     reset = _finalized_plan(
+        wire_api="openai_responses",
         view=_planning_view(
             builtin_facts=(builtin,),
             mcp_facts=(direct, late),
@@ -625,9 +616,12 @@ def test_round9_provider_contract_reset_reprojects_only_installed_cohort() -> No
     assert tuple(
         item.provider_name for item in reset.direct_projection_set.tool_versions
     ) == tuple(item.provider_name for item in cold.direct_projection_set.tool_versions)
-    assert (
-        reset.direct_projection_set.native_function_tool_wire_contract_fingerprint
-        != cold.direct_projection_set.native_function_tool_wire_contract_fingerprint
+    assert tuple(
+        thaw_json(item.wire_tool)["name"]
+        for item in reset.direct_projection_set.projections
+    ) == tuple(
+        thaw_json(item.wire_tool)["function"]["name"]
+        for item in cold.direct_projection_set.projections
     )
     late_route = next(
         item
@@ -1247,7 +1241,7 @@ def test_mcp_native_token_boundary_uses_actual_wire_estimator_and_excludes_built
         if q.version.provider_name == large.canonical_tool_spec.name
     )
     assert quote.wire_estimated_tokens == tokens
-    plan = _finalized_plan(view=view)
+    plan = _finalized_plan(view=view, wire_api=wire_api)
     assert len(plan.direct_tool_surface.tool_specs) == (2 if tokens < 64_000 else 1)
     assert plan.mcp_catalog_route_projection.routes[0].route is (
         ToolCapabilityRouteKind.DIRECT
@@ -1329,7 +1323,6 @@ def test_capability_identity_digest_vectors_sort_and_provider_wire_are_stable():
     assert [f.identity.stable_name for f in plan.dispatch_view.registry_tool_facts] == ["b", "a"]
     assert all(route.route is ToolCapabilityRouteKind.DIRECT for route in plan.mcp_catalog_route_projection.routes)
     assert canonical_json_bytes([p.wire_tool for p in plan.direct_projection_set.projections]) == (b'[{"function":{"description":"Capability a","name":"a","parameters":{"properties":{},"type":"object"},"strict":false},"type":"function"},{"function":{"description":"Capability b","name":"b","parameters":{"properties":{},"type":"object"},"strict":false},"type":"function"}]')
-    assert plan.direct_projection_set.projection_set_fingerprint == "sha256:1dea59d55fc9dd3121c9fda7b70cc8e115e33656025cc16bbf9527661437f756"
     assert all(version.identity is fact.identity for version, fact in zip(plan.direct_projection_set.tool_versions, facts, strict=True))
 
 
@@ -1356,4 +1349,4 @@ def test_capability_multisource_framing_uses_original_digest_bytes(monkeypatch):
     monkeypatch.setattr(registry_module, "MAXIMUM_CAPABILITY_PLANNER_FRAMING_BYTES", low - 1)
     with pytest.raises(ValueError, match="framing"):
         registry_module._require_bounded_planner_framing(**kwargs)
-    assert low == 3392
+    assert low == 3218

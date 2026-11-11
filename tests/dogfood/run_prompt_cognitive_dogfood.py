@@ -61,7 +61,6 @@ from tests.dogfood.run_model_switch_handover_dogfood import (
 from tests.dogfood.prompt_cognitive_fixtures import seed_unknown_local_append
 
 
-SCHEMA_VERSION = "prompt-cognitive-load-real-model-dogfood.v1"
 CONNECTION_ID = "connection:pkguzkyqoz4z4seaj6a2do2bkm"
 MODEL_ID = "openai/gpt-6-luna"
 ORCHESTRATION_TOOLS = {
@@ -1087,7 +1086,6 @@ async def _run(
     database_name, _admin_root, ephemeral_admin, ephemeral_runtime = _create_database(saved)
     original_pulsara_home = os.environ.get("PULSARA_HOME")
     report: dict[str, object] = {
-        "schema_version": SCHEMA_VERSION,
         "started_at_utc": datetime.now(timezone.utc).isoformat(),
         "saved_pulsara_home": str(saved_home),
         "connection": {
@@ -1344,7 +1342,6 @@ def main() -> int:
         report = asyncio.run(_run(selected, calls, runs))
     except BaseException as exc:
         report = {
-            "schema_version": SCHEMA_VERSION,
             "completed_at_utc": datetime.now(timezone.utc).isoformat(),
             "passed": False,
             "failure_type": type(exc).__name__,

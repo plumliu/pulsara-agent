@@ -46,7 +46,6 @@ class CellOutputContent:
             raise TypeError("Cell output record must be an object")
         object.__setattr__(self, "record", freeze_tool_json_object(self.record))
         payload = {
-            "schema_version": "cell_output.v1",
             "cell_id": self.cell_id,
             "source_turn_id": self.source_turn_id,
             "source_exec_attempt_id": self.source_exec_attempt_id,
@@ -86,19 +85,15 @@ class CellOutputContent:
             not isinstance(value, dict)
             or set(value)
             != {
-                "schema_version",
                 "cell_id",
                 "source_turn_id",
                 "source_exec_attempt_id",
                 "record_sequence",
                 "record",
             }
-            or value["schema_version"] != "cell_output.v1"
         ):
             raise ValueError("Cell output canonical schema is invalid")
-        result = cls(
-            **{key: item for key, item in value.items() if key != "schema_version"}
-        )
+        result = cls(**value)
         if result.body != body:
             raise ValueError("Cell output storage is not canonical")
         return result

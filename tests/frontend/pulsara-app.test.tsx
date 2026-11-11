@@ -4330,7 +4330,7 @@ describe('explicit runtime reopen owner', () => {
 it('opens the unique ACTIVE schedule from the session header and hides the alarm after it pauses', async () => {
   const task = { id: 'scheduled:header', session_id: initialSession.id, name: '会话活跃计划', prompt: '检查进展', status: 'ACTIVE' as const, revision: 1,
     next_run_at: '2026-10-13T00:00:00Z', timezone: 'Asia/Shanghai', permission_mode: 'bypass-permissions' as const,
-    schedule: { contract: 'scheduled-rule:v1' as const, kind: 'daily' as const, start_date: '2026-10-13', time: '08:00' } };
+    schedule: { kind: 'daily' as const, start_date: '2026-10-13', time: '08:00' } };
   vi.spyOn(LocalScheduledTasksApi.prototype, 'listSessions').mockResolvedValue({sessions:[],next_cursor:null});
   const list = vi.spyOn(LocalScheduledTasksApi.prototype, 'list').mockResolvedValue({tasks:[task],next_cursor:null});
   try {

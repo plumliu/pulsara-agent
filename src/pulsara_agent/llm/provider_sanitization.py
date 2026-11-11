@@ -23,8 +23,6 @@ _AUTHORIZATION_RE = re.compile(
 
 def _contract() -> ProviderErrorSanitizationContractFact:
     payload = {
-        "contract_id": "pulsara.provider-error-sanitizer",
-        "contract_version": "v3",
         "stable_code_mapping_fingerprint": sha256_fingerprint(
             "provider-error-code-map:v3",
             {

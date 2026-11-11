@@ -90,7 +90,6 @@ class _Model(CallbackScriptedKernelModel):
     def resolve_compaction_summary_call(self, **kwargs):
         call = super().resolve_compaction_summary_call(**kwargs)
         self.summary.binding_id = call.target.transport.binding_id
-        self.summary.contract_version = call.target.transport.contract_version
         call = replace(call, target=replace(call.target, transport=self.summary))
         self.model_runtime.register_test_call_override(call)
         return call

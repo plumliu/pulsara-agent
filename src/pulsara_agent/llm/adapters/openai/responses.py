@@ -121,7 +121,6 @@ class OpenAIResponsesTransport:
     timeout_policy: OpenAITransportTimeoutPolicy
     api: str = OPENAI_RESPONSES_API
     binding_id: str = "pulsara.openai.responses"
-    contract_version: str = "v8-connection-reasoning-profiles"
     retry_config: LLMRetryConfig | None = None
     retry_sleep: Callable[[float], Awaitable[None]] = field(
         default=asyncio.sleep, repr=False

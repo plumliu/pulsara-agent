@@ -206,7 +206,6 @@ class _CompactionScriptedModel(ScriptedKernelModel):
     def resolve_compaction_summary_call(self, **kwargs):
         call = super().resolve_compaction_summary_call(**kwargs)
         self.summary_transport.binding_id = call.target.transport.binding_id
-        self.summary_transport.contract_version = call.target.transport.contract_version
         call = replace(
             call,
             target=replace(call.target, transport=self.summary_transport),
@@ -227,7 +226,6 @@ class _ActiveCompactionModel(CallbackScriptedKernelModel):
     def resolve_compaction_summary_call(self, **kwargs):
         call = super().resolve_compaction_summary_call(**kwargs)
         self.summary_transport.binding_id = call.target.transport.binding_id
-        self.summary_transport.contract_version = call.target.transport.contract_version
         call = replace(
             call,
             target=replace(call.target, transport=self.summary_transport),

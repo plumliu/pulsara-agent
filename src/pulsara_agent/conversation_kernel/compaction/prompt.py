@@ -7,7 +7,6 @@ import re
 from hashlib import sha256
 
 from pulsara_agent.conversation_kernel.compaction.contracts import (
-    COMPACTION_SUMMARY_PROMPT_CONTRACT,
     CompactionContinuationMode,
     CompactionSnapshotCarrier,
     FrozenCompactionSummary,
@@ -199,7 +198,7 @@ def summary_request_fingerprint(summary_request: str) -> str:
     if not summary_request:
         raise ValueError("summary request is empty")
     return context_fingerprint(
-        COMPACTION_SUMMARY_PROMPT_CONTRACT,
+        "pulsara.context-compaction-summary.v7-unified-history-retention",
         {"request": summary_request},
     )
 

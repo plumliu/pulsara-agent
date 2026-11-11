@@ -55,7 +55,6 @@ from pulsara_agent.model_input.contracts import (
 from pulsara_agent.model_input.lowering import project_tool_result_public_value
 from pulsara_agent.primitives.context import canonical_json_bytes, thaw_json
 from pulsara_agent.primitives.plan_workflow import (
-    PlanInteractionBinding,
     PlanQuestionContent,
     parse_plan_exit_arguments,
     extract_plan_entry_reason,
@@ -553,12 +552,6 @@ class PlanToolBatchCoordinator:
             else derive_id('plan-interaction', 'tool', workflow_id, assistant_entry_id, selected.tool_call_id)
         )
         catalog_entry = builtin_tool_catalog_entry(selected.tool_name)
-        catalog_binding = catalog_entry.binding_contract.base
-        request_binding = PlanInteractionBinding(
-            catalog_binding.contract_id,
-            catalog_binding.contract_version,
-            catalog_binding.binding_fingerprint,
-        )
         disposition = PlanToolBatchDisposition.APPLY
         # A Plan call owns the complete batch even when its frozen surface was
         # revoked or its arguments are invalid.  Classify those conditions
@@ -609,16 +602,15 @@ class PlanToolBatchCoordinator:
             try:
                 if kind is PlanToolControlKind.ENTER:
                     extract_plan_entry_reason(
-                        binding=request_binding,
                         arguments=selected.arguments,
                     )
                 elif kind is PlanToolControlKind.QUESTION:
                     parse_plan_question_arguments(
-                        binding=request_binding, arguments=selected.arguments,
+                        arguments=selected.arguments,
                     )
                 else:
                     parse_plan_exit_arguments(
-                        binding=request_binding, arguments=selected.arguments,
+                        arguments=selected.arguments,
                     )
             except ValueError:
                 disposition = PlanToolBatchDisposition.INVALID_ARGUMENTS
@@ -719,7 +711,6 @@ class PlanToolBatchCoordinator:
             selected_call_ordinal=selected_call_index,
             control_kind=kind,
             selected_arguments=selected.arguments,
-            request_binding=request_binding,
             permission_snapshot=canonical_facts.run_permission_snapshot,
             workflow_id=workflow_id,
             expected_workflow_revision=expected_revision,

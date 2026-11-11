@@ -66,13 +66,6 @@ from pulsara_agent.primitives.context import (
 
 COMPACTION_SOURCE_LINEAGE_CONTRACT = "pulsara.compaction-source-lineage.v1"
 COMPACTION_CANONICAL_RANGE_CONTRACT = "pulsara.compaction-canonical-range.v1"
-COMPACTION_SNAPSHOT_COMPILER_CONTRACT = (
-    "pulsara.context-snapshot-carrier.v5-canonical-refs"
-)
-COMPACTION_SUMMARY_PROMPT_CONTRACT = (
-    "pulsara.context-compaction-summary.v7-unified-history-retention"
-)
-COMPACTION_MODEL_CONTRACT = "pulsara.primary-model-compaction.v1"
 CONTEXT_SNAPSHOT_MEDIA_TYPE = "application/vnd.pulsara.context-snapshot+json"
 CONTEXT_SNAPSHOT_CODEC = "utf-8"
 
@@ -1046,9 +1039,6 @@ class ContextSnapshotDraft:
     workspace_id: str
     source_through_sequence: int
     source_digest: str
-    compiler_contract: str
-    prompt_contract: str
-    model_contract: str
     content: CanonicalContent = field(repr=False)
     carrier: CompactionSnapshotCarrier = field(repr=False)
 
@@ -1119,9 +1109,6 @@ class CompactionCanonicalAdoptionFactoryInput:
     source_digest: str
     snapshot_content: CanonicalContent = field(repr=False)
     snapshot_carrier: CompactionSnapshotCarrier = field(repr=False)
-    compiler_contract: str
-    prompt_contract: str
-    model_contract: str
     occurred_at: datetime
     actor_id: str
 
@@ -1199,9 +1186,6 @@ def build_prepared_compaction_canonical_adoption(
         workspace_id=value.scope.workspace_id,
         source_through_sequence=value.source_through_sequence,
         source_digest=value.source_digest,
-        compiler_contract=value.compiler_contract,
-        prompt_contract=value.prompt_contract,
-        model_contract=value.model_contract,
         content=value.snapshot_content,
         carrier=value.snapshot_carrier,
     )
@@ -1296,10 +1280,7 @@ class CompactionOutcome:
 
 __all__ = [
     "COMPACTION_CANONICAL_RANGE_CONTRACT",
-    "COMPACTION_MODEL_CONTRACT",
-    "COMPACTION_SNAPSHOT_COMPILER_CONTRACT",
     "COMPACTION_SOURCE_LINEAGE_CONTRACT",
-    "COMPACTION_SUMMARY_PROMPT_CONTRACT",
     "CONTEXT_SNAPSHOT_CODEC",
     "CONTEXT_SNAPSHOT_MEDIA_TYPE",
     "ColdRebuildCompactionProjection",

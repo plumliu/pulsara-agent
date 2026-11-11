@@ -1923,7 +1923,7 @@ def _schedule_values():
     return {
         "name": "Daily report",
         "prompt": "Prepare a report.",
-        "schedule": {"contract": "scheduled-rule:v1", "kind": "daily", "start_date": "2026-10-13", "time": "09:00"},
+        "schedule": {"kind": "daily", "start_date": "2026-10-13", "time": "09:00"},
         "timezone": "Asia/Shanghai",
         "permission_mode": "read-only",
     }

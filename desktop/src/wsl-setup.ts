@@ -160,8 +160,7 @@ export class WslSetup {
     if (!/^[a-f0-9]{64}$/.test(payload.sha256) || !/^[a-zA-Z0-9][a-zA-Z0-9.+_-]*$/.test(payload.version)) throw new Error('无效的随包资源信息。');
     options.signal?.throwIfAborted();
     options.onProgress?.('正在检查 Windows 互操作资源…');
-    const helper = await execute(payload.interopHelper,['--version'],{env:wslHostEnvironment(),windowsHide:true,shell:false,encoding:'utf8'});
-    if (helper.stdout.trim() !== 'pulsara-interop 1') throw new Error('Windows 互操作资源版本不匹配。');
+    await execute(payload.interopHelper,['--version'],{env:wslHostEnvironment(),windowsHide:true,shell:false,encoding:'utf8'});
     const hostHelperPath = await hostPathInWsl(current,payload.interopHelper);
     await executeWsl(current,'/usr/bin/test',['-x',hostHelperPath],current.home);
     const expected = path.posix.join(current.home,'.local/share/pulsara/runtime',payload.version);

@@ -94,7 +94,6 @@ from pulsara_agent.model_input.provider_replay import (
 )
 from pulsara_agent.model_input.continuity import (
     FULL_HISTORY_CONTEXT_BASE_IDENTITY,
-    PROVIDER_MESSAGE_LOWERING_CONTRACT,
 )
 from pulsara_agent.ports.tool_output import ToolOutputUnavailableReason
 from pulsara_agent.ports.tool_execution import (
@@ -112,7 +111,6 @@ from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.plan_workflow import (
     PlanApprovedMaterializationDisposition,
     PlanHandoffKind,
-    PlanInteractionBinding,
     PlanWorkflowEnteredBy,
     PlanWorkflowStatus,
     project_plan_continuation_for_provider,
@@ -702,8 +700,6 @@ class CanonicalProviderInputReader:
                    t.permission_plan_workflow_id,
                    t.permission_plan_revision_at_admission,
                    t.permission_inherited_from_turn_id,
-                   t.permission_contract_id,
-                   t.permission_contract_fingerprint,
                    t.permission_snapshot_fingerprint,
                    r.revision_ordinal, r.base_kind,
                    r.context_snapshot_id, r.source_through_sequence,
@@ -800,7 +796,6 @@ class CanonicalProviderInputReader:
                             "source_through_sequence": int(
                                 snapshot["source_through_sequence"]
                             ),
-                            "lowering": PROVIDER_MESSAGE_LOWERING_CONTRACT,
                         },
                     )
                 ),
@@ -997,7 +992,6 @@ class CanonicalProviderInputReader:
                         result_state=str(result["result_state"]))
                 late_text = _canonical_json_text(
                     {
-                        "schema_version": "late_tool_outcome_observation.v1",
                         "tool_call_id": call.tool_call_id,
                         "result_state": result["result_state"],
                         "result": result_body_text,
@@ -1325,7 +1319,6 @@ class CanonicalProviderInputReader:
                         is ProviderToolResultClosureKind.PLAN_INTERACTION_ABORTED
                         else _canonical_json_text(
                             {
-                                "schema_version": "provider_tool_result_closure.v1",
                                 "tool_call_id": call.tool_call_id,
                                 "disposition": closure_kind.value,
                             }
@@ -1809,8 +1802,6 @@ def _permission_snapshot_from_binding(
             if binding["permission_inherited_from_turn_id"] is None
             else str(binding["permission_inherited_from_turn_id"])
         ),
-        permission_contract_id=str(binding["permission_contract_id"]),
-        permission_contract_fingerprint=str(binding["permission_contract_fingerprint"]),
         snapshot_fingerprint=str(binding["permission_snapshot_fingerprint"]),
     )
 
@@ -1846,8 +1837,6 @@ def _plan_workflow_compile_fact(
         "workflow_status": PlanWorkflowStatus(str(row["status"])),
         "entered_by": PlanWorkflowEnteredBy(str(row["entered_by"])),
         "resume_permission_mode": PermissionMode(str(row["resume_permission_mode"])),
-        "permission_contract_id": str(row["permission_contract_id"]),
-        "permission_contract_fingerprint": str(row["permission_contract_fingerprint"]),
     }
     for name, value in values.items():
         object.__setattr__(provisional, name, value)
@@ -1874,8 +1863,7 @@ def _plan_handoff_compile_facts(
            e.source_plan_handoff_kind, e.source_plan_interaction_id,
            t.permission_plan_revision_at_admission,
            w.*, i.assistant_entry_id, i.tool_call_id,
-           i.request_contract_id, i.request_contract_version,
-           i.request_contract_fingerprint, i.request_semantic_digest,
+           i.request_semantic_digest,
            b.tool_arguments
     FROM pulsara_v3.transcript_entries AS e
     JOIN pulsara_v3.turns AS t
@@ -1960,11 +1948,6 @@ def _plan_handoff_compile_facts(
         interaction_id=interaction_id,
         assistant_entry_id=str(row["assistant_entry_id"]),
         tool_call_id=str(row["tool_call_id"]),
-        binding=PlanInteractionBinding(
-            str(row["request_contract_id"]),
-            str(row["request_contract_version"]),
-            str(row["request_contract_fingerprint"]),
-        ),
         request_semantic_digest=str(row["request_semantic_digest"]),
         arguments=frozen_arguments,
     )
@@ -1993,9 +1976,6 @@ def _plan_handoff_compile_facts(
         "interaction_id": interaction_id,
         "assistant_entry_id": str(row["assistant_entry_id"]),
         "tool_call_id": str(row["tool_call_id"]),
-        "request_contract_id": str(row["request_contract_id"]),
-        "request_contract_version": str(row["request_contract_version"]),
-        "request_contract_fingerprint": str(row["request_contract_fingerprint"]),
         "request_semantic_digest": str(row["request_semantic_digest"]),
         "content_identity": extracted.identity,
         "exact_plan_utf8": extracted.exact_plan_utf8,

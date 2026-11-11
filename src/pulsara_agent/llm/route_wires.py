@@ -24,18 +24,6 @@ from pulsara_agent.llm.provider import (
     ModelIdentityPolicy,
     RouteWireProfile,
 )
-from pulsara_agent.llm.provider_replay import (
-    ProviderAssistantReplayCodecKind,
-    provider_replay_contract_fingerprint,
-)
-
-
-_CHAT_REPLAY = provider_replay_contract_fingerprint(
-    ProviderAssistantReplayCodecKind.CHAT_CLOSED_REASONING_FIELDS
-)
-_RESPONSES_REPLAY = provider_replay_contract_fingerprint(
-    ProviderAssistantReplayCodecKind.RESPONSES_EXACT_OUTPUT_ITEMS
-)
 
 
 def _chat_reasoning(
@@ -286,17 +274,7 @@ def _contract(
             if wire_api is WireApi.OPENAI_CHAT_COMPLETIONS
             else "pulsara.openai.responses"
         ),
-        transport_contract_version=(
-            "v8-connection-reasoning-profiles-and-tool-correlation"
-            if wire_api is WireApi.OPENAI_CHAT_COMPLETIONS
-            else "v8-connection-reasoning-profiles"
-        ),
         model_identity_policy=model_identity_policy,
-        assistant_replay_contract=(
-            _CHAT_REPLAY
-            if wire_api is WireApi.OPENAI_CHAT_COMPLETIONS
-            else _RESPONSES_REPLAY
-        ),
         profile=profile,
         reasoning_profiles=reasoning_profiles,
         default_reasoning_profile=ReasoningWireProfile.CATALOG_STANDARD,

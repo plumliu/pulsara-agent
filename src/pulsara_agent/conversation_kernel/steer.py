@@ -371,14 +371,6 @@ class PreparedPromptIngressCommand:
         )
 
     @property
-    def schema_version(self):
-        return (
-            "run_scheduled_task.v1"
-            if self.command_kind == "RUN_SCHEDULED_TASK"
-            else "queue_prompt.v3"
-        )
-
-    @property
     def input_origin(self):
         return (
             CanonicalInputOriginKind.SCHEDULED_TASK

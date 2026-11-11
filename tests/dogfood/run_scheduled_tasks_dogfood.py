@@ -80,7 +80,6 @@ async def run():
                         timezone="UTC",
                         permission_mode=permission,
                         schedule={
-                            "contract": "scheduled-rule:v1",
                             "kind": "once",
                             "run_at_utc": (
                                 datetime.now(timezone.utc) + timedelta(hours=1)

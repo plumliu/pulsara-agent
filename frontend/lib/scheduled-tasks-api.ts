@@ -1,6 +1,6 @@
 import type { RequestExecution } from './request-execution';
 import type { PermissionMode } from './pulsara-types';
-export type ScheduleRule = { contract: 'scheduled-rule:v1' } & (
+export type ScheduleRule = (
   | { kind: 'once'; run_at_utc: string }
   | { kind: 'interval'; anchor_at_utc: string; seconds: number }
   | { kind: 'daily'; start_date: string; time: string }

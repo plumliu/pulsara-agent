@@ -10,9 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from pulsara_agent.llm.adapters.openai.function_tools import (
-    openai_native_function_tool_contract_fingerprint,
-)
 from pulsara_agent.llm.model_catalog import ReasoningControlContract
 from pulsara_agent.llm.model_connections import (
     ModelCallBinding,
@@ -43,19 +40,11 @@ class FrozenProviderProjectionStrategy:
 
     route_wire_profile: RouteWireProfile
     transport_binding_id: str
-    transport_contract_version: str
-    assistant_replay_contract: str
     reasoning_wire_profile: ReasoningWireProfile
     supported_reasoning_families: frozenset[str]
     lower_reasoning: ReasoningLowerer
     context_materializer: object
     semantic_wire_group: object
-
-    @property
-    def native_function_tool_wire_contract_fingerprint(self) -> str:
-        return openai_native_function_tool_contract_fingerprint(
-            self.route_wire_profile.wire_api
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,8 +181,6 @@ def _freeze_provider_projection_strategy(
     return FrozenProviderProjectionStrategy(
         route_wire_profile=target.model_profile.route_wire_profile,
         transport_binding_id=route.transport_binding_id,
-        transport_contract_version=route.transport_contract_version,
-        assistant_replay_contract=route.assistant_replay_contract,
         reasoning_wire_profile=target.contract.reasoning_wire.profile,
         supported_reasoning_families=frozenset(
             target.contract.reasoning_wire.supported_reasoning_families

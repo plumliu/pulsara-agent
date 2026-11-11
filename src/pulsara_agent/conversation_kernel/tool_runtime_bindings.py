@@ -71,7 +71,6 @@ def production_builtin_executor_binding_identity_fingerprint(
         {
             "tool_name": entry.name,
             "descriptor_id": descriptor.id,
-            "descriptor_contract_version": contract.contract_version,
             "descriptor_fingerprint": descriptor.fingerprint(),
             "input_schema_fingerprint": input_schema_fingerprint,
             "binding_contract_fingerprint": (

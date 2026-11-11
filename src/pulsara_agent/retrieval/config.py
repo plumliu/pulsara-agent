@@ -195,7 +195,6 @@ class EmbeddingSemanticContract:
     model: str
     shape: str = "openai_embedding"
     dimensions: int = 1024
-    contract_version: int = 1
 
     @property
     def contract_id(self):
@@ -222,7 +221,6 @@ class DenseRecallPurpose(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class DenseEligibilityPolicy:
-    policy_id: str = "pulsara.memory-dense-eligibility.coarse-v1"
     automatic_minimum_similarity: float = 0.55
     explicit_minimum_similarity: float = 0.20
     relation_candidate_minimum_similarity: float = 0.40

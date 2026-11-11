@@ -27,7 +27,6 @@ from pulsara_agent.storage.postgres_connection_provider import (
 )
 
 CANONICAL_TOOL_RESULT_PREVIEW_HARD_BYTES = 65_536
-CANONICAL_TOOL_RESULT_PREVIEW_CONTRACT = "pulsara.canonical-tool-result-preview.v3-owned-body"
 
 
 class KnownOutputPublicationFailure(RuntimeError):
@@ -220,6 +219,6 @@ class PostgresToolOutputReadPort:
                 tuple(row["model_visible_memory_fact_ids"] or ()), row["result_facts"])
 
 
-__all__ = ["CANONICAL_TOOL_RESULT_PREVIEW_HARD_BYTES", "CANONICAL_TOOL_RESULT_PREVIEW_CONTRACT",
+__all__ = ["CANONICAL_TOOL_RESULT_PREVIEW_HARD_BYTES",
            "KnownOutputPublicationFailure", "PreparedToolOutputBody", "PreparedToolOutputProjection", "ToolOutputProcessor",
            "PostgresToolOutputReadPort", "read_tool_output_content"]

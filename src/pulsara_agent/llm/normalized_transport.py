@@ -327,7 +327,6 @@ class NormalizedLLMTransport:
         self._adapter = adapter
         self.api = adapter.api
         self.binding_id = adapter.binding_id
-        self.contract_version = adapter.contract_version
         self.sanitizer_contract_fingerprint = (
             DEFAULT_PROVIDER_ERROR_SANITIZATION_CONTRACT.contract_fingerprint
         )
@@ -336,7 +335,6 @@ class NormalizedLLMTransport:
             {
                 "api": self.api,
                 "binding_id": self.binding_id,
-                "contract_version": self.contract_version,
                 "sanitizer_contract_fingerprint": self.sanitizer_contract_fingerprint,
             },
         )

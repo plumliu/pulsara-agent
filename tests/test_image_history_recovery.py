@@ -126,11 +126,6 @@ def test_canonical_image_history_atomic_pages_search_and_cross_session(
     first = read(target={"kind": "SESSION_ENTRY", "entry_id": entries[1]}, limit=1, max_chars=len(placeholder))
     assert first["items"][0]["text"] == placeholder
     old = _decode(_cursor(first), "read_session_content")
-    old["operation"] = "read_session_content.v2"
-    with pytest.raises(SessionQueryError) as exc:
-        read(cursor=_encode(old))
-    assert exc.value.code == "CURSOR_INVALID"
-    old["operation"] = "read_session_content.v4"
     old["offset"] = 1
     with pytest.raises(SessionQueryError, match="splits an image"):
         read(cursor=_encode(old))

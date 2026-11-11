@@ -7,7 +7,6 @@ import argparse
 from hashlib import sha256
 import json
 from pathlib import Path
-import re
 import subprocess
 import sys
 import tempfile
@@ -19,7 +18,6 @@ PY_PROTO = (
     ROOT
     / "src/pulsara_agent/terminal_protocol/generated_v3/terminal_kernel_v3_pb2.py"
 )
-GATEWAY = ROOT / "src/pulsara_agent/terminal_protocol/v3_gateway.py"
 FIXTURE = ROOT / "tests/fixtures/stage2_protocol_v3_wire.json"
 
 
@@ -33,11 +31,8 @@ def main() -> None:
 
 
 def _verify() -> None:
-    identity = "sha256:" + sha256(SCHEMA.read_bytes()).hexdigest()
-    if re.search(re.escape(identity), GATEWAY.read_text(encoding="utf-8")) is None:
-        raise SystemExit(f"Protocol v3 schema identity is stale in {GATEWAY}")
     _verify_generated()
-    _verify_fixture(identity)
+    _verify_fixture()
 
 
 def _generate_python(output: Path) -> None:
@@ -64,10 +59,8 @@ def _verify_generated() -> None:
             raise SystemExit("generated Protocol v3 Python binding is stale")
 
 
-def _verify_fixture(identity: str) -> None:
+def _verify_fixture() -> None:
     fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
-    if fixture.get("schema_fingerprint") != identity:
-        raise SystemExit("Protocol v3 wire fixture schema is stale")
     sys.path.insert(0, str(ROOT / "src"))
     from pulsara_agent.terminal_protocol.generated_v3 import (
         terminal_kernel_v3_pb2 as wire,

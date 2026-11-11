@@ -70,7 +70,6 @@ class CompileDecisionSample:
 @dataclass(frozen=True, slots=True)
 class ModelInputCompileOperationalProjection:
     disposition: CompileObservationDisposition
-    compiler_contract_version: str
     model_call_index: int
     tool_surface_fingerprint: str
     degraded_source_count: int
@@ -96,8 +95,7 @@ class ModelInputCompileOperationalProjection:
         ):
             raise ValueError("compile observation contains an invalid count")
         if (
-            not self.compiler_contract_version
-            or not self.tool_surface_fingerprint
+            not self.tool_surface_fingerprint
             or not self.decision_digest
         ):
             raise ValueError("compile observation identity is incomplete")
@@ -105,7 +103,6 @@ class ModelInputCompileOperationalProjection:
     def public_payload(self) -> Mapping[str, object]:
         return {
             "disposition": self.disposition.value,
-            "compiler_contract_version": self.compiler_contract_version,
             "model_call_index": self.model_call_index,
             "tool_surface_fingerprint": self.tool_surface_fingerprint,
             "degraded_source_count": self.degraded_source_count,
@@ -167,7 +164,6 @@ def project_model_input_compile_observation(
     report = compiled.compile_report
     return ModelInputCompileOperationalProjection(
         disposition=CompileObservationDisposition.COMPILED,
-        compiler_contract_version=report.compiler_contract_version,
         model_call_index=model_call_index,
         tool_surface_fingerprint=report.tool_surface_fingerprint,
         degraded_source_count=report.degraded_source_count,

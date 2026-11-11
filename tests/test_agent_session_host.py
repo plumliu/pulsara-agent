@@ -40,7 +40,9 @@ def _delegation_progress(model, request):
                 continue
             if isinstance(value, dict):
                 value = value.get('pulsara_terminal_observation', value)
-            if not isinstance(value, dict) or value.get('schema_version') != 'cell_output.v1':
+            if not isinstance(value, dict) or set(value) != {
+                'cell_id', 'source_turn_id', 'source_exec_attempt_id', 'record_sequence', 'record'
+            }:
                 continue
             record = value['record']
             if record.get('kind') != 'log':

@@ -57,8 +57,6 @@ WORKSPACE_AGENTS_SKILL_ROOT_PARTS = (".agents", "skills")
 USER_AGENTS_SKILL_ROOT_PARTS = (".agents", "skills")
 SKILL_FILE_NAME = "SKILL.md"
 
-AGENT_SKILLS_CONTRACT_ID = "pulsara.agent-skills-core.v1"
-SKILL_PLACEMENT_CONTRACT_ID = "pulsara.skill-placement.v1"
 MAX_SKILL_FILE_BYTES = 64 * 1024
 MAX_SKILL_FRONTMATTER_BYTES = 32 * 1024
 MAX_SKILL_YAML_NODES = 512
@@ -983,7 +981,6 @@ def skill_manifest_semantic_fingerprint(
     return context_fingerprint(
         "local-skill-manifest-semantic:v2-agent-skills-core",
         {
-            "contract": AGENT_SKILLS_CONTRACT_ID,
             "name": name,
             "description": description,
             "license": license,
@@ -1549,7 +1546,6 @@ def _optional_trimmed_string(fields: dict[str, Any], key: str) -> str | None:
 
 
 __all__ = [
-    "AGENT_SKILLS_CONTRACT_ID",
     "FrozenLooseSkillDefinitions",
     "HeldSkillChild",
     "HeldSkillRoot",
@@ -1564,7 +1560,6 @@ __all__ = [
     "PreparedLooseSkillRootPolicy",
     "PreparedSkillRootBinding",
     "SKILL_FILE_NAME",
-    "SKILL_PLACEMENT_CONTRACT_ID",
     "SkillDocumentParseResult",
     "SkillObservationError",
     "SkillPlacementValidationResult",

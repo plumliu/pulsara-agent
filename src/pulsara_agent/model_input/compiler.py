@@ -81,9 +81,6 @@ from pulsara_agent.tools.builtins.filesystem import (
 )
 
 
-COMPILER_CONTRACT_VERSION = "pulsara.structured-model-input-compiler.prefix-continuity.v17-canonical-worker-branches"
-
-
 class _SacrificeRank(IntEnum):
     DEBUG = 0
     OPTIONAL = 1
@@ -93,7 +90,6 @@ class _SacrificeRank(IntEnum):
 
 _SOURCE_POLICY = {
     ContextSourceKind.BASE_SYSTEM: (
-        "pulsara.base-system.prefix-continuity.v10-runtime-state-handoff",
         ContextChannel.SYSTEM,
         ContextTrustClass.ROOT_INSTRUCTION,
         ContextBudgetClass.MUST_KEEP,
@@ -103,7 +99,6 @@ _SOURCE_POLICY = {
         ContextSourceLifecycle.EPOCH_ROOT,
     ),
     ContextSourceKind.RUNTIME_ENVIRONMENT: (
-        "pulsara.runtime-environment.v5-facts-only",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.TRUSTED_RUNTIME_FACT,
         ContextBudgetClass.MUST_KEEP,
@@ -113,7 +108,6 @@ _SOURCE_POLICY = {
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.RUN_PERMISSION: (
-        "pulsara.run-permission.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
         ContextBudgetClass.MUST_KEEP,
@@ -123,7 +117,6 @@ _SOURCE_POLICY = {
         ContextSourceLifecycle.TURN_APPEND,
     ),
     ContextSourceKind.PLAN_HANDOFF: (
-        "pulsara.plan-handoff.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
         ContextBudgetClass.MUST_KEEP,
@@ -133,7 +126,6 @@ _SOURCE_POLICY = {
         ContextSourceLifecycle.ONE_SHOT,
     ),
     ContextSourceKind.PLAN_WORKFLOW: (
-        "pulsara.plan-workflow.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
         ContextBudgetClass.MUST_KEEP,
@@ -143,7 +135,6 @@ _SOURCE_POLICY = {
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.USER_ACTIONS: (
-        "pulsara.user-actions.v1",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.TRUSTED_RUNTIME_FACT,
         ContextBudgetClass.OPTIONAL,
@@ -153,7 +144,6 @@ _SOURCE_POLICY = {
         ContextSourceLifecycle.ONE_SHOT,
     ),
     ContextSourceKind.SKILL_CATALOG: (
-        "pulsara.skill-catalog.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.IMPORTANT,
@@ -163,7 +153,6 @@ _SOURCE_POLICY = {
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.MCP_CATALOG: (
-        "pulsara.mcp-catalog.v4-tool-evolution",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.IMPORTANT,
@@ -173,7 +162,6 @@ _SOURCE_POLICY = {
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.ACTIVE_SKILL: (
-        "pulsara.active-skill.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.MUST_KEEP,
@@ -183,7 +171,6 @@ _SOURCE_POLICY = {
         ContextSourceLifecycle.ACTIVATION_SNAPSHOT,
     ),
     ContextSourceKind.PREVIOUS_TURN_OUTCOME: (
-        "pulsara.previous-turn-outcome.v1",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
         ContextBudgetClass.MUST_KEEP,
@@ -193,7 +180,6 @@ _SOURCE_POLICY = {
         ContextSourceLifecycle.TURN_APPEND,
     ),
     ContextSourceKind.RUNTIME_CLOCK: (
-        "pulsara.runtime-clock.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.TRUSTED_RUNTIME_FACT,
         ContextBudgetClass.OPTIONAL,
@@ -203,7 +189,6 @@ _SOURCE_POLICY = {
         ContextSourceLifecycle.CALL_APPEND,
     ),
     ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD: (
-        "pulsara.memory-response-preference-head.v1",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.IMPORTANT,
@@ -213,7 +198,6 @@ _SOURCE_POLICY = {
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.MEMORY_RECALL: (
-        "pulsara.memory-recall.v1",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.IMPORTANT,
@@ -223,7 +207,6 @@ _SOURCE_POLICY = {
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.MEMORY_WRITE_HINT: (
-        "pulsara.memory-write-hint.v1",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
         ContextBudgetClass.OPTIONAL,
@@ -233,7 +216,6 @@ _SOURCE_POLICY = {
         ContextSourceLifecycle.CALL_APPEND,
     ),
     ContextSourceKind.HOOK_CONTEXT: (
-        "pulsara.hook-context.v1",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.IMPORTANT,
@@ -243,7 +225,6 @@ _SOURCE_POLICY = {
         ContextSourceLifecycle.ONE_SHOT,
     ),
     ContextSourceKind.COMPACTION_RUNTIME_HANDOFF: (
-        "pulsara.compaction-runtime-handoff.v3-active-pca",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.MUST_KEEP,
@@ -253,7 +234,6 @@ _SOURCE_POLICY = {
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.RETAINED_SKILL_CONTEXT: (
-        "pulsara.retained-skill-context.v1",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.MUST_KEEP,
@@ -344,7 +324,6 @@ def estimate_runtime_handoff_pca_tokens(body: str) -> int:
         trust_class=ContextTrustClass.UNTRUSTED_OBSERVATION,
         lifecycle=SourceObservationLifecycle.SNAPSHOT,
         presence=SourceObservationPresence.VALUE,
-        contract_version=_SOURCE_POLICY[ContextSourceKind.COMPACTION_RUNTIME_HANDOFF][0],
         body=body,
     )
     estimator = PulsaraHeuristicTokenEstimatorV3()
@@ -588,7 +567,6 @@ class _AppendSourceEmission:
     presence: SourceObservationPresence
     lifecycle: SourceObservationLifecycle
     semantic_fingerprint: str
-    contract_version: str
     trust_class: ContextTrustClass
     state: _SourceState | None = None
     fixed_message: LLMMessage | None = None
@@ -625,7 +603,7 @@ def _catalog_render_identity(candidate, text):
         # FULL variant, defines this snapshot's installed prefix occurrence.
         return context_fingerprint(
             "pulsara:mcp-catalog-render:v1",
-            {"contract": candidate.source_contract_version, "text": text},
+            {"text": text},
         )
     return candidate.domain_semantic_fingerprint
 
@@ -997,7 +975,6 @@ class StructuredModelInputCompiler:
             },
         )
         report = ContextCompileReport(
-            compiler_contract_version=COMPILER_CONTRACT_VERSION,
             tool_surface_fingerprint=surface.surface_fingerprint,
             protected_prefix_message_count=0,
             protected_prefix_logical_bytes=0,
@@ -1293,7 +1270,6 @@ class StructuredModelInputCompiler:
             presence: SourceObservationPresence | None = None
             lifecycle: SourceObservationLifecycle | None = None
             body = ""
-            contract_version: str
             trust: ContextTrustClass
             semantic: str
             placement: int
@@ -1330,7 +1306,6 @@ class StructuredModelInputCompiler:
                     lifecycle = _observation_lifecycle(candidate.lifecycle)
                     body = selected.text
                     semantic_domain = _catalog_render_identity(candidate, body)
-                contract_version = candidate.source_contract_version
                 trust = candidate.trust_class
                 placement = candidate.placement_ordinal
                 semantic = _source_occurrence_fingerprint(
@@ -1361,7 +1336,6 @@ class StructuredModelInputCompiler:
                     turn_id=identity.turn_id,
                 ):
                     continue
-                contract_version = absence.source_contract_version
                 trust = absence.trust_class
                 placement = absence.placement_ordinal
                 semantic = _source_occurrence_fingerprint(
@@ -1398,7 +1372,6 @@ class StructuredModelInputCompiler:
                 trust_class=trust,
                 lifecycle=lifecycle,
                 presence=presence,
-                contract_version=contract_version,
                 body=body,
             )
             observation_messages.append((placement, kind.value, message))
@@ -1711,7 +1684,6 @@ class StructuredModelInputCompiler:
                     presence=SourceObservationPresence.VALUE,
                     lifecycle=_observation_lifecycle(candidate.lifecycle),
                     semantic_fingerprint=semantic,
-                    contract_version=candidate.source_contract_version,
                     trust_class=candidate.trust_class,
                     state=state,
                     requires_installed_replacement=(
@@ -1784,7 +1756,6 @@ class StructuredModelInputCompiler:
                 trust_class=absence.trust_class,
                 lifecycle=lifecycle,
                 presence=presence,
-                contract_version=absence.source_contract_version,
                 body="",
             )
             emissions.append(
@@ -1794,7 +1765,6 @@ class StructuredModelInputCompiler:
                     presence=presence,
                     lifecycle=lifecycle,
                     semantic_fingerprint=semantic,
-                    contract_version=absence.source_contract_version,
                     trust_class=absence.trust_class,
                     fixed_message=message,
                     requires_installed_replacement=True,
@@ -1929,7 +1899,6 @@ class StructuredModelInputCompiler:
             },
         )
         report = ContextCompileReport(
-            compiler_contract_version=COMPILER_CONTRACT_VERSION,
             tool_surface_fingerprint=(
                 predecessor.tool_exposure_plan.direct_tool_surface.surface_fingerprint
             ),
@@ -2224,7 +2193,6 @@ class StructuredModelInputCompiler:
             if (
                 expected is None
                 or (
-                    candidate.source_contract_version,
                     candidate.channel,
                     candidate.trust_class,
                     candidate.budget_class,
@@ -2262,7 +2230,6 @@ class StructuredModelInputCompiler:
                     ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
                 )
             (
-                version,
                 channel,
                 trust,
                 budget,
@@ -2275,7 +2242,6 @@ class StructuredModelInputCompiler:
                 "context-source-contract:v1",
                 {
                     "kind": fact.source_kind.value,
-                    "version": version,
                     "channel": channel.value,
                     "trust": trust.value,
                     "budget": budget.value,
@@ -2286,8 +2252,7 @@ class StructuredModelInputCompiler:
                 },
             )
             if (
-                fact.source_contract_version != version
-                or fact.source_contract_fingerprint != expected_contract
+                fact.source_contract_fingerprint != expected_contract
                 or fact.trust_class is not trust
                 or fact.budget_class is not budget
                 or fact.placement_ordinal != placement
@@ -2760,4 +2725,4 @@ def _source_occurrence_fingerprint(
     )
 
 
-__all__ = ["COMPILER_CONTRACT_VERSION", "StructuredModelInputCompiler"]
+__all__ = ["StructuredModelInputCompiler"]

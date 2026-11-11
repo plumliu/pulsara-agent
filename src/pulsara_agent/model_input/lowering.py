@@ -302,7 +302,6 @@ def source_variant_message(
             trust_class=candidate.trust_class,
             lifecycle=SourceObservationLifecycle.UNAVAILABLE,
             presence=SourceObservationPresence.UNAVAILABLE,
-            contract_version=candidate.source_contract_version,
             body="",
         )
     lifecycle = {
@@ -320,7 +319,6 @@ def source_variant_message(
         trust_class=candidate.trust_class,
         lifecycle=lifecycle,
         presence=SourceObservationPresence.VALUE,
-        contract_version=candidate.source_contract_version,
         body=text,
     )
 

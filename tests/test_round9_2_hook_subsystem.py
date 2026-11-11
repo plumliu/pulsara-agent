@@ -1984,46 +1984,6 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
     asyncio.run(exercise())
 
 
-@pytest.mark.parametrize('scope', [HookVisibilityScope.USER, HookVisibilityScope.WORKSPACE])
-@pytest.mark.parametrize('plugin', [False, True])
-@pytest.mark.parametrize('enabled', [False, True])
-@pytest.mark.parametrize('previous_contract', ['pulsara.hook-definition-trust.v1', 'pulsara.hook-definition-trust.v2'])
-def test_v3_invalidates_old_trust_without_changing_enabled_or_time(tmp_path, monkeypatch, scope, plugin, enabled, previous_contract):
-    from dataclasses import replace
-    from pulsara_agent.hooks import trust
-    from pulsara_agent.hooks.contracts import PluginHookSourceIdentity, PluginHookTrustSubject
-    key = 'future-project' if scope is HookVisibilityScope.WORKSPACE else None
-    if plugin:
-        provenance = FrozenHookSourceProvenance(
-            PluginHookSourceIdentity(scope, 'sample', 'package:fmrsm7m5in754a7bzjajljis5q',
-                'dev.pulsara/hooks/hooks.json', tmp_path / 'hooks.json', key),
-            PluginHookTrustSubject(scope, 'sample', key), None, 'sample')
-    else:
-        provenance = _provenance(tmp_path, kind=HookSourceKind.WORKSPACE_FILE if key else HookSourceKind.USER_FILE)
-    definition = replace(_definition(tmp_path, HookEventType.PRE_TOOL_USE_EVENT, 'printf test', matcher='Read|Grep|Glob'), provenance=provenance)
-    store = trust.HookTrustStore(tmp_path)
-    with monkeypatch.context() as old:
-        old.setattr(trust, 'TRUST_DIGEST_CONTRACT', previous_contract)
-        digest = trust.normalized_definition_digest(provenance, (definition,))
-    store.trust(provenance.trust_subject, expected_digest=digest)
-    store.set_enabled(provenance.trust_subject, enabled=enabled)
-    previous = store.read(provenance.trust_subject)
-    current = trust.normalized_definition_digest(provenance, (definition,))
-    assert current != digest
-    # A new store loading a later project also refuses the old semantic trust.
-    restarted = trust.HookTrustStore(tmp_path)
-    assessment = restarted.assess(provenance.trust_subject, current)
-    assert assessment.disposition is (HookTrustDisposition.MODIFIED if enabled else HookTrustDisposition.DISABLED)
-    assert restarted.read(provenance.trust_subject) == previous
-    restarted.set_enabled(provenance.trust_subject, enabled=True)
-    assert restarted.assess(provenance.trust_subject, current).disposition is HookTrustDisposition.MODIFIED
-    restarted.set_enabled(provenance.trust_subject, enabled=False)
-    restarted.trust(provenance.trust_subject, expected_digest=current)
-    assert restarted.assess(provenance.trust_subject, current).disposition is HookTrustDisposition.DISABLED
-    restarted.set_enabled(provenance.trust_subject, enabled=True)
-    assert restarted.assess(provenance.trust_subject, current).disposition is HookTrustDisposition.TRUSTED
-
-
 @pytest.mark.parametrize('event', [HookEventType.PRE_TOOL_USE_EVENT, HookEventType.USER_PROMPT_SUBMIT_EVENT, HookEventType.STOP_EVENT])
 def test_async_exit_two_has_explicit_unsupported_control_diagnostic(tmp_path, event):
     definition = _definition(tmp_path, event, 'deny', asynchronous=True)

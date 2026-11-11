@@ -856,7 +856,7 @@ class _ScheduledTaskOperations:
             deadline_monotonic=deadline_monotonic,
         ) as c:
             row = c.execute(
-                f"""SELECT cmd.semantic_digest,cmd.command_kind,cmd.request_schema_version,q.*,
+                f"""SELECT cmd.semantic_digest,cmd.command_kind,q.*,
                 {REQUEST_EXECUTION_COLUMNS} FROM pulsara_v3.session_commands cmd
                 JOIN pulsara_v3.sessions s ON s.id=cmd.session_id
                 JOIN pulsara_v3.prompt_queue_items q ON q.session_id=cmd.session_id AND q.id=cmd.target_queue_item_id
@@ -869,7 +869,6 @@ class _ScheduledTaskOperations:
                 return None
             if (
                 row["command_kind"] != "RUN_SCHEDULED_TASK"
-                or row["request_schema_version"] != "run_scheduled_task.v1"
                 or row["semantic_digest"] != digest
                 or row["input_origin"] != "SCHEDULED_TASK"
                 or row["scheduled_task_id"] != request["task_id"]
@@ -921,7 +920,6 @@ class _ScheduledTaskOperations:
         if (
             q is None
             or command["command_kind"] != "RUN_SCHEDULED_TASK"
-            or command["request_schema_version"] != "run_scheduled_task.v1"
             or command["semantic_digest"]
             != context_fingerprint("pulsara:run-scheduled-task:v1", a.action_value())
             or q["input_origin"] != "SCHEDULED_TASK"

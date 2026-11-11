@@ -48,12 +48,9 @@ from pulsara_agent.model_input.contracts import (
 from pulsara_agent.primitives.context import canonical_json_bytes, context_fingerprint
 from pulsara_agent.primitives.model_call import ModelCallPurpose
 
-PROVIDER_MESSAGE_LOWERING_CONTRACT = (
-    "pulsara.provider-message-lowering.prefix-continuity.v12-runtime-content"
-)
 FULL_HISTORY_CONTEXT_BASE_IDENTITY = context_fingerprint(
     "pulsara:context-base-semantic-identity:v1",
-    {"kind": "FULL_HISTORY", "lowering": PROVIDER_MESSAGE_LOWERING_CONTRACT},
+    {"kind": "FULL_HISTORY"},
 )
 _EMPTY_SCOPE_COLD_START_SEAL = object()
 _EXPLICIT_MODEL_SWITCH_AUTHORITY_SEAL = object()
@@ -129,14 +126,11 @@ class RuntimeObservation:
     trust_class: ContextTrustClass
     lifecycle: SourceObservationLifecycle
     presence: SourceObservationPresence
-    contract_version: str
     body: str = field(repr=False)
 
     def __post_init__(self) -> None:
         if self.source_kind is ContextSourceKind.BASE_SYSTEM:
             raise ValueError("base system is not a runtime observation")
-        if not self.contract_version:
-            raise ValueError("runtime observation contract is empty")
         self.body.encode("utf-8")
         if self.presence is SourceObservationPresence.VALUE and self.lifecycle in {
             SourceObservationLifecycle.CLEARED,
@@ -188,7 +182,6 @@ def encode_runtime_observation(
     trust_class: ContextTrustClass,
     lifecycle: SourceObservationLifecycle,
     presence: SourceObservationPresence,
-    contract_version: str,
     body: str,
 ) -> LLMMessage:
     observation = RuntimeObservation(
@@ -196,7 +189,6 @@ def encode_runtime_observation(
         trust_class=trust_class,
         lifecycle=lifecycle,
         presence=presence,
-        contract_version=contract_version,
         body=body,
     )
     return _provider_runtime_observation_message(
@@ -772,7 +764,6 @@ __all__ = [
     "InstalledEpochRuntimeCohort",
     "NewTriggerAnchor",
     "NoNewTriggerAnchor",
-    "PROVIDER_MESSAGE_LOWERING_CONTRACT",
     "ProviderRuntimeObservation",
     "PreparedProviderInputAppendCandidate",
     "ProcessLocalCanonicalFrontier",

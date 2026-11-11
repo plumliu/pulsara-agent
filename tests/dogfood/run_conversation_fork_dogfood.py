@@ -316,7 +316,6 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     report = {
-        "schema_version": "conversation-fork-dogfood.v1",
         "model_id": args.model,
         "wire_api": args.wire_api,
         "provider_calls": [],

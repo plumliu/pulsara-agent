@@ -148,7 +148,6 @@ def _assert_source_variant_wire_upper(candidate, upper, *, wire_api: str) -> Non
             trust_class=candidate.trust_class,
             lifecycle=_observation_lifecycle(candidate.lifecycle),
             presence=SourceObservationPresence.VALUE,
-            contract_version=candidate.source_contract_version,
             body=variant.text,
         )
         actual_wire = wire(actual)
@@ -410,8 +409,6 @@ def test_fresh_plan_upper_bounds_actual_source_collection(
             permission_snapshot_fingerprint=permission.snapshot_fingerprint,
             current_workflow_revision=1,
             entered_by=PlanWorkflowEnteredBy.AGENT,
-            permission_contract_id=permission.permission_contract_id,
-            permission_contract_fingerprint=permission.permission_contract_fingerprint,
         )
         workflow = FrozenPlanWorkflowCompileFact(
             **workflow_values,
@@ -766,15 +763,10 @@ def test_v2_final_wire_traversal_rejects_source_or_payload_drift() -> None:
 
 def test_v3_fact_preserves_d1_and_formal_wire_accounting() -> None:
     fact = PulsaraHeuristicTokenEstimatorV3().fact
-    assert fact.estimator_id == "pulsara_heuristic"
-    assert fact.estimator_version == "v3"
     assert fact.image_grid_pixels == 28
     assert fact.image_scale_numerator == 7
     assert fact.image_scale_denominator == 8
     assert fact.image_min_tokens == 256
-    assert fact.image_wire_accounting_contract == (
-        "formal_user_image_parts:v1-payload-elided-per-item-rounding"
-    )
 
 
 def _recent(entry_id: str, sequence: int, *parts: LLMTextPart | LLMImagePart):
@@ -1198,8 +1190,7 @@ def test_typed_tool_result_canonical_charge_includes_prompt_body_and_image_bytes
     late_content = FrozenPromptContent(
         (
             LLMTextPart(
-                '{"schema_version":"late_tool_outcome_observation.v1",'
-                '"tool_call_id":"call:7","result_state":"SUCCESS",'
+                '{"tool_call_id":"call:7","result_state":"SUCCESS",'
                 '"result":"Image loaded."}'
             ),
             image,
@@ -1373,7 +1364,6 @@ def test_serialized_catalog_quote_bounds_real_owner_json_escaping(
         trust_class=ContextTrustClass.UNTRUSTED_OBSERVATION,
         lifecycle=SourceObservationLifecycle.SNAPSHOT,
         presence=SourceObservationPresence.VALUE,
-        contract_version="post-response-resource-upper",
         body=body,
     )
     upper = _runtime_source_message_upper(

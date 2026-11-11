@@ -137,9 +137,8 @@ def _properties():
                         {
                             "type": "object",
                             "additionalProperties": False,
-                            "required": ["contract", "kind", *fields],
+                            "required": ["kind", *fields],
                             "properties": {
-                                "contract": {"const": "scheduled-rule:v1"},
                                 "kind": {"const": kind},
                                 **fields,
                             },

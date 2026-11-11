@@ -43,8 +43,8 @@ def _seed_old_database(database):
         conn.execute("CREATE TABLE public.unrelated_data(value text)")
         conn.execute("INSERT INTO public.unrelated_data VALUES ('keep-always')")
         conn.execute(
-            "UPDATE public.pulsara_schema_migrations SET universe_fingerprint = %s",
-            ("sha256:" + "0" * 64,),
+            "UPDATE public.pulsara_schema_migrations SET resource_sha256 = %s",
+            ("0" * 64,),
         )
 
 
@@ -58,8 +58,7 @@ def test_explicit_reset_reinstalls_old_universe_and_preserves_unrelated_data():
             failure.value.code
             is PostgresSchemaFailureCode.MIGRATION_UNIVERSE_RESET_REQUIRED
         )
-        report = runner.reset(deadline_monotonic=monotonic() + 30)
-        assert report.applied_versions == (0,)
+        runner.reset(deadline_monotonic=monotonic() + 30)
         PostgresRuntimeConnectionFactory(database.runtime_dsn).verify(
             deadline_monotonic=monotonic() + 30
         )
@@ -94,9 +93,9 @@ def test_failed_reset_rolls_back_the_deletion(monkeypatch):
             )
             assert (
                 conn.execute(
-                    "SELECT universe_fingerprint FROM public.pulsara_schema_migrations"
+                    "SELECT resource_sha256 FROM public.pulsara_schema_migrations"
                 ).fetchone()[0]
-                == "sha256:" + "0" * 64
+                == "0" * 64
             )
 
 

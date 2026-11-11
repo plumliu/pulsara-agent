@@ -482,7 +482,6 @@ class StaticContextSourceCollector:
             trust_class=binding.trust,
             lifecycle=lifecycle,
             presence=SourceObservationPresence.VALUE,
-            contract_version=binding.contract_version,
             body=body,
         )
 
@@ -562,7 +561,6 @@ class StaticContextSourceCollector:
         candidates: tuple[ContextSourceCandidate, ...] = (
             _candidate(
                 kind=ContextSourceKind.BASE_SYSTEM,
-                version="pulsara.base-system.prefix-continuity.v10-runtime-state-handoff",
                 channel=ContextChannel.SYSTEM,
                 trust=ContextTrustClass.ROOT_INSTRUCTION,
                 budget=ContextBudgetClass.MUST_KEEP,
@@ -572,7 +570,6 @@ class StaticContextSourceCollector:
             ),
             _candidate(
                 kind=ContextSourceKind.RUNTIME_ENVIRONMENT,
-                version="pulsara.runtime-environment.v5-facts-only",
                 channel=ContextChannel.RUNTIME_OBSERVATION,
                 trust=ContextTrustClass.TRUSTED_RUNTIME_FACT,
                 budget=ContextBudgetClass.MUST_KEEP,
@@ -585,7 +582,6 @@ class StaticContextSourceCollector:
             ),
             _candidate(
                 kind=ContextSourceKind.RUN_PERMISSION,
-                version="pulsara.run-permission.v2",
                 channel=ContextChannel.RUNTIME_OBSERVATION,
                 trust=ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
                 budget=ContextBudgetClass.MUST_KEEP,
@@ -607,7 +603,6 @@ class StaticContextSourceCollector:
             candidates += (
                 _candidate(
                     kind=ContextSourceKind.PLAN_HANDOFF,
-                    version="pulsara.plan-handoff.v2",
                     channel=ContextChannel.RUNTIME_OBSERVATION,
                     trust=ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
                     budget=ContextBudgetClass.MUST_KEEP,
@@ -623,7 +618,6 @@ class StaticContextSourceCollector:
             candidates += (
                 _candidate(
                     kind=ContextSourceKind.PLAN_WORKFLOW,
-                    version="pulsara.plan-workflow.v2",
                     channel=ContextChannel.RUNTIME_OBSERVATION,
                     trust=ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
                     budget=ContextBudgetClass.MUST_KEEP,
@@ -655,7 +649,6 @@ class StaticContextSourceCollector:
             candidates += (
                 _candidate(
                     kind=ContextSourceKind.PREVIOUS_TURN_OUTCOME,
-                    version="pulsara.previous-turn-outcome.v1",
                     channel=ContextChannel.RUNTIME_OBSERVATION,
                     trust=ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
                     budget=ContextBudgetClass.MUST_KEEP,
@@ -671,7 +664,6 @@ class StaticContextSourceCollector:
         if user_actions is not None:
             candidates += (_candidate(
                 kind=ContextSourceKind.USER_ACTIONS,
-                version="pulsara.user-actions.v1",
                 channel=ContextChannel.RUNTIME_OBSERVATION,
                 trust=ContextTrustClass.TRUSTED_RUNTIME_FACT,
                 budget=ContextBudgetClass.OPTIONAL,
@@ -827,7 +819,6 @@ def _absent_source(
         source_kind=kind,
         lifecycle=binding.lifecycle,
         absence_kind=absence,
-        source_contract_version=binding.contract_version,
         source_contract_fingerprint=binding.contract_fingerprint,
         trust_class=binding.trust,
         budget_class=binding.budget,
@@ -1608,7 +1599,6 @@ def _enabled_memory_context() -> FrozenModelCallMemoryContext:
 def _candidate(
     *,
     kind: ContextSourceKind,
-    version: str,
     channel: ContextChannel,
     trust: ContextTrustClass,
     budget: ContextBudgetClass,
@@ -1634,7 +1624,6 @@ def _candidate(
         "context-source-contract:v1",
         {
             "kind": kind.value,
-            "version": version,
             "channel": channel.value,
             "trust": trust.value,
             "budget": budget.value,
@@ -1667,7 +1656,6 @@ def _candidate(
     )
     return ContextSourceCandidate(
         kind,
-        version,
         contract,
         semantic,
         channel,

@@ -375,7 +375,6 @@ class ScheduledTaskService:
         return {
             "schedule": validate_rule(
                 {
-                    "contract": "scheduled-rule:v1",
                     "kind": "once",
                     "run_at_utc": local.astimezone(datetime_timezone.utc).isoformat(),
                 },

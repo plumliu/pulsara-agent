@@ -44,15 +44,11 @@ from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from pulsara_agent.primitives.permission import (
-    PERMISSION_PRESET_CONTRACT_FINGERPRINT,
-    PERMISSION_PRESET_CONTRACT_ID,
     PermissionMode,
     preset_permission_payload,
 )
 from pulsara_agent.primitives.plan_workflow import (
-    PLAN_INTERACTION_CONTRACTS,
     PlanDraftDecision,
-    PlanInteractionBinding,
     PlanQuestionAnswerKind,
     PlanWorkflowStatus,
     extract_plan_draft,
@@ -72,15 +68,6 @@ from pulsara_agent.terminal_protocol.v3_gateway import (
     _outcome_to_wire,
 )
 from tests.support.round3 import authorize_direct_tool, prepare_test_direct_tool_surface
-
-
-def _binding(tool_name: str) -> PlanInteractionBinding:
-    contract = builtin_tool_catalog_entry(tool_name).binding_contract.base
-    return PlanInteractionBinding(
-        contract.contract_id,
-        contract.contract_version,
-        contract.binding_fingerprint,
-    )
 
 
 def _accepted_resolution(interaction_id: str) -> AcceptedPlanResolution:
@@ -119,12 +106,6 @@ def _accepted_resolution(interaction_id: str) -> AcceptedPlanResolution:
 
 
 def test_round4_plan_interactions_and_permission_presets() -> None:
-    assert set(PLAN_INTERACTION_CONTRACTS.values()) == {
-        "ask_plan_question",
-        "exit_plan",
-    }
-    assert PERMISSION_PRESET_CONTRACT_ID == "pulsara.permission-presets.v2"
-    assert PERMISSION_PRESET_CONTRACT_FINGERPRINT.startswith("sha256:")
     for mode in PermissionMode:
         first = preset_permission_payload(mode)
         second = preset_permission_payload(mode)
@@ -287,7 +268,6 @@ def test_round4_permission_snapshot_is_immutable_and_plan_only_narrows() -> None
 def test_round4_central_question_and_draft_extractor_owns_utf8_identity() -> None:
     question = extract_plan_question(
         interaction_id="interaction:question",
-        binding=_binding("ask_plan_question"),
         arguments=freeze_json(
             {
                 "allow_free_text": True,
@@ -316,7 +296,6 @@ def test_round4_central_question_and_draft_extractor_owns_utf8_identity() -> Non
         interaction_id="interaction:draft",
         assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
         tool_call_id="call:exit",
-        binding=_binding("exit_plan"),
         request_semantic_digest="sha256:" + "1" * 64,
         arguments=freeze_json({"summary": "摘要", "plan": body}),  # type: ignore[arg-type]
     )
@@ -329,7 +308,6 @@ def test_round4_central_question_and_draft_extractor_owns_utf8_identity() -> Non
 
 
 def test_round4_question_recommendation_is_optional_but_at_most_one() -> None:
-    binding = _binding("ask_plan_question")
     arguments = {
         "question": "Choose one",
         "options": [
@@ -340,7 +318,6 @@ def test_round4_question_recommendation_is_optional_but_at_most_one() -> None:
     }
     question = extract_plan_question(
         interaction_id="interaction:no-recommendation",
-        binding=binding,
         arguments=freeze_json(arguments),  # type: ignore[arg-type]
     )
     assert not any(option.recommended for option in question.options)
@@ -352,7 +329,6 @@ def test_round4_question_recommendation_is_optional_but_at_most_one() -> None:
     with pytest.raises(ValueError, match="at most one recommendation"):
         extract_plan_question(
             interaction_id="interaction:multiple-recommendations",
-            binding=binding,
             arguments=freeze_json(arguments),  # type: ignore[arg-type]
         )
 
@@ -369,7 +345,6 @@ def test_round4_question_waiter_accepts_resolution_before_publish_and_await() ->
         )
         question = extract_plan_question(
             interaction_id=waiter.interaction_id,
-            binding=_binding("ask_plan_question"),
             arguments=freeze_json(
                 {"question": "继续吗？", "options": [], "allow_free_text": True}
             ),  # type: ignore[arg-type]
@@ -962,12 +937,11 @@ def test_exit_plan_empty_union_has_no_draft(arguments):
     from pulsara_agent.ports.tool_execution import thaw_tool_json_object
     from pulsara_agent.primitives.plan_workflow import parse_plan_exit_arguments
     entry = builtin_tool_catalog_entry('exit_plan')
-    assert entry.binding_contract.base.contract_version == 'v2'
     validate(arguments, thaw_tool_json_object(entry.descriptor.input_schema))
-    assert parse_plan_exit_arguments(binding=_binding('exit_plan'), arguments=freeze_json(arguments)) == (None, None)
+    assert parse_plan_exit_arguments(arguments=freeze_json(arguments)) == (None, None)
     with pytest.raises(ValueError, match='nonblank'):
         extract_plan_draft(interaction_id='no-draft', assistant_entry_id='no-assistant',
-            tool_call_id='no-call', binding=_binding('exit_plan'), request_semantic_digest='unused',
+            tool_call_id='no-call', request_semantic_digest='unused',
             arguments=freeze_json(arguments))
 
 
@@ -976,4 +950,4 @@ def test_exit_plan_empty_union_has_no_draft(arguments):
 def test_exit_plan_empty_union_does_not_accept_malformed_arguments(arguments):
     from pulsara_agent.primitives.plan_workflow import parse_plan_exit_arguments
     with pytest.raises(ValueError):
-        parse_plan_exit_arguments(binding=_binding('exit_plan'), arguments=freeze_json(arguments))
+        parse_plan_exit_arguments(arguments=freeze_json(arguments))

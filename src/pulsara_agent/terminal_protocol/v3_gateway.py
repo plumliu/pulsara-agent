@@ -106,11 +106,6 @@ from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 
 from pulsara_agent.terminal_process.models import TerminalProcessInfo
 
 
-PROTOCOL_MAJOR = 6
-PROTOCOL_MINOR = 0
-PROTOCOL_SCHEMA_FINGERPRINT = (
-    "sha256:e0a3630fda2840bdaac85abf6a391203647cbe04b99d4b4b3c2d5eeeba6bd3d2"
-)
 MAXIMUM_FRAME_BYTES = 8 << 20
 MAXIMUM_OBSERVATION_WAIT_MS = STAGE2_LIMITS.committed_observation_hard_wait_ms
 HEARTBEAT_INTERVAL_MS = 10_000
@@ -134,14 +129,6 @@ class _Connection:
     granted_role: int = wire.ATTACHMENT_ROLE_UNSPECIFIED
     authenticated: bool = False
     provider_retry_key: tuple | None = None
-
-
-def protocol_identity() -> wire.ProtocolIdentity:
-    return wire.ProtocolIdentity(
-        major=PROTOCOL_MAJOR,
-        minor=PROTOCOL_MINOR,
-        schema_fingerprint=PROTOCOL_SCHEMA_FINGERPRINT,
-    )
 
 
 def install_fingerprint(namespace: str, message: Message, field: str) -> str:
@@ -336,13 +323,6 @@ class TerminalKernelProtocolServer:
     ) -> wire.ServerFrame:
         if state.authenticated:
             return _error(request.request_id, "HELLO_ALREADY_ACCEPTED")
-        protocol = request.protocol
-        if (
-            protocol.major != PROTOCOL_MAJOR
-            or protocol.minor != PROTOCOL_MINOR
-            or protocol.schema_fingerprint != PROTOCOL_SCHEMA_FINGERPRINT
-        ):
-            return _error(request.request_id, "PROTOCOL_V4_REQUIRED")
         if request.launch_id != self._launch_id or not hmac.compare_digest(
             bytes(request.launch_capability), self._launch_capability
         ):
@@ -394,7 +374,6 @@ class TerminalKernelProtocolServer:
         state.authenticated = True
         accepted = wire.HelloAccepted(
             request_id=request.request_id,
-            protocol=protocol_identity(),
             attachment_id=state.attachment_id,
             attachment_generation=state.attachment_generation,
             granted_role=request.requested_role,
@@ -2231,10 +2210,6 @@ def _permission_to_wire(value: PermissionMode) -> int:
 __all__ = [
     "HEARTBEAT_INTERVAL_MS",
     "MAXIMUM_FRAME_BYTES",
-    "PROTOCOL_MAJOR",
-    "PROTOCOL_MINOR",
-    "PROTOCOL_SCHEMA_FINGERPRINT",
     "TerminalKernelProtocolServer",
     "install_fingerprint",
-    "protocol_identity",
 ]

@@ -8,8 +8,6 @@ module deliberately has no dependency on runtime policy classes.
 from __future__ import annotations
 
 from enum import StrEnum
-from hashlib import sha256
-import json
 from typing import Any, Mapping
 
 
@@ -21,8 +19,6 @@ class PermissionMode(StrEnum):
 
 
 DEFAULT_PERMISSION_MODE = PermissionMode.BYPASS_PERMISSIONS
-
-PERMISSION_PRESET_CONTRACT_ID = "pulsara.permission-presets.v2"
 
 
 _PRESET_PERMISSION_PAYLOADS: dict[PermissionMode, dict[str, Any]] = {
@@ -93,27 +89,6 @@ _PRESET_PERMISSION_PAYLOADS: dict[PermissionMode, dict[str, Any]] = {
 }
 
 
-def _canonical_json_bytes(value: object) -> bytes:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-
-
-PERMISSION_PRESET_CONTRACT_FINGERPRINT = (
-    "sha256:"
-    + sha256(
-        b"pulsara:permission-presets:v2\0"
-        + _canonical_json_bytes(
-            {mode.value: _PRESET_PERMISSION_PAYLOADS[mode] for mode in PermissionMode}
-        )
-    ).hexdigest()
-)
-
-
 def parse_permission_mode(value: str | PermissionMode) -> PermissionMode:
     if isinstance(value, PermissionMode):
         return value
@@ -143,8 +118,6 @@ def preset_permission_payload(mode: str | PermissionMode) -> dict[str, Any]:
 
 __all__ = [
     "DEFAULT_PERMISSION_MODE",
-    "PERMISSION_PRESET_CONTRACT_FINGERPRINT",
-    "PERMISSION_PRESET_CONTRACT_ID",
     "PermissionMode",
     "parse_permission_mode",
     "preset_permission_payload",

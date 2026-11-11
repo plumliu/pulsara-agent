@@ -408,7 +408,7 @@ def frozen_prompt_content_canonical_value(
             )
         else:  # pragma: no cover - FrozenPromptContent closes this union.
             raise TypeError("canonical prompt value requires typed parts")
-    return {"schema": "pulsara.prompt/v2", "parts": tuple(parts)}
+    return {"parts": tuple(parts)}
 
 
 def llm_content_logical_bytes(parts: tuple[LLMContentPart, ...]) -> int:

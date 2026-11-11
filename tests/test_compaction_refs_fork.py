@@ -10,9 +10,6 @@ import pytest
 
 from pulsara_agent.identity import random_id
 from pulsara_agent.conversation_kernel.compaction.contracts import (
-    COMPACTION_MODEL_CONTRACT,
-    COMPACTION_SNAPSHOT_COMPILER_CONTRACT,
-    COMPACTION_SUMMARY_PROMPT_CONTRACT,
     CONTEXT_SNAPSHOT_CODEC,
     CONTEXT_SNAPSHOT_MEDIA_TYPE,
     CompactionCanonicalAdoptionFactoryInput,
@@ -186,9 +183,6 @@ def _compact(repo, guard, turn_id, boundary, retained):
                 codec=CONTEXT_SNAPSHOT_CODEC,
             ),
             snapshot_carrier=carrier,
-            compiler_contract=COMPACTION_SNAPSHOT_COMPILER_CONTRACT,
-            prompt_contract=COMPACTION_SUMMARY_PROMPT_CONTRACT,
-            model_contract=COMPACTION_MODEL_CONTRACT,
             occurred_at=datetime.now(timezone.utc),
             actor_id="runtime:test",
         )

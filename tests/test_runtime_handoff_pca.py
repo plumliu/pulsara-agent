@@ -149,7 +149,6 @@ def test_actual_source_encoder_and_both_serializers_stay_within_pca_boundary(
         trust_class=ContextTrustClass.UNTRUSTED_OBSERVATION,
         lifecycle=SourceObservationLifecycle.SNAPSHOT,
         presence=SourceObservationPresence.VALUE,
-        contract_version="pulsara.compaction-runtime-handoff.v3-active-pca",
         body=body,
     )
     primitive = PulsaraHeuristicTokenEstimatorV3()

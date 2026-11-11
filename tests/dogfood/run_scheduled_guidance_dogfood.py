@@ -115,7 +115,6 @@ async def run(destination: Path):
                 assert len(page["tasks"]) == 1, page
                 first = page["tasks"][0]
                 assert first["schedule"] == {
-                    "contract": "scheduled-rule:v1",
                     "kind": "daily",
                     "start_date": "2026-10-07",
                     "time": "08:00",

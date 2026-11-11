@@ -51,7 +51,6 @@ from pulsara_agent.primitives.plan_workflow import (
     PlanApprovedMaterializationDisposition,
     PlanDraftContentIdentity,
     PlanHandoffKind,
-    PlanInteractionBinding,
     PlanWorkflowEnteredBy,
     PlanWorkflowStatus,
     extract_plan_draft,
@@ -456,7 +455,6 @@ class ContextRenderVariant:
 @dataclass(frozen=True, slots=True)
 class ContextSourceCandidate:
     source_kind: ContextSourceKind
-    source_contract_version: str
     source_contract_fingerprint: str
     source_semantic_fingerprint: str
     channel: ContextChannel
@@ -471,8 +469,6 @@ class ContextSourceCandidate:
     initial_mode: ContextRenderMode = ContextRenderMode.FULL
 
     def __post_init__(self) -> None:
-        if not self.source_contract_version:
-            raise ValueError("source candidate identity is incomplete")
         if (
             not 0 <= self.placement_ordinal <= 999
             or not 0 <= self.degradation_priority <= 999
@@ -536,7 +532,6 @@ class ContextSourceCandidate:
             "context-source-contract:v1",
             {
                 "kind": self.source_kind.value,
-                "version": self.source_contract_version,
                 "channel": self.channel.value,
                 "trust": self.trust_class.value,
                 "budget": self.budget_class.value,
@@ -579,7 +574,6 @@ class ContextSourceAbsentFact:
     source_kind: ContextSourceKind
     lifecycle: ContextSourceLifecycle
     absence_kind: ContextSourceAbsenceKind
-    source_contract_version: str
     source_contract_fingerprint: str
     trust_class: ContextTrustClass
     budget_class: ContextBudgetClass
@@ -588,8 +582,6 @@ class ContextSourceAbsentFact:
     domain_semantic_fingerprint: str
 
     def __post_init__(self) -> None:
-        if not self.source_contract_version:
-            raise ValueError("absent source contract is empty")
         for value in (
             self.source_contract_fingerprint,
             self.domain_semantic_fingerprint,
@@ -1176,8 +1168,6 @@ class FrozenPlanWorkflowCompileFact:
     workflow_status: PlanWorkflowStatus
     entered_by: PlanWorkflowEnteredBy
     resume_permission_mode: PermissionMode
-    permission_contract_id: str
-    permission_contract_fingerprint: str
     fact_fingerprint: str
 
     def __post_init__(self) -> None:
@@ -1206,8 +1196,6 @@ def plan_workflow_compile_fact_fingerprint(
             "workflow_status": fact.workflow_status.value,
             "entered_by": fact.entered_by.value,
             "resume_permission_mode": fact.resume_permission_mode.value,
-            "permission_contract_id": fact.permission_contract_id,
-            "permission_contract_fingerprint": fact.permission_contract_fingerprint,
         },
     )
 
@@ -1298,9 +1286,6 @@ class ApprovedPlanMaterializationFact:
     interaction_id: str
     assistant_entry_id: str
     tool_call_id: str
-    request_contract_id: str
-    request_contract_version: str
-    request_contract_fingerprint: str
     request_semantic_digest: str
     content_identity: PlanDraftContentIdentity
     exact_plan_utf8: bytes = field(repr=False)
@@ -1337,21 +1322,11 @@ def approved_plan_materialization_fingerprint(
             "interaction_id": fact.interaction_id,
             "assistant_entry_id": fact.assistant_entry_id,
             "tool_call_id": fact.tool_call_id,
-            "request_contract_id": fact.request_contract_id,
-            "request_contract_version": fact.request_contract_version,
-            "request_contract_fingerprint": fact.request_contract_fingerprint,
             "request_semantic_digest": fact.request_semantic_digest,
             "content_identity": {
                 "interaction_id": fact.content_identity.interaction_id,
                 "assistant_entry_id": fact.content_identity.assistant_entry_id,
                 "tool_call_id": fact.content_identity.tool_call_id,
-                "request_contract_id": fact.content_identity.request_contract_id,
-                "request_contract_version": (
-                    fact.content_identity.request_contract_version
-                ),
-                "request_contract_fingerprint": (
-                    fact.content_identity.request_contract_fingerprint
-                ),
                 "request_semantic_digest": (
                     fact.content_identity.request_semantic_digest
                 ),
@@ -1518,9 +1493,6 @@ class FrozenCanonicalCompileSnapshot:
             or workflow.workflow_ordinal != permission.plan_context_ordinal_at_admission
             or workflow.current_workflow_revision
             < int(permission.plan_workflow_revision_at_admission or 0)
-            or workflow.permission_contract_id != permission.permission_contract_id
-            or workflow.permission_contract_fingerprint
-            != permission.permission_contract_fingerprint
         ):
             raise ValueError("compile Plan workflow does not exact-join")
         handoff = self.plan_handoff_fact
@@ -1571,10 +1543,6 @@ class FrozenCanonicalCompileSnapshot:
                 or approved.assistant_entry_id != content.assistant_entry_id
                 or approved.tool_call_id != content.tool_call_id
                 or approved.interaction_id != content.interaction_id
-                or approved.request_contract_id != content.request_contract_id
-                or approved.request_contract_version != content.request_contract_version
-                or approved.request_contract_fingerprint
-                != content.request_contract_fingerprint
                 or approved.request_semantic_digest != content.request_semantic_digest
             ):
                 raise ValueError("approved Plan materialization does not exact-join")
@@ -1601,11 +1569,6 @@ class FrozenCanonicalCompileSnapshot:
                     interaction_id=approved.interaction_id,
                     assistant_entry_id=approved.assistant_entry_id,
                     tool_call_id=approved.tool_call_id,
-                    binding=PlanInteractionBinding(
-                        approved.request_contract_id,
-                        approved.request_contract_version,
-                        approved.request_contract_fingerprint,
-                    ),
                     request_semantic_digest=approved.request_semantic_digest,
                     arguments=matching_calls[0].arguments,
                 )
@@ -1750,7 +1713,6 @@ def provider_input_item_leaf(item: FrozenProviderInputItem) -> Mapping[str, obje
                 if item.tool_result_delivery.reason is None
                 else item.tool_result_delivery.reason.value
             ),
-            "classifier_contract": item.tool_result_delivery.classifier_contract,
         },
     }
     if item.tool_call_name == "read_video_frames":
@@ -1931,7 +1893,6 @@ class CompiledToolResultDecision:
 
 @dataclass(frozen=True, slots=True)
 class ContextCompileReport:
-    compiler_contract_version: str
     tool_surface_fingerprint: str
     protected_prefix_message_count: int
     protected_prefix_logical_bytes: int
@@ -1943,8 +1904,6 @@ class ContextCompileReport:
     decision_digest: str
 
     def __post_init__(self) -> None:
-        if not self.compiler_contract_version:
-            raise ValueError("compile budget report contract is empty")
         numeric = (
             self.protected_prefix_message_count,
             self.protected_prefix_logical_bytes,

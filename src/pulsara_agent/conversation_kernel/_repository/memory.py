@@ -557,14 +557,13 @@ class _MemoryOperations(_MemoryManagementOperations):
                 LEFT JOIN pulsara_v3.memory_embeddings AS e
                   ON e.memory_domain_id=f.memory_domain_id AND e.fact_id=f.id
                  AND e.fact_semantic_digest=f.fact_semantic_digest
-                 AND e.embedding_contract_id=%s AND e.embedding_contract_version=%s
+                 AND e.embedding_contract_id=%s
                 WHERE f.memory_domain_id=%s AND f.lifecycle='ACTIVE'
                   AND f.context_id=ANY(%s::text[]) AND e.fact_id IS NULL
                 ORDER BY f.accepted_at, f.id LIMIT %s
                 """,
                 (
                     embedding_contract.contract_id,
-                    embedding_contract.contract_version,
                     read_binding.memory_domain_id,
                     list(read_binding.readable_context_ids),
                     max(1, min(limit, 100)),
@@ -604,16 +603,14 @@ class _MemoryOperations(_MemoryManagementOperations):
                 )
                 INSERT INTO pulsara_v3.memory_embeddings (
                     memory_domain_id, fact_id, fact_semantic_digest,
-                    embedding_contract_id, embedding_contract_version,
-                    embedding, embedded_at
+                    embedding_contract_id, embedding, embedded_at
                 )
                 SELECT f.memory_domain_id, f.id, f.fact_semantic_digest,
-                       %s, %s, %s::public.vector, %s
+                       %s, %s::public.vector, %s
                 FROM source AS f
                 ON CONFLICT (memory_domain_id, fact_id) DO UPDATE
                 SET fact_semantic_digest=EXCLUDED.fact_semantic_digest,
                     embedding_contract_id=EXCLUDED.embedding_contract_id,
-                    embedding_contract_version=EXCLUDED.embedding_contract_version,
                     embedding=EXCLUDED.embedding, embedded_at=EXCLUDED.embedded_at
                 RETURNING fact_id
                 """,
@@ -623,7 +620,6 @@ class _MemoryOperations(_MemoryManagementOperations):
                     list(read_binding.readable_context_ids),
                     fact_semantic_digest,
                     embedding_contract.contract_id,
-                    embedding_contract.contract_version,
                     literal,
                     embedded_at,
                 ),

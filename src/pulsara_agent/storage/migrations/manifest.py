@@ -1,12 +1,10 @@
-"""Closed clean-universe catalog and runtime privilege manifest."""
+"""Current baseline catalog and runtime privilege manifest."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from importlib.resources import files
 import json
-
-from pulsara_agent.storage.migrations.contracts import postgres_schema_fingerprint
 
 
 CONVERSATION_KERNEL_RELATIONS = (
@@ -86,10 +84,9 @@ class CleanPostgresSchemaManifest:
     required_extensions: tuple[dict[str, object], ...]
     required_functions: tuple[str, ...]
     observed_catalog_fingerprint: str
-    manifest_fingerprint: str
 
 
-def build_postgres_schema_manifest(_version: int = 0) -> CleanPostgresSchemaManifest:
+def build_postgres_schema_manifest() -> CleanPostgresSchemaManifest:
     payload = json.loads(
         files("pulsara_agent.storage.migrations.resources")
         .joinpath("0000_conversation_kernel_expected_catalog_v1.json")
@@ -101,21 +98,11 @@ def build_postgres_schema_manifest(_version: int = 0) -> CleanPostgresSchemaMani
     extensions = tuple(dict(item) for item in payload["required_extensions"])
     functions = tuple(str(item) for item in payload["required_functions"])
     observed_catalog_fingerprint = str(payload["observed_catalog_fingerprint"])
-    fingerprint = postgres_schema_fingerprint(
-        "pulsara:conversation-kernel-clean-catalog:v1",
-        {
-            "product_relations": relations,
-            "required_extensions": extensions,
-            "required_functions": functions,
-            "observed_catalog_fingerprint": observed_catalog_fingerprint,
-        },
-    )
     return CleanPostgresSchemaManifest(
         relations,
         extensions,
         functions,
         observed_catalog_fingerprint,
-        fingerprint,
     )
 
 

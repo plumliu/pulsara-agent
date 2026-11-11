@@ -13,7 +13,6 @@ from pulsara_agent.conversation_kernel.prompt_content import (
     MAXIMUM_PROMPT_MULTIPART_BYTES,
     PROMPT_BODY_CODEC,
     PROMPT_BODY_MEDIA_TYPE,
-    PROMPT_BODY_SCHEMA,
     PROMPT_IMAGE_BLOB_CODEC,
     canonical_prompt_body_resource_quote,
     decode_canonical_prompt_body,
@@ -199,7 +198,6 @@ def test_canonical_prompt_codec_preserves_interleaving_and_duplicate_refs() -> N
     assert PROMPT_BODY_MEDIA_TYPE == "application/vnd.pulsara.prompt+json"
     assert PROMPT_BODY_CODEC == "utf-8"
     assert PROMPT_IMAGE_BLOB_CODEC == "binary"
-    assert value["schema"] == PROMPT_BODY_SCHEMA == "pulsara.prompt/v2"
     assert [part["type"] for part in value["parts"]] == [
         "text",
         "image",
@@ -258,10 +256,10 @@ def test_canonical_prompt_decoder_and_hydration_are_exact() -> None:
 @pytest.mark.parametrize(
     "body",
     (
-        b'{"parts":[{"text":"x","type":"text"}],"schema":"pulsara.prompt/v2","schema":"pulsara.prompt/v2"}',
-        b'{"extra":0,"parts":[{"text":"x","type":"text"}],"schema":"pulsara.prompt/v2"}',
-        b'{"parts":[{"extra":0,"text":"x","type":"text"}],"schema":"pulsara.prompt/v2"}',
-        b'{"schema": "pulsara.prompt/v2", "parts": [{"type": "text", "text": "x"}]}',
+        b'{"parts":[{"text":"x","type":"text"}],"parts":[{"text":"x","type":"text"}]}',
+        b'{"extra":0,"parts":[{"text":"x","type":"text"}]}',
+        b'{"parts":[{"extra":0,"text":"x","type":"text"}]}',
+        b'{"parts": [{"type": "text", "text": "x"}]}',
     ),
 )
 def test_canonical_prompt_decoder_rejects_duplicate_unknown_and_noncanonical_json(
@@ -282,8 +280,7 @@ def test_descriptor_quote_rejects_expanded_content_before_hydration() -> None:
     image = _validated_image(b"x")
     body = json.dumps({"parts": [{"digest": image.content_digest,
         "image_ref": image.image_ref, "encoded_bytes": 16777216,
-        "height": 1, "media_type": "image/png", "type": "image", "width": 1}],
-        "schema": "pulsara.prompt/v2"}, sort_keys=True, separators=(",", ":")).encode()
+        "height": 1, "media_type": "image/png", "type": "image", "width": 1}]}, sort_keys=True, separators=(",", ":")).encode()
     decoded = decode_canonical_prompt_body(body)
 
     with pytest.raises(ValueError, match="multipart bound"):

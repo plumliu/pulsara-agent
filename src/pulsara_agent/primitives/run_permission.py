@@ -13,8 +13,6 @@ from hashlib import sha256
 import json
 
 from pulsara_agent.primitives.permission import (
-    PERMISSION_PRESET_CONTRACT_FINGERPRINT,
-    PERMISSION_PRESET_CONTRACT_ID,
     PermissionMode,
 )
 
@@ -41,8 +39,6 @@ class FrozenRunPermissionSnapshot:
     plan_workflow_id: str | None
     plan_workflow_revision_at_admission: int | None
     inherited_from_turn_id: str | None
-    permission_contract_id: str
-    permission_contract_fingerprint: str
     snapshot_fingerprint: str
 
     def __post_init__(self) -> None:
@@ -50,13 +46,6 @@ class FrozenRunPermissionSnapshot:
             raise ValueError("permission snapshot identity is required")
         if self.plan_context_ordinal_at_admission < 0:
             raise ValueError("permission plan-context ordinal must be non-negative")
-        if self.permission_contract_id != PERMISSION_PRESET_CONTRACT_ID:
-            raise ValueError("permission preset contract is unavailable")
-        if (
-            self.permission_contract_fingerprint
-            != PERMISSION_PRESET_CONTRACT_FINGERPRINT
-        ):
-            raise ValueError("permission preset contract fingerprint is unavailable")
         plan_bound = self.overlay is RunPermissionOverlay.PLAN_READ_ONLY
         if plan_bound != (
             self.plan_workflow_id is not None
@@ -98,8 +87,6 @@ class FrozenRunPermissionSnapshot:
                 self.plan_workflow_revision_at_admission
             ),
             inherited_from_turn_id=self.inherited_from_turn_id,
-            permission_contract_id=self.permission_contract_id,
-            permission_contract_fingerprint=self.permission_contract_fingerprint,
         )
         if self.snapshot_fingerprint != expected:
             raise ValueError("permission snapshot fingerprint mismatch")
@@ -116,10 +103,6 @@ def run_permission_snapshot_fingerprint(
     plan_workflow_id: str | None,
     plan_workflow_revision_at_admission: int | None,
     inherited_from_turn_id: str | None,
-    permission_contract_id: str = PERMISSION_PRESET_CONTRACT_ID,
-    permission_contract_fingerprint: str = (
-        PERMISSION_PRESET_CONTRACT_FINGERPRINT
-    ),
 ) -> str:
     payload = {
         "snapshot_id": snapshot_id,
@@ -133,8 +116,6 @@ def run_permission_snapshot_fingerprint(
             plan_workflow_revision_at_admission
         ),
         "inherited_from_turn_id": inherited_from_turn_id,
-        "permission_contract_id": permission_contract_id,
-        "permission_contract_fingerprint": permission_contract_fingerprint,
     }
     encoded = json.dumps(
         payload,
@@ -183,8 +164,6 @@ def build_run_permission_snapshot(
             plan_workflow_revision_at_admission
         ),
         inherited_from_turn_id=inherited_from_turn_id,
-        permission_contract_id=PERMISSION_PRESET_CONTRACT_ID,
-        permission_contract_fingerprint=PERMISSION_PRESET_CONTRACT_FINGERPRINT,
         snapshot_fingerprint=fingerprint,
     )
 

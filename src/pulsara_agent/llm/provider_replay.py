@@ -38,13 +38,6 @@ RESPONSES_NON_REPLAY_OPERATIONAL_ITEM_FIELDS = frozenset(
 )
 RESPONSES_NON_REPLAY_EMPTY_MESSAGE_ITEM_FIELDS = frozenset({"summary"})
 RESPONSES_NON_REPLAY_NULL_FUNCTION_CALL_ITEM_FIELDS = frozenset({"namespace"})
-RESPONSES_COMPLETED_OUTPUT_SOURCE_CONTRACT = (
-    "completed-terminal-and-settled-item-done-field-union:v7"
-)
-
-PROVIDER_REPLAY_COMPATIBILITY_CONTRACT_VERSION = (
-    "pulsara.provider-replay-target-compatibility.v1"
-)
 
 
 class ProviderAssistantReplayCodecKind(StrEnum):
@@ -76,8 +69,6 @@ def provider_replay_contract_fingerprint(
                 ("reasoning_details", "ORDERED_ARRAY_APPEND"),
             ),
             "top_level": "exact_single_assistant_message",
-            "public_projection": "ordered_text_then_tool_calls:v2",
-            "canonical_array": "pulsara.canonical-json.v1",
         }
     elif codec_kind is ProviderAssistantReplayCodecKind.RESPONSES_EXACT_OUTPUT_ITEMS:
         contract = {
@@ -85,8 +76,6 @@ def provider_replay_contract_fingerprint(
             "codec": codec_kind.value,
             "items": tuple(sorted(RESPONSES_REPLAYABLE_OUTPUT_ITEM_TYPES)),
             "message_content": ("output_text", "text"),
-            "public_order": "optional_single_message_before_function_calls:v1",
-            "completed_output_source": RESPONSES_COMPLETED_OUTPUT_SOURCE_CONTRACT,
             "excluded_operational_item_fields": tuple(
                 sorted(RESPONSES_NON_REPLAY_OPERATIONAL_ITEM_FIELDS)
             ),
@@ -96,7 +85,6 @@ def provider_replay_contract_fingerprint(
             "excluded_null_function_call_item_fields": tuple(
                 sorted(RESPONSES_NON_REPLAY_NULL_FUNCTION_CALL_ITEM_FIELDS)
             ),
-            "canonical_array": "pulsara.canonical-json.v1",
         }
     else:
         raise ValueError("provider replay codec is unsupported")
@@ -111,15 +99,12 @@ class ProviderReplayTargetCompatibilityFact:
     transport_binding_id: str
     codec_kind: ProviderAssistantReplayCodecKind
     provider_replay_contract_fingerprint: str
-    compatibility_contract_version: str
     replay_target_fingerprint: str
 
     def __post_init__(self) -> None:
         if (
             self.codec_kind is not provider_replay_codec_for_wire_api(self.wire_api)
             or not self.transport_binding_id
-            or self.compatibility_contract_version
-            != PROVIDER_REPLAY_COMPATIBILITY_CONTRACT_VERSION
         ):
             raise ValueError("provider replay target union is invalid")
         for value in (
@@ -180,7 +165,6 @@ def build_provider_replay_target_compatibility(
         transport_binding_id=target_fact.transport_binding_id,
         codec_kind=codec,
         provider_replay_contract_fingerprint=contract_fingerprint,
-        compatibility_contract_version=(PROVIDER_REPLAY_COMPATIBILITY_CONTRACT_VERSION),
         replay_target_fingerprint=target_fingerprint,
     )
 
@@ -203,7 +187,6 @@ def _replay_target_fingerprint(
             "transport_binding": transport_binding_id,
             "codec": codec_kind.value,
             "replay_contract": provider_replay_contract_fingerprint,
-            "compatibility_contract": (PROVIDER_REPLAY_COMPATIBILITY_CONTRACT_VERSION),
         },
     )
 
@@ -717,8 +700,6 @@ __all__ = [
     "MAXIMUM_PROVIDER_REPLAY_PAYLOAD_BYTES",
     "MAXIMUM_PROVIDER_REPLAY_RESPONSES_ITEMS",
     "MAXIMUM_PROVIDER_REPLAY_STRING_UTF8_BYTES",
-    "PROVIDER_REPLAY_COMPATIBILITY_CONTRACT_VERSION",
-    "RESPONSES_COMPLETED_OUTPUT_SOURCE_CONTRACT",
     "RESPONSES_NON_REPLAY_OPERATIONAL_ITEM_FIELDS",
     "RESPONSES_REPLAYABLE_OUTPUT_ITEM_TYPES",
     "PreparedDurableProviderAssistantReplay",

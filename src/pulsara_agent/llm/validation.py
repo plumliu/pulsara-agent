@@ -60,7 +60,6 @@ def validate_model_context_shape_for_call(
     transport = call.target.transport
     if (
         transport.binding_id != target_fact.transport_binding_id
-        or transport.contract_version != target_fact.transport_contract_version
     ):
         raise ModelTargetBindingMismatch(
             "transport binding changed after target resolution"

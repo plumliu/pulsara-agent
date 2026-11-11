@@ -68,7 +68,6 @@ def _preview_and_late_charge(body: str) -> tuple[CompletedToolCallBlock, int]:
     # the hydrated item with the production canonical resource owner.
     late_body = canonical_json_bytes(
         {
-            "schema_version": "late_tool_outcome_observation.v1",
             "tool_call_id": call.tool_call_id,
             "result_state": "SUCCESS",
             "result": preview,
@@ -137,7 +136,6 @@ def test_late_image_canonical_charge_fits_text_base_plus_exact_image_increment()
     )
     late_body = canonical_json_bytes(
         {
-            "schema_version": "late_tool_outcome_observation.v1",
             "tool_call_id": call.tool_call_id,
             "result_state": "SUCCESS",
             "result": public_text,

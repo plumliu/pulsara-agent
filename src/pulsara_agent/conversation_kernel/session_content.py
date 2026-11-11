@@ -72,13 +72,7 @@ def _encode(value):
 def _decode(cursor, operation):
     try:
         value = json.loads(base64.b64decode(cursor, altchars=b"-_", validate=True))
-        expected = (
-            operation
-            if operation == "search_sessions"
-            else operation
-            + (".bm25.v3" if operation == "search_session_content" else ".v4")
-        )
-        if not isinstance(value, dict) or value.get("operation") != expected:
+        if not isinstance(value, dict) or value.get("operation") != operation:
             raise ValueError()
         return value
     except (ValueError, TypeError, UnicodeError) as exc:
@@ -592,7 +586,7 @@ class SessionContentQuery:
         def token(sequence, start):
             return _encode(
                 {
-                    "operation": operation + ".v4",
+                    "operation": operation,
                     "session_id": target,
                     "cut": cut,
                     "event_cut": event_cut,
@@ -837,7 +831,7 @@ class SessionContentQuery:
             page_id = random_id("page")
         next_cursor = _encode(
             {
-                "operation": "search_session_content.bm25.v3",
+                "operation": "search_session_content",
                 "query": query,
                 "session_id": target,
                 "include_tools": tools,

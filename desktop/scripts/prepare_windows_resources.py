@@ -32,9 +32,7 @@ def compile_helper(output: Path) -> None:
         raise RuntimeError("The Windows build requires the .NET Framework 4.x compiler")
     output.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run([str(compiler), "/nologo", "/target:exe", "/platform:x64", "/r:System.Runtime.Serialization.dll", f"/out:{output}", str(ROOT / "native/windows-interop-helper/Program.cs")], check=True)
-    checked = subprocess.run([str(output), "--version"], check=True, capture_output=True, text=True)
-    if checked.stdout.strip() != "pulsara-interop 1":
-        raise RuntimeError("The Windows interoperability helper protocol differs")
+    subprocess.run([str(output), "--version"], check=True, capture_output=True, text=True)
 
 
 def build() -> None:

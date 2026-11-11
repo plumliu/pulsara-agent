@@ -33,7 +33,6 @@ from pulsara_agent.primitives.context import canonical_json_bytes
 from pulsara_agent.identity import derive_id, require_id
 
 
-PROMPT_BODY_SCHEMA = "pulsara.prompt/v2"
 PROMPT_BODY_MEDIA_TYPE = "application/vnd.pulsara.prompt+json"
 PROMPT_BODY_CODEC = "utf-8"
 PROMPT_IMAGE_BLOB_CODEC = "binary"
@@ -233,7 +232,6 @@ def canonical_prompt_body_value(
     if isinstance(value, FrozenPromptContent):
         return frozen_prompt_content_canonical_value(value)
     return {
-        "schema": PROMPT_BODY_SCHEMA,
         "parts": tuple(_part_value(part) for part in value.parts),
     }
 
@@ -364,9 +362,9 @@ def decode_canonical_prompt_body(body: bytes) -> CanonicalPromptBody:
         value = json.loads(text, object_pairs_hook=_unique_json_object)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("canonical prompt body is not valid UTF-8 JSON") from exc
-    if not isinstance(value, Mapping) or set(value) != {"schema", "parts"}:
+    if not isinstance(value, Mapping) or set(value) != {"parts"}:
         raise ValueError("canonical prompt body shape is invalid")
-    if value["schema"] != PROMPT_BODY_SCHEMA or not isinstance(value["parts"], list):
+    if not isinstance(value["parts"], list):
         raise ValueError("canonical prompt body schema is invalid")
     parts: list[CanonicalPromptBodyPart] = []
     for item in value["parts"]:
@@ -469,7 +467,6 @@ __all__ = [
     "MAXIMUM_PROMPT_MULTIPART_BYTES",
     "PROMPT_BODY_CODEC",
     "PROMPT_BODY_MEDIA_TYPE",
-    "PROMPT_BODY_SCHEMA",
     "PROMPT_IMAGE_BLOB_CODEC",
     "PromptContentResourceQuote",
     "canonical_prompt_body_bytes",

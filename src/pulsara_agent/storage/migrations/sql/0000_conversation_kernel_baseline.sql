@@ -2,16 +2,9 @@ CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
 CREATE EXTENSION IF NOT EXISTS pg_search VERSION '0.26.1';
 
 CREATE TABLE public.pulsara_schema_migrations (
-    universe_id text NOT NULL CHECK (universe_id = 'pulsara.conversation-kernel.v1'),
-    universe_generation integer NOT NULL CHECK (universe_generation = 1),
-    universe_fingerprint text NOT NULL CHECK (universe_fingerprint ~ '^sha256:[0-9a-f]{64}$'),
-    version integer PRIMARY KEY CHECK (version >= 0),
     name text NOT NULL UNIQUE,
     resource_sha256 text NOT NULL CHECK (resource_sha256 ~ '^[0-9a-f]{64}$'),
-    migration_contract_fingerprint text NOT NULL CHECK (migration_contract_fingerprint ~ '^sha256:[0-9a-f]{64}$'),
-    registry_prefix_fingerprint text NOT NULL CHECK (registry_prefix_fingerprint ~ '^sha256:[0-9a-f]{64}$'),
-    applied_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    application_version text NOT NULL
+    applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 REVOKE ALL ON public.pulsara_schema_migrations FROM PUBLIC;
 
@@ -124,9 +117,6 @@ CREATE TABLE pulsara_v3.context_snapshots (
     workspace_id text NOT NULL,
     source_through_sequence bigint NOT NULL CHECK (source_through_sequence >= 0),
     source_digest text NOT NULL CHECK (source_digest ~ '^sha256:[0-9a-f]{64}$'),
-    compiler_contract text NOT NULL,
-    prompt_contract text NOT NULL,
-    model_contract text NOT NULL,
     inline_content bytea,
     blob_id text,
     content_digest text NOT NULL CHECK (content_digest ~ '^sha256:[0-9a-f]{64}$'),
@@ -168,12 +158,6 @@ CREATE TABLE pulsara_v3.turns (
     permission_plan_workflow_id text,
     permission_plan_revision_at_admission bigint,
     permission_inherited_from_turn_id text,
-    permission_contract_id text NOT NULL CHECK (
-        permission_contract_id = 'pulsara.permission-presets.v2'
-    ),
-    permission_contract_fingerprint text NOT NULL CHECK (
-        permission_contract_fingerprint = 'sha256:3d67042487c798bf96e2339aab76ea20268bcaccc65361a262dc8ff7f33dbb51'
-    ),
     permission_snapshot_fingerprint text NOT NULL CHECK (
         permission_snapshot_fingerprint ~ '^sha256:[0-9a-f]{64}$'
     ),
@@ -315,7 +299,6 @@ CREATE TABLE pulsara_v3.session_commands (
         'ENTER_PLAN', 'CANCEL_PLAN', 'FORCE_EXIT_PLAN',
         'RESOLVE_PLAN_INTERACTION', 'COMPACT_CONTEXT'
     )),
-    request_schema_version text NOT NULL,
     semantic_digest text NOT NULL CHECK (semantic_digest ~ '^sha256:[0-9a-f]{64}$'),
     target_kind text NOT NULL CHECK (target_kind IN (
         'TURN', 'ENTRY', 'QUEUE_ITEM', 'INTERACTION_DECISION',
@@ -924,12 +907,6 @@ CREATE TABLE pulsara_v3.prompt_queue_items (
     permission_plan_workflow_id text,
     permission_plan_revision_at_admission bigint,
     permission_inherited_from_turn_id text,
-    permission_contract_id text CHECK (
-        permission_contract_id = 'pulsara.permission-presets.v2'
-    ),
-    permission_contract_fingerprint text CHECK (
-        permission_contract_fingerprint = 'sha256:3d67042487c798bf96e2339aab76ea20268bcaccc65361a262dc8ff7f33dbb51'
-    ),
     permission_snapshot_fingerprint text CHECK (
         permission_snapshot_fingerprint ~ '^sha256:[0-9a-f]{64}$'
     ),
@@ -983,8 +960,6 @@ CREATE TABLE pulsara_v3.prompt_queue_items (
             AND permission_admission_source IS NULL
             AND permission_overlay IS NULL
             AND permission_plan_context_ordinal IS NULL
-            AND permission_contract_id IS NULL
-            AND permission_contract_fingerprint IS NULL
             AND permission_snapshot_fingerprint IS NULL) OR
         (input_origin IN ('HUMAN_MESSAGE','CELL_OUTPUT') AND delivery_mode='NEW_TURN'
             AND requested_permission_mode IS NOT NULL
@@ -996,8 +971,6 @@ CREATE TABLE pulsara_v3.prompt_queue_items (
             AND permission_plan_workflow_id IS NULL
             AND permission_plan_revision_at_admission IS NULL
             AND permission_inherited_from_turn_id IS NULL
-            AND permission_contract_id IS NULL
-            AND permission_contract_fingerprint IS NULL
             AND permission_snapshot_fingerprint IS NULL) OR
         (input_origin IN ('SCHEDULED_TASK','AGENT_INSTRUCTION') AND delivery_mode='NEW_TURN'
             AND permission_snapshot_id IS NOT NULL
@@ -1006,8 +979,6 @@ CREATE TABLE pulsara_v3.prompt_queue_items (
             AND permission_admission_source IN ('USER_SUBMISSION','RUNTIME_PLAN_CONTINUATION','TERMINAL_OBSERVATION')
             AND permission_overlay IS NOT NULL
             AND permission_plan_context_ordinal IS NOT NULL
-            AND permission_contract_id IS NOT NULL
-            AND permission_contract_fingerprint IS NOT NULL
             AND permission_snapshot_fingerprint IS NOT NULL)
     ),
     CONSTRAINT ck_prompt_queue_permission_overlay_exact CHECK (
@@ -1212,12 +1183,6 @@ CREATE TABLE pulsara_v3.plan_workflows (
     resume_permission_mode text NOT NULL CHECK (resume_permission_mode IN (
         'read-only', 'ask-permissions', 'accept-edits', 'bypass-permissions'
     )),
-    permission_contract_id text NOT NULL CHECK (
-        permission_contract_id = 'pulsara.permission-presets.v2'
-    ),
-    permission_contract_fingerprint text NOT NULL CHECK (
-        permission_contract_fingerprint = 'sha256:3d67042487c798bf96e2339aab76ea20268bcaccc65361a262dc8ff7f33dbb51'
-    ),
     workflow_revision bigint NOT NULL CHECK (workflow_revision >= 1),
     accepted_plan_interaction_id text,
     accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -1262,11 +1227,6 @@ CREATE TABLE pulsara_v3.plan_interactions (
     origin_turn_id text NOT NULL,
     assistant_entry_id text NOT NULL,
     tool_call_id text NOT NULL,
-    request_contract_id text NOT NULL,
-    request_contract_version text NOT NULL,
-    request_contract_fingerprint text NOT NULL CHECK (
-        request_contract_fingerprint ~ '^sha256:[0-9a-f]{64}$'
-    ),
     request_semantic_digest text NOT NULL CHECK (
         request_semantic_digest ~ '^sha256:[0-9a-f]{64}$'
     ),
@@ -1306,16 +1266,6 @@ CREATE TABLE pulsara_v3.plan_interactions (
         (kind = 'DRAFT_REVIEW' AND status IN (
             'OPEN', 'APPROVED', 'REVISION_REQUESTED', 'CANCELLED', 'ABORTED'
         ))
-    ),
-    CHECK (
-        (kind = 'QUESTION'
-            AND request_contract_id = 'pulsara.workflow.ask_plan_question'
-            AND request_contract_version = 'v1'
-            AND request_contract_fingerprint = 'sha256:d19178a8bc3eaa69f03ce3151b1803b760be6afa55f5f58f489e58e45d5420b9') OR
-        (kind = 'DRAFT_REVIEW'
-            AND request_contract_id = 'pulsara.workflow.exit_plan'
-            AND request_contract_version = 'v2'
-            AND request_contract_fingerprint = 'sha256:9e77c16295c1ec7059729498b26c5665b494e49002113485bbebfa3d739165d1')
     ),
     CHECK (
         (status = 'OPEN' AND resolution_command_id IS NULL
@@ -1505,7 +1455,6 @@ CREATE TABLE pulsara_v3.memory_embeddings (
         fact_semantic_digest ~ '^sha256:[0-9a-f]{64}$'
     ),
     embedding_contract_id text NOT NULL,
-    embedding_contract_version integer NOT NULL CHECK (embedding_contract_version >= 1),
     embedding public.vector(1024) NOT NULL,
     embedded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (memory_domain_id, fact_id),
@@ -1744,8 +1693,6 @@ BEGIN
             OLD.permission_plan_workflow_id IS DISTINCT FROM NEW.permission_plan_workflow_id OR
             OLD.permission_plan_revision_at_admission IS DISTINCT FROM NEW.permission_plan_revision_at_admission OR
             OLD.permission_inherited_from_turn_id IS DISTINCT FROM NEW.permission_inherited_from_turn_id OR
-            OLD.permission_contract_id IS DISTINCT FROM NEW.permission_contract_id OR
-            OLD.permission_contract_fingerprint IS DISTINCT FROM NEW.permission_contract_fingerprint OR
             OLD.permission_snapshot_fingerprint IS DISTINCT FROM NEW.permission_snapshot_fingerprint
         ) THEN
             RAISE EXCEPTION 'turn permission snapshot is immutable'
@@ -1894,8 +1841,6 @@ BEGIN
             OLD.entry_assistant_entry_id IS DISTINCT FROM NEW.entry_assistant_entry_id OR
             OLD.entry_tool_call_id IS DISTINCT FROM NEW.entry_tool_call_id OR
             OLD.resume_permission_mode IS DISTINCT FROM NEW.resume_permission_mode OR
-            OLD.permission_contract_id IS DISTINCT FROM NEW.permission_contract_id OR
-            OLD.permission_contract_fingerprint IS DISTINCT FROM NEW.permission_contract_fingerprint OR
             NEW.workflow_revision <> OLD.workflow_revision + 1 OR
             OLD.status <> 'ACTIVE'
         ) THEN
@@ -1957,9 +1902,6 @@ BEGIN
             OLD.origin_turn_id IS DISTINCT FROM NEW.origin_turn_id OR
             OLD.assistant_entry_id IS DISTINCT FROM NEW.assistant_entry_id OR
             OLD.tool_call_id IS DISTINCT FROM NEW.tool_call_id OR
-            OLD.request_contract_id IS DISTINCT FROM NEW.request_contract_id OR
-            OLD.request_contract_version IS DISTINCT FROM NEW.request_contract_version OR
-            OLD.request_contract_fingerprint IS DISTINCT FROM NEW.request_contract_fingerprint OR
             OLD.request_semantic_digest IS DISTINCT FROM NEW.request_semantic_digest OR
             (OLD.control_tool_result_id IS DISTINCT FROM NEW.control_tool_result_id
                 AND NOT (

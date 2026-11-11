@@ -1376,8 +1376,6 @@ def _catalog_entry(
     binding = build_tool_binding_contract(
         tool_name=name,
         origin=origin,
-        contract_id=f"pulsara.{origin.value}.{name}",
-        contract_version="v2" if name == "exit_plan" else "v1",
     )
     if not isinstance(binding, BuiltinToolBindingContract):
         raise TypeError("builtin catalog produced a non-builtin binding")

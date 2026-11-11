@@ -543,21 +543,6 @@ def test_missing_secret_has_a_narrow_typed_failure() -> None:
         )
 
 
-def test_unsupported_schema_cannot_be_repaired_into_empty_settings(tmp_path):
-    from pulsara_agent.settings import LocalSettingsSchemaUnsupported
-
-    path = tmp_path / "local-settings.yaml"
-    path.parent.chmod(0o700)
-    original = b"schema: pulsara-local-settings:v2\nmodel_connections: preserve-me\n"
-    path.write_bytes(original)
-    path.chmod(0o600)
-    store = LocalSettingsStore(path)
-    with pytest.raises(LocalSettingsSchemaUnsupported):
-        store.read()
-    with pytest.raises(LocalSettingsSchemaUnsupported):
-        asyncio.run(store.add_model_connection(connection=_connection("a"), api_key="secret"))
-    assert path.read_bytes() == original
-
 
 def test_failed_embedding_confirmation_does_not_partially_save_or_enable(tmp_path):
     from tests.retrieval_fixtures import input_for

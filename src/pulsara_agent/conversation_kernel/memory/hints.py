@@ -139,7 +139,6 @@ def normalize_memory_trigger_text(value: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class MemoryWriteOptOut:
-    contract_id: str = "pulsara.memory-write-opt-out.v2"
 
     def excludes(self, text: str) -> bool:
         normalized = normalize_memory_trigger_text(text)
@@ -156,7 +155,6 @@ class MemoryWriteOptOut:
 
 @dataclass(frozen=True, slots=True)
 class TurnMemoryUseOptOut:
-    contract_id: str = "pulsara.turn-memory-use-opt-out.v1"
 
     def excludes(self, text: str) -> bool:
         normalized = normalize_memory_trigger_text(text)
@@ -170,7 +168,6 @@ class TurnMemoryUseOptOut:
 class CheapMemoryWriteHintMatcher:
     """A fallible local attention gate with no candidate or source authority."""
 
-    contract_id: str = "pulsara.cheap-memory-write-hint.v2"
     signals: tuple[str, ...] = _SEALED_WRITE_HINT_SIGNALS
 
     def matches(self, text: str) -> bool:
