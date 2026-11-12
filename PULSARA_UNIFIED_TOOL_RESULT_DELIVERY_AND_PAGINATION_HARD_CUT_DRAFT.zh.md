@@ -581,7 +581,7 @@ runtime 完整保存本次观察结果后推进内部位置，并可释放对应
 
 底层 terminal owner 与物理资源调度继续共享；模型工具的进程归属、查询、日志观察和控制按调用上下文的 session_id 隔离。ROOT 与 subagent session 等价，各自只访问本 session 进程，持有其他 session 的 PROCESS Target 不赋予访问权。同一 session 内跨 turn、原生与 JS 共用该进程的内部观察位置，不新增模型可填的 session_id、跨 session 接管或独立读者机制。
 
-write_file 导出读取已保存的完整工具结果，不依赖原临时日志继续存在，也不自动包含后续进程输出。真实存储失败沿既有错误通道说明原因、已知缺失和业务效果，不把残缺内容当作完整结果，不自动重做命令。exec_process、manage_process 的具体合同见[原生工具修订草案第 8、9 节](PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md#8-exec_process启动命令与首次观察)：wait／write 共用内部位置并返回全部待观察增量，close_stdin／kill 不推进位置；原样 write 的交互内容由模型决定。
+write_file 导出读取已保存的完整工具结果，不依赖原临时日志继续存在，也不自动包含后续进程输出。真实存储失败沿既有错误通道说明原因、已知缺失和业务效果，不把残缺内容当作完整结果，不自动重做命令。exec_process、manage_process 的具体合同见[原生工具修订草案第 1、2 节](native_tools/terminal.md#1-exec_process启动命令与首次观察)：wait／write 共用内部位置并返回全部待观察增量，close_stdin／kill 不推进位置；原样 write 的交互内容由模型决定。
 
 ## 10. 实施前必须闭合的事项
 
