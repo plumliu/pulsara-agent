@@ -32,6 +32,10 @@
 | todo | 仅原生、无 JS API；items 完整替换清单，最多 10 项，非空单行文字不重复且至多一个 in_progress；删除文本大小 cap；成功返回 meta.counts 和简短 content，失败／取消不返回计数 |
 | query_schedules | 仅 ROOT 原生、无 JS API；可选 target 精确查询与可选 status:ALL／ACTIVE／PAUSED 列表筛选互斥，默认 ALL；固定当前会话，删除 session、cursor；content 使用统一完整计划 object，revision 只保留在内部；原生沿统一 12k 分页 |
 | manage_schedule | 仅 ROOT 原生、固定当前会话；create／switch／update／pause／resume／delete 六个 action，revision 内部取得；新计划权限取创建 turn 冻结值，修改不提供权限参数；五种时间规则、15 分钟最小间隔和默认上海时区；pause／delete 取消该计划未消费输入，已运行回复继续；resume 不补跑或恢复已取消输入；成功简短返回，delete 不返回业务 Target |
+| open_in_pulsara | 仅 ROOT 原生、无 JS API；targets 接受 PATH／URL／AGENT，逐项请求展示；结果仅 meta.status 和文字 content，任一目标失败为 ERROR，说明已接受项及原因，合法项仍继续；不回显目标或归属 ID，NEXT 不重触发展示 |
+| exec_cell | 仅 ROOT 原生、无 JS API；PATH target 与 code 严格二选一，删除顶层 path；接纳成功返回 CELL Target、meta.status 和简短 content，不返回 accepted 或 Cell 状态；steer 继续独立交付，NEXT 不重新执行脚本 |
+| query_cells | 仅 ROOT 原生、无 JS API；只保留可选 CELL target，列表返回 object 记录，单查返回状态、pending_calls 及完整冻结源码；删除 has_unread_output、公开游标和源码分页参数；完整结果按 12k／NEXT 交付，补页不刷新 Cell 或消费 steer |
+| manage_cell | 仅 ROOT 原生、无 JS API；target、action:wait／stop，wait 可填 yield_time_ms；成功返回实际 cell_status、pending_calls 和必要文字；停止、已提交调用及各阶段 steer 处理完全保持当前底层语义，不撤销已发生效果或撤回已入队输出；NEXT 只读冻结结果 |
 
 `read_file` 的 NEXT Target 分支和 `write_file` 的 source 导出分支暂不展开。续读时只需传入运行时返回的完整 Target，不公开或解释内部定位。其他工具按后续讨论逐项补充，不从本节推导尚未确定的业务字段。
 
@@ -162,3 +166,5 @@ object.value 本身是唯一权威业务对象，完整 JSON 文字按需投影�
 | [记忆工具](native_tools/memory.md) | 第 1–3 章：remember、query_memory、manage_memory 的参数、互斥分支、返回类型、原生示例及失败语义；runtime 自动取得并发条件；仅 ROOT 原生，无 JS API |
 | [进度清单工具](native_tools/todo.md) | 第 1 章：todo 的完整替换参数、10 项上限、meta.counts、返回类型、原生示例及错误语义；仅原生，无 JS API；第 2 章为生产实现参考 |
 | [定时会话工具](native_tools/schedules.md) | 第 1 章：共用 schedule 时间规则、创建默认值及完整规则类型；第 2 章：query_schedules；第 3–5 章：manage_schedule 的 create／switch、update、pause／resume／delete，含精简返回、原生示例、内部并发及队列语义；第 6 章为实现参考；仅 ROOT 原生，无 JS API |
+| [展示工具](native_tools/open_in_pulsara.md) | 第 1 章：open_in_pulsara 的参数、精简返回、原生示例及 ERROR 语义；合法展示项继续处理；第 2 章为实现参考；仅 ROOT 原生，无 JS API |
+| [Code Mode 控制工具](native_tools/code_mode.md) | 第 1 章：exec_cell 的 PATH target／code 互斥参数、简短启动结果及独立 steer；第 2 章：query_cells 的可选 target、列表与单查返回、空结果和错误语义；第 3 章：manage_cell 的 wait／stop 参数、pending_calls、精简返回及原生示例，保留已提交工具和各阶段 steer 的现行停止边界；均按冻结结果走 12k／NEXT；第 4 章为实现参考；仅 ROOT 原生，无 JS API |

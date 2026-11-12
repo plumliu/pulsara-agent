@@ -169,6 +169,8 @@ ROOT 分配的主指令                  AGENT_INSTRUCTION
 
 Cell 显式 console.log/return 沿现有接纳链路形成交给 ROOT 的 steer，使用共同内容。已消费并进入会话的 Cell steer 中，真实 image 内容项的 IMAGE_REF 可再交给 view_image 读取，沿原 workspace 边界；具体来源资格见第 5.2 节。Cell steer 本身不提供 read_file 读取、续读或导出入口，保存为会话 entry 不会把 steer 变成文件或工具结果。不得新增“入队后立即有可读 SESSION_ENTRY”、ACK 或跨重启恢复承诺。JS 中间结果不因保存而自动进入 ROOT 上下文。
 
+既有异常诊断及晚到结果补发保留：非显式停止时，脚本异常结束等原因使已提交工具结果未能交付 JS，仍按原 Cell 输出路径交给 ROOT；普通中间值不因存储统一而自动披露。显式 stop 和 Host 关闭继续抑制补发，已发生效果及原调用结果仍正常结算。补发属于独立的 Cell 输入发生，不建立第二份原工具结果权威，不新增恢复任务或 steer 读取入口，具体边界沿 unified 第 8.8 节及 Code Mode 工具草案。
+
 ## 5. blob、图片出现与读取资格
 
 ### 5.1 字节与出现项
@@ -421,7 +423,7 @@ tool 消息：本页文字、object 的 JSON 文字、原图片位置的 IMAGE_R
 | 图片属性 | 同图尺寸从 blob 取得，不在可视化记录重复维护；原可视化状态、失败及其他媒体语义保持 |
 | GC | 转移后 blob 受保护；删一个出现不误删其他内容／可视化仍引用的 blob |
 | MCP | 正式交错、audience 各分支、structuredContent、携图错误及损坏图片；无 Base64 第二正文 |
-| Cell | 显式 steer 整条交付，已进入会话的图片引用可再读；steer 本身无 read_file 读取／续读／导出入口，无接纳回执或自动 ROOT 披露 |
+| Cell | 显式 steer 整条交付，保留既有异常诊断及非显式停止的晚到结果补发；已进入会话的图片引用可再读；steer 本身无 read_file 读取／续读／导出入口，无新增接纳回执或普通中间值自动披露 |
 | 前端及批注 | 草稿到 entry 接续，引用／评论身份及文字定位保持，不擅自嵌图 |
 | fork、检索 | 新合同 fork 来源与图片资格正确；索引可重建，QA／QAQ 保留混合助手项文字 |
 | 实际 provider | Chat Completions/Responses 的 tool 文本和关联 user 图片正确；同 epoch SYSTEM/tools 不变、messages 只追加 |
