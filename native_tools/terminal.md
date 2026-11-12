@@ -45,6 +45,8 @@ interface ExecProcessArgs {
 
 观察时间和本次工具观察耗时仍在原生消息顶层，不混进日志或重复放进 meta。命令输出即使恰好是 JSON，也仍为文字项，不自动升级成 object、Target 或图片。
 
+上述进程事实是本次观察取得并保存的快照。补页、导出或返回这次 JS 业务值时不重新查询进程，不将保存时的 RUNNING/null 改成后来取得的 EXITED/退出码；进程记录回收也不改变已保存结果。query_processes 的 duration_seconds 等记录同样固定在本次查询时刻，不随补页继续增长。工具状态与进程状态保持独立，原生分页不承担刷新进程的职责。
+
 ```typescript
 type ProcessTarget = {
   kind: "PROCESS";

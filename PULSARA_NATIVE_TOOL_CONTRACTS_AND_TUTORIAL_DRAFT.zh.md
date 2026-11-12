@@ -20,8 +20,16 @@
 | exec_process | 四个启动参数、工具状态与进程状态分离、运行／退出结果、实际输出及原生与 JS 示例；删除 observe 和公开游标；待观察日志透明暂存 |
 | manage_process | wait、write、close_stdin、kill 四个动作；内部观察位置、完整待观察增量、控制动作、原生与 JS 示例及输入小实验 |
 | query_processes | 可选 PROCESS Target、单查与列表共用的 object 记录、原生与 JS 示例，以及列表无记录与单查未找到的不同状态和说明 |
+| search_sessions | query、lifecycle 参数、同域跨工作区范围、entry 优先与标题兜底，以及只含会话信息和命中来源的 object 记录；不附具体 entry |
+| search_session_content | target、query 参数，单 ID 的 Q₁ Target 与 QA／QAQ 摘录，四种消息标签及原生／JS 完整返回；删除 include_tools 和搜索续查参数 |
+| read_session_content | 可选的原文展开步骤，必填 target、正负 limit；SESSION 从 latest 向前读，单 ID 的 SESSION_ENTRY 从锚点按指定方向读；逐消息 object 及原生／JS 示例 |
+| enter_plan | 仅原生、空对象参数、meta.status 与简短文字结果；保留模式切换、自动继续、重复进入成功及单独调用行为 |
+| ask_plan_question | 仅原生，question 与可选 options，始终允许自由回答；结果只用 meta.status 和文字 content，10 分钟未作答返回 CANCELLED，由模型决定是否调用 exit_plan |
+| exit_plan | 仅原生，可选 plan、summary；提交方案阻塞等待审批，只返回一次最终结果，修订／取消审批／十分钟超时均让当前只读轮继续，由模型决定是否退出，完整图文修订反馈另沿用户输入路径交付一次；批准或无方案退出才恢复权限并自动续接；Markdown 按 summary 命名、默认方案.md、重名用 (2) 顺延，写入失败不阻止审批，实际保存成功才返回顶层 PATH Target；无方案退出不等待审批、不创建文件 |
 
 `read_file` 的 NEXT Target 分支和 `write_file` 的 source 导出分支暂不展开。续读时只需传入运行时返回的完整 Target，不公开或解释内部定位。其他工具按后续讨论逐项补充，不从本节推导尚未确定的业务字段。
+
+先按[有序内容统一存储 hardcut](PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md#10-数据库优先与停用期间的分步实施)明确数据库结构与存储基础，允许停用 Pulsara 后先重建新库；随后继续包括历史会话工具在内的全部 native tool 合同讨论，再逐步接通消费者。无需等待全部消费者实现才继续讨论；已定语义保留，未定部分不因建库成为实施合同。
 
 本文件与[统一工具结果交付与分页草案](PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)配合使用：该草案定义完整保存、原生 12k 分页、JS 完整返回及 Cell 图文 steer；本文件细化工具本身的合同。这里已明确的工具参数、字段、meta/content 形状及状态表达，以本文件为准。
 
@@ -35,7 +43,7 @@
 
 | 位置 | 职责 |
 | --- | --- |
-| target | 实际读取或操作的业务对象；文件工具为解析后的文件，find_files 为搜索目录，search_file_content 为搜索文件或目录，exec_process 和 manage_process 的正常进程结果为 PROCESS Target |
+| target | 实际读取或操作的业务对象；文件工具为解析后的文件，find_files 为搜索目录，search_file_content 为搜索文件或目录，exec_process 和 manage_process 的正常进程结果为 PROCESS Target，exit_plan 方案文件实际保存成功时为该文件的 PATH Target |
 | meta | 本次调用状态及工具必要的类型化业务信息 |
 | content | 最直接的可读内容，使用有序内容项对象数组 |
 
@@ -137,9 +145,11 @@ object.value 本身是唯一权威业务对象，完整 JSON 文字按需投影�
 
 ## 3. 工具文档索引
 
-两篇工具文档共同适用本文第 1、2 章的规则。
+各篇工具文档共同适用本文第 1、2 章的规则。
 
 | 文档 | 工具章节 |
 | --- | --- |
 | [文件系统工具](native_tools/filesystem.md) | 第 1–5 章：read_file、write_file、edit_file、find_files、search_file_content |
 | [终端工具](native_tools/terminal.md) | 第 1–3 章：exec_process、manage_process、query_processes |
+| [历史会话工具](native_tools/session_history.md) | 第 1–3 章：search_sessions、search_session_content、read_session_content 的参数、返回类型及原生／JS 示例；单 ID 的 entry 定位、四种消息标签与正负 limit |
+| [Plan 工具](native_tools/plan.md) | 第 1–3 章：enter_plan、ask_plan_question、exit_plan 的参数、行为、返回值及原生示例；10 分钟交互期限、方案双份保存及顶层 PATH Target；仅原生，无 JS API |
