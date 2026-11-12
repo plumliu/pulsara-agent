@@ -29,6 +29,9 @@
 | remember | 仅 ROOT 原生，context_kind、kind、title、条件必填的 statement；创建独立记忆，返回 Target、updated_at、简短说明及最多三条完整相关候选 |
 | query_memory | 仅 ROOT 原生，target 精确读取与 query／可选 limit 关键词查询互斥，target 放首位；返回完整记忆对象，原生沿统一 12k 分页 |
 | manage_memory | 仅 ROOT 原生，target、action:edit／delete；edit 提供 statement／context_kind，修改成功和无变化返回 Target、updated_at 及简短说明，删除成功只返回简短说明；不推荐候选；并发旧值由 runtime 自动取得，无快照先提示查询 |
+| todo | 仅原生、无 JS API；items 完整替换清单，最多 10 项，非空单行文字不重复且至多一个 in_progress；删除文本大小 cap；成功返回 meta.counts 和简短 content，失败／取消不返回计数 |
+| query_schedules | 仅 ROOT 原生、无 JS API；可选 target 精确查询与可选 status:ALL／ACTIVE／PAUSED 列表筛选互斥，默认 ALL；固定当前会话，删除 session、cursor；content 使用统一完整计划 object，revision 只保留在内部；原生沿统一 12k 分页 |
+| manage_schedule | 仅 ROOT 原生、固定当前会话；create／switch／update／pause／resume／delete 六个 action，revision 内部取得；新计划权限取创建 turn 冻结值，修改不提供权限参数；五种时间规则、15 分钟最小间隔和默认上海时区；pause／delete 取消该计划未消费输入，已运行回复继续；resume 不补跑或恢复已取消输入；成功简短返回，delete 不返回业务 Target |
 
 `read_file` 的 NEXT Target 分支和 `write_file` 的 source 导出分支暂不展开。续读时只需传入运行时返回的完整 Target，不公开或解释内部定位。其他工具按后续讨论逐项补充，不从本节推导尚未确定的业务字段。
 
@@ -157,3 +160,5 @@ object.value 本身是唯一权威业务对象，完整 JSON 文字按需投影�
 | [历史会话工具](native_tools/session_history.md) | 第 1–3 章：search_sessions、search_session_content、read_session_content 的参数、返回类型及原生／JS 示例；单 ID 的 entry 定位、四种消息标签与正负 limit |
 | [Plan 工具](native_tools/plan.md) | 第 1–3 章：enter_plan、ask_plan_question、exit_plan 的参数、行为、返回值及原生示例；10 分钟交互期限、方案双份保存及顶层 PATH Target；仅原生，无 JS API |
 | [记忆工具](native_tools/memory.md) | 第 1–3 章：remember、query_memory、manage_memory 的参数、互斥分支、返回类型、原生示例及失败语义；runtime 自动取得并发条件；仅 ROOT 原生，无 JS API |
+| [进度清单工具](native_tools/todo.md) | 第 1 章：todo 的完整替换参数、10 项上限、meta.counts、返回类型、原生示例及错误语义；仅原生，无 JS API；第 2 章为生产实现参考 |
+| [定时会话工具](native_tools/schedules.md) | 第 1 章：共用 schedule 时间规则、创建默认值及完整规则类型；第 2 章：query_schedules；第 3–5 章：manage_schedule 的 create／switch、update、pause／resume／delete，含精简返回、原生示例、内部并发及队列语义；第 6 章为实现参考；仅 ROOT 原生，无 JS API |
