@@ -26,6 +26,9 @@
 | enter_plan | 仅原生、空对象参数、meta.status 与简短文字结果；保留模式切换、自动继续、重复进入成功及单独调用行为 |
 | ask_plan_question | 仅原生，question 与可选 options，始终允许自由回答；结果只用 meta.status 和文字 content，10 分钟未作答返回 CANCELLED，由模型决定是否调用 exit_plan |
 | exit_plan | 仅原生，可选 plan、summary；提交方案阻塞等待审批，只返回一次最终结果，修订／取消审批／十分钟超时均让当前只读轮继续，由模型决定是否退出，完整图文修订反馈另沿用户输入路径交付一次；批准或无方案退出才恢复权限并自动续接；Markdown 按 summary 命名、默认方案.md、重名用 (2) 顺延，写入失败不阻止审批，实际保存成功才返回顶层 PATH Target；无方案退出不等待审批、不创建文件 |
+| remember | 仅 ROOT 原生，context_kind、kind、title、条件必填的 statement；创建独立记忆，返回 Target、updated_at、简短说明及最多三条完整相关候选 |
+| query_memory | 仅 ROOT 原生，target 精确读取与 query／可选 limit 关键词查询互斥，target 放首位；返回完整记忆对象，原生沿统一 12k 分页 |
+| manage_memory | 仅 ROOT 原生，target、action:edit／delete；edit 提供 statement／context_kind，修改成功和无变化返回 Target、updated_at 及简短说明，删除成功只返回简短说明；不推荐候选；并发旧值由 runtime 自动取得，无快照先提示查询 |
 
 `read_file` 的 NEXT Target 分支和 `write_file` 的 source 导出分支暂不展开。续读时只需传入运行时返回的完整 Target，不公开或解释内部定位。其他工具按后续讨论逐项补充，不从本节推导尚未确定的业务字段。
 
@@ -153,3 +156,4 @@ object.value 本身是唯一权威业务对象，完整 JSON 文字按需投影�
 | [终端工具](native_tools/terminal.md) | 第 1–3 章：exec_process、manage_process、query_processes |
 | [历史会话工具](native_tools/session_history.md) | 第 1–3 章：search_sessions、search_session_content、read_session_content 的参数、返回类型及原生／JS 示例；单 ID 的 entry 定位、四种消息标签与正负 limit |
 | [Plan 工具](native_tools/plan.md) | 第 1–3 章：enter_plan、ask_plan_question、exit_plan 的参数、行为、返回值及原生示例；10 分钟交互期限、方案双份保存及顶层 PATH Target；仅原生，无 JS API |
+| [记忆工具](native_tools/memory.md) | 第 1–3 章：remember、query_memory、manage_memory 的参数、互斥分支、返回类型、原生示例及失败语义；runtime 自动取得并发条件；仅 ROOT 原生，无 JS API |
