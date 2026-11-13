@@ -40,6 +40,26 @@
 | read_video_frames | ROOT 原生及 Code Mode JS API；仅 target、from、to、action、crop，action 为 overview／detail／motion，删除 mode 和 continuation；完整范围先生成保存，有序索引 object→image，原生 12k／NEXT，JS 完整值；cell_rect 为 [left,top,right,bottom]，现行选择和质量保持 |
 | read_transcript | ROOT 原生及 Code Mode JS API；仅 target、from、to，删除 continuation、公开 media_version 及单次累计 180 秒 ASR 限制；按完整请求范围取得字幕或语音文字并保存，meta 保留状态、来源及实际语言，content 使用 text／逐段 object；原生冻结 12k／NEXT，JS 完整值，补页不读取媒体或发起 ASR |
 | annotate_media | 仅 ROOT 原生、无 JS API；target、from、to、text 全部必填，追加时间标注；返回 PATH Target、meta.status 和简短 text，不回传标注全文或公开成功标记；保留内部文件路径／修改时间绑定及由调用参数读取标注的现有语义，NEXT 只读冻结结果、不重复添加标注 |
+| query_capabilities，SKILL 分支 | 顶层 kind 在所有调用中必填，分类为 SKILL／HOOK／MCP／PLUGIN，不支持全种类列表；列表可选 scope、PLUGIN parent，精确查询仅 target、kind；SKILL Target 只含 kind、skill_path，PLUGIN parent 使用稳定 plugin_path；列表和精确查询共用 SkillRecord，保留名称、描述、来源和状态文字，删除状态／资格布尔字段、source_kind 筛选和旧 offset／limit；原生冻结 12k／NEXT、JS 完整值 |
+| query_capabilities，HOOK 分支 | 必填 kind:HOOK；列表可选 scope、parent，精确查询只填 target、kind；本地和 Plugin Hook 统一使用 kind、config_path 的 HOOK_SOURCE Target，不公开来源、作用域或 Plugin ID；共用 target、status、definitions 记录，不在 Target 外重复路径，每条定义只含 event、matcher、command；详细配置按 target.config_path 用 read_file 读取；原生冻结 12k／NEXT、JS 完整值 |
+| query_capabilities，MCP 分支 | 必填 kind:MCP；服务列表可选 scope、PLUGIN parent；MCP_CONNECTION 以 config_path＋文件内 server_id 定位，MCP_TOOL 以运行目录 server_id＋remote_tool_name 定位；只公开连接和工具 Target，模型不接触运行实例 Target；服务保留名称、状态、可选 instructions，配置路径不重复；Prompt、资源不进入目录，HOST_OVERRIDE 保留内部未消费入口；原生冻结 12k／NEXT、JS 完整值；两个 MCP 接入工具后续讨论 |
+| query_capabilities，PLUGIN 分支 | 必填 kind:PLUGIN；列表可选 scope，精确查询仅 target、kind，Target 以稳定实例目录 plugin_path 定位；列表 object 给包概览及三类组件数量，精确查询仅 text 与组件 Target 交错，不嵌套组件清单或重复包自身 Target；组件交给 SKILL／HOOK／MCP 分支按需查询；原生冻结 12k／NEXT、JS 完整值 |
+| reload_capabilities | 参数固定 {}，全量刷新当前能力来源；仅 ROOT 原生、bypass 权限调用，无 JS API；业务结果只保留 meta.status 和 text content，部分失败为 ERROR，写清已完成部分、失败路径和具体原因，未确认状态如实说明；取消保留已发生事实；原生冻结 12k／NEXT，补页不重新刷新 |
+| manage_capability，INSTALL_LOOSE_SKILL | 仅 ROOT 原生、无 JS API；target 为源目录 PATH Target，必填 action、scope，删除 source_path、name、description；名称与说明取源 SKILL.md，安装启用设置沿现有规则，目标已存在时报错；返回安装后的 SKILL Target、meta.status 和简短 text；失败说明实际路径、原因及已发生效果，已安装但刷新失败为 ERROR 并保留真实 Target；原生冻结 12k／NEXT，补页不重装 |
+| manage_capability，SET_LOOSE_SKILL_ENABLED | 仅 ROOT 原生、无 JS API；保留独立启停，enabled 为必填 boolean，true 开启、false 关闭；target 为最小 SKILL Target，成功返回同一 Target、SUCCESS 和简短 text，重复设置仍成功；删除重复业务字段及 current／adoption 包装，错误写明实际效果；原生冻结 12k／NEXT |
+| manage_capability，REMOVE_LOOSE_SKILL | 仅 ROOT 原生、无 JS API；只填最小 SKILL target、action；删除范围限有效 Pulsara home 的 skills 和当前项目 .pulsara/skills，两处 .agents/skills 保留发现和启停机制，bundled／Plugin Skill 不由该动作删除；只清理确切路径的启用记录，保留其他副本及同名选择；返回仅 meta.status／text content；清理或刷新部分失败为 ERROR，写清实际效果、路径及原因；原生冻结 12k／NEXT，补页不重删 |
+| manage_capability，TRUST_HOOK_SOURCE | 仅 ROOT 原生、无 JS API；target 为 kind＋config_path 的最小 HOOK_SOURCE Target，只填 target、action；本地／Plugin 共用，完整非空当前定义经用户审阅后保存信任，完全权限模式也不跳过；不自动开启来源或 Plugin；返回同一 Target、meta.status、简短 text，取消及保存／刷新失败说明实际效果；原生冻结 12k／NEXT，补页不重新审阅或信任 |
+| manage_capability，REVOKE_HOOK_TRUST | 仅 ROOT 原生、无 JS API；只填最小 HOOK_SOURCE target、action；撤销信任而保留启用设置，不删除定义／脚本，不再完整信任审阅；返回同一 Target、meta.status、简短 text，已保存撤销但刷新失败按 ERROR 并说明；原生冻结 12k／NEXT，补页不重做 |
+| manage_capability，SET_HOOK_SOURCE_ENABLED | 仅 ROOT 原生、无 JS API；最小 HOOK_SOURCE target、action、必填 boolean enabled；开启／关闭保留信任，开启不建立信任或启用 Plugin，重复设置仍成功；返回同一 Target、meta.status、简短 text，失败与已保存效果放 content；原生冻结 12k／NEXT，补页不重新启停；其余底层语义保持现状 |
+| manage_capability，MCP 共用 config | ADD／UPDATE 共用公开配置字段；ADD 补默认，UPDATE 按明确字段局部更新（含嵌套 transport），env／Header 映射整体替换；两类连接遵守各自修改边界，Plugin 保留包定义且支持 config:null 恢复默认；不公开 display_name，新增使用 server_id；保留适用的用户高级配置及凭据，敏感或特殊认证交现有编辑器；独立及 Plugin 连接默认允许 ROOT 和子代理，用户可在能力页关闭；对象局部更新保留显式范围，Plugin config:null 一并移除范围覆盖并恢复此默认，模型不填 scope_policy；两个 action 见第 8、9 章 |
+| manage_capability，ADD_LOCAL_MCP | 仅 ROOT 原生、无 JS API；最小 MCP_CONNECTION target、action、可选 config，提供时按共用 ADD 候选处理，省略打开新增编辑器；同键存在失败不覆盖；成功仅同一 Target、meta.status、简短 text；取消、并发、保存和后续失败说明实际效果，原生冻结 12k／NEXT，补页不新增或重开编辑器 |
+| manage_capability，UPDATE_MCP_CONNECTION | 仅 ROOT 原生、无 JS API；独立／Plugin 共用最小 MCP_CONNECTION target、action、可选局部 config，省略打开预填编辑器，Plugin 可传 null 恢复默认；未填部分保持、保留包定义、用户高级及适用私密配置；内部并发由 runtime 在本次操作内核对；成功仅同一 Target、meta.status、简短 text，重复正常提交仍成功；缺失不自动新增，失败说明实际效果，原生冻结 12k／NEXT |
+| manage_capability，REMOVE_LOCAL_MCP | 仅 ROOT 原生、无 JS API；只填最小 MCP_CONNECTION target、action，内部核对由 runtime 取得；凭据、OAuth、项目来源批准和运行连接清理完全保持现有底层语义，不强杀已接纳调用、不等待全部旧引用退出；业务结果只保留 meta.status／简短 text，无顶层业务 Target；部分清理或必要采用失败按 ERROR 写明已知效果及具体原因；原生冻结 12k／NEXT，补页不重做删除或清理 |
+| manage_capability，AUTHORIZE_MCP | 仅 ROOT 原生、无 JS API；独立／Plugin 共用最小 MCP_CONNECTION target、action，删除模型 expected_*；完整复用现有 OAuth 登录、用户授权、任务复用、内部核对及结算，完成后才给最终结果；成功仅同一 Target、meta.status、简短 text；前端关联事实内部保留，原生冻结 12k／NEXT，补页不再次登录 |
+| manage_capability，CLEAR_MCP_AUTHORIZATION | 仅 ROOT 原生、无 JS API；只填最小 MCP_CONNECTION target、action，内部核对由 runtime 取得；完整复用现有 logout，仅清本地 OAuth 记录并结算相关登录／刷新任务，不删除连接、不清非 OAuth 凭据、不承诺远端撤销；成功保留连接 Target、meta.status、简短 text，无记录正常清除仍成功；原生冻结 12k／NEXT |
+| manage_capability，INSTALL_PLUGIN | 仅 ROOT 原生、无 JS API；source_path 统一为首位源目录 PATH target，保留必填 scope、可选 replace=false 与 source_format=native（native／claude／codex／cursor）；完整保留安装、替换及启用底层语义，新安装／替换均保持关闭；返回最小稳定 PLUGIN Target、meta.status、简短 text，有用诊断入 content，内部安装身份不公开；实际部分清理或必要采用失败按 ERROR 说明已知效果；原生冻结 12k／NEXT，补页不重装或启用 |
+| manage_capability，SET_PLUGIN_ENABLED | 仅 ROOT 原生、无 JS API；最小 PLUGIN target、action、必填 boolean enabled，内部安装条件由 runtime 核对；完整保留开启审阅（含重复 true）、关闭的组件退出范围及 Hook 信任，关闭不删包、配置、凭据或 OAuth；成功仅同一 Target、meta.status、简短 text，重复正常设置仍成功，不公开阶段枚举；已保存但必要采用失败按 ERROR 说明，原生冻结 12k／NEXT，补页不重新启停 |
+| manage_capability，REMOVE_PLUGIN | 仅 ROOT 原生、无 JS API；最小 PLUGIN target、action，内部安装条件由 runtime 核对；完整保留实例移除、包 GC、数据及源目录保留、凭据／OAuth 和运行组件退出语义，不立即删包或清数据；业务结果仅 meta.status／简短 text，无顶层插件 Target；部分清理失败按 ERROR，已发生删除仍让 runtime 照常处理；content 直接说明已完成操作和失败原因；原生冻结 12k／NEXT，补页不重做删除或 GC |
 
 `read_file` 的 NEXT Target 分支和 `write_file` 的 source 导出分支暂不展开。续读时只需传入运行时返回的完整 Target，不公开或解释内部定位。其他工具按后续讨论逐项补充，不从本节推导尚未确定的业务字段。
 
@@ -57,7 +77,7 @@
 
 | 位置 | 职责 |
 | --- | --- |
-| target | 实际读取或操作的业务对象；文件工具为解析后的文件，find_files 为搜索目录，search_file_content 为搜索文件或目录，exec_process 和 manage_process 的正常进程结果为 PROCESS Target，exit_plan 方案文件实际保存成功时为该文件的 PATH Target |
+| target | 实际读取或操作的业务对象；文件工具为解析后的文件，find_files 为搜索目录，search_file_content 为搜索文件或目录，exec_process 和 manage_process 的正常进程结果为 PROCESS Target，exit_plan 方案文件实际保存成功时为该文件的 PATH Target；manage_capability 的 INSTALL_LOOSE_SKILL 成功时为安装后的 SKILL Target |
 | meta | 本次调用状态及工具必要的类型化业务信息 |
 | content | 最直接的可读内容，使用有序内容项对象数组 |
 
@@ -69,9 +89,9 @@ query_processes 的进程 Target 只放在 content 的每条 object 记录中，
 
 现有观察信息在原生消息顶层并列呈现：`observed_at_utc` 是实际观察时间，`observation_duration_microseconds` 是实际观察耗时，单位为微秒。二者与 target、meta、content、tool_result、next 同层，不放进 meta、content 或嵌套 observation。未测得耗时不得伪造为 0，仍沿既有观察 owner 表达实际可用事实，不为本次修订增加一套计时机制。
 
-JS 的 `tools.read_file`、`tools.write_file`、`tools.edit_file`、`tools.find_files`、`tools.search_file_content`、`tools.exec_process`、`tools.manage_process`、`tools.query_processes`、`tools.view_image`、`tools.read_video_frames`、`tools.read_transcript` 成功时直接返回各节定义的完整业务值，不套用原生消息的时间外壳、12k 页预算、tool_result 或 next。数据库内容、JS 值和原生投影来自同一份结果，不保存第二份手工维护的业务正文。
+JS 的 `tools.read_file`、`tools.write_file`、`tools.edit_file`、`tools.find_files`、`tools.search_file_content`、`tools.exec_process`、`tools.manage_process`、`tools.query_processes`、`tools.view_image`、`tools.read_video_frames`、`tools.read_transcript`，以及 `tools.query_capabilities` 的 SKILL、HOOK、MCP、PLUGIN 四个分支，成功时直接返回各节定义的完整业务值，不套用原生消息的时间外壳、12k 页预算、tool_result 或 next。数据库内容、JS 值和原生投影来自同一份结果，不保存第二份手工维护的业务正文。
 
-content 的每项统一为 type/value：文字项的 value 是字符串，图片项的 value 是 IMAGE_REF Target，Target 项的 value 是 PATH Target，object 项的 value 是 JSON 对象。find_files 将命中文件保存为 Target 内容项，不并列返回 targets 或重复文字清单；search_file_content 的匹配行和计数使用 object 项。原生工具消息及显式 console.log／return 将 Target 项投影为文字引用，将 object 项投影为通用 JSON 文字，不自动打开、读取或加载其中的文件；图片项按当前模型能力投递真实图片或固定文字说明，原生能力不足显示 ERROR，Cell steer 不增加工具状态外壳。console.log 每个参数及显式 return 均递归识别实际输出任意层级的 image 内容项，其他内容呈现一次；不解析引用字符串或扫描未输出变量。普通文字项仍不自动增加分隔符。共同类型见第 2.4 节，投影及准入沿统一交付草案。
+content 的每项统一为 type/value：文字项的 value 是字符串，图片项的 value 是 IMAGE_REF Target，Target 项的 value 是该工具声明的具体 Target，object 项的 value 是 JSON 对象。find_files 将命中文件保存为 PATH Target 内容项，不并列返回 targets 或重复文字清单；search_file_content 的匹配行和计数使用 object 项；PLUGIN 精确查询使用 text 与 SKILL／HOOK_SOURCE／MCP_CONNECTION Target 项交错返回。原生工具消息及显式 console.log／return 将 Target 项投影为文字引用，将 object 项投影为通用 JSON 文字，不自动打开、读取或加载其中的文件；图片项按当前模型能力投递真实图片或固定文字说明，原生能力不足显示 ERROR，Cell steer 不增加工具状态外壳。console.log 每个参数及显式 return 均递归识别实际输出任意层级的 image 内容项，其他内容呈现一次；不解析引用字符串或扫描未输出变量。普通文字项仍不自动增加分隔符。共同类型见第 2.4 节，投影及准入沿统一交付草案。
 
 这些 PATH 工具不公开文件修订标记，也不接受模型提供的修订条件。读取、创建及结果交付不产生后续编辑资格，不维护已读行区间或通过结果窗口回填资格。edit_file 不要求模型先调用 read_file 或通过特定入口读过全文；文件路径权限与真实交付范围仍各自保持原义。
 
@@ -96,6 +116,8 @@ read_file、write_file、edit_file、find_files、search_file_content 的业务�
 read_video_frames、read_transcript 的实际失败业务值同样通过 err.result 完整提供，具体形状见[多媒体工具草案](native_tools/media.md)第 2.7、3.6 节。转录失败保留已取得文字和真实未完成区间，不增加 partial 状态；原生 NEXT 只读冻结失败结果，不继续识别或重试 ASR。
 
 ### 2.3 错误说明与提示统一进入 content
+
+query_capabilities 四个分支失败同样保留实际存在的完整 err.result，具体参数、来源观察及失败记录形状见[能力管理工具草案](native_tools/capabilities.md)。这里不推导尚未确定的能力管理动作及 MCP 接入工具合同。
 
 错误展示使用相同的结果结构，不另造错误正文包装：
 
@@ -138,9 +160,9 @@ interface ImagePart {
   value: ImageRefTarget;
 }
 
-interface TargetPart {
+interface TargetPart<TTarget = PathTarget> {
   type: "target";
-  value: PathTarget;
+  value: TTarget;
 }
 
 interface ObjectPart {
@@ -148,10 +170,10 @@ interface ObjectPart {
   value: JsonObject;
 }
 
-type ResultPart = TextPart | ImagePart | TargetPart | ObjectPart;
+type ResultPart<TTarget = PathTarget> = TextPart | ImagePart | TargetPart<TTarget> | ObjectPart;
 ```
 
-各工具声明具体的 content 类型：文件正文、创建说明与 diff 使用 TextPart[]；find_files 使用文字项与 Target 项；search_file_content 按模式声明 object 的精确 value 字段或 Target 项。object.value 的最外层是 JSON 对象，内部允许嵌套对象、数组及 JSON 基本值，不只声明为未知对象，也不新增 match 或 count 内容类型。输入参数中的 target、content 或 MCP 业务字段不因内容项统一而重命名。
+各工具声明具体的 content 类型：文件正文、创建说明与 diff 使用 TextPart[]；find_files 使用文字项与 PATH Target 项；search_file_content 按模式声明 object 的精确 value 字段或 PATH Target 项；PLUGIN 精确查询使用文字项与组件 Target 项，value 精确限定为 SkillTarget、HookSourceTarget 或 McpConnectionTarget，类型见[能力管理工具草案](native_tools/capabilities.md)。上面的默认 PathTarget 只供文件类用法，不把所有工具的引用都限制成路径，也不因此让任何工具接受任意种类 Target。object.value 的最外层是 JSON 对象，内部允许嵌套对象、数组及 JSON 基本值，不只声明为未知对象，也不新增 match 或 count 内容类型。输入参数中的 target、content 或 MCP 业务字段不因内容项统一而重命名。
 
 Target 项展示引用，图片项按模型能力交付真实图片或明确的固定文字说明；导出只给图片引用，不声称已看图。object 的 value 整体按确定字段顺序、固定两空格缩进序列化为标准 JSON 文字，并带结束换行；保留花括号、方括号、引号和字段名，字符串及控制字符按 JSON 规则转义。原生和导出按这一文字规则处理；Cell 输出保留文字结构，并递归识别其中实际 image 内容项，在原位置交图或给失败说明。保存与 JS 返回仍为完整的原对象。
 
@@ -175,3 +197,5 @@ object.value 本身是唯一权威业务对象，完整 JSON 文字按需投影�
 | [展示工具](native_tools/open_in_pulsara.md) | 第 1 章：open_in_pulsara 的参数、精简返回、原生示例及 ERROR 语义；合法展示项继续处理；第 2 章为实现参考；仅 ROOT 原生，无 JS API |
 | [Code Mode 控制工具](native_tools/code_mode.md) | 第 1 章：exec_cell 的 PATH target／code 互斥参数、简短启动结果及独立 steer；第 2 章：query_cells 的可选 target、列表与单查返回、空结果和错误语义；第 3 章：manage_cell 的 wait／stop 参数、pending_calls、精简返回及原生示例，保留已提交工具和各阶段 steer 的现行停止边界；均按冻结结果走 12k／NEXT；第 4 章为实现参考；仅 ROOT 原生，无 JS API |
 | [多媒体工具](native_tools/media.md) | 第 1 章：view_image；第 2 章：read_video_frames 五个参数、三个 action、最简索引与图文返回，cell_rect 沿现行角点坐标；第 3 章：read_transcript 三个参数、逐段文字 object、原生／JS 示例及错误语义，删除累计 180 秒 ASR 限制和公开 media_version，完整取得保存后冻结 12k／NEXT；第 4 章：annotate_media 四个必填参数、仅原生、简短返回与错误语义，保留内部文件绑定，NEXT 不重复添加标注；第 5 章为实现参考 |
+| [能力查询与刷新工具](native_tools/capabilities.md) | 第 1–4 章：SKILL／HOOK／MCP／PLUGIN 查询及最小 Target，含原生／JS 示例和冻结 12k／NEXT；第 5 章：reload_capabilities 无参数全量刷新、仅 ROOT 原生、精简返回及具体失败说明，部分失败为 ERROR；第 6 章为实现参考；两个 MCP 接入工具后续讨论 |
+| [能力变更工具](native_tools/manage_capability.md) | 第 1 章：INSTALL_LOOSE_SKILL；第 2 章：SET_LOOSE_SKILL_ENABLED，保留开启与关闭；第 3 章：REMOVE_LOOSE_SKILL 删除范围、配置清理及部分失败 ERROR；第 4 章：TRUST_HOOK_SOURCE；第 5 章：REVOKE_HOOK_TRUST；第 6 章：SET_HOOK_SOURCE_ENABLED；六项均含参数、精简返回、原生示例、错误语义及冻结 12k／NEXT；第 7 章：MCP 的 ADD／UPDATE 共用 config，含字段、类型、新增默认、局部更新、映射替换及两类归属边界，保留局部更新中的用户配置，独立／Plugin 连接统一默认允许 ROOT 和子代理使用；第 8 章：ADD_LOCAL_MCP；第 9 章：UPDATE_MCP_CONNECTION，统一独立／Plugin 连接，含三项最简参数、两类修改边界、Plugin 恢复默认、编辑器分支、精简返回、错误及冻结分页；第 10 章：REMOVE_LOCAL_MCP，含最简参数、简短结果、原生示例、现有清理语义及部分清理失败 ERROR；第 11 章：AUTHORIZE_MCP；第 12 章：CLEAR_MCP_AUTHORIZATION，最小参数及精简结果共用独立／Plugin 连接，底层授权和前端语义保持；第 13 章：INSTALL_PLUGIN，统一源目录 PATH 参数、精简稳定 PLUGIN Target 结果，安装／替换及关闭状态保持现状；第 14 章：SET_PLUGIN_ENABLED，最小参数、精简结果、原生示例和错误，保留开启审阅、组件退出及 Hook 信任；第 15 章：REMOVE_PLUGIN，保留现有包回收、数据、凭据及运行语义，部分失败按 ERROR，已发生删除仍正常处理；content 使用直白结果说明；第 16 章为实现参考；仅 ROOT 原生、无 JS API |

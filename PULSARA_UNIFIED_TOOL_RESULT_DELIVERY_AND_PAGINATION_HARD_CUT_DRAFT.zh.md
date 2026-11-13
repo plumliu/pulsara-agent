@@ -91,7 +91,7 @@ MCP 正式内容项的 `annotations.audience` 仅在接入边界用于受众判�
 
 一份已接受结果以完整业务值及其有序图文内容为唯一权威，图片二进制由既有图片存储承载。原生正文、导出文字与 JS 返回值均从这一份结果产生，不分别保存原始 JSON 备份、JS 专用结果副本或第二份手工维护的展示正文。页是结果的有序视图，不成为另一个独立业务结果实体。
 
-完整内容采用有序的 type/value 内容项，文字、图片、Target 引用及 JSON 对象分别使用 text、image、target、object 类型。文字 value 为原字符串，图片 value 为 IMAGE_REF Target，Target 项 value 为 PATH Target，object 项 value 为 JSON 对象；精确类型见第 8.7 节。图片项引用现有图片资产，图片二进制归图片存储；文字、出现顺序和关联归原结果。不能只保存“拼起来的一段文字 + 无序图片列表”，也不能分别保存互为权威的文本结果与图文结果。
+完整内容采用有序的 type/value 内容项，文字、图片、Target 引用及 JSON 对象分别使用 text、image、target、object 类型。文字 value 为原字符串，图片 value 为 IMAGE_REF Target，Target 项 value 为对应工具声明的具体 Target，object 项 value 为 JSON 对象；精确类型见第 8.7 节。文件搜索使用 PATH Target，Plugin 组件导航使用 SKILL、HOOK_SOURCE、MCP_CONNECTION Target，不新增内容类型。图片项引用现有图片资产，图片二进制归图片存储；文字、出现顺序和关联归原结果。不能只保存“拼起来的一段文字 + 无序图片列表”，也不能分别保存互为权威的文本结果与图文结果。
 
 find_files 将命中文件保存为 type:target 内容项，value 保存 PATH Target，不另存 targets 或重复文字清单。无匹配时 SUCCESS 的 content 返回一句 type:text 说明。Target 引用不是文件内容或媒体附件：原生工具结果、导出及显式 Cell 输出仅投影其完整文字引用，不自动打开、读取或加载文件。具体参数顺序、目录 Target 与结果路径规则见原生工具修订草案。
 
@@ -464,9 +464,9 @@ type ImageRefTarget = {kind: "IMAGE_REF"; image_ref: string};
 type JsonValue = string | number | boolean | null | JsonValue[] | JsonObject;
 type JsonObject = {[key: string]: JsonValue};
 type ImagePart = {type: "image"; value: ImageRefTarget};
-type TargetPart = {type: "target"; value: PathTarget};
+type TargetPart<TTarget = PathTarget> = {type: "target"; value: TTarget};
 type ObjectPart = {type: "object"; value: JsonObject};
-type ResultPart = TextPart | ImagePart | TargetPart | ObjectPart;
+type ResultPart<TTarget = PathTarget> = TextPart | ImagePart | TargetPart<TTarget> | ObjectPart;
 
 interface ImageResult {
   content: ResultPart[];
@@ -484,7 +484,7 @@ interface ImageResult {
 ]
 ```
 
-Target 内容项统一使用 `{"type":"target","value":{"kind":"PATH","path":"…"}}`。它的文字投影只展示 value 中的紧凑 JSON 引用并带结束换行，路径特殊字符按 JSON 转义；该换行属于引用自身的投影，不改变普通文字项不自动插入分隔符的规则。Target 项只展示定位信息，不隐式调用文件或媒体工具；image 项按当前模型能力及读取结果投递真实图片或明确说明，text 项直接投影字符串 value。图片二进制仍不进入 value。Cell 实际输出值中的 image 内容项对象不论嵌套位置均按第 8.8 节识别；裸 Target、引用字符串和仅同名普通字段不触发读取，工具输入及其他业务字段不因此改名。
+Target 内容项统一使用 `{"type":"target","value":<该工具声明的具体 Target>}`。文件搜索的 value 为 PATH Target；PLUGIN 精确查询的 value 为 SKILL、HOOK_SOURCE 或 MCP_CONNECTION Target，精确字段见[能力管理工具草案](native_tools/capabilities.md)。各工具分别限定合法 Target，不将共同类型误作接受任意引用的工具参数。它的文字投影只展示 value 中的紧凑 JSON 引用并带结束换行，字段和路径特殊字符按 JSON 转义；该换行属于引用自身的投影，不改变普通文字项不自动插入分隔符的规则。Target 项只展示定位信息，不隐式调用文件、能力或媒体工具；image 项按当前模型能力及读取结果投递真实图片或明确说明，text 项直接投影字符串 value。图片二进制仍不进入 value。Cell 实际输出值中的 image 内容项对象不论嵌套位置均按第 8.8 节识别；裸 Target、引用字符串和仅同名普通字段不触发读取，工具输入及其他业务字段不因此改名。
 
 object 的 value 是 JSON 对象，内部可含数组、嵌套对象和 JSON 基本值。原生与导出的文字投影按确定键顺序、固定两空格缩进序列化整个 value，并带结束换行；保留花括号、方括号、引号及全部字段名，字符串和控制字符按 JSON 转义，空对象显示 {}。Cell 输出保留相同文字结构，同时按第 8.8 节递归识别其内的实际 image 内容项对象，在该位置形成图片或失败说明；不要求整条混合图文成为可重新解析的单段 JSON。target、targets 等普通字段仍不触发路径或图片读取，不设置字段名专属排版器。
 
