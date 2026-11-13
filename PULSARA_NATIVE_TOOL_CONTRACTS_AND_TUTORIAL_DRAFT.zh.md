@@ -36,6 +36,10 @@
 | exec_cell | 仅 ROOT 原生、无 JS API；PATH target 与 code 严格二选一，删除顶层 path；接纳成功返回 CELL Target、meta.status 和简短 content，不返回 accepted 或 Cell 状态；steer 继续独立交付，NEXT 不重新执行脚本 |
 | query_cells | 仅 ROOT 原生、无 JS API；只保留可选 CELL target，列表返回 object 记录，单查返回状态、pending_calls 及完整冻结源码；删除 has_unread_output、公开游标和源码分页参数；完整结果按 12k／NEXT 交付，补页不刷新 Cell 或消费 steer |
 | manage_cell | 仅 ROOT 原生、无 JS API；target、action:wait／stop，wait 可填 yield_time_ms；成功返回实际 cell_status、pending_calls 和必要文字；停止、已提交调用及各阶段 steer 处理完全保持当前底层语义，不撤销已发生效果或撤回已入队输出；NEXT 只读冻结结果 |
+| view_image | ROOT 原生及 Code Mode JS API；必填 PATH／IMAGE_REF target，完整保存有序 text→image content；原生能力不足或缺图时 ERROR 和文字说明，JS 仍完整返回；console.log／return 递归识别任意层级 image 节点，局部失败保留其他内容；凭已知引用读图，不查 session／workspace 或来源资格，冻结 12k／NEXT 保持 |
+| read_video_frames | ROOT 原生及 Code Mode JS API；仅 target、from、to、action、crop，action 为 overview／detail／motion，删除 mode 和 continuation；完整范围先生成保存，有序索引 object→image，原生 12k／NEXT，JS 完整值；cell_rect 为 [left,top,right,bottom]，现行选择和质量保持 |
+| read_transcript | ROOT 原生及 Code Mode JS API；仅 target、from、to，删除 continuation、公开 media_version 及单次累计 180 秒 ASR 限制；按完整请求范围取得字幕或语音文字并保存，meta 保留状态、来源及实际语言，content 使用 text／逐段 object；原生冻结 12k／NEXT，JS 完整值，补页不读取媒体或发起 ASR |
+| annotate_media | 仅 ROOT 原生、无 JS API；target、from、to、text 全部必填，追加时间标注；返回 PATH Target、meta.status 和简短 text，不回传标注全文或公开成功标记；保留内部文件路径／修改时间绑定及由调用参数读取标注的现有语义，NEXT 只读冻结结果、不重复添加标注 |
 
 `read_file` 的 NEXT Target 分支和 `write_file` 的 source 导出分支暂不展开。续读时只需传入运行时返回的完整 Target，不公开或解释内部定位。其他工具按后续讨论逐项补充，不从本节推导尚未确定的业务字段。
 
@@ -65,9 +69,9 @@ query_processes 的进程 Target 只放在 content 的每条 object 记录中，
 
 现有观察信息在原生消息顶层并列呈现：`observed_at_utc` 是实际观察时间，`observation_duration_microseconds` 是实际观察耗时，单位为微秒。二者与 target、meta、content、tool_result、next 同层，不放进 meta、content 或嵌套 observation。未测得耗时不得伪造为 0，仍沿既有观察 owner 表达实际可用事实，不为本次修订增加一套计时机制。
 
-JS 的 `tools.read_file`、`tools.write_file`、`tools.edit_file`、`tools.find_files`、`tools.search_file_content`、`tools.exec_process`、`tools.manage_process`、`tools.query_processes` 成功时直接返回各节定义的完整业务值，不套用原生消息的时间外壳、12k 页预算、tool_result 或 next。数据库内容、JS 值和原生投影来自同一份结果，不保存第二份手工维护的业务正文。
+JS 的 `tools.read_file`、`tools.write_file`、`tools.edit_file`、`tools.find_files`、`tools.search_file_content`、`tools.exec_process`、`tools.manage_process`、`tools.query_processes`、`tools.view_image`、`tools.read_video_frames`、`tools.read_transcript` 成功时直接返回各节定义的完整业务值，不套用原生消息的时间外壳、12k 页预算、tool_result 或 next。数据库内容、JS 值和原生投影来自同一份结果，不保存第二份手工维护的业务正文。
 
-content 的每项统一为 type/value：文字项的 value 是字符串，图片项的 value 是 IMAGE_REF Target，Target 项的 value 是 PATH Target，object 项的 value 是 JSON 对象。find_files 将命中文件保存为 Target 内容项，不并列返回 targets 或重复文字清单；search_file_content 的匹配行和计数使用 object 项。原生工具消息及显式 console.log／return 将 Target 项投影为文字引用，将 object 项投影为通用 JSON 文字，不自动打开、读取或加载其中的文件；只有图片项投影真实图片。普通文字项仍不自动增加分隔符。共同类型见第 2.4 节，投影及准入沿统一交付草案。
+content 的每项统一为 type/value：文字项的 value 是字符串，图片项的 value 是 IMAGE_REF Target，Target 项的 value 是 PATH Target，object 项的 value 是 JSON 对象。find_files 将命中文件保存为 Target 内容项，不并列返回 targets 或重复文字清单；search_file_content 的匹配行和计数使用 object 项。原生工具消息及显式 console.log／return 将 Target 项投影为文字引用，将 object 项投影为通用 JSON 文字，不自动打开、读取或加载其中的文件；图片项按当前模型能力投递真实图片或固定文字说明，原生能力不足显示 ERROR，Cell steer 不增加工具状态外壳。console.log 每个参数及显式 return 均递归识别实际输出任意层级的 image 内容项，其他内容呈现一次；不解析引用字符串或扫描未输出变量。普通文字项仍不自动增加分隔符。共同类型见第 2.4 节，投影及准入沿统一交付草案。
 
 这些 PATH 工具不公开文件修订标记，也不接受模型提供的修订条件。读取、创建及结果交付不产生后续编辑资格，不维护已读行区间或通过结果窗口回填资格。edit_file 不要求模型先调用 read_file 或通过特定入口读过全文；文件路径权限与真实交付范围仍各自保持原义。
 
@@ -87,7 +91,9 @@ content 的每项统一为 type/value：文字项的 value 是字符串，图片
 
 exec_process、manage_process 的进程状态是独立业务事实：meta.status 表达工具调用是否成功，meta.process_status 与 exit_code 表达命令是否结束及怎样退出。正常启动、观察或完成控制动作并取得结果时，即使进程仍在运行或以非零退出码结束，工具调用均为 SUCCESS，JS 正常返回；不能因命令退出码非零而抛 ToolError。主动 kill 成功也为 SUCCESS，不将目标进程被终止等同于工具调用 CANCELLED。
 
-read_file、write_file、edit_file、find_files、search_file_content 的业务错误沿异常通道返回；在 `catch (err)` 中，err 是 JS 异常对象，`err.result` 是它携带的完整失败业务值，不是枚举或错误代码。确实存在该业务值时，也使用 target/meta/content 结构，meta.status 为 ERROR 或 CANCELLED，全部内容保留且不分页。两个搜索工具的失败业务值包含原因及实际已取得的文件或业务记录，不把它截成程序页。query_processes 同样沿异常通道提供实际存在的完整失败业务值，但按[第 3 节](native_tools/terminal.md#3-query_processes进程清单与元数据)只使用 meta/content，不重复顶层 target。参数或运行时失败若没有业务结果，就不伪造 err.result。不把旧的重复结果 ID、读取指令、可用性布尔值或内部错误分类带回新的公开包装。
+read_file、write_file、edit_file、find_files、search_file_content 的业务错误沿异常通道返回；在 `catch (err)` 中，err 是 JS 异常对象，`err.result` 是它携带的完整失败业务值，不是枚举或错误代码。确实存在该业务值时，也使用 target/meta/content 结构，meta.status 为 ERROR 或 CANCELLED，全部内容保留且不分页。两个搜索工具的失败业务值包含原因及实际已取得的文件或业务记录，不把它截成程序页。query_processes 同样沿异常通道提供实际存在的完整失败业务值，但按[第 3 节](native_tools/terminal.md#3-query_processes进程清单与元数据)只使用 meta/content，不重复顶层 target。view_image 的实际失败业务值同样由 err.result 完整提供，具体形状见[多媒体工具草案](native_tools/media.md#17-错误取消及交付失败)，不生成假图片项。参数或运行时失败若没有业务结果，就不伪造 err.result。不把旧的重复结果 ID、读取指令、可用性布尔值或内部错误分类带回新的公开包装。
+
+read_video_frames、read_transcript 的实际失败业务值同样通过 err.result 完整提供，具体形状见[多媒体工具草案](native_tools/media.md)第 2.7、3.6 节。转录失败保留已取得文字和真实未完成区间，不增加 partial 状态；原生 NEXT 只读冻结失败结果，不继续识别或重试 ASR。
 
 ### 2.3 错误说明与提示统一进入 content
 
@@ -147,9 +153,9 @@ type ResultPart = TextPart | ImagePart | TargetPart | ObjectPart;
 
 各工具声明具体的 content 类型：文件正文、创建说明与 diff 使用 TextPart[]；find_files 使用文字项与 Target 项；search_file_content 按模式声明 object 的精确 value 字段或 Target 项。object.value 的最外层是 JSON 对象，内部允许嵌套对象、数组及 JSON 基本值，不只声明为未知对象，也不新增 match 或 count 内容类型。输入参数中的 target、content 或 MCP 业务字段不因内容项统一而重命名。
 
-Target 项展示引用，图片项交付真实图片。object 的 value 整体按确定字段顺序、固定两空格缩进序列化为标准 JSON 文字，并带结束换行；保留花括号、方括号、引号和字段名，字符串及控制字符按 JSON 规则转义。原生、导出及显式 Cell 输出共用这一规则，保存与 JS 返回仍为完整的原对象。
+Target 项展示引用，图片项按模型能力交付真实图片或明确的固定文字说明；导出只给图片引用，不声称已看图。object 的 value 整体按确定字段顺序、固定两空格缩进序列化为标准 JSON 文字，并带结束换行；保留花括号、方括号、引号和字段名，字符串及控制字符按 JSON 规则转义。原生和导出按这一文字规则处理；Cell 输出保留文字结构，并递归识别其中实际 image 内容项，在原位置交图或给失败说明。保存与 JS 返回仍为完整的原对象。
 
-object 中的 target、targets 或更深层字段均作为普通 JSON 数据递归序列化，不拆出引用、不提升为 Target 项。对象内部的图片引用也不触发真实图片交付，不读取路径指向的文件，不根据字段名猜测媒体或工具操作。
+object 中的 target、targets 或更深层字段均作为普通 JSON 数据递归序列化，不拆出引用、不提升为 Target 项。裸图片引用不触发真实图片交付，不读取路径指向的文件；Cell 输出中的实际 image 内容项对象则不论嵌套层级均被识别，不根据字段名猜测媒体或工具操作。
 
 object.value 本身是唯一权威业务对象，完整 JSON 文字按需投影，不再保存一份原始 JSON 备份或独立手写正文。原生按其文字投影的连续顺序进行 12k 分页，跨页片段明确属于正文片段，不冒充完整 JSON 对象；内部定位对模型透明，不生成对象字段游标或程序分片。JS 始终取得完整对象，console.log／return 沿既定 Cell 规则整条投影，不套用原生页预算。
 
@@ -168,3 +174,4 @@ object.value 本身是唯一权威业务对象，完整 JSON 文字按需投影�
 | [定时会话工具](native_tools/schedules.md) | 第 1 章：共用 schedule 时间规则、创建默认值及完整规则类型；第 2 章：query_schedules；第 3–5 章：manage_schedule 的 create／switch、update、pause／resume／delete，含精简返回、原生示例、内部并发及队列语义；第 6 章为实现参考；仅 ROOT 原生，无 JS API |
 | [展示工具](native_tools/open_in_pulsara.md) | 第 1 章：open_in_pulsara 的参数、精简返回、原生示例及 ERROR 语义；合法展示项继续处理；第 2 章为实现参考；仅 ROOT 原生，无 JS API |
 | [Code Mode 控制工具](native_tools/code_mode.md) | 第 1 章：exec_cell 的 PATH target／code 互斥参数、简短启动结果及独立 steer；第 2 章：query_cells 的可选 target、列表与单查返回、空结果和错误语义；第 3 章：manage_cell 的 wait／stop 参数、pending_calls、精简返回及原生示例，保留已提交工具和各阶段 steer 的现行停止边界；均按冻结结果走 12k／NEXT；第 4 章为实现参考；仅 ROOT 原生，无 JS API |
+| [多媒体工具](native_tools/media.md) | 第 1 章：view_image；第 2 章：read_video_frames 五个参数、三个 action、最简索引与图文返回，cell_rect 沿现行角点坐标；第 3 章：read_transcript 三个参数、逐段文字 object、原生／JS 示例及错误语义，删除累计 180 秒 ASR 限制和公开 media_version，完整取得保存后冻结 12k／NEXT；第 4 章：annotate_media 四个必填参数、仅原生、简短返回与错误语义，保留内部文件绑定，NEXT 不重复添加标注；第 5 章为实现参考 |
