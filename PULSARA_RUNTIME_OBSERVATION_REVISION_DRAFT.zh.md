@@ -48,17 +48,19 @@ runtime observation 继续由原运行时来源投影为模型消息，不因 ro
 
 ### 1.3 发送入口与 Runtime 交接的边界
 
-pulsara_runtime_observation 是运行时补充信息的统一载体，允许在以下三个位置发送：
+pulsara_runtime_observation 是运行时补充信息的统一载体，发送入口仅限以下三种：
 
 | 入口 | 发送位置与范围 |
 | --- | --- |
 | 所有新 turn 首次模型输入 | 必须提供本 turn 的环境、时间和冻结权限；有筛选后的相关净变化时，也发送 Skill／MCP 通知；紧邻前轮中断时，按第 8 节提供前轮说明；当前作用域有待发 USER_ACTIONS 时按第 9 节附带。用户输入、定时任务、子代理启动及 Plan 自动续接等入口遵循同一规则 |
-| 用户主动 steer／补充输入 | 随本次实际采用的真实用户输入，按各 source 自身规则附带通知及待发 USER_ACTIONS；不因为历史消息或当前 turn 最初由用户开启而触发 |
-| 活动 turn 压缩后继续 | 在压缩后的恢复位置，与 TODO／PCA 并列提供当前运行信息、适用的 Plan 说明及第 8 节的前轮中断说明 |
+| 用户显式 steer | 随本次实际采用的真人用户主动 steer，按各 source 自身规则附带通知及待发 USER_ACTIONS；不因为历史消息或当前 turn 最初由用户开启而触发 |
+| 活动 turn 压缩并采用新上下文后继续 | 在压缩后的恢复位置，与 TODO／PCA 并列提供当前运行信息、适用的 Plan 说明及第 8 节的前轮中断说明 |
+
+第一个入口按新 turn 的启动来源划分为两个不交子集：由真人用户消息开启的 turn，以及由其他来源开启的 turn；后者包括定时任务、子代理启动、Plan 自动续接等。两者覆盖全部新 turn，均在该 turn 的首次模型输入处按各 source 条件处理。
 
 Runtime 交接专指压缩后的 TODO／PCA（process／cell／agent）状态交接。待读 Skill 清单和 runtime observation 在同一恢复位置与它并列；Plan 自动续接属于新 turn 的开始，不称为 Runtime 交接。
 
-上述入口不要求重发全部 source；没有本次需要交付的内容时不发空块。普通工具续跑、后台事件或能力变化本身不单独触发 observation。完整初始 Skill 目录仍是第 2 节的上下文初始说明；Hook 执行反馈使用独立的 pulsara_hook_context。
+命中上述入口后，各 source 仍须满足自己的发送条件，不要求每次发送全部 source；没有本次需要交付的内容时不发空块。普通工具续跑、同一 turn 内的 Cell／Agent 输出、后台能力或记忆变化本身均不单独触发 observation；Cell／Agent 等输入实际开启新 turn 时，按第一个入口处理。空闲压缩不提前发送活动 turn 的恢复说明。完整初始 Skill 目录仍是第 2 节的上下文初始说明；Hook 执行反馈使用独立的 pulsara_hook_context，按事件交付。
 
 Skill／MCP 变化通知由所有新 turn 的首次模型输入或本次新采用的用户主动 steer 触发。普通工具续跑、同一 turn 内的 Cell／Agent 等运行时补充本身不触发；它们如果实际开启了新 turn，则适用新 turn 规则。压缩恢复本身只提供运行说明，不补报能力变化历史；恢复后若同次还实际采用新的用户 steer，按该入口处理。
 
