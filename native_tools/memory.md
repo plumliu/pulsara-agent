@@ -653,6 +653,10 @@ next: null
 
 上述参数是单一现行合同。公开工具族为 remember、query_memory、manage_memory；删除独立 get_memory、旧 search_memory 及 mark_memory_relation，不提供兼容别名或关系入口。内存中的瞬时检索与模型结果复用根目录草案规定的底层路径；正常工具返回不使用隐式召回的增量 i／j 去重，仍完整保存本次业务结果。
 
+隐式召回的 MEMORY_RECALL observation 沿[Runtime Observation 修订草案](../PULSARA_RUNTIME_OBSERVATION_REVISION_DRAFT.zh.md)使用 source／body 外壳，body 为 text＋可选 target 对象数组，不公开 presence。偏好刷新、混合召回和旧召回记忆失效核对，只随新采用的 ROOT 真人消息／主动 steer 检查并发送，普通工具续跑不刷新。必要读取失败时用文字说明整条记忆信息暂不可用，不交付部分增量，也不推进 P／i；具体记忆增量规则沿根目录草案。本文三个显式工具仍按工具合同读取当前业务状态，使用各自的 meta.status／content 返回值。
+
+MEMORY_WRITE_HINT 另按[Runtime Observation 草案第 10 节](../PULSARA_RUNTIME_OBSERVATION_REVISION_DRAFT.zh.md#10-记忆写入提醒-memory_write_hint)发送一条 text 建议，提醒模型自行判断是否保存或更新；它不自动调用工具，不改变本文参数、权限和结果合同。
+
 完整结果和原生交付沿索引共用规则：工具状态只表达一次，错误说明进入文字 content；tool_result 指向完整工具结果，NEXT 只补读已保存内容。时间观察信息在原生消息顶层，不混入记忆业务对象的 recorded_at／updated_at。具体工具结果使用本文规定的类型，不恢复旧业务 JSON 或关系包装。
 
 三个工具的返回值及原生示例已在第 1 至 3 章确定。本轮只定文档，不修改生产实现、数据库、工具 schema 或提示词。

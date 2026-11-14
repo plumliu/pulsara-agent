@@ -1,6 +1,6 @@
 # Pulsara Runtime Observation 修订草案
 
-状态：讨论草案，主体未实施。当前代码已修复同批用户输入的 Skill 引用收集，并删除旧 16 项激活限制；其余目录、提示与交接修订仍待实施。本文件确定 runtime observation 的公共展示形状、Skill 与 MCP 变化通知，以及本轮运行信息、规划状态、已批准计划的发送与压缩交接。Hook 附加文字使用[独立消息草案](PULSARA_HOOK_CONTEXT_MESSAGE_REVISION_DRAFT.zh.md)，不再作为本外壳的来源；Plugin、记忆及其他来源的具体正文和发送规则后续逐类讨论，不在此推定。
+状态：讨论草案，主体未实施。当前代码已修复同批用户输入的 Skill 引用收集，并删除旧 16 项激活限制；其余目录、提示与交接修订仍待实施。本文件确定 runtime observation 的公共展示形状、Skill 与 MCP 变化通知，本轮运行信息、规划状态、已批准计划和前轮中断说明的发送与压缩交接，以及 USER_ACTIONS 和 MEMORY_WRITE_HINT 提醒。记忆隐式召回已按[记忆 CRUD 草案第 6 节](PULSARA_MEMORY_CRUD_HARD_CUT_DRAFT.zh.md#6-搜索索引与自动召回)确定业务规则，采用本文件的公共外壳。Hook 附加文字使用[独立消息草案](PULSARA_HOOK_CONTEXT_MESSAGE_REVISION_DRAFT.zh.md)，不再作为本外壳的来源；Plugin 自身变化不单独通知。
 
 ## 1. 公共模型展示形状
 
@@ -27,12 +27,14 @@
 
 | 字段 | 模型可见含义 |
 | --- | --- |
-| source | 本次说明的来源；已确定 SKILL_CATALOG_CHANGES、ACTIVE_SKILL，第 6 节的 TURN_CONTEXT、PLAN_MODE、APPROVED_PLAN，以及第 7 节的 MCP_CATALOG_CHANGES |
+| source | 本次说明的来源；已确定 SKILL_CATALOG_CHANGES、ACTIVE_SKILL，第 6 节的 TURN_CONTEXT、PLAN_MODE、APPROVED_PLAN，第 7 节的 MCP_CATALOG_CHANGES，第 8 节的 PREVIOUS_TURN_OUTCOME，第 9 节的 USER_ACTIONS，第 10 节的 MEMORY_WRITE_HINT，以及第 11 节的 MEMORY_RECALL |
 | body | 集中呈现本次说明的对象数组 |
 | body[].text | 自然语言内容，直接说明发生了什么、必要原因及下一步引导 |
 | body[].target | 需要后续操作时附带的已有 Target；不需要时省略 |
 
 这里是给模型阅读的说明，不是审计记录或程序 SDK 结果。不使用工具 content 的 type/value，不新增操作枚举、状态矩阵、变化 ID、版本标签或回执。Target 仍采用既定形状；Skill 使用 kind:SKILL、skill_path，不在对象旁再重复裸路径。body 的 text 直接表达空、失败或变化，不把正文包成另一层 JSON 字符串。
+
+Skill／MCP 来自 Plugin 时，在现有通知的 text 中于组件名称后注明“（来自插件 <插件名称>）”，名称沿已有 Plugin 来源取得。只补充这句来源说明，通知项及 Target 不新增 parent、plugin_id、Plugin Target 或归属对象；发送时机和最小 Target 保持原规则，Plugin 自身变化不单独生成通知。
 
 runtime observation 继续由原运行时来源投影为模型消息，不因 role=user 就成为新人类指令。内部必要的来源与控制事实仍由原 owner 保存，不从公开文字反推执行权限。
 
@@ -50,9 +52,9 @@ pulsara_runtime_observation 是运行时补充信息的统一载体，允许在�
 
 | 入口 | 发送位置与范围 |
 | --- | --- |
-| 所有新 turn 首次模型输入 | 必须提供本 turn 的环境、时间和冻结权限；有筛选后的相关净变化时，也发送 Skill／MCP 通知。用户输入、定时任务、子代理启动及 Plan 自动续接等入口遵循同一规则 |
-| 用户主动 steer／补充输入 | 随本次实际采用的真实用户输入，按各 source 自身规则附带通知；不因为历史消息或当前 turn 最初由用户开启而触发 |
-| 活动 turn 压缩后继续 | 在压缩后的恢复位置，与 TODO／PCA 并列提供当前运行信息及适用的 Plan 说明 |
+| 所有新 turn 首次模型输入 | 必须提供本 turn 的环境、时间和冻结权限；有筛选后的相关净变化时，也发送 Skill／MCP 通知；紧邻前轮中断时，按第 8 节提供前轮说明；当前作用域有待发 USER_ACTIONS 时按第 9 节附带。用户输入、定时任务、子代理启动及 Plan 自动续接等入口遵循同一规则 |
+| 用户主动 steer／补充输入 | 随本次实际采用的真实用户输入，按各 source 自身规则附带通知及待发 USER_ACTIONS；不因为历史消息或当前 turn 最初由用户开启而触发 |
+| 活动 turn 压缩后继续 | 在压缩后的恢复位置，与 TODO／PCA 并列提供当前运行信息、适用的 Plan 说明及第 8 节的前轮中断说明 |
 
 Runtime 交接专指压缩后的 TODO／PCA（process／cell／agent）状态交接。待读 Skill 清单和 runtime observation 在同一恢复位置与它并列；Plan 自动续接属于新 turn 的开始，不称为 Runtime 交接。
 
@@ -60,7 +62,7 @@ Runtime 交接专指压缩后的 TODO／PCA（process／cell／agent）状态交
 
 Skill／MCP 变化通知由所有新 turn 的首次模型输入或本次新采用的用户主动 steer 触发。普通工具续跑、同一 turn 内的 Cell／Agent 等运行时补充本身不触发；它们如果实际开启了新 turn，则适用新 turn 规则。压缩恢复本身只提供运行说明，不补报能力变化历史；恢复后若同次还实际采用新的用户 steer，按该入口处理。
 
-记忆来源保留独立触发规则：runtime 自动开启新 turn 或压缩本身不触发记忆观察；真实用户输入开启的 turn 和用户主动 steer，仍按既定用户输入记忆规则处理。扩大运行信息及能力通知的入口，不将运行时输入冒充为用户输入，也不因此重做召回。
+记忆来源只随 ROOT 本次新采用的真实用户消息或用户主动 steer，按第 11 节及记忆 CRUD 草案检查并发送，包括回答偏好刷新、混合召回和旧召回记忆失效核对；普通工具续跑不刷新或发送这些内容。runtime 自动开启新 turn 或压缩本身不触发记忆观察。MEMORY_WRITE_HINT 另须满足第 10 节的写入及命中条件。扩大运行信息及能力通知的入口，不将运行时输入冒充为用户输入，也不因此重做召回。
 
 能力通知侧只保存上次已告知的相关状态快照作为比较依据；当前真实状态继续由现有能力 owner 提供。最新净 diff 在准备本次汇报时临时计算，用于生成通知，用完即可丢弃，不另存持续更新的 diff，也不累计中间变化。
 
@@ -134,6 +136,8 @@ review：检查代码中的问题。
 | 描述、路径或同名选中副本改变 | 说明更新，附当前名称、必要描述和 Target，不让模型继续依赖旧目录信息 |
 
 名称、描述、路径、选中副本及可用性均未改变，只有说明正文变化时，不发送 Skill 变化通知，也不增加通知专用的正文追踪。正文由模型调用 read_file 时取得；压缩后的既定强制重读规则保持。
+
+Plugin 来源的 text 示例：“已启用技能 review（来自插件 review-tools）：检查代码中的问题。”
 
 例如：
 
@@ -342,6 +346,7 @@ messages：
   必须优先用 read_file 重读的 Skill 清单
   TURN_CONTEXT observation 块
   PLAN_MODE 或 APPROVED_PLAN observation 块（仅相应 turn）
+  PREVIOUS_TURN_OUTCOME observation 块（仅紧邻前轮中断时）
   按原顺序保留的近期原始消息与必要的完整工具交互
   尚待处理的新输入（如果有）
 ```
@@ -412,6 +417,8 @@ text 使用建议性语气：已确认的新增、停用或更新直接陈述；
 
 body 仍按服务聚合为 text＋可选 target 对象；text 可以较具体，但不变成接口说明全文或变化清单。服务在当前查询范围内仍可定位时，复用最小 MCP_CONNECTION Target；已移除或已超出当前可见范围、无法提供可用 Target 时，只保留名称及说明。工具名称和变化类别可以直接写在 text 中，不新增结构化通知字段。
 
+Plugin 来源的 text 示例：“MCP 服务 docs（来自插件 knowledge-tools）的工具目录已更新。如有需要，可以查询当前目录。”
+
 ```json
 {
   "pulsara_runtime_observation": {
@@ -457,7 +464,208 @@ body 仍按服务聚合为 text＋可选 target 对象；text 可以较具体，
 
 删除旧 MCP_CATALOG source 的全量自动摘要、presence 公开展示、FULL／COMPACT／REF_ONLY 三档目录投影和专用配额，以及 direct／meta 分类、降级例外、相关省略计数、资源数量和固定调用教学。不保留旧 source 别名，不将整份目录总摘要或总指纹代替本节的实际变化比较；此处不改变协议、发现、调用及 provider 的真实资源边界，也不新增通知总量 cap。
 
-## 8. 实施接点与核对
+## 8. 前轮中断说明 PREVIOUS_TURN_OUTCOME
+
+### 8.1 精简正文
+
+保留 PREVIOUS_TURN_OUTCOME 来源，以 body 的 text 项说明紧邻上一轮为什么中断，以及哪些执行事实仍需留意。只看同一 session 紧邻的前一轮，不跳过正常完成的轮去寻找更早的失败，也不把本说明当作上一轮任务总结或自动恢复指令。
+
+| 实际事实 | 文字表达 |
+| --- | --- |
+| 用户停止或执行失败等中断原因 | 直接说明实际原因；用户停止时提醒按本轮输入处理，不自行恢复已停止任务 |
+| 已保存部分助手内容 | 必要时说明这些内容仅代表已有进展，不代表任务已经完成；没有已保存的完整助手 entry 时不虚构进展 |
+| 存在明确未派发的调用 | 需要时用文字说明未派发，不与已发生执行尝试的调用混为一谈 |
+| 已记录执行尝试但尚无确认结果 | 说明实际效果未知，提醒先核实，避免仅因缺少结果就重新执行 |
+
+各项按实际情况出现，不固定回报统计或零值。有助于理解时，可在 text 中注明相关工具名称及实际可公开的错误详情；不为说明生成虚构 Target，不从自然语言反推工具结算状态。
+
+### 8.2 发送时机与压缩位置
+
+| 入口或情况 | 发送规则 |
+| --- | --- |
+| 新 turn 首次模型输入 | 紧邻前轮确实中断且符合原读取规则时发送一次，用户、定时任务、子代理及 Plan 续接等入口采用同一判断 |
+| 用户主动 steer 或普通工具续跑 | 不重复发送已交付的前轮中断说明 |
+| 上一轮迟到工具结果 | 沿原路径关联原调用独立追加，不替换已交付的闭合说明，不为了更新数量或状态再次发送整份前轮汇总 |
+| 活动 turn 压缩后继续 | 在 TODO／PCA 旁，与 TURN_CONTEXT 等运行说明并列恢复本 turn 适用的前轮中断说明；依据本次已接纳事实生成，已取得结果的调用不再说成尚无确认结果 |
+| 已结束 turn 的空闲压缩 | 不提前附加本说明；下一次实际开启新 turn 时重新判断其紧邻前轮 |
+| 无前轮、前轮正常完成或既有控制路径明确排除的退出 | 不发送本说明，也不发送清空消息或空 body |
+
+Plan 正常模式切换和既有强制退出的排除规则继续沿原控制语义处理，不一律当作需要提示的前轮中断。首次通知是否已进入上下文沿现有输入安装边界判断；候选准备不算发送完成，不新增回执或投递登记。
+
+### 8.3 模型可见示例
+
+例如上一轮被用户停止，且仍有工具执行尝试未取得确认结果时：
+
+```json
+{
+  "pulsara_runtime_observation": {
+    "source": "PREVIOUS_TURN_OUTCOME",
+    "body": [
+      {"text": "上一轮由用户停止，任务未完成。按本轮输入处理，不要自行恢复已停止的任务。"},
+      {"text": "上一轮仍有工具执行尝试尚无确认结果，实际效果未知。请先核实，避免重复执行。"}
+    ]
+  }
+}
+```
+
+若上一轮因模型请求失败而中断且没有结果不确定的工具，body 可只包含“上一轮因模型请求失败而中断，任务未完成。请结合已保留的内容按本轮输入处理。”这一文字项。实际存在可公开错误原因时可补充其原有含义，不伪造具体失败细节。
+
+### 8.4 删除公开包装，保留底层事实
+
+删除正文中 outcome、accepted_assistant_disposition 等公开枚举、not_dispatched_tool_count／unknown_tool_count 等统计字段，以及 guidance、unresolved_tool_name_samples、terminal_public_detail、diagnostic_handling 的独立公开字段包装；必要信息按第 8.1 节直接表达为文字。删除公开 presence、空 body／CLEARED 清空消息和 FULL／COMPACT 双份正文，只生成一份简短说明。
+
+保留原中断原因、已接受助手内容、执行尝试、派发与结果结算事实，以及迟到结果的读取与交付路径。公开字段精简不把“结果未知”改成“未执行”，也不改变已发生效果、自动重试或 Plan 控制语义。不为本来源套用 Skill／MCP 的净 diff 通知机制或新增比较快照。
+
+工具调用的模型消息配对继续由原路径闭合：暂缺真实结果时，按未派发或可能已执行的实际事实生成闭合说明，不伪造数据库中的真实工具结果。迟到的真实结果关联原调用独立追加，不替换已交付的闭合说明，也不再次作为原调用的配对工具消息。PREVIOUS_TURN_OUTCOME 只负责简短提醒，不承担工具调用闭合，不改写已有消息；同一 epoch 的模型输入继续只追加。
+
+## 9. 用户操作提醒 USER_ACTIONS
+
+### 9.1 两类内容与精简正文
+
+USER_ACTIONS 只报告当前既有范围内的工作区重建和用户进程控制事实，不扩展为通用用户操作日志。body 使用 text＋可选 PROCESS Target 的对象数组：
+
+| 事项 | 正文与 Target |
+| --- | --- |
+| 工作区目录重新创建 | text 说明本次操作只创建了空目录，原文件未恢复，后续应以实际磁盘内容为准；不重复返回 TURN_CONTEXT 已提供的工作区根路径，不附 Target |
+| 用户停止后台进程 | text 说明实际停止成功、失败或尚未确认的情况，附原 PROCESS Target；必要的失败原因或子代理来源直接写入 text |
+
+这些文字表达操作发生时的事实，不把停止尝试写成停止成功，也不将提醒当作恢复旧任务或重新启动进程的指令。被拒绝的请求、目标已经结束的无变化操作不生成提醒；进程自然退出、停止整轮、停止 Cell 和停止压缩继续沿各自现有路径处理，不纳入本来源。
+
+### 9.2 发送时机、暂存与压缩
+
+当前作用域有待发事项时，只在新 turn 首次模型输入或本次实际采用用户主动 steer 的入口取出并尝试交付。用户点击停止进程、恢复工作区目录是控制操作，不自动算一条用户 steer；不为提醒制造 steer、唤醒空闲模型或额外开启 turn。实际控制及已有等待流程的恢复仍立即按原规则生效。
+
+普通工具续跑不取走待发提醒。继续复用现有 session 待发 owner，工作区重建保留尚未取出的最新事项，同一进程尚未取出的多次控制保留最新结果；不记录完整动作过程，不新增能力净 diff 或比较快照。
+
+压缩不重放已发送的 USER_ACTIONS，不将其加入 TODO／PCA 旁的固定交接清单。已交付文字正常参与历史压缩，未取出的事项留在原 owner 中等待下一个合格发送入口；预览、压缩候选准备或压缩本身不消费待发事项。若压缩后同次还实际采用用户主动 steer，按该用户输入入口处理。
+
+保持既有尽力交付：取出后若投影、编译或实际输入准入失败，可以舍弃本批提醒，不保证重新排队，不改变实际操作结果；Host 关闭时沿原生命周期清理。没有事项时不发空块，交付后不再发送清空消息，不新增持久日志、回执或重试任务。
+
+### 9.3 模型可见示例
+
+以下示意同一次交付工作区重建、进程停止成功和另一进程停止未确认三项事实，进程身份为占位：
+
+```json
+{
+  "pulsara_runtime_observation": {
+    "source": "USER_ACTIONS",
+    "body": [
+      {
+        "text": "用户重新创建了工作区目录。本次操作只创建了空目录，未恢复原文件；后续操作前请重新检查实际文件。"
+      },
+      {
+        "text": "用户已停止该后台进程。",
+        "target": {"kind": "PROCESS", "process_id": "process:<进程A>"}
+      },
+      {
+        "text": "用户尝试停止该后台进程，但未能确认停止完成。原因：进程管理器不可用。",
+        "target": {"kind": "PROCESS", "process_id": "process:<进程B>"}
+      }
+    ]
+  }
+}
+```
+
+### 9.4 删除公开包装，复用底层能力
+
+删除旧 actions／guidance 包装、公开 presence，以及事项中的 kind、origin、时间、disposition、status、exit_code、physical_state、group_alive、public_detail 等固定公开字段；工作区的 original_files_restored、handling 等信息改用上述文字表达。只保留 text 和需要时的 PROCESS Target，不新增另一组操作或状态字段。
+
+进程查找、终止、物理结算、重复控制、权限与作用域、取消及失败处理完全复用现有底层能力，不改变停止方式或执行语义。工作区重建也复用现有恢复路径，不借通知修订恢复原文件。后续 hardcut 只对齐通知的取出入口、公开投影及实际封装计量，控制 owner 和操作结果继续沿原路径；本轮不改生产代码。
+
+## 10. 记忆写入提醒 MEMORY_WRITE_HINT
+
+### 10.1 只随符合条件的新用户输入发送
+
+只在 ROOT 当前 turn 的冻结有效权限非只读、本次新采用真实用户消息或用户主动 steer 时检查。还须同时满足：用户未禁止记忆写入、记忆能力可用、模型实际工具目录中有 remember，并且本批至少一条新用户输入命中现有轻量词句匹配规则。用户禁止保存或禁用记忆时，继续沿现有策略优先处理，不因正向命中而发送提示。
+
+按本次实际采用的用户输入逐条检查，同批任一条命中就集中发送一条提醒，不只检查最后一条；首次调用前尚未交付的初始用户输入也纳入本批。例如先输入“以后回答简短”，再补充普通任务材料，不应因最后一条未命中而漏掉提醒。整批采用后的有效记忆策略仍须允许写入。
+
+普通工具续跑不重复发送；不能沿用“这个 turn 最初由用户开启”的状态再次触发。Plan 自动续接、定时任务等运行时入口、Cell／Agent 输出、压缩及上下文预览本身不触发。压缩后的 Runtime 交接不固定恢复旧提醒，既有历史消息按正常压缩规则处理。
+
+### 10.2 正文只保留一条建议
+
+保留既有 MEMORY_WRITE_HINT source，body 使用一条 text 对象，不使用裸字符串，也不附 Target、命中词、分数或控制字段：
+
+```json
+{
+  "pulsara_runtime_observation": {
+    "source": "MEMORY_WRITE_HINT",
+    "body": [
+      {
+        "text": "本次用户输入可能包含值得长期保留的信息。请自行判断，必要时在本次回复结束前使用记忆工具保存或更新。"
+      }
+    ]
+  }
+}
+```
+
+这只是建议，不自动写入记忆，也不要求每次都调用工具。模型按记忆工具合同判断是否创建或更新；没有满足条件的提示时不发送空块。它与 MEMORY_RECALL 独立，不改变回答偏好、混合召回、变化通知或 P／i 的规则。
+
+### 10.3 复用现有门控与匹配
+
+复用现有词句匹配、用户禁用策略、冻结权限及工具可用性检查。实施时将同批判断收敛为“任一真实用户输入命中、最终策略允许写入”，删除仅取最后一条命中结果和沿历史用户入口重复触发的路径。不增加模型分类器、持久登记、发送回执或新的数量与正文预算。
+
+## 11. 记忆召回 MEMORY_RECALL
+
+### 11.1 发送时机与业务依据
+
+记忆选择、增量交付和失效通知以[记忆 CRUD 草案第 6 节](PULSARA_MEMORY_CRUD_HARD_CUT_DRAFT.zh.md#6-搜索索引与自动召回)为准，本节汇总它们在统一 observation 中的发送与展示方式，不另设一套召回算法。
+
+回答偏好刷新、混合召回和已交付旧记忆的失效核对，统一只在 ROOT 本次新采用真实用户消息或用户主动 steer 时检查并发送，保留各部分的用户禁用语义、选择条件及既有可读范围。回答偏好独立选择，不依赖本次输入关键词；相关性召回继续混合持久记忆与历史 QA／QAQ。普通工具续跑不刷新偏好、不核对旧召回记忆，也不发送新的 MEMORY_RECALL；Cell／Agent 输出、Plan 自动续接等运行时入口和压缩本身同样不触发上述检查。不因所有新 turn 都有 TURN_CONTEXT 就触发记忆读取。
+
+偏好与旧召回记忆在两次合格输入之间发生的变化，留到下一次新采用真人输入时按当前事实核对；显式记忆查询和 CRUD 仍沿工具合同读取当前业务状态。增量结算沿记忆草案处理；压缩不新增固定的记忆交接块，也不为重发旧 observation 重新检索。增量依据仍取当前上下文实际保留及已安装的内容，不建立跨 epoch 的永久“曾经见过”记录。
+
+### 11.2 三部分内容统一投影到 body 数组
+
+仅使用 MEMORY_RECALL 一个 source，合并回答偏好、混合召回和变化通知。三部分先由记忆 owner 组织，再投影为 body 数组中的 text 项；不是 observation 的三个新增外层字段，也不把业务对象直接放进 body。
+
+| 待投影内容 | 发送规则与模型可见提示 | 详细合同 |
+| --- | --- | --- |
+| response_preferences | 全局与当前工作区合计最多 8 条，按 updated_at 从新到旧。首次或其他集合变化发送完整新集合，标题为“当前完整回答偏好”；仅新增且原成员的值及相对顺序未变时只发新增对象，标题为“新增回答偏好”；未变则省略 | [第 6.2 节](PULSARA_MEMORY_CRUD_HARD_CUT_DRAFT.zh.md#62-回答偏好独立输入) |
+| recall | 持久记忆与 QA／QAQ 共用 20→5 选择；先选出本次 j，再与过去已交付且仍有效的 i 判重，只发新增内容或修改后的新版本，不补第六项。标题为“新增召回内容” | [第 6.3 节](PULSARA_MEMORY_CRUD_HARD_CUT_DRAFT.zh.md#63-持久记忆与历史会话混合召回)及[增量交付](PULSARA_MEMORY_CRUD_HARD_CUT_DRAFT.zh.md#631-增量交付) |
+| notices | 只报告过去 recall 中旧持久记忆已确认失效的事实，每项为 target、title、notice。标题为“先前召回记忆的变化”；不用于回答偏好或历史摘录，不占八条偏好／五项召回名额 | [第 6.6 节](PULSARA_MEMORY_CRUD_HARD_CUT_DRAFT.zh.md#66-同一-runtime-observation-中的正文与通知)及[第 6.7 节](PULSARA_MEMORY_CRUD_HARD_CUT_DRAFT.zh.md#67-读取失败与增量结算) |
+
+完整记忆对象和 QA／QAQ 摘录保持各自形状，在 text 中使用上述小标题及缩进对象／数组展示；回答偏好 statement 固定为 ""。偏好被删、范围或成员变化、顺序变化以及八条满后发生替换时，都按完整新集合发送，不使用 notices。完整偏好集合清空时，仍发送“当前完整回答偏好”及 response_preferences:[]。
+
+旧 recall 记忆只是本次未入选，不代表失效；确认修改、删除或不可读才通知。notices 可覆盖不在本次 j 中的旧记忆，不能仅核对 i 与 j 的交集。旧版通知只作废旧版；同条 observation 中已选中的新版仍作为完整对象交付。具体空值、通知文字和组装方式沿[第 6.6／6.7 节](PULSARA_MEMORY_CRUD_HARD_CUT_DRAFT.zh.md#66-同一-runtime-observation-中的正文与通知)。
+
+例如本次偏好未变、无新增召回，只确认一条旧记忆已删除，公开形状为：
+
+```json
+{
+  "pulsara_runtime_observation": {
+    "source": "MEMORY_RECALL",
+    "body": [
+      {
+        "text": "先前召回记忆的变化\nnotices:\n  [\n    {\n      \"target\": {\"kind\": \"MEMORY\", \"memory_id\": \"memory:<记忆ID>\"},\n      \"title\": \"项目 Python 版本\",\n      \"notice\": \"该记忆已删除。\"\n    }\n  ]"
+      }
+    ]
+  }
+}
+```
+
+正常读取后三部分均无待交付内容时，不发送空 observation；偏好全量替换及确认清空都是需要交付的更新，读取失败说明沿第 11.3 节发送。删除旧的独立 MEMORY_RESPONSE_PREFERENCE_HEAD 消息路径，保留其独立偏好选择职责；不在统一消息之外再次发送偏好。不公开 presence、状态枚举或增量模式字段。
+
+### 11.3 失败、安装与正文边界
+
+读取失败和安装结算完整沿[第 6.7 节](PULSARA_MEMORY_CRUD_HARD_CUT_DRAFT.zh.md#67-读取失败与增量结算)：必要存储读取或已交付记忆核对任一部分失败，本次整条 observation 用一条 text 说明暂不可用，不发布成功部分、不用空数组冒充无结果，也不推进偏好集合 P 或有效 recall 内容 i。可选向量、重排通道失败仍沿原有可选通道处理，不一概视为整条读取失败。
+
+```json
+{
+  "pulsara_runtime_observation": {
+    "source": "MEMORY_RECALL",
+    "body": [
+      {"text": "本次记忆信息暂不可用：数据库读取失败。"}
+    ]
+  }
+}
+```
+
+P／i 只在既有 provider 输入安装成功后推进：P 为应用偏好追加／全量替换后的完整有效集合；i 先作废已通知的旧版本，再纳入本次新增／新版内容。不把 i 替换成本次 j，也不套用 Skill／MCP 的上次已告知快照替换规则；候选准备和模型回答都不是结算边界。
+
+正文沿[第 6.4 节](PULSARA_MEMORY_CRUD_HARD_CUT_DRAFT.zh.md#64-单一正文与条目限制)完整交付，删除 FULL／COMPACT／REF_ONLY 及记忆专属预算降级路径，不引入原生工具的 12k／NEXT 分页。显式记忆工具仍按[native_tools/memory.md](native_tools/memory.md)保存并返回完整业务结果，不套用隐式 i／j 去重。
+
+## 12. 实施接点与核对
 
 相关合同：[能力查询](native_tools/capabilities.md)、[文件工具](native_tools/filesystem.md)、[Plan 工具](native_tools/plan.md)、[统一交付](PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)、[有序内容数据库](PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md)。Plan 工具按本文件的 turn 边界、三类说明和交接位置同步；其他文档的对应旧 Skill 叙述在后续同步时按本文件收敛，不据旧叙述恢复自动全文注入。
 
@@ -473,6 +681,10 @@ body 仍按服务聚合为 text＋可选 target 对象；text 可以较具体，
 | [Plan 控制与续接](src/pulsara_agent/conversation_kernel/plan_runtime.py)、[Plan 事务](src/pulsara_agent/conversation_kernel/_repository/plans.py)及[Runtime 交接](src/pulsara_agent/conversation_kernel/compaction/runtime_handoff.py) | 每个新 turn 提供冻结运行信息，并可附相关能力净变化；新 turn 起始与压缩后的 TODO／PCA 状态交接分开；规划压缩引用进入前 turn A 最后一条已交付用户输入，执行压缩承接完整获批原文；自动续接不触发 slash 激活或记忆观察，空闲压缩不提供 Runtime 交接 |
 | [MCP 发现与定义事实](src/pulsara_agent/conversation_kernel/mcp/discovery.py)、[schema 接纳](src/pulsara_agent/conversation_kernel/mcp/schema.py)、[目录与连接 owner](src/pulsara_agent/conversation_kernel/mcp/supervisor.py)及[执行策略](src/pulsara_agent/conversation_kernel/tool_surface.py) | 复用完整已接纳 schema、说明、配置、范围与策略事实；按第 7 节比较变化，不新增协议解析器或刷新路径；不把 SDK 未纳入定义事实的元数据宣称为已有追踪能力 |
 | [MCP 旧展示](src/pulsara_agent/conversation_kernel/context_sources.py)、[摘要判重与 source heads](src/pulsara_agent/model_input/compiler.py)及[输入准备](src/pulsara_agent/conversation_kernel/provider_dispatch.py) | 用 MCP_CATALOG_CHANGES 替换旧目录摘要；只保存上次已告知快照，每个新 turn 首次输入或本次用户主动 steer 准备汇报时临时计算最新净 diff，有相关变化才通知，输入安装成功后用生成本次通知所依据的快照替换旧快照，ABA 不通知；采用新上下文时初始化比较快照，不保留跨上下文变化历史 |
+| [前轮事实读取](src/pulsara_agent/conversation_kernel/reader.py)、[正文采集](src/pulsara_agent/conversation_kernel/context_sources.py)、[输入编译](src/pulsara_agent/model_input/compiler.py)及[压缩事实承接](src/pulsara_agent/conversation_kernel/compaction/planner.py) | 按第 8 节只在新 turn 首次输入及活动 turn 压缩恢复时提供适用的简短中断说明；迟到结果沿原路径交付，不重复汇总；删除公开字段包装、presence、清空消息和双份正文，保留中断与工具结算事实 |
+| [用户控制与提醒暂存](src/pulsara_agent/conversation_kernel/host_controls.py)、[输入准备](src/pulsara_agent/conversation_kernel/provider_dispatch.py)及[来源投影](src/pulsara_agent/conversation_kernel/context_sources.py) | 按第 9 节只报告工作区重建与进程控制，合格入口才取出，text＋可选 PROCESS Target 替代旧公开包装；压缩不重放，保持既有尽力交付，进程控制及工作区恢复继续复用底层能力 |
+| [写入提示匹配](src/pulsara_agent/conversation_kernel/memory/hints.py)、[输入准备](src/pulsara_agent/conversation_kernel/provider_dispatch.py)及[记忆来源组装](src/pulsara_agent/conversation_kernel/memory/dispatch.py) | 按第 10 节复用既有写入门控；只检查本次新采用的 ROOT 用户输入，同批任一命中且最终策略允许时发送一条 text 提醒，不在普通续跑或压缩交接中重复触发 |
+| [记忆输入编排](src/pulsara_agent/conversation_kernel/memory/dispatch.py)、[输入准备](src/pulsara_agent/conversation_kernel/provider_dispatch.py)、[记忆投影与检索入口](src/pulsara_agent/conversation_kernel/memory_tools.py)及[输入编译](src/pulsara_agent/model_input/compiler.py) | 按第 11 节及记忆 CRUD 草案统一为 MEMORY_RECALL，body 使用 text＋可选 target 的对象数组承载三部分文字投影；仅在新采用 ROOT 真人消息／主动 steer 时检查，删除普通工具续跑的偏好刷新分支；保留独立偏好选择与混合召回，删除双份偏好消息及预算降级，复用输入安装边界推进 P／i |
 
 实施验证应覆盖六类来源、原生与 JS、部分读取、同名不同副本、终端读取不追踪、slash 与自然语言名称区分、目录新增启停移除及更新、压缩后目录刷新与待读强制提示、删除禁用过滤、来源失败不伪装空值，以及同 epoch 前缀不改写。保留实际来源、权限、读取、顺序和压缩连续性的行为验证；不新增只证明字段已删的测试。
 
@@ -482,4 +694,12 @@ body 仍按服务聚合为 text＋可选 target 对象；text 可以较具体，
 
 MCP 另核对：每个新 turn 首次输入与本次实际采用的用户主动 steer 都比较，同 turn 工具续跑及 Cell／Agent 补充不触发；服务增删启停及恢复、同名工具定义和范围变化按相关类别筛选；正文保留建议性查询指引；准备汇报时临时计算最新净 diff，启停或定义 ABA 不通知；相同提示文字对应不同最终净变化仍再次通知；在既有 provider 输入安装成功时，用生成本次通知所依据的状态快照替换上次已告知快照，准备后再发生的变化留待下一次比较，候选准备或队列采用不提前替换，也不等待模型回复，安装失败不替换；观察失败不误报删除；采用新上下文时初始化比较快照且不补报旧变化。无需为接入本节再覆盖一套依赖的 JSON Schema 一致性测试。
 
-其他 runtime observation 的正文、发送时机和交接职责尚未确定。本文件不因通知调整而改动 MCP 查询、执行、记忆召回或其他控制语义，后续逐类补齐。Hook 的模型附加文字与事件交付沿[独立消息草案](PULSARA_HOOK_CONTEXT_MESSAGE_REVISION_DRAFT.zh.md)，删除旧 HOOK_CONTEXT source，不在 pulsara_runtime_observation 中发送 Hook 信息。Hook 安装、移除、信任、撤销信任和启停均不主动通知模型；能力查询与管理工具的正常结果保留，阻止、参数修改、权限裁决和续接控制保持现状。
+前轮说明另核对：只取同 session 紧邻前轮，正常完成不翻出更早失败；新 turn 首次输入发送一次，steer／普通续跑不重复；活动 turn 压缩按当前已接纳事实恢复，空闲压缩不提前注入；工具调用经原路径闭合，迟到真实结果独立追加，不回写已交付闭合说明或重复前轮汇总；明确未派发与效果未知准确区分，已有部分助手内容不冒充任务完成。
+
+用户操作提醒另核对：只报告两类既有事项，新 turn／实际用户 steer 才取出，普通续跑和压缩候选不消费；原文件未恢复的事实明确，停止成功与失败／未确认准确区分；PROCESS Target 保持原形状；多次未发送操作沿现有暂存收敛，压缩不重放，提醒省略不改变实际控制结算。
+
+写入提醒另核对：仅 ROOT、冻结权限非只读、记忆未禁用且 remember 可用；本批真实用户消息／主动 steer 任一命中时只发一条，后续普通补充不掩盖此前命中，禁止保存仍优先；工具续跑、运行时新 turn 和压缩本身均不触发，不执行自动保存。
+
+记忆召回另按第 11 节及[记忆 CRUD 草案第 6 节](PULSARA_MEMORY_CRUD_HARD_CUT_DRAFT.zh.md#6-搜索索引与自动召回)核对：三部分仅投影为一条 source／body 消息，body 保持对象数组；偏好刷新、混合召回和旧记忆失效核对只随新采用 ROOT 真人消息／主动 steer，普通工具续跑、运行时新 turn 或压缩本身均不触发；偏好追加与全量替换正确，i 为累计有效内容而非上轮结果，旧版通知不误伤新版；读取失败整条说明不可用且不推进 P／i；正常读取后三部分无待交付内容不发空消息，偏好全量替换和清空仍交付。
+
+本文件不因通知调整而改动 MCP 查询、执行、记忆召回或其他控制语义。Plugin 自身的安装、移除及启停不单独生成 observation，其 Skill／MCP 组件的实际变化按对应规则处理。Hook 的模型附加文字与事件交付沿[独立消息草案](PULSARA_HOOK_CONTEXT_MESSAGE_REVISION_DRAFT.zh.md)，删除旧 HOOK_CONTEXT source，不在 pulsara_runtime_observation 中发送 Hook 信息。Hook 安装、移除、信任、撤销信任和启停均不主动通知模型；能力查询与管理工具的正常结果保留，阻止、参数修改、权限裁决和续接控制保持现状。
