@@ -1480,14 +1480,14 @@ def test_round9_2_queued_prompt_context_stays_candidate_bound_until_full(
         context_limit=0,
     )
     scrub = HookSecretScrubSet.capture()
-    active = owner.prepare_sync(
+    active = owner.prepare_prompt(
         scope=scope,
         causal_ref=DirectPromptRef('command:dgeavwvig55n3uzk2zxinbgaee', 'turn:74y74rvr2pht5lydgxvy57nxgq', 'entry:mf74nwta7ulytsfrqcjlnrxkxa', "revision:A"),
-        entries=(
-            HookContextEntry(definition, 0, 1, "context-for-active-turn-A", scrub),
-        ),
     )
-    queued = owner.prepare_sync(
+    active.accept_prompt_entries((
+        HookContextEntry(definition, 0, 1, "context-for-active-turn-A", scrub),
+    ))
+    queued = owner.prepare_prompt(
         scope=scope,
         causal_ref=QueuedPromptRef(
             'command:odnox7ugjdnns5kuspunx2q274',
@@ -1496,11 +1496,10 @@ def test_round9_2_queued_prompt_context_stays_candidate_bound_until_full(
             'entry:z24wqokjse36cbgojj5qpqioqi',
             "revision:B",
         ),
-        entries=(
-            HookContextEntry(definition, 0, 2, "context-for-queued-turn-B", scrub),
-        ),
     )
-    assert active is not None and queued is not None
+    queued.accept_prompt_entries((
+        HookContextEntry(definition, 0, 2, "context-for-queued-turn-B", scrub),
+    ))
     active.commit()
     queued.commit_prompt_bound('queue:dvzibiul2jmfaj5m6reewz35fe')
 
@@ -1520,6 +1519,97 @@ def test_round9_2_queued_prompt_context_stays_candidate_bound_until_full(
     assert "context-for-active-turn-A" not in selected_for_b.full_text
     assert "context-for-queued-turn-B" in selected_for_b.full_text
     selected_for_b.reservation.retire()
+
+
+@pytest.mark.parametrize("queued", [False, True])
+def test_prompt_attempt_retirement_is_exact_and_rejects_late_retry_output(
+    tmp_path: Path, queued: bool,
+) -> None:
+    from pulsara_agent.hooks.contracts import HookContextEntry
+
+    owner = HookContextOwner()
+    scope = _scope()
+    owner.register_scope(scope)
+    causal = (
+        QueuedPromptRef(
+            'command:odnox7ugjdnns5kuspunx2q274',
+            'queue:dvzibiul2jmfaj5m6reewz35fe',
+            'turn:paqqn75nkrrptym5iw4zxx6u6e',
+            'entry:z24wqokjse36cbgojj5qpqioqi', 'revision:B',
+        ) if queued else DirectPromptRef(
+            'command:odnox7ugjdnns5kuspunx2q274',
+            'turn:paqqn75nkrrptym5iw4zxx6u6e',
+            'entry:z24wqokjse36cbgojj5qpqioqi', 'revision:B',
+        )
+    )
+    definition = _definition(tmp_path, HookEventType.USER_PROMPT_SUBMIT_EVENT, "noop")
+    scrub = HookSecretScrubSet.capture()
+
+    def entry(text: str):
+        return (HookContextEntry(definition, 0, 1, text, scrub),)
+
+    rejected = owner.prepare_prompt(scope=scope, causal_ref=causal)
+    rejected.accept_prompt_entries(entry("rejected-before-acceptance"))
+    assert owner.freeze_for_target(
+        scope_kind="ROOT", session_id=scope.session_id, estimator=_Estimator(),
+    ) is None
+    rejected.retire()
+    adopted = owner.prepare_prompt(scope=scope, causal_ref=causal)
+    adopted.accept_prompt_entries(entry("accepted-retry"))
+    adopted.commit()
+    rejected.accept_prompt_entries(entry("rejected-late-output"))
+    rejected.commit()
+    rejected.retire()
+    selected = owner.freeze_for_target(
+        scope_kind="ROOT", session_id=scope.session_id, estimator=_Estimator(),
+    )
+    assert selected is not None
+    assert "accepted-retry" in selected.full_text
+    assert "rejected" not in selected.full_text
+    selected.reservation.retire()
+
+    adopted.accept_prompt_entries(entry("accepted-late-output"))
+    selected = owner.freeze_for_target(
+        scope_kind="ROOT", session_id=scope.session_id, estimator=_Estimator(),
+    )
+    assert selected is not None and "accepted-late-output" in selected.full_text
+    selected.reservation.retire()
+
+
+def test_active_prompt_retirement_preserves_other_output_and_scope_close_drops_late(
+    tmp_path: Path,
+) -> None:
+    from pulsara_agent.hooks.contracts import HookContextEntry
+
+    owner = HookContextOwner()
+    scope = _scope()
+    owner.register_scope(scope)
+    causal = DirectPromptRef(
+        'command:odnox7ugjdnns5kuspunx2q274',
+        'turn:paqqn75nkrrptym5iw4zxx6u6e',
+        'entry:z24wqokjse36cbgojj5qpqioqi', 'revision:B',
+    )
+    definition = _definition(tmp_path, HookEventType.USER_PROMPT_SUBMIT_EVENT, "noop")
+    scrub = HookSecretScrubSet.capture()
+    failed = owner.prepare_prompt(scope=scope, causal_ref=causal)
+    surviving = owner.prepare_prompt(scope=scope, causal_ref=causal)
+    failed.commit()
+    surviving.commit()
+    failed.accept_prompt_entries((HookContextEntry(definition, 0, 1, "failed", scrub),))
+    surviving.accept_prompt_entries((HookContextEntry(definition, 0, 2, "surviving", scrub),))
+    failed.retire()
+    selected = owner.freeze_for_target(
+        scope_kind="ROOT", session_id=scope.session_id, estimator=_Estimator(),
+    )
+    assert selected is not None
+    assert "surviving" in selected.full_text and "failed" not in selected.full_text
+    selected.reservation.retire()
+    owner.close()
+    surviving.accept_prompt_entries((HookContextEntry(definition, 0, 3, "after-close", scrub),))
+    surviving.commit()
+    assert owner.freeze_for_target(
+        scope_kind="ROOT", session_id=scope.session_id, estimator=_Estimator(),
+    ) is None
 
 
 def test_round9_2_borrowed_credential_rotation_is_rejected_at_exact_spawn_sink(

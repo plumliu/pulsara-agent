@@ -1201,13 +1201,13 @@ class ConversationKernelRunner:
             scope_kind=self._session_scope_kind,
         )
         try:
-            if hook_context_reservation is not None:
-                hook_context_reservation.commit()
             outcome = await self._turn_admission.accept_root_intent(
                 candidate,
                 model_resolution_snapshot=frozen_model_resolution,
                 cancellation_intent=intent,
             )
+            if hook_context_reservation is not None:
+                hook_context_reservation.commit()
         except BaseException:
             if hook_context_reservation is not None:
                 hook_context_reservation.retire()
@@ -1218,9 +1218,10 @@ class ConversationKernelRunner:
                 cancellation_intent=intent,
                 started_input_group=outcome.started_input_group,
             )
-        finally:
+        except BaseException:
             if hook_context_reservation is not None:
                 hook_context_reservation.retire()
+            raise
 
     async def prepare_plan_question_resolution_input(
         self,

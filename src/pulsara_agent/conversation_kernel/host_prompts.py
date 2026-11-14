@@ -166,25 +166,31 @@ class _HostPromptOperations:
                 identity.entry_id,
                 identity.context_revision_id,
             )
-        outcome = await self._hooks.dispatch(
-            HookDispatchEnvelope(
-                view,
-                self._hook_root_scope,
-                public_input,
-                causal_ref,
-                self._deadlines.deadline(
-                    KernelWatchdogOwner.PROVIDER_DISPATCH_PLANNING
+        reservation = self._hook_context.prepare_prompt(
+            scope=self._hook_root_scope, causal_ref=causal_ref,
+        )
+        try:
+            outcome = await self._hooks.dispatch(
+                HookDispatchEnvelope(
+                    view,
+                    self._hook_root_scope,
+                    public_input,
+                    causal_ref,
+                    self._deadlines.deadline(
+                        KernelWatchdogOwner.PROVIDER_DISPATCH_PLANNING
+                    ),
                 ),
-            ),
-            matcher_subject=event_matcher_subject(public_input.event_type),
-        )
+                matcher_subject=event_matcher_subject(public_input.event_type),
+                prompt_context_reservation=reservation,
+            )
+        except BaseException:
+            reservation.retire()
+            raise
         if outcome.decision is GateDecision.BLOCK:
+            reservation.retire()
             return outcome.reason or "UserPromptSubmit Hook blocked", None
-        return None, self._hook_context.prepare_sync(
-            scope=self._hook_root_scope,
-            causal_ref=causal_ref,
-            entries=outcome.context_entries,
-        )
+        reservation.accept_prompt_entries(outcome.context_entries)
+        return None, reservation
 
     async def run_turn(
         self,
@@ -674,11 +680,11 @@ class _HostPromptOperations:
                     raise RuntimeError(
                         "compatible prompt command has no canonical outcome"
                     )
-                if hook_context_reservation is not None:
-                    if existing.target_id == queue_item_id:
-                        hook_context_reservation.commit_prompt_bound(queue_item_id)
-                    else:
-                        hook_context_reservation.retire()
+                if (
+                    hook_context_reservation is not None
+                    and existing.target_id != queue_item_id
+                ):
+                    hook_context_reservation.retire()
                 self._queue_wake.set()
                 existing = await self.query_command(command_id)
                 if existing is None:
@@ -712,8 +718,6 @@ class _HostPromptOperations:
             if hook_context_reservation is not None:
                 hook_context_reservation.retire()
                 hook_context_reservation = None
-        if hook_context_reservation is not None:
-            hook_context_reservation.commit_prompt_bound(queue_item_id)
         self._queue_wake.set()
         outcome = KernelCommandOutcome(
             command_id,
@@ -1067,8 +1071,6 @@ class _HostPromptOperations:
                 input_origin="SCHEDULED_TASK" if scheduled else "AGENT_INSTRUCTION",
             )
             self._queued_prompt_hooks[candidate.queue_item_id] = outcome
-            if outcome[1] is not None:
-                outcome[1].commit_prompt_bound(candidate.queue_item_id)
         if outcome[0] is None:
             return True
         await self._io.run(
@@ -1177,10 +1179,8 @@ class _HostPromptOperations:
         """The sole task owns start, preparation, execution and terminal cleanup."""
         accepted = None
         execution_entered = False
-        self._hook_context.activate_prompt_candidate(
-            scope=self._hook_root_scope,
-            prompt_candidate_id=candidate.queue_item_id,
-        )
+        activated_context = ()
+        execution_completed = False
         try:
             confirmation, cancelled = await self._drain_start_settlement(
                 asyncio.create_task(
@@ -1235,12 +1235,18 @@ class _HostPromptOperations:
             )
             if finalizer_cancelled or self._closing or intent.cause is not None:
                 raise asyncio.CancelledError
+            activated_context = self._hook_context.activate_prompt_candidate(
+                scope=self._hook_root_scope,
+                prompt_candidate_id=candidate.queue_item_id,
+            )
             execution_entered = True
-            return await self._run_accepted_root_chain(
+            result = await self._run_accepted_root_chain(
                 accepted.turn_id,
                 intent,
                 started_input_group=accepted.started_input_group,
             )
+            execution_completed = True
+            return result
         except StaleHostWriter:
             # The takeover transaction owns canonical interruption.
             return None
@@ -1260,6 +1266,9 @@ class _HostPromptOperations:
                     pass
             raise
         finally:
+            if not execution_completed:
+                for reservation in activated_context:
+                    reservation.retire()
             if accepted is not None and not execution_entered:
                 reason = (
                     "USER_STOPPED"

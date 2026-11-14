@@ -17,6 +17,7 @@ from pulsara_agent.hooks.contracts import (
     HookDispatchScopeRef,
     HookScopeKind,
     HookSecretScrubber,
+    QueuedPromptRef,
 )
 from pulsara_agent.llm.estimator import TEXT_UTF8_BYTES_PER_TOKEN
 from pulsara_agent.model_input.contracts import ModelInputTokenEstimator
@@ -50,6 +51,9 @@ class FrozenHookContextContribution:
     text: str
     secret_scrubber: HookSecretScrubber = field(repr=False, compare=False)
     continuation_reason: bool = False
+    prompt_reservation: PendingHookContextReservation | None = field(
+        default=None, repr=False, compare=False
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +97,8 @@ class PendingHookContextReservation:
         "_committed",
         "_prompt_candidate_id",
         "_retired",
+        "_prompt_scope",
+        "_prompt_causal_ref",
     )
 
     def __init__(
@@ -100,6 +106,9 @@ class PendingHookContextReservation:
         owner: "HookContextOwner",
         key: tuple[int, int, HookScopeKind, str | None],
         values: tuple[FrozenHookContextContribution, ...],
+        *,
+        prompt_scope: HookDispatchScopeRef | None = None,
+        prompt_causal_ref: HookDispatchCausalRef | None = None,
     ) -> None:
         self._owner = owner
         self._key = key
@@ -107,8 +116,29 @@ class PendingHookContextReservation:
         self._committed = False
         self._prompt_candidate_id: str | None = None
         self._retired = False
+        self._prompt_scope = prompt_scope
+        self._prompt_causal_ref = prompt_causal_ref
+
+    def accept_prompt_entries(self, entries: tuple[HookContextEntry, ...]) -> None:
+        """Keep synchronous and late outputs on the exact ingress attempt."""
+
+        if self._prompt_scope is None or self._prompt_causal_ref is None:
+            raise ValueError("Hook reservation is not an input candidate")
+        values = tuple(
+            replace(item, prompt_reservation=self)
+            for item in _freeze_contributions(
+                scope=self._prompt_scope,
+                causal_ref=self._prompt_causal_ref,
+                entries=entries,
+                continuation_reason=False,
+            )
+        )
+        self._owner._offer_prompt_values(self, values)
 
     def commit(self) -> None:
+        if self._prompt_scope is not None:
+            self._owner._activate_prompt(self)
+            return
         if self._retired or self._committed:
             return
         self._committed = True
@@ -119,25 +149,19 @@ class PendingHookContextReservation:
 
         if not prompt_candidate_id:
             raise ValueError("queued Hook context requires an exact prompt candidate")
-        if self._retired or self._committed:
-            return
-        self._committed = True
-        self._prompt_candidate_id = prompt_candidate_id
-        self._owner._commit_prompt_bound(self._key, prompt_candidate_id, self._values)
+        if self._prompt_scope is None:
+            raise ValueError("queued Hook context requires an input reservation")
+        self._owner._bind_prompt(self, prompt_candidate_id)
 
     def retire(self) -> None:
+        if self._prompt_scope is not None:
+            self._owner._retire_prompt(self)
+            return
         if self._retired:
             return
         self._retired = True
         if self._committed:
-            if self._prompt_candidate_id is None:
-                self._owner._remove_pending_values(self._key, self._values)
-            else:
-                self._owner._remove_prompt_bound_values(
-                    self._key,
-                    self._prompt_candidate_id,
-                    self._values,
-                )
+            self._owner._remove_pending_values(self._key, self._values)
 
 
 class _NullDiagnosticPort:
@@ -159,7 +183,7 @@ class HookContextOwner:
         ] = {}
         self._prompt_bound: dict[
             tuple[tuple[int, int, HookScopeKind, str | None], str],
-            list[FrozenHookContextContribution],
+            list[PendingHookContextReservation],
         ] = {}
         self._live_scopes: set[tuple[int, int, HookScopeKind, str | None]] = set()
         self._reservations: set[HookContextReservation] = set()
@@ -183,6 +207,17 @@ class HookContextOwner:
         )
         if reservation is not None:
             reservation.commit()
+
+    def prepare_prompt(
+        self, *, scope: HookDispatchScopeRef, causal_ref: HookDispatchCausalRef
+    ) -> PendingHookContextReservation:
+        reservation = PendingHookContextReservation(
+            self, _scope_key(scope), (),
+            prompt_scope=scope, prompt_causal_ref=causal_ref,
+        )
+        if isinstance(causal_ref, QueuedPromptRef):
+            reservation.commit_prompt_bound(causal_ref.queue_item_id)
+        return reservation
 
     def prepare_sync(
         self,
@@ -335,14 +370,16 @@ class HookContextOwner:
         *,
         scope: HookDispatchScopeRef,
         prompt_candidate_id: str,
-    ) -> None:
+    ) -> tuple[PendingHookContextReservation, ...]:
         """Move one FULL queued admission into its now-exclusive live scope."""
 
         key = _scope_key(scope)
         prompt_key = (key, prompt_candidate_id)
         with self._lock:
-            values = tuple(self._prompt_bound.pop(prompt_key, ()))
-        self._commit_pending(key, values)
+            reservations = tuple(self._prompt_bound.pop(prompt_key, ()))
+            for reservation in reservations:
+                self._activate_prompt_locked(reservation)
+            return reservations
 
     def retire_prompt_candidate(
         self,
@@ -354,7 +391,8 @@ class HookContextOwner:
 
         key = _scope_key(scope)
         with self._lock:
-            self._prompt_bound.pop((key, prompt_candidate_id), None)
+            for reservation in tuple(self._prompt_bound.pop((key, prompt_candidate_id), ())):
+                self._retire_prompt_locked(reservation)
 
     def retire_scope(self, scope: HookDispatchScopeRef) -> None:
         key = _scope_key(scope)
@@ -365,13 +403,18 @@ class HookContextOwner:
                 prompt_key for prompt_key in self._prompt_bound if prompt_key[0] == key
             )
             for prompt_key in prompt_keys:
-                self._prompt_bound.pop(prompt_key, None)
+                for reservation in self._prompt_bound.pop(prompt_key, ()):
+                    self._retire_prompt_locked(reservation)
 
     def close(self) -> None:
         with self._lock:
             self._closed = True
             self._live_scopes.clear()
             self._pending.clear()
+            for bucket in self._prompt_bound.values():
+                for reservation in bucket:
+                    reservation._retired = True
+                    reservation._values = ()
             self._prompt_bound.clear()
             reservations = tuple(self._reservations)
             self._reservations.clear()
@@ -405,56 +448,100 @@ class HookContextOwner:
         with self._lock:
             if self._closed or key not in self._live_scopes:
                 return
-            bucket = self._pending.setdefault(key, [])
-            bucket.extend(values)
-            while bucket:
-                batch = FrozenHookContextBatch(key[2], key[3], tuple(bucket))
-                full, compact = render_hook_context_batch(batch)
-                if (
-                    max(len(full.encode("utf-8")), len(compact.encode("utf-8")))
-                    <= MAXIMUM_HOOK_CONTEXT_VARIANT_BYTES
-                ):
-                    break
-                bucket.pop(0)
-                self._diagnostics.offer(
-                    (
-                        HookDiagnostic(
-                            "HOOK_CONTEXT_BUFFER_OMITTED",
-                            "oldest complete Hook context entry was dropped",
-                        ),
-                    )
-                )
+            self._append_pending_locked(key, values)
 
-    def _commit_prompt_bound(
+    def _offer_prompt_values(
         self,
-        key: tuple[int, int, HookScopeKind, str | None],
-        prompt_candidate_id: str,
+        reservation: PendingHookContextReservation,
         values: tuple[FrozenHookContextContribution, ...],
     ) -> None:
-        if not values:
-            return
         with self._lock:
-            if self._closed or key not in self._live_scopes:
+            if (
+                self._closed or reservation._retired
+                or reservation._key not in self._live_scopes
+            ):
                 return
-            bucket = self._prompt_bound.setdefault((key, prompt_candidate_id), [])
+            if reservation._committed:
+                self._append_pending_locked(reservation._key, values)
+            else:
+                bucket = list((*reservation._values, *values))
+                self._bound_bucket_locked(reservation._key, bucket)
+                reservation._values = tuple(bucket)
+
+    def _bind_prompt(
+        self, reservation: PendingHookContextReservation, prompt_candidate_id: str
+    ) -> None:
+        with self._lock:
+            if (
+                self._closed or reservation._retired or reservation._committed
+                or reservation._key not in self._live_scopes
+            ):
+                return
+            if reservation._prompt_candidate_id is not None:
+                if reservation._prompt_candidate_id != prompt_candidate_id:
+                    raise ValueError("Hook input candidate identity changed")
+                return
+            reservation._prompt_candidate_id = prompt_candidate_id
+            self._prompt_bound.setdefault(
+                (reservation._key, prompt_candidate_id), []
+            ).append(reservation)
+
+    def _activate_prompt(self, reservation: PendingHookContextReservation) -> None:
+        with self._lock:
+            self._activate_prompt_locked(reservation)
+
+    def _activate_prompt_locked(self, reservation: PendingHookContextReservation) -> None:
+        if (
+            self._closed or reservation._retired or reservation._committed
+            or reservation._key not in self._live_scopes
+        ):
+            return
+        reservation._committed = True
+        self._append_pending_locked(reservation._key, reservation._values)
+        reservation._values = ()
+
+    def _retire_prompt(self, reservation: PendingHookContextReservation) -> None:
+        with self._lock:
+            self._retire_prompt_locked(reservation)
+            prompt_key = (reservation._key, reservation._prompt_candidate_id)
+            bucket = self._prompt_bound.get(prompt_key)
+            if bucket is not None:
+                bucket[:] = [item for item in bucket if item is not reservation]
+                if not bucket:
+                    self._prompt_bound.pop(prompt_key, None)
+
+    def _retire_prompt_locked(self, reservation: PendingHookContextReservation) -> None:
+        reservation._retired = True
+        reservation._values = ()
+        bucket = self._pending.get(reservation._key)
+        if bucket is not None:
+            bucket[:] = [item for item in bucket if item.prompt_reservation is not reservation]
+            if not bucket:
+                self._pending.pop(reservation._key, None)
+
+    def _append_pending_locked(
+        self, key: tuple[int, int, HookScopeKind, str | None],
+        values: tuple[FrozenHookContextContribution, ...],
+    ) -> None:
+        if values:
+            bucket = self._pending.setdefault(key, [])
             bucket.extend(values)
-            while bucket:
-                batch = FrozenHookContextBatch(key[2], key[3], tuple(bucket))
-                full, compact = render_hook_context_batch(batch)
-                if (
-                    max(len(full.encode("utf-8")), len(compact.encode("utf-8")))
-                    <= MAXIMUM_HOOK_CONTEXT_VARIANT_BYTES
-                ):
-                    break
-                bucket.pop(0)
-                self._diagnostics.offer(
-                    (
-                        HookDiagnostic(
-                            "HOOK_CONTEXT_BUFFER_OMITTED",
-                            "oldest complete queued Hook context entry was dropped",
-                        ),
-                    )
-                )
+            self._bound_bucket_locked(key, bucket)
+
+    def _bound_bucket_locked(
+        self, key: tuple[int, int, HookScopeKind, str | None],
+        bucket: list[FrozenHookContextContribution],
+    ) -> None:
+        while bucket:
+            batch = FrozenHookContextBatch(key[2], key[3], tuple(bucket))
+            full, compact = render_hook_context_batch(batch)
+            if max(len(full.encode("utf-8")), len(compact.encode("utf-8"))) <= MAXIMUM_HOOK_CONTEXT_VARIANT_BYTES:
+                break
+            bucket.pop(0)
+            self._diagnostics.offer((HookDiagnostic(
+                "HOOK_CONTEXT_BUFFER_OMITTED",
+                "oldest complete Hook context entry was dropped",
+            ),))
 
     def _retire_reservation(self, reservation: HookContextReservation) -> None:
         with self._lock:
@@ -473,22 +560,6 @@ class HookContextOwner:
             bucket[:] = [item for item in bucket if id(item) not in identities]
             if not bucket:
                 self._pending.pop(key, None)
-
-    def _remove_prompt_bound_values(
-        self,
-        key: tuple[int, int, HookScopeKind, str | None],
-        prompt_candidate_id: str,
-        values: tuple[FrozenHookContextContribution, ...],
-    ) -> None:
-        identities = {id(item) for item in values}
-        prompt_key = (key, prompt_candidate_id)
-        with self._lock:
-            bucket = self._prompt_bound.get(prompt_key)
-            if bucket is None:
-                return
-            bucket[:] = [item for item in bucket if id(item) not in identities]
-            if not bucket:
-                self._prompt_bound.pop(prompt_key, None)
 
 
 def render_hook_context_batch(batch: FrozenHookContextBatch) -> tuple[str, str]:

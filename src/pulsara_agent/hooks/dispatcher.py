@@ -36,6 +36,7 @@ from pulsara_agent.hooks.contracts import (
     PermissionOutcome,
 )
 from pulsara_agent.hooks.executor import HookCommandExecutor, HookExecutionRequest
+from pulsara_agent.hooks.context import PendingHookContextReservation
 from pulsara_agent.hooks.matcher import (
     FrozenHookMatcherSubject,
     definition_matches,
@@ -280,6 +281,7 @@ class KernelHookDispatcher:
         *,
         matcher_subject: FrozenHookMatcherSubject,
         continuation_already_used: bool = False,
+        prompt_context_reservation: PendingHookContextReservation | None = None,
     ) -> HookDispatchOutcome:
         await self._enter_ordinary()
         try:
@@ -287,6 +289,7 @@ class KernelHookDispatcher:
                 envelope,
                 matcher_subject=matcher_subject,
                 continuation_already_used=continuation_already_used,
+                prompt_context_reservation=prompt_context_reservation,
             )
         finally:
             await self._leave_ordinary()
@@ -318,6 +321,7 @@ class KernelHookDispatcher:
         *,
         matcher_subject: FrozenHookMatcherSubject,
         continuation_already_used: bool,
+        prompt_context_reservation: PendingHookContextReservation | None = None,
     ) -> HookDispatchOutcome:
         event_type = envelope.public_input.event_type
         expected_family = EVENT_OUTCOME_FAMILY[event_type]
@@ -365,6 +369,7 @@ class KernelHookDispatcher:
                         request,
                         scope=envelope.scope,
                         causal_ref=envelope.causal_ref,
+                        prompt_context_reservation=prompt_context_reservation,
                     ),
                     name=(
                         "kernel-hook-background:"
@@ -426,6 +431,7 @@ class KernelHookDispatcher:
         *,
         scope: HookDispatchScopeRef,
         causal_ref: HookDispatchCausalRef,
+        prompt_context_reservation: PendingHookContextReservation | None,
     ) -> None:
         try:
             parsed = await self._execute_and_parse(request)
@@ -438,21 +444,24 @@ class KernelHookDispatcher:
         if (
             isinstance(parsed, ValidHandlerContribution)
             and parsed.context_text
-            and self._background_context is not None
+            and (prompt_context_reservation is not None or self._background_context is not None)
         ):
             if parsed.scrub_set is None:
                 raise RuntimeError("valid Hook context lost its secret scrub set")
-            await self._background_context.accept_background(
-                scope=scope,
-                causal_ref=causal_ref,
-                entry=HookContextEntry(
-                    parsed.definition,
-                    parsed.source_ordinal,
-                    parsed.event_dispatch_ordinal,
-                    parsed.context_text,
-                    parsed.scrub_set,
-                ),
+            entry = HookContextEntry(
+                parsed.definition,
+                parsed.source_ordinal,
+                parsed.event_dispatch_ordinal,
+                parsed.context_text,
+                parsed.scrub_set,
             )
+            if prompt_context_reservation is not None:
+                prompt_context_reservation.accept_prompt_entries((entry,))
+            else:
+                assert self._background_context is not None
+                await self._background_context.accept_background(
+                    scope=scope, causal_ref=causal_ref, entry=entry,
+                )
 
     def _offer_view_diagnostics(
         self, view: FrozenHookDefinitionView, *, phase: str
