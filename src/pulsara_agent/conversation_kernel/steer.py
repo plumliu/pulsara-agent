@@ -1096,7 +1096,6 @@ class MemorySourceInvalidationReservation:
     prior_semantic_fingerprint: str
     desired_presence: SourceObservationPresence
     desired_semantic_fingerprint: str
-    source_contract_fingerprint: str
     invalidation_input_token_ceiling: int
     invalidation_epoch_bytes_ceiling: int
     estimator_fingerprint: str
@@ -1121,7 +1120,6 @@ class MemorySourceInvalidationReservation:
         for value in (
             self.prior_semantic_fingerprint,
             self.desired_semantic_fingerprint,
-            self.source_contract_fingerprint,
             self.estimator_fingerprint,
         ):
             if not value.startswith("sha256:"):
@@ -1143,7 +1141,6 @@ def build_memory_source_invalidation_reservation(
     prior_semantic_fingerprint: str,
     desired_presence: SourceObservationPresence,
     desired_semantic_fingerprint: str,
-    source_contract_fingerprint: str,
     invalidation_input_token_ceiling: int,
     invalidation_epoch_bytes_ceiling: int,
     estimator_fingerprint: str,
@@ -1154,7 +1151,6 @@ def build_memory_source_invalidation_reservation(
         prior_semantic_fingerprint=prior_semantic_fingerprint,
         desired_presence=desired_presence,
         desired_semantic_fingerprint=desired_semantic_fingerprint,
-        source_contract_fingerprint=source_contract_fingerprint,
         invalidation_input_token_ceiling=invalidation_input_token_ceiling,
         invalidation_epoch_bytes_ceiling=invalidation_epoch_bytes_ceiling,
         estimator_fingerprint=estimator_fingerprint,

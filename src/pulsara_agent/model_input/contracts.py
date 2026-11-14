@@ -455,7 +455,6 @@ class ContextRenderVariant:
 @dataclass(frozen=True, slots=True)
 class ContextSourceCandidate:
     source_kind: ContextSourceKind
-    source_contract_fingerprint: str
     source_semantic_fingerprint: str
     channel: ContextChannel
     trust_class: ContextTrustClass
@@ -528,25 +527,15 @@ class ContextSourceCandidate:
             and self.channel is ContextChannel.SYSTEM
         ):
             raise ValueError("untrusted observation cannot use SYSTEM channel")
-        expected_contract = context_fingerprint(
-            "context-source-contract:v1",
-            {
-                "kind": self.source_kind.value,
-                "channel": self.channel.value,
-                "trust": self.trust_class.value,
-                "budget": self.budget_class.value,
-                "placement": self.placement_ordinal,
-                "degradation": self.degradation_priority,
-                "modes": tuple(mode.value for mode in modes),
-                "lifecycle": self.lifecycle.value,
-            },
-        )
-        if self.source_contract_fingerprint != expected_contract:
-            raise ValueError("source contract fingerprint mismatch")
         semantic_payload: dict[str, object] = {
             "source_kind": self.source_kind.value,
             "source_instance_id": f"context-source:{self.source_kind.value.lower()}",
-            "source_contract_fingerprint": self.source_contract_fingerprint,
+            "channel": self.channel.value,
+            "trust": self.trust_class.value,
+            "budget": self.budget_class.value,
+            "placement": self.placement_ordinal,
+            "degradation": self.degradation_priority,
+            "lifecycle": self.lifecycle.value,
             "variants": tuple(v.semantic_fingerprint for v in self.variants),
         }
         if self.initial_mode is not ContextRenderMode.FULL:
@@ -574,7 +563,6 @@ class ContextSourceAbsentFact:
     source_kind: ContextSourceKind
     lifecycle: ContextSourceLifecycle
     absence_kind: ContextSourceAbsenceKind
-    source_contract_fingerprint: str
     trust_class: ContextTrustClass
     budget_class: ContextBudgetClass
     placement_ordinal: int
@@ -582,12 +570,8 @@ class ContextSourceAbsentFact:
     domain_semantic_fingerprint: str
 
     def __post_init__(self) -> None:
-        for value in (
-            self.source_contract_fingerprint,
-            self.domain_semantic_fingerprint,
-        ):
-            if not value.startswith(SHA256_PREFIX):
-                raise ValueError("absent source fingerprint is invalid")
+        if not self.domain_semantic_fingerprint.startswith(SHA256_PREFIX):
+            raise ValueError("absent source fingerprint is invalid")
         if not 0 <= self.placement_ordinal <= 999:
             raise ValueError("absent source placement is invalid")
         if not 0 <= self.degradation_priority <= 999:
@@ -598,7 +582,6 @@ class ContextSourceAbsentFact:
 class CollectedContextSources:
     candidates: tuple[ContextSourceCandidate, ...]
     diagnostics: tuple[ContextSourceCollectionDiagnostic, ...]
-    registry_fingerprint: str
     collection_fingerprint: str
     absent_facts: tuple[ContextSourceAbsentFact, ...] = ()
 
@@ -614,7 +597,6 @@ class CollectedContextSources:
         expected = context_fingerprint(
             "collected-context-sources:v1",
             {
-                "registry_fingerprint": self.registry_fingerprint,
                 "candidates": tuple(
                     c.source_semantic_fingerprint for c in self.candidates
                 ),

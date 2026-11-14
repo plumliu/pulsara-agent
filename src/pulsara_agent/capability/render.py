@@ -16,7 +16,6 @@ from pulsara_agent.primitives.context import canonical_json_bytes
 
 
 MAX_SKILL_CATALOG_UTF8_BYTES = 384 * 1024
-MAX_ACTIVE_SKILLS = 16
 MAX_ACTIVE_SKILL_BODY_UTF8_BYTES = 512 * 1024
 
 
@@ -71,10 +70,6 @@ def render_active_skill_prompt(
 
     if not injections:
         return None
-    if len(injections) > MAX_ACTIVE_SKILLS:
-        raise SkillProjectionOverbound(
-            ActiveSkillProjectionUnavailableReason.ACTIVE_PROJECTION_OVERBOUND
-        )
     ordered = tuple(sorted(injections, key=lambda item: item.name))
     if len({item.name for item in ordered}) != len(ordered):
         raise ValueError("active Skill names are duplicated")
@@ -122,7 +117,6 @@ def active_projection_overbound_diagnostic() -> SkillDiagnostic:
 
 __all__ = [
     "MAX_ACTIVE_SKILL_BODY_UTF8_BYTES",
-    "MAX_ACTIVE_SKILLS",
     "MAX_SKILL_CATALOG_UTF8_BYTES",
     "SkillProjectionOverbound",
     "active_projection_overbound_diagnostic",

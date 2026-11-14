@@ -568,7 +568,6 @@ def test_catalog_selected_variant_deduplication_and_explicit_clear():
     cleared = _collected(
         candidates=sources.candidates,
         diagnostics=sources.diagnostics,
-        registry_fingerprint=sources.registry_fingerprint,
         absent_facts=tuple(
             value for value in sources.absent_facts if value.source_kind is not kind
         )

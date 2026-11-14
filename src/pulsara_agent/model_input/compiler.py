@@ -2230,30 +2230,16 @@ class StructuredModelInputCompiler:
                     ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
                 )
             (
-                channel,
+                _channel,
                 trust,
                 budget,
                 placement,
                 degradation,
-                modes,
+                _modes,
                 lifecycle,
             ) = expected
-            expected_contract = context_fingerprint(
-                "context-source-contract:v1",
-                {
-                    "kind": fact.source_kind.value,
-                    "channel": channel.value,
-                    "trust": trust.value,
-                    "budget": budget.value,
-                    "placement": placement,
-                    "degradation": degradation,
-                    "modes": tuple(mode.value for mode in modes),
-                    "lifecycle": lifecycle.value,
-                },
-            )
             if (
-                fact.source_contract_fingerprint != expected_contract
-                or fact.trust_class is not trust
+                fact.trust_class is not trust
                 or fact.budget_class is not budget
                 or fact.placement_ordinal != placement
                 or fact.degradation_priority != degradation

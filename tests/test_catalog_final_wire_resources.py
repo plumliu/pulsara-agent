@@ -282,7 +282,6 @@ def _prepare_case(
             request.sources.candidates,
             request.sources.absent_facts,
             (),
-            request.sources.registry_fingerprint,
             exposure,
             skill_view,
             # Owner acquisition is outside this frozen-input compiler/wire test.

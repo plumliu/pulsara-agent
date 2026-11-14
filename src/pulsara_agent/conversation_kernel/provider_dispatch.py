@@ -2392,10 +2392,16 @@ class ProviderDispatchCoordinator:
                             activation_subject=activation_subject,
                             activation_text=activation_text,
                             skill_reference_surfaces=(
-                                explicit_skill_reference_surfaces(human_prefix[-1].content)
-                                if human_prefix else _skill_reference_surfaces_for_anchor(
+                                *_skill_reference_surfaces_for_anchor(
                                     base_input, base_anchor
-                                )
+                                ),
+                                *(
+                                    surface
+                                    for prompt in human_prefix
+                                    for surface in explicit_skill_reference_surfaces(
+                                        prompt.content
+                                    )
+                                ),
                             ),
                             deadline_monotonic=deadline,
                         )
@@ -2709,11 +2715,6 @@ class ProviderDispatchCoordinator:
                     if borrow is None:
                         raise RuntimeError("steer dispatch lacks a physical borrow")
                     self._tools.validate_tool_surface_borrow(borrow, surface)
-                    if (
-                        frozen_sources.registry_fingerprint
-                        != self._context_source_collector.registry_fingerprint
-                    ):
-                        raise RuntimeError("context source registry drifted")
                 except Exception as exc:
                     raise PreparedSteerPlanStale(
                         "prepared steer process-local facts changed before consumption"

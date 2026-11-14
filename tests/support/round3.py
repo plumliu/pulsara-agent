@@ -466,10 +466,6 @@ class _Cwd:
 class StaticContextSourceCollector:
     """Required first-party facts with the production contracts."""
 
-    @property
-    def registry_fingerprint(self) -> str:
-        return ContextSourceRegistry().fingerprint
-
     @staticmethod
     def _value_observation_message(
         kind: ContextSourceKind,
@@ -693,11 +689,9 @@ class StaticContextSourceCollector:
             for kind, absence in absence_kinds.items()
             if kind not in present
         )
-        registry = self.registry_fingerprint
         collection = context_fingerprint(
             "collected-context-sources:v1",
             {
-                "registry_fingerprint": registry,
                 "candidates": tuple(
                     item.source_semantic_fingerprint for item in candidates
                 ),
@@ -713,7 +707,7 @@ class StaticContextSourceCollector:
                 ),
             },
         )
-        return CollectedContextSources(candidates, (), registry, collection, absent)
+        return CollectedContextSources(candidates, (), collection, absent)
 
     def freeze_non_trigger_sources(
         self, **kwargs: object
@@ -727,7 +721,6 @@ class StaticContextSourceCollector:
             candidates=collection.candidates,
             absent_facts=collection.absent_facts,
             diagnostics=collection.diagnostics,
-            registry_fingerprint=collection.registry_fingerprint,
             tool_exposure_plan=kwargs["tool_exposure_plan"],  # type: ignore[arg-type]
             skill_dispatch_view=kwargs["skill_dispatch_view"],  # type: ignore[arg-type]
             skill_owner_snapshot=kwargs["skill_owner_snapshot"],  # type: ignore[arg-type]
@@ -738,9 +731,6 @@ class StaticContextSourceCollector:
         frozen: FrozenNonTriggerContextSources,
         **_kwargs: object,
     ) -> CollectedContextSources:
-        registry = self.registry_fingerprint
-        if registry != frozen.registry_fingerprint:
-            raise ValueError("context source registry changed after source freeze")
         absent = frozen.absent_facts
         if not any(
             item.source_kind is ContextSourceKind.ACTIVE_SKILL
@@ -758,7 +748,6 @@ class StaticContextSourceCollector:
         collection = context_fingerprint(
             "collected-context-sources:v1",
             {
-                "registry_fingerprint": registry,
                 "candidates": tuple(
                     item.source_semantic_fingerprint for item in frozen.candidates
                 ),
@@ -777,7 +766,6 @@ class StaticContextSourceCollector:
         return CollectedContextSources(
             frozen.candidates,
             frozen.diagnostics,
-            registry,
             collection,
             absent,
         )
@@ -819,7 +807,6 @@ def _absent_source(
         source_kind=kind,
         lifecycle=binding.lifecycle,
         absence_kind=absence,
-        source_contract_fingerprint=binding.contract_fingerprint,
         trust_class=binding.trust,
         budget_class=binding.budget,
         placement_ordinal=binding.placement,
@@ -829,7 +816,11 @@ def _absent_source(
             {
                 "kind": kind.value,
                 "absence": absence.value,
-                "contract": binding.contract_fingerprint,
+                "trust": binding.trust.value,
+                "budget": binding.budget.value,
+                "placement": binding.placement,
+                "degradation": binding.degradation,
+                "lifecycle": binding.lifecycle.value,
             },
         ),
     )
@@ -1619,20 +1610,6 @@ def _candidate(
         ContextSourceKind.ACTIVE_SKILL: ContextSourceLifecycle.ACTIVATION_SNAPSHOT,
         ContextSourceKind.PREVIOUS_TURN_OUTCOME: ContextSourceLifecycle.TURN_APPEND,
     }[kind]
-    modes = tuple(mode for mode, _text in variants)
-    contract = context_fingerprint(
-        "context-source-contract:v1",
-        {
-            "kind": kind.value,
-            "channel": channel.value,
-            "trust": trust.value,
-            "budget": budget.value,
-            "placement": placement,
-            "degradation": degradation,
-            "modes": tuple(mode.value for mode in modes),
-            "lifecycle": lifecycle.value,
-        },
-    )
     rendered = tuple(
         ContextRenderVariant(
             mode,
@@ -1650,13 +1627,17 @@ def _candidate(
         {
             "source_kind": kind.value,
             "source_instance_id": instance,
-            "source_contract_fingerprint": contract,
+            "channel": channel.value,
+            "trust": trust.value,
+            "budget": budget.value,
+            "placement": placement,
+            "degradation": degradation,
+            "lifecycle": lifecycle.value,
             "variants": tuple(item.semantic_fingerprint for item in rendered),
         },
     )
     return ContextSourceCandidate(
         kind,
-        contract,
         semantic,
         channel,
         trust,

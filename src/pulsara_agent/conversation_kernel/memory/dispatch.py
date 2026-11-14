@@ -298,7 +298,6 @@ class MemoryDispatchSupport:
             desired_semantic_fingerprint=(
                 self._memory_source_occurrence_fingerprint(desired)
             ),
-            source_contract_fingerprint=desired.source_contract_fingerprint,
             invalidation_input_token_ceiling=max(token_deltas),
             invalidation_epoch_bytes_ceiling=max(byte_deltas),
             estimator_fingerprint=(

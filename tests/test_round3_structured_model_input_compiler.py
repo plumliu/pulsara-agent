@@ -578,24 +578,16 @@ def _candidate(
         )
         for mode, text in zip(modes, texts, strict=True)
     )
-    contract = context_fingerprint(
-        "context-source-contract:v1",
-        {
-            "kind": kind.value,
-            "channel": selected_channel.value,
-            "trust": selected_trust.value,
-            "budget": budget.value,
-            "placement": placement,
-            "degradation": degradation,
-            "modes": tuple(mode.value for mode in modes),
-            "lifecycle": lifecycle.value,
-        },
-    )
     instance = f"context-source:{kind.value.lower()}"
     semantic_payload: dict[str, object] = {
         "source_kind": kind.value,
         "source_instance_id": instance,
-        "source_contract_fingerprint": contract,
+        "channel": selected_channel.value,
+        "trust": selected_trust.value,
+        "budget": budget.value,
+        "placement": placement,
+        "degradation": degradation,
+        "lifecycle": lifecycle.value,
         "variants": tuple(item.semantic_fingerprint for item in variants),
     }
     if initial_mode is not ContextRenderMode.FULL:
@@ -603,7 +595,6 @@ def _candidate(
     semantic = context_fingerprint("context-source-candidate:v1", semantic_payload)
     return ContextSourceCandidate(
         source_kind=kind,
-        source_contract_fingerprint=contract,
         source_semantic_fingerprint=semantic,
         channel=selected_channel,
         trust_class=selected_trust,
@@ -659,11 +650,9 @@ def _sources(
         if kind not in candidate_kinds and kind not in absent_by_kind:
             absent_by_kind[kind] = _absent(kind, absence_kind)
     absent_facts = tuple(absent_by_kind.values())
-    registry = ContextSourceRegistry().fingerprint
     fingerprint = context_fingerprint(
         "collected-context-sources:v1",
         {
-            "registry_fingerprint": registry,
             "candidates": tuple(
                 candidate.source_semantic_fingerprint for candidate in candidates
             ),
@@ -680,7 +669,7 @@ def _sources(
         },
     )
     return CollectedContextSources(
-        tuple(candidates), (), registry, fingerprint, absent_facts
+        tuple(candidates), (), fingerprint, absent_facts
     )
 
 
@@ -697,31 +686,25 @@ def _absent(
         modes,
         lifecycle,
     ) = _SOURCE_FACTS[kind]
-    contract = context_fingerprint(
-        "context-source-contract:v1",
-        {
-            "kind": kind.value,
-            "channel": channel.value,
-            "trust": trust.value,
-            "budget": budget.value,
-            "placement": placement,
-            "degradation": degradation,
-            "modes": tuple(mode.value for mode in modes),
-            "lifecycle": lifecycle.value,
-        },
-    )
     return ContextSourceAbsentFact(
         source_kind=kind,
         lifecycle=lifecycle,
         absence_kind=absence_kind,
-        source_contract_fingerprint=contract,
         trust_class=trust,
         budget_class=budget,
         placement_ordinal=placement,
         degradation_priority=degradation,
         domain_semantic_fingerprint=context_fingerprint(
             "pulsara:context-source-absence:v1",
-            {"kind": kind.value, "absence": absence_kind.value, "contract": contract},
+            {
+                "kind": kind.value,
+                "absence": absence_kind.value,
+                "trust": trust.value,
+                "budget": budget.value,
+                "placement": placement,
+                "degradation": degradation,
+                "lifecycle": lifecycle.value,
+            },
         ),
     )
 
@@ -1665,15 +1648,12 @@ def test_round3_source_registry_is_exact_and_rejects_self_certified_wrong_trust(
             )
         )
 
-    registry = ContextSourceRegistry().fingerprint
     empty = CollectedContextSources(
         (),
         (),
-        registry,
         context_fingerprint(
             "collected-context-sources:v1",
             {
-                "registry_fingerprint": registry,
                 "candidates": (),
                 "diagnostics": (),
                 "absent": (),
@@ -1695,7 +1675,6 @@ def test_round3_1_compiler_requires_exact_value_or_absent_for_every_source() -> 
     collection = context_fingerprint(
         "collected-context-sources:v1",
         {
-            "registry_fingerprint": valid.registry_fingerprint,
             "candidates": tuple(
                 item.source_semantic_fingerprint for item in valid.candidates
             ),
@@ -1714,7 +1693,6 @@ def test_round3_1_compiler_requires_exact_value_or_absent_for_every_source() -> 
     missing = CollectedContextSources(
         valid.candidates,
         (),
-        valid.registry_fingerprint,
         collection,
         absent,
     )
@@ -1724,21 +1702,26 @@ def test_round3_1_compiler_requires_exact_value_or_absent_for_every_source() -> 
     assert failure.value.kind is ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
 
 
-def test_round3_1_compiler_rejects_self_certified_absent_policy() -> None:
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("trust_class", ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE),
+        ("budget_class", ContextBudgetClass.MUST_KEEP),
+        ("placement_ordinal", 91),
+        ("degradation_priority", 81),
+        ("lifecycle", ContextSourceLifecycle.EPOCH_ROOT),
+        ("absence_kind", ContextSourceAbsenceKind.NOT_APPLICABLE),
+    ),
+)
+def test_round3_1_compiler_rejects_self_certified_absent_policy(field, value) -> None:
     valid = _sources()
     absent = tuple(
-        replace(item, trust_class=ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE)
+        replace(item, **{field: value})
         if item.source_kind is ContextSourceKind.RUNTIME_CLOCK
         else item
         for item in valid.absent_facts
     )
-    malformed = CollectedContextSources(
-        valid.candidates,
-        valid.diagnostics,
-        valid.registry_fingerprint,
-        valid.collection_fingerprint,
-        absent,
-    )
+    malformed = _sources(*valid.candidates, absent_facts=absent)
 
     with pytest.raises(StructuredModelInputCompileError) as failure:
         StructuredModelInputCompiler().compile(
@@ -1746,6 +1729,33 @@ def test_round3_1_compiler_rejects_self_certified_absent_policy() -> None:
         )
     assert failure.value.kind is ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
 
+
+@pytest.mark.parametrize(
+    ("position", "value"),
+    (
+        (0, ContextChannel.SYSTEM),
+        (1, ContextTrustClass.UNTRUSTED_OBSERVATION),
+        (2, ContextBudgetClass.MUST_KEEP),
+        (3, 91),
+        (4, 81),
+        (5, (ContextRenderMode.FULL, ContextRenderMode.REF_ONLY)),
+        (6, ContextSourceLifecycle.EPOCH_ROOT),
+    ),
+)
+def test_compiler_rejects_source_policy_despite_consistent_content_identity(
+    monkeypatch, position, value
+) -> None:
+    kind = ContextSourceKind.RUNTIME_CLOCK
+    policy = list(_SOURCE_FACTS[kind])
+    policy[position] = value
+    monkeypatch.setitem(_SOURCE_FACTS, kind, tuple(policy))
+    malformed = _sources(_candidate(kind, ("clock full", "clock compact")))
+
+    with pytest.raises(StructuredModelInputCompileError) as failure:
+        StructuredModelInputCompiler().compile(
+            _prepared_request(_snapshot(), malformed)
+        )
+    assert failure.value.kind is ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
 
 
 def test_round3_source_identity_duplicate_and_variant_order_fail_closed() -> None:
@@ -2984,7 +2994,6 @@ def test_round3_capability_sources_and_public_diagnostics_are_separate(
     by_kind = {candidate.source_kind: candidate for candidate in collected.candidates}
     assert by_kind[ContextSourceKind.SKILL_CATALOG].variants[0].text == ("CATALOG FULL")
     assert by_kind[ContextSourceKind.ACTIVE_SKILL].variants[0].text == "ACTIVE FULL"
-    assert collected.registry_fingerprint == collector.registry_fingerprint
     retained_absence = next(
         item
         for item in collected.absent_facts

@@ -30,7 +30,7 @@ def test_context_collection_preserves_separate_human_skill_reference_surfaces(hu
 
     surfaces = ('````\n/quoted-skill', '/comment-skill')
     registry = ContextSourceRegistry()
-    frozen = SimpleNamespace(registry_fingerprint=registry.fingerprint,
+    frozen = SimpleNamespace(
         candidates=(), absent_facts=(), diagnostics=(),
         skill_dispatch_view=object(), skill_owner_snapshot=object())
     received = []

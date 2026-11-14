@@ -626,18 +626,6 @@ class _NativePlanningDeadlineModel(_ScriptedModel):
         raise TimeoutError("injected native Tool planning deadline")
 
 
-class _ChangingRegistryCollector(StaticContextSourceCollector):
-    def __init__(self) -> None:
-        self._reads = 0
-
-    @property
-    def registry_fingerprint(self) -> str:
-        self._reads += 1
-        if self._reads == 1:
-            return super().registry_fingerprint
-        return "sha256:" + ("0" * 64)
-
-
 class _RecordingHookReservation:
     def __init__(self) -> None:
         self.retire_calls = 0
@@ -676,13 +664,17 @@ class _PostCompactionHookContextCollector(StaticContextSourceCollector):
             {
                 "source_kind": ContextSourceKind.HOOK_CONTEXT.value,
                 "source_instance_id": instance_id,
-                "source_contract_fingerprint": binding.contract_fingerprint,
+                "channel": binding.channel.value,
+                "trust": binding.trust.value,
+                "budget": binding.budget.value,
+                "placement": binding.placement,
+                "degradation": binding.degradation,
+                "lifecycle": binding.lifecycle.value,
                 "variants": tuple(item.semantic_fingerprint for item in variants),
             },
         )
         candidate = ContextSourceCandidate(
             source_kind=ContextSourceKind.HOOK_CONTEXT,
-            source_contract_fingerprint=binding.contract_fingerprint,
             source_semantic_fingerprint=semantic,
             channel=binding.channel,
             trust_class=binding.trust,
@@ -7365,38 +7357,6 @@ def test_round3_compile_failure_observer_cannot_block_turn_interruption(
             (session_id,),
         ).fetchone() == ("INTERRUPTED", "PROVIDER_INPUT_RESOURCE_EXHAUSTED")
     assert turn_count == 1
-
-
-def test_round3_source_registry_drift_interrupts_with_zero_provider_open(
-    stage2_migrated_postgres_database,
-) -> None:
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = ConversationKernelRepository(provider)
-    session_id = _name("session")
-    lease = _acquire_bound_host_writer(
-        repository,
-        session_id=session_id,
-        workspace_id=_name("workspace"),
-        writer_owner_id=_name("host"),
-        lease_seconds=30,
-        deadline_monotonic=monotonic() + 30,
-    )
-    model = _ScriptedModel([_text_stream("must not open")])
-    runner = ConversationKernelRunner(
-        model_resolution_snapshot_provider=test_model_resolution_snapshot,
-        repository=repository,
-        writer_lease=lease,
-        model=model,
-        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
-        live_bus=LiveAgentEventBus(),
-        context_source_collector=_ChangingRegistryCollector(),
-    )
-    with pytest.raises(StructuredModelInputCompileError) as failure:
-        asyncio.run(
-            runner.run_turn(frozen_test_prompt("accepted before registry drift"))
-        )
-    assert failure.value.kind is ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
-    assert model.requests == []
 
 
 def test_round3_surface_revoked_before_borrow_has_zero_provider_open(

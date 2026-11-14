@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
 
@@ -602,6 +603,29 @@ def test_render_active_prompt_keeps_raw_markdown_and_uses_sentinel_fence(
     item = json.loads(rendered or "{}")["skills"][0]
     assert item["body"] == body
     assert "BEGIN_PULSARA_SKILL_BODY" not in (rendered or "")
+
+
+def test_multiple_skill_activations_preserve_content_through_handoff_validation(
+    tmp_path: Path,
+) -> None:
+    from pulsara_agent.conversation_kernel.context_sources import (
+        _validate_inherited_active_skill_body,
+    )
+
+    injections = tuple(
+        replace(
+            _injection(tmp_path, body=f"# Skill {index}\n"),
+            name=f"skill-{index:02d}",
+        )
+        for index in range(24)
+    )
+    rendered = render_active_skill_prompt(injections)
+    assert rendered is not None
+    _validate_inherited_active_skill_body(rendered)
+    rows = json.loads(rendered)["skills"]
+    assert [(row["name"], row["body"]) for row in rows] == [
+        (item.name, item.body) for item in injections
+    ]
 
 
 def test_render_active_prompt_includes_cli_hints_as_guidance(tmp_path: Path) -> None:

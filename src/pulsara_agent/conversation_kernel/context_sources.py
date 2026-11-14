@@ -16,7 +16,6 @@ from pulsara_agent.capability.contracts import (
 )
 from pulsara_agent.capability.render import (
     MAX_ACTIVE_SKILL_BODY_UTF8_BYTES,
-    MAX_ACTIVE_SKILLS,
 )
 from pulsara_agent.capability.types import (
     ActiveSkillReason,
@@ -98,9 +97,6 @@ def _tool_exposure_plan_identity(
 
 
 class ContextSourceCollectorPort(Protocol):
-    @property
-    def registry_fingerprint(self) -> str: ...
-
     def freeze_exited_plan_source_upper(
         self, resume_permission_mode: PermissionMode
     ) -> tuple[LLMMessage, ...]: ...
@@ -192,29 +188,12 @@ class _SourceBinding:
     modes: tuple[ContextRenderMode, ...]
     lifecycle: ContextSourceLifecycle
 
-    @property
-    def contract_fingerprint(self) -> str:
-        return context_fingerprint(
-            "context-source-contract:v1",
-            {
-                "kind": self.source_kind.value,
-                "channel": self.channel.value,
-                "trust": self.trust.value,
-                "budget": self.budget.value,
-                "placement": self.placement,
-                "degradation": self.degradation,
-                "modes": tuple(mode.value for mode in self.modes),
-                "lifecycle": self.lifecycle.value,
-            },
-        )
-
 
 @dataclass(frozen=True, slots=True)
 class FrozenNonTriggerContextSources:
     candidates: tuple[ContextSourceCandidate, ...]
     absent_facts: tuple[ContextSourceAbsentFact, ...]
     diagnostics: tuple[ContextSourceCollectionDiagnostic, ...]
-    registry_fingerprint: str
     tool_exposure_plan: FrozenToolCapabilityExposurePlan = field(repr=False)
     skill_dispatch_view: FrozenSkillCapabilityDispatchView = field(repr=False)
     skill_owner_snapshot: PreparedSkillCatalogSourceSnapshot = field(
@@ -408,23 +387,17 @@ _BINDINGS = (
 
 
 class ContextSourceRegistry:
-    """Closed first-party binding set, never a domain truth registry."""
+    """Closed first-party rendering policy; the compiler checks actual fields.
+
+    Source content and domain identities belong to continuity. This binding set
+    is not an independent source of runtime truth or an epoch rebase boundary.
+    """
 
     def __init__(self) -> None:
         kinds = tuple(binding.source_kind for binding in _BINDINGS)
         if len(kinds) != len(set(kinds)):
             raise RuntimeError("first-party context source bindings are duplicated")
         self._by_kind = {binding.source_kind: binding for binding in _BINDINGS}
-        self.fingerprint = context_fingerprint(
-            "context-source-registry:v1",
-            tuple(
-                (
-                    binding.source_kind.value,
-                    binding.contract_fingerprint,
-                )
-                for binding in _BINDINGS
-            ),
-        )
 
     def binding(self, kind: ContextSourceKind) -> _SourceBinding:
         return self._by_kind[kind]
@@ -459,10 +432,6 @@ class KernelContextSourceCollector:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._registry = registry or ContextSourceRegistry()
         self._hook_context_owner = hook_context_owner
-
-    @property
-    def registry_fingerprint(self) -> str:
-        return self._registry.fingerprint
 
     def _value_observation_message(
         self,
@@ -823,7 +792,6 @@ class KernelContextSourceCollector:
             candidates=tuple(candidates),
             absent_facts=tuple(absent),
             diagnostics=tuple(diagnostics),
-            registry_fingerprint=self._registry.fingerprint,
             tool_exposure_plan=tool_exposure_plan,
             skill_dispatch_view=skill_dispatch_view,
             skill_owner_snapshot=skill_owner_snapshot,
@@ -880,8 +848,6 @@ class KernelContextSourceCollector:
         deadline_monotonic: float | None = None,
     ) -> CollectedContextSources:
         del deadline_monotonic
-        if frozen.registry_fingerprint != self._registry.fingerprint:
-            raise ValueError("context source registry changed after source freeze")
         candidates = list(frozen.candidates)
         absent = list(frozen.absent_facts)
         diagnostics = list(frozen.diagnostics)
@@ -1005,7 +971,6 @@ class KernelContextSourceCollector:
             candidates=tuple(candidates),
             absent_facts=tuple(absent),
             diagnostics=tuple(diagnostics),
-            registry_fingerprint=self._registry.fingerprint,
         )
 
     def freeze_compaction_active_skill_source(
@@ -1126,7 +1091,12 @@ class KernelContextSourceCollector:
         semantic_payload: dict[str, object] = {
             "source_kind": kind.value,
             "source_instance_id": f"context-source:{kind.value.lower()}",
-            "source_contract_fingerprint": binding.contract_fingerprint,
+            "channel": binding.channel.value,
+            "trust": binding.trust.value,
+            "budget": binding.budget.value,
+            "placement": binding.placement,
+            "degradation": binding.degradation,
+            "lifecycle": binding.lifecycle.value,
             "variants": tuple(item.semantic_fingerprint for item in variants),
         }
         if initial_mode is not ContextRenderMode.FULL:
@@ -1139,7 +1109,6 @@ class KernelContextSourceCollector:
                 "context-source-domain-identity:v1",
                 {
                     "source_kind": kind.value,
-                    "source_contract_fingerprint": binding.contract_fingerprint,
                     "provider_visible_semantic_fingerprint": semantic,
                     "domain_identity": domain_identity,
                 },
@@ -1147,7 +1116,6 @@ class KernelContextSourceCollector:
         )
         return ContextSourceCandidate(
             source_kind=kind,
-            source_contract_fingerprint=binding.contract_fingerprint,
             source_semantic_fingerprint=semantic,
             channel=binding.channel,
             trust_class=binding.trust,
@@ -1171,14 +1139,17 @@ class KernelContextSourceCollector:
             {
                 "kind": kind.value,
                 "absence": absence_kind.value,
-                "contract": binding.contract_fingerprint,
+                "trust": binding.trust.value,
+                "budget": binding.budget.value,
+                "placement": binding.placement,
+                "degradation": binding.degradation,
+                "lifecycle": binding.lifecycle.value,
             },
         )
         return ContextSourceAbsentFact(
             source_kind=kind,
             lifecycle=binding.lifecycle,
             absence_kind=absence_kind,
-            source_contract_fingerprint=binding.contract_fingerprint,
             trust_class=binding.trust,
             budget_class=binding.budget,
             placement_ordinal=binding.placement,
@@ -1230,7 +1201,7 @@ def _validate_inherited_active_skill_body(body: str) -> None:
     if not isinstance(payload, dict) or set(payload) != {"skills"}:
         raise ValueError("installed ACTIVE_SKILL body shape is invalid")
     rows = payload["skills"]
-    if not isinstance(rows, list) or not 1 <= len(rows) <= MAX_ACTIVE_SKILLS:
+    if not isinstance(rows, list) or not rows:
         raise ValueError("installed ACTIVE_SKILL item count is invalid")
     names: list[str] = []
     for row in rows:
@@ -1277,14 +1248,17 @@ def build_memory_context_source(
             {
                 "kind": kind.value,
                 "absence": absence_kind.value,
-                "contract": binding.contract_fingerprint,
+                "trust": binding.trust.value,
+                "budget": binding.budget.value,
+                "placement": binding.placement,
+                "degradation": binding.degradation,
+                "lifecycle": binding.lifecycle.value,
             },
         )
         return ContextSourceAbsentFact(
             source_kind=kind,
             lifecycle=binding.lifecycle,
             absence_kind=absence_kind,
-            source_contract_fingerprint=binding.contract_fingerprint,
             trust_class=binding.trust,
             budget_class=binding.budget,
             placement_ordinal=binding.placement,
@@ -1301,7 +1275,12 @@ def build_memory_context_source(
         {
             "source_kind": kind.value,
             "source_instance_id": f"context-source:{kind.value.lower()}",
-            "source_contract_fingerprint": binding.contract_fingerprint,
+            "channel": binding.channel.value,
+            "trust": binding.trust.value,
+            "budget": binding.budget.value,
+            "placement": binding.placement,
+            "degradation": binding.degradation,
+            "lifecycle": binding.lifecycle.value,
             "variants": tuple(item.semantic_fingerprint for item in variants),
         },
     )
@@ -1312,7 +1291,6 @@ def build_memory_context_source(
             "context-source-domain-identity:v1",
             {
                 "source_kind": kind.value,
-                "source_contract_fingerprint": binding.contract_fingerprint,
                 "provider_visible_semantic_fingerprint": semantic,
                 "domain_identity": domain_identity,
             },
@@ -1320,7 +1298,6 @@ def build_memory_context_source(
     )
     return ContextSourceCandidate(
         source_kind=kind,
-        source_contract_fingerprint=binding.contract_fingerprint,
         source_semantic_fingerprint=semantic,
         channel=binding.channel,
         trust_class=binding.trust,
@@ -1351,7 +1328,6 @@ def replace_memory_context_sources(
         candidates=candidates,
         absent_facts=absent,
         diagnostics=sources.diagnostics,
-        registry_fingerprint=sources.registry_fingerprint,
     )
 
 
@@ -1377,14 +1353,17 @@ def build_compaction_context_source(
             {
                 "kind": kind.value,
                 "absence": absence_kind.value,
-                "contract": binding.contract_fingerprint,
+                "trust": binding.trust.value,
+                "budget": binding.budget.value,
+                "placement": binding.placement,
+                "degradation": binding.degradation,
+                "lifecycle": binding.lifecycle.value,
             },
         )
         return ContextSourceAbsentFact(
             source_kind=kind,
             lifecycle=binding.lifecycle,
             absence_kind=absence_kind,
-            source_contract_fingerprint=binding.contract_fingerprint,
             trust_class=binding.trust,
             budget_class=binding.budget,
             placement_ordinal=binding.placement,
@@ -1401,7 +1380,12 @@ def build_compaction_context_source(
         {
             "source_kind": kind.value,
             "source_instance_id": f"context-source:{kind.value.lower()}",
-            "source_contract_fingerprint": binding.contract_fingerprint,
+            "channel": binding.channel.value,
+            "trust": binding.trust.value,
+            "budget": binding.budget.value,
+            "placement": binding.placement,
+            "degradation": binding.degradation,
+            "lifecycle": binding.lifecycle.value,
             "variants": tuple(item.semantic_fingerprint for item in variants),
         },
     )
@@ -1412,7 +1396,6 @@ def build_compaction_context_source(
             "context-source-domain-identity:v1",
             {
                 "source_kind": kind.value,
-                "source_contract_fingerprint": binding.contract_fingerprint,
                 "provider_visible_semantic_fingerprint": semantic,
                 "domain_identity": domain_identity,
             },
@@ -1420,7 +1403,6 @@ def build_compaction_context_source(
     )
     return ContextSourceCandidate(
         source_kind=kind,
-        source_contract_fingerprint=binding.contract_fingerprint,
         source_semantic_fingerprint=semantic,
         channel=binding.channel,
         trust_class=binding.trust,
@@ -1457,7 +1439,6 @@ def replace_compaction_context_sources(
         candidates=candidates,
         absent_facts=absent,
         diagnostics=sources.diagnostics,
-        registry_fingerprint=sources.registry_fingerprint,
     )
 
 
@@ -1487,7 +1468,6 @@ def replace_hook_context_source(
         candidates=candidates,
         absent_facts=absent,
         diagnostics=sources.diagnostics,
-        registry_fingerprint=sources.registry_fingerprint,
     )
 
 
@@ -1502,7 +1482,6 @@ def replace_frozen_hook_context_source(
             candidates=sources.candidates,
             absent_facts=sources.absent_facts,
             diagnostics=sources.diagnostics,
-            registry_fingerprint=sources.registry_fingerprint,
             ),
         replacement,
     )
@@ -1510,7 +1489,6 @@ def replace_frozen_hook_context_source(
         candidates=collected.candidates,
         absent_facts=collected.absent_facts,
         diagnostics=sources.diagnostics,
-        registry_fingerprint=sources.registry_fingerprint,
         tool_exposure_plan=sources.tool_exposure_plan,
         skill_dispatch_view=sources.skill_dispatch_view,
         skill_owner_snapshot=sources.skill_owner_snapshot,
@@ -1544,7 +1522,6 @@ def replace_frozen_compaction_context_sources(
         candidates=candidates,
         absent_facts=absent,
         diagnostics=sources.diagnostics,
-        registry_fingerprint=sources.registry_fingerprint,
         tool_exposure_plan=sources.tool_exposure_plan,
         skill_dispatch_view=sources.skill_dispatch_view,
         skill_owner_snapshot=sources.skill_owner_snapshot,
@@ -1556,13 +1533,11 @@ def _collected(
     *,
     candidates: tuple[ContextSourceCandidate, ...],
     diagnostics: tuple[ContextSourceCollectionDiagnostic, ...],
-    registry_fingerprint: str,
     absent_facts: tuple[ContextSourceAbsentFact, ...] = (),
 ) -> CollectedContextSources:
     fingerprint = context_fingerprint(
         "collected-context-sources:v1",
         {
-            "registry_fingerprint": registry_fingerprint,
             "candidates": tuple(
                 item.source_semantic_fingerprint for item in candidates
             ),
@@ -1588,7 +1563,6 @@ def _collected(
     return CollectedContextSources(
         candidates=candidates,
         diagnostics=diagnostics,
-        registry_fingerprint=registry_fingerprint,
         collection_fingerprint=fingerprint,
         absent_facts=absent_facts,
     )
