@@ -12,7 +12,7 @@
 
 这样未使用的 MCP 工具无需常驻完整 schema，模型也不必判断远端工具是否进入当前冻结目录。代价是：首次使用不熟悉的工具时，需要先发现工具并阅读其接口说明，可能产生多次往返。本方案接受这个取舍，不以“脚本运行时查到 schema”代替模型实际取得说明。
 
-本轮不改变 `read_mcp_resource`、用户通过 slash 使用 MCP Prompt 的产品语义，也不重新设计连接管理、凭据或执行框架。
+资源使用独立的固定入口 read_mcp_resource：传 MCP_CONNECTION 按需列资源及模板目录，传 MCP_RESOURCE 读取具体 URI，不通过 tools/call 或 MCP_TOOL_REF。参数、精简返回和原生／JS 示例见[MCP 接入草案第 4 章](native_tools/mcp.md#4-read_mcp_resource按需列目录与读取资源)。用户通过 slash 使用 MCP Prompt 的产品语义保持；连接管理、凭据和执行框架继续复用。
 
 ## 2. 编写业务 Cell 前的信息准备
 
@@ -36,7 +36,7 @@
 
 ### 2.2 返回结构说明的边界
 
-精确详情保留完整 `input_schema`、实际描述及服务声明的可选 `output_schema`。共同返回包装由 MCP 工具教程说明：`meta.status`、有序 `content` 和可选 `structuredContent`。
+META 精确详情的完整 `input_schema` 必填，能力查询返回类型与固定 SDK 声明须表达这一条件；UNAVAILABLE 详情可省略无法提供的 schema。详情保留实际描述及服务声明的可选 `output_schema`。共同返回包装由 MCP 工具教程说明：`meta.status`、有序 `content` 和可选 `structuredContent`。
 
 `output_schema` 描述成功的 `structuredContent`，不描述整个 Pulsara 返回包，也不约束失败业务值。没有输出 schema 时，仍可使用已知的共同包装、组合 `content` 或输出完整结果，不要求额外探测调用。只有代码需要访问尚未知晓的业务字段时，才先观察真实结果，再编写依赖它的后续代码；不编造字段，也不为了解返回形状而重复执行有副作用的操作。
 
@@ -109,6 +109,7 @@ JS 使用 `tools.call_mcp_tool({target, arguments})`。本轮不改变参数校�
 | 服务返回业务失败 | ERROR，保留完整失败业务值及适用 err.result，不自动判定引用失效 |
 | 调用已发送，响应丢失或超时 | 按现有结算说明已知效果或结果未确认，不声称“未执行”，不自动重新调用 |
 | 已收到响应，但输出 schema 验证或图片接入失败 | 如实说明收到响应后的失败，保留已有业务内容；不能改称本地未派发或据此重做业务 |
+| 取消请求到达 | 仅实际结算为取消时返回 CANCELLED；仍取得确定成功或错误结果时保留真实 SUCCESS／ERROR 及已接受内容，不因取消到达宣称未派发 |
 
 重新查询只取得当前调用信息，不证明之前操作没有发生，也不授权自动重放。新旧引用的退休只影响后续新调用的准入，不撤销已经接纳的调用或抹去其真实结果。
 
@@ -116,7 +117,7 @@ JS 使用 `tools.call_mcp_tool({target, arguments})`。本轮不改变参数校�
 
 ### 4.1 查询与固定入口
 
-继续使用已确定的服务列表、服务内工具目录、工具精确详情三层查询和最小 Target。服务记录保留实际提供的 instructions；不默认交付所有远端工具的完整输入输出 schema，不新增全量接口注入或自动探索流程。
+继续使用已确定的服务列表、服务内工具目录、工具精确详情三层查询和最小 Target。服务记录保留实际提供的 instructions，可附已知 resource_count 和 resource_template_count；未知计数省略，确认没有才填 0，计数随本次已接纳目录快照冻结，不额外请求 MCP。不默认交付所有远端工具的完整输入输出 schema，也不展开资源目录；需要时将连接 Target 交给 read_mcp_resource，不新增全量接口注入或自动探索流程。
 
 工具精确详情删除 DIRECT 分支及其 `tool_name`。可调用时返回既有 meta 调用引用；不可用时说明实际原因，不生成假引用。暂沿现有 META／UNAVAILABLE 表达，不在本轮另行设计查询结果包装。查询与管理入口中的权限、启停、信任、ROOT／子代理范围保持各自已确定的合同。
 

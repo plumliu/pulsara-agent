@@ -23,7 +23,7 @@ MCP 的完整结果指按第 2.3 节完成 audience 过滤后接受的结果；�
 - `view_image`、`read_video_frames` 和包含正式 inline 图片的 MCP 响应统一形成有序图文结果；保存与图片 owner 共用，按消费入口形成原生页、JS 程序值或 Cell 主动输出。
 - 原生结果按 12k v3 分页；JS 工具调用直接取得完整的本次类型化业务值，不套用模型展示分页。
 - JS 可以组合多个工具结果，通过 console.log／显式 return 输出单个图片项、数组、完整结果或任意嵌套组合。只在实际输出值中递归识别 image 内容项，按模型能力及实际读取结果在原位置投图或给文字说明；首版不另设 token 预算或自动分页。
-- Code Mode 的固定 SDK 声明其可调用 API 的输入和完整返回类型、共同图文内容项、图片 Target 与错误规则；MCP 只声明 call_mcp_tool 的共同接口，远端参数及可选返回 schema 通过查询按需交给模型，不为所有远端工具常驻独立方法和声明。
+- Code Mode 的固定 SDK 声明其可调用 API 的输入和完整返回类型、共同图文内容项、图片 Target 与错误规则；MCP 声明 call_mcp_tool 和 read_mcp_resource 两个固定接口，远端工具参数及可选返回 schema 通过查询按需交给模型，不为所有远端工具常驻独立方法和声明。
 - 不新增 `read_next`，不新增 artifact 或 next 实体、ID、注册表、持久分页任务。
 
 模型需要区分的只有：本次调用的业务状态，以及原生结果的实际交付进度。统一交付层不判断、不增加字段表示整个来源是否穷尽。原生工具结果页与脚本主动组合输出分别遵循第 7 节与第 8.8 节；完整保存与共同图文表示不要求所有消费者采用相同的展示限制。
@@ -339,7 +339,15 @@ provider 可能按模型和 detail 再缩放或切块；原样发送不承诺模
 
 MCP SDK 拥有协议解析和内容类型。当前依赖的 `CallToolResult.content` 是有序列表，正式 `TextContent` 与 `ImageContent` 可以交错；Pulsara 不复制 MCP 解析器或根据正文外形猜图片。
 
-远端 MCP 工具统一通过 call_mcp_tool 调用，ROOT 与子代理均使用该入口；适用 Code Mode 时使用 tools.call_mcp_tool。删除远端工具的 provider 原生安装、Cell 独立方法和 DIRECT 分支，内置工具的原生安装及前缀冻结机制保留。架构边界见[统一 meta 调用草案](PULSARA_MCP_META_ONLY_CALLING_ARCHITECTURE_DRAFT.zh.md)。业务返回为：meta 只含 status:SUCCESS／ERROR／CANCELLED，content 为转换后的有序 text／image 数组，structuredContent 仅在服务提供时原样保留。不返回业务层面的顶层 target、调用引用或专属 result 包装。原生时间、tool_result 及 next 沿共用外壳；JS 只取得完整业务值，不带原生外壳或展示分页。target／arguments 参数与原生／JS 示例见[MCP 接入草案](native_tools/mcp.md)。read_mcp_resource 暂不展开。
+远端 MCP 工具统一通过 call_mcp_tool 调用，ROOT 与子代理均使用该入口；适用 Code Mode 时使用 tools.call_mcp_tool。删除远端工具的 provider 原生安装、Cell 独立方法和 DIRECT 分支，内置工具的原生安装及前缀冻结机制保留。架构边界见[统一 meta 调用草案](PULSARA_MCP_META_ONLY_CALLING_ARCHITECTURE_DRAFT.zh.md)。该元工具业务返回为：meta 只含 status:SUCCESS／ERROR／CANCELLED，content 为转换后的有序 text／image 数组，structuredContent 仅在服务提供时原样保留。不返回业务层面的顶层 target、调用引用或专属 result 包装。原生时间、tool_result 及 next 沿共用外壳；JS 只取得完整业务值，不带原生外壳或展示分页。target／arguments 参数与原生／JS 示例见[MCP 接入草案](native_tools/mcp.md)。
+
+read_mcp_resource 使用独立固定入口，参数仅 target：MCP_CONNECTION 列当前已接纳资源／模板目录，MCP_RESOURCE 读取具体 URI，不经 tools/call 或工具调用引用。目录使用 text／object，具体资源记录给 MCP_RESOURCE Target，模板给实际 server_id／uri_template；读取将正式 ReadResourceResult.contents 按原顺序转为 URI／MIME 说明及 text／image，不新增 structuredContent。文本保持原样，图片 blob 逐项解码保存为实际资产，坏图原位 text 并以 ERROR 保留其余内容；其他二进制按确定性文字保留完整公开载荷，不隐式解析文档、播放媒体或读取链接。ROOT／子代理和原生／JS 沿现有调用范围，原生模型能力不足及图片读取失败使用第 8.2 节投影，JS 业务值不因模型能力改变。两个分支都完整保存后再原生 12k／NEXT，JS 取得完整值；NEXT 不重新 listing 或请求 resources/read。具体类型和示例见[MCP 接入草案第 4 章](native_tools/mcp.md#4-read_mcp_resource按需列目录与读取资源)。
+
+资源 blob 缺 MIME 时，复用现有图片 owner 识别及校验；有效图片保存为真实资产，无法识别为图片的内容按未知二进制完整保留 Base64 文字，省略 MIME 说明，不误报为坏图。服务明确声明图片类型或已可靠识别为图片后，验证失败才按局部图片接入 ERROR 处理。
+
+call_mcp_tool 与 read_mcp_resource 均按真实结果结算。仅实际结算为取消时使用 CANCELLED；取消请求到达后仍取得确定成功或错误结果时，保留真实 SUCCESS／ERROR 及已接受内容，不据此宣称未派发。
+
+query_capabilities 的服务记录可附 resource_count 和 resource_template_count，两项为同一已接纳目录快照中的已知计数，未知省略、确认没有才填 0；不展开资源或模板，不为计数额外请求远端。目录 object 及计数为本次查询的冻结业务值，不能随 NEXT 重新读取或改写。
 
 详情查询的调用引用在同一 session 的原生与各个 Cell 间共用，Cell 结束或 epoch 更换本身不使其失效。完整查询结果保存、接纳后即可调用；删除整页 schema 预算拒绝、FULL 展示后激活及每 epoch 1,024 个引用上限，不改成 session 总上限。原生详情走统一 12k／NEXT，是否信息足够由模型决定，NEXT 不刷新或激活引用。有效性、参数与权限仍在实际调用时校验，调用引用保持进程内管理。独立及 Plugin 连接默认允许 ROOT 和子代理，用户可在能力页关闭子代理使用；各 session 不互借调用引用。
 
@@ -350,7 +358,7 @@ MCP SDK 拥有协议解析和内容类型。当前依赖的 `CallToolResult.cont
 - 先按第 2.3 节过滤正式内容项并移除 audience，再按保留项的原顺序接入文字项与图片项。仅保留的正式 `ImageContent.data` 解码后进入既有图片验证及存储流程；MIME、实际格式与资源边界沿同一 owner 处理。
 - structuredContent 保留完整 JSON 值、字段缺失与显式 null 的区别；完整接入正常时，正式 isError:true 映射为 meta.status:ERROR，false 或缺省映射为 SUCCESS，不再重复公开 isError。图片接入失败及其他错误、取消沿真实结算，不根据文字或结构化业务字段猜状态。保留 audience 之外适用内容标注的公开语义；原本不公开的元数据不因图文接入自动披露。
 - 不把普通文字中的 Base64、Markdown 链接、`image_url` 字段或任意 JSON 自动升级为视觉内容。资源链接和其他内容类型维持既有公开语义，不因 MIME 像图片就擅自抓取远端资源。
-- MCP 适配 owner 将通过过滤的正式内容按原顺序形成共同 `ResultPart[]`：SDK TextContent.text 映射为 `{"type":"text","value":"…"}`，正式图片解码保存后映射为 `{"type":"image","value":<IMAGE_REF Target>}`。资源链接、嵌入资源、音频等未直接支持的块及 audience 之外的适用标注，按确定性文字投影保留其公开字段和所属位置，本族不生成 object 或 target 内容项，不将资源 URI 推断为 Pulsara Target，也不把 JSON 文字解析成对象。图片自身的附带说明置于该图之前，按第 8.1 节处理；文字项等其他内容的附带说明也紧邻其所属内容，不推断普通相邻文字与图片的关系。不能因块类型不认识就额外丢弃通过过滤的内容，也不能将未适配的 SDK 对象留在 JS `content` 中，直到 console.log 时才因类型不匹配失败。该转换只适配正式内容项，不改写普通业务字段及 structuredContent 中的 text、target、value 等字段；不新增媒体能力或独立注册表，不自动抓取链接或播放音频。
+- call_mcp_tool 的适配 owner 将通过过滤的正式内容按原顺序形成共同 `ResultPart[]`：SDK TextContent.text 映射为 `{"type":"text","value":"…"}`，正式图片解码保存后映射为 `{"type":"image","value":<IMAGE_REF Target>}`。资源链接、嵌入资源、音频等未直接支持的块及 audience 之外的适用标注，按确定性文字投影保留其公开字段和所属位置，此处不生成 object 或 target 内容项，不将资源 URI 推断为 Pulsara Target，也不把 JSON 文字解析成对象。图片自身的附带说明置于该图之前，按第 8.1 节处理；文字项等其他内容的附带说明也紧邻其所属内容，不推断普通相邻文字与图片的关系。不能因块类型不认识就额外丢弃通过过滤的内容，也不能将未适配的 SDK 对象留在 JS `content` 中，直到 console.log 时才因类型不匹配失败。该转换只适配正式内容项，不改写普通业务字段及 structuredContent 中的 text、target、value 等字段；不新增媒体能力或独立注册表，不自动抓取链接或播放音频。
 - 对过滤后的有序图文及公开业务字段形成唯一结果，不保留整份原始 MCP JSON 作为第二份正文。正式 ImageContent 的 Base64 解码后由图片资产承载，共同 content 的图片项使用 IMAGE_REF，不为 Code Mode 重建这份旧图片块。
 - structuredContent 是 MCP 协议定义的可选业务字段，不搬进 content、不包装成 object 项，也不推广为所有工具的公共字段。接入与保存时原样保留其对象、数组、标量及 null；其中即使存在相同 Base64、content、type、value、target 或 isError 也不扫描、过滤或替换。此类 Base64 是独立业务 JSON 的原值，不受正式图片块转换的承诺约束；其原生文字投影按普通文字计量，不成为隐式图片附件。content 与 structuredContent 可能重复或互补，完整保留二者，不自动去重。脚本实际输出的合法 Pulsara image 内容项仍沿第 8.8 节递归投影，不改写保存的业务值。
 - 通过过滤的正式图片逐项解码、验证，复用现有图片 owner，不因单图无效而整批丢弃。Base64 无效、图片损坏、格式不支持或 MIME 不符的项，在原位置接入为 text，复用第 8.2 节及 view_image 的失败文字表达，写实际原因和“未交付实际图片”；尚无有效资产时不生成假 IMAGE_REF 或图片外键。其他文字、有效图片及 structuredContent 按原顺序保留。完整接入结果为 ERROR，JS 通过 err.result 取得这份完整值，不新增局部状态字段；整份保存失败仍沿第 3.1 节处理。已有真实引用的后续读取失败仍按第 8.2 节投影，不改写原结果；Cell steer 的局部占位不增加状态外壳。收到的业务响应与远端效果已确定时，不能因图片接入失败改称远端效果未知，也不能重发 MCP 调用。
@@ -611,7 +619,7 @@ Cell 的有序内容项直接构成模型接收的图文内容。Cell、源 turn
 
 原生工具的 observation 面向模型直接阅读，可以用自然语言表达业务内容；原生参数 schema 不必重复携带所有工具的返回结构。共同 Target、续读和图片关联的操作规则仍须让模型可见。Code Mode 中脚本需要字段访问、数组处理与参数传递，仅提供工具名称、说明和输入 schema 不足以让模型正确编排；返回值声明是本次 hard cut 的必要部分。
 
-从同一个 Pulsara 工具定义及其业务返回模型生成固定程序 SDK 声明，不能为提示词手写另一套与执行脱节的 DTO。MCP 使用 call_mcp_tool 的固定签名、共同返回及错误规则，具体远端接口由查询提供，不自动生成所有远端工具的常驻独立方法。SDK 至少提供：
+从同一个 Pulsara 工具定义及其业务返回模型生成固定程序 SDK 声明，不能为提示词手写另一套与执行脱节的 DTO。MCP 使用 call_mcp_tool 和 read_mcp_resource 的固定签名、对应返回及错误规则，具体远端工具接口由查询提供，不自动生成所有远端工具的常驻独立方法。能力查询的 META 详情必须声明完整 input_schema 为必填；UNAVAILABLE 可省略无法提供的 schema。资源目录／具体读取的 Target 分支及 object／text／image 返回类型也须声明。SDK 至少提供：
 
 - 公共 Target、ResultPart、console.log／return 对任意层级 image 内容项对象的递归识别规则，包含单图、数组、嵌套组合、完整结果、object.value、图片能力投影和局部失败占位。
 - 每个固定 SDK API 的参数类型与完整返回类型，包括工具专属业务字段、数组元素、必选/可选字段及 null 含义；call_mcp_tool 说明 arguments 按远端 input_schema 校验、structuredContent 按已声明 output_schema 理解，不能把自然语言 observation 假定成 JS 对象。
@@ -742,6 +750,7 @@ write_file 导出读取已保存的完整工具结果，不依赖原临时日志
 - 内置图像工具：view_image 首屏及 NEXT 续读按实际位置交付说明或真实图片，不要求每页二者齐全；overview 保留拼图及格子定位；视频索引用 object，JS 可访问完整字段，原生确定投影且无重复说明。detail 为首中尾有限观察的 inline 图文，不增加采样、不重解码补页。
 - detail 精确共享：同一源帧的目标合并、不同源时刻的 A→B→A、同页共享与跨页重新投递，均保留独立时间事实；页边界不改变已保存图像或选择计划。
 - MCP：call_mcp_tool 原生／JS 结果只含 meta.status、content 及存在时的 structuredContent，无业务 target、重复 isError 或专属 result；原生外壳不进入 JS。ROOT／子代理统一 meta，未使用 schema 不常驻；同 session 原生及不同 Cell 可复用引用，完整接纳后即可调用，NEXT 不影响激活，删除每 epoch 1,024 个引用上限及专属测试。覆盖通过 audience 过滤的正式 TextContent/ImageContent 交错、多图、纯图、携图错误响应，保留 structuredContent 的缺失/null、对象/数组/标量及其中相同 Base64 原值，不扫描业务 JSON、不自动去重；失败值不假定符合成功 output_schema，正确处理无效图片及普通文字中的伪图片 JSON；资源链接、嵌入资源、音频等其他保留块及 audience 之外标注的公开信息在所属位置确定投影。JS content 可直接参与严格图文输出，不额外丢字段、不隐式抓资源链接、不新增媒体能力或重发业务。
+- MCP 资源：服务记录的 resource_count／resource_template_count 已知时为实际数量、未知省略、确认为空才为 0，NEXT 不重算；read_mcp_resource 的连接分支完整返回资源及模板目录 object，资源分支返回本次 contents 的有序 text／image；模板实例只需具体资源 Target，正确处理 Plugin 连接与实际服务标识。覆盖未知目录、空目录、空 contents、多资源、图片 blob、坏图混合及其他二进制完整文字；完整失败值进入 err.result，原生 12k／NEXT 和 JS 完整值一致，续读不重新 listing 或请求资源。
 - MCP 变化：删除原生兼容和降级测试，保留实际发现、刷新及准入验证；A 定义变化拒绝其旧引用，B 增删不影响未变 A，同目标重连可复用，实际目标／账户改变不得沿用旧资格。刷新失败不误报删除；新查询读当前已接纳目录，NEXT 读冻结结果；已接纳操作正常结算，未发送和已发送后失败如实说明，不自动重做。
 - audience：缺失、null、空数组均保留；非空数组包含 assistant 保留，明确不含 assistant 才丢弃。原生与 JS 对文字、图片及其他正式内容项采用同一规则；排除内容及其附带信息不入库、不解码保存图片、不进入 JS，也不通过续读或导出恢复。保留内容和说明均不再暴露 audience，不保留该字段的原始响应备份；全部过滤为空时业务状态及已知效果保持原义，内置工具未带 audience 时正常保留。
 - motion：完整处理跨越多个内部分析/渲染批次的请求，保存全部观察与拼图后才交付第一页；批次边界无重复、遗漏或时间错序，窗口和交付页大小不改变观察选择与既定质量。

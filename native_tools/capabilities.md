@@ -2,7 +2,7 @@
 
 共用规则见[原生工具修订草案索引](../PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 1、2 章；完整保存、原生 12k／NEXT、JS 完整返回及 Cell 输出沿[统一交付草案](../PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)，唯一正文及业务字段归属沿[数据库 hardcut 草案](../PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md)。
 
-状态：讨论草案，未实施。本文件确定 query_capabilities 的 SKILL、HOOK、MCP、PLUGIN 四类必填 kind、最小 Target、参数、返回字段、原生／JS 用法和失败语义，以及 reload_capabilities 的无参数原生调用和精简结果。manage_capability 单列在[能力变更工具草案](manage_capability.md)，已确定的管理 action 及参数、结果以该草案为准，其他 action 不由本文件推定。SKILL、HOOK、PLUGIN 沿 ROOT 原生及 Code Mode JS 的来源查询边界，不因分类调整开放子代理的本地来源查询；MCP 保留原调用者的来源及运行目录范围。reload_capabilities 保持仅 ROOT 原生、bypass 权限调用，不提供 JS API。call_mcp_tool 的原生／JS 结果及调用合同见[MCP 接入草案](mcp.md)；read_mcp_resource 暂不展开。本轮只改文档。
+状态：讨论草案，未实施。本文件确定 query_capabilities 的 SKILL、HOOK、MCP、PLUGIN 四类必填 kind、最小 Target、参数、返回字段、原生／JS 用法和失败语义，以及 reload_capabilities 的无参数原生调用和精简结果。manage_capability 单列在[能力变更工具草案](manage_capability.md)，已确定的管理 action 及参数、结果以该草案为准，其他 action 不由本文件推定。SKILL、HOOK、PLUGIN 沿 ROOT 原生及 Code Mode JS 的来源查询边界，不因分类调整开放子代理的本地来源查询；MCP 保留原调用者的来源及运行目录范围。reload_capabilities 保持仅 ROOT 原生、bypass 权限调用，不提供 JS API。call_mcp_tool 及 read_mcp_resource 的参数、原生／JS 返回和用法见[MCP 接入草案](mcp.md)。本轮只改文档。
 
 ## 1. query_capabilities：SKILL 分支
 
@@ -616,7 +616,7 @@ MCP 分支只提供三层查询，不把协议支持的全部对象都展开为�
 
 顶层 kind 始终必填 MCP，不新增子类别、action 或详细查询开关。服务列表不展开工具 schema；工具目录不为所有工具提前生成调用引用，精确选中工具后才取得对应详情。
 
-Prompt 留在用户 slash 链路，资源和资源模板不进入本章的三层查询，也不返回它们的数量或查询指引。本章不扩展 query_capabilities 对这些对象的查询分支。read_mcp_resource 仍是独立入口，是否及如何修订另行讨论；不为了该入口反向扩张默认目录。ROOT 与子代理通过 call_mcp_tool 使用这些精确详情取得的调用引用，共同返回和元工具参数见[MCP 接入草案](mcp.md)。
+Prompt 留在用户 slash 链路，资源和资源模板不在本章展开。服务记录可返回已知的 resource_count 和 resource_template_count，供模型判断是否按需查看；资源目录与具体读取统一由 read_mcp_resource 承担，传 MCP_CONNECTION 列目录，传 MCP_RESOURCE 读具体 URI。本章不增加资源类别或查询分支；相同连接 Target 交给 query_capabilities 仍返回工具目录。ROOT 与子代理通过 call_mcp_tool 使用精确工具详情取得的调用引用，两个 MCP 接入口的参数及返回见[MCP 接入草案](mcp.md)。
 
 复用当前来源观察、MCP 目录、路由及调用引用 owner，查询只读取当前可观察事实，不连接服务、执行远端工具或自动刷新目录。本地／Plugin 配置来源保留原 Host home 和 GUI 项目范围；子代理只见其分配的运行目录，不据此开放 ROOT 的安装来源。独立及 Plugin 连接默认允许 ROOT 和子代理，用户可在能力页关闭子代理使用；二者统一通过 call_mcp_tool 调用各自范围内的工具。JS 沿现有 Code Mode 范围使用，不因查询分类改变原权限。
 
@@ -678,13 +678,15 @@ MCP_TOOL 的 server_id 是当前调用范围中由 runtime 返回的实际服务
 
 | 记录 | 保留字段 |
 | --- | --- |
-| 服务 | target、name、status，可选 instructions；配置路径使用 target.config_path |
+| 服务 | target、name、status，可选 instructions、resource_count、resource_template_count；配置路径使用 target.config_path |
 | 工具目录项 | target、实际 description、简短 status |
 | 工具精确详情 | target、实际 description、input_schema、实际声明的 output_schema、invocation |
 
 服务的 target.config_path 来自实际配置来源，不伪造路径，也不在服务记录中重复一个 config_path。instructions 只保留该服务实际提供的使用说明，不自动总结或补写。详细连接配置需要时沿 target.config_path 调用 read_file 或使用终端查看，不默认返回命令、args、cwd、endpoint、认证配置及环境变量；查询不自动读取整份配置。
 
-服务 status 简短说明连接、禁用或目录尚未发现等实际情况。工具目录的 status 说明当前是否可调用；这些是业务状态，不替代 meta.status 的查询状态。来源及运行身份由内部 owner 处理，不再并列返回 source、runtime_target、计数、多个状态布尔值或子项查询调用。
+resource_count 是已发现具体资源数量，resource_template_count 是已发现模板数量，不是模板能展开出的实例数。两项均为非负整数，分别只在有可靠目录依据时提供，未知时省略，确认没有才填 0，不填 null 或用 0 代替未知。计数与本次服务记录所用的已接纳目录快照一起冻结，不为取得数字额外请求 MCP，也不保证查询后远端状态始终不变；NEXT 不重算计数。不增加合计、已读数量或目录就绪布尔值。
+
+服务 status 简短说明连接、禁用或目录尚未发现等实际情况。工具目录的 status 说明当前是否可调用；这些是业务状态，不替代 meta.status 的查询状态。来源及运行身份由内部 owner 处理，不再并列返回 source、runtime_target、其他计数、多个状态布尔值或子项查询调用。
 
 ```typescript
 type McpQueryJsonValue =
@@ -697,6 +699,8 @@ interface McpServiceRecord {
   name: string;
   status: string;
   instructions?: string;
+  resource_count?: number;
+  resource_template_count?: number;
 }
 
 interface McpToolListRecord {
@@ -705,17 +709,24 @@ interface McpToolListRecord {
   status: string;
 }
 
-type McpToolInvocation =
-  | {mode: "META"; target: {kind: "MCP_TOOL_REF"; tool_ref: string}}
-  | {mode: "UNAVAILABLE"};
-
-interface McpToolDetailRecord {
-  target: McpToolTarget;
-  description?: string;
-  input_schema?: McpQueryJsonObject;
-  output_schema?: McpQueryJsonObject;
-  invocation: McpToolInvocation;
-}
+type McpToolDetailRecord =
+  | {
+      target: McpToolTarget;
+      description?: string;
+      input_schema: McpQueryJsonObject;
+      output_schema?: McpQueryJsonObject;
+      invocation: {
+        mode: "META";
+        target: {kind: "MCP_TOOL_REF"; tool_ref: string};
+      };
+    }
+  | {
+      target: McpToolTarget;
+      description?: string;
+      input_schema?: McpQueryJsonObject;
+      output_schema?: McpQueryJsonObject;
+      invocation: {mode: "UNAVAILABLE"};
+    };
 
 interface McpQueryTextPart {
   type: "text";
@@ -745,7 +756,7 @@ type QueryMcpToolsResult = QueryMcpSuccess<McpToolListRecord> | QueryMcpFailure;
 type QueryMcpToolResult = QueryMcpSuccess<McpToolDetailRecord> | QueryMcpFailure;
 ```
 
-可调用的 META 详情必须保存完整 input_schema，不为展示页长裁掉或猜测参数；原生投影允许跨页。只有服务实际声明 output_schema 时才返回，不填 null 占位；它描述成功 structuredContent，不描述整个调用结果，也不约束失败业务值。没有该 schema 时可使用已知共同包装和 content，或输出完整结果，不强制额外探测调用。UNAVAILABLE 可省略无法提供的 schema，content 的 text 简短说明原因，不能伪造可调用性。查询成功取得“当前不可用”这一事实时不把它混同为查询失败。
+可调用的 META 详情必须保存完整 input_schema，返回类型和固定 SDK 声明均将其设为必填，不为展示页长裁掉或猜测参数；原生投影允许跨页。只有服务实际声明 output_schema 时才返回，不填 null 占位；它描述成功 structuredContent，不描述整个调用结果，也不约束失败业务值。没有输出 schema 时可使用已知共同包装和 content，或输出完整结果，不强制额外探测调用。UNAVAILABLE 可省略无法提供的 schema，content 的 text 简短说明原因，不能伪造可调用性。查询成功取得“当前不可用”这一事实时不把它混同为查询失败。
 
 所有远端 MCP 工具统一通过 call_mcp_tool 调用，不返回 DIRECT 或独立 tool_name。META 使用原 owner 返回的 MCP_TOOL_REF；UNAVAILABLE 不提供假调用 Target。同一 session 内，原生调用与各个 Cell 共用引用，Cell 结束或模型 epoch 更换本身不使引用失效；ROOT 与子代理各用自己的 session 引用。有效性按该工具实际定义、策略、范围和目标身份核对，权限继续逐次检查。普通同目标重连完成发现且依据未变时可复用原引用；无关工具变化或聚合 runtime 代次更新不使它失效。共同返回沿[MCP 接入草案](mcp.md)，不由查询记录反推资源读取合同。
 
@@ -776,7 +787,9 @@ content:
     },
     "name": "文档服务",
     "status": "已连接，目录已发现。",
-    "instructions": "搜索文档后，根据返回的文档标识取得正文。"
+    "instructions": "搜索文档后，根据返回的文档标识取得正文。",
+    "resource_count": 3,
+    "resource_template_count": 1
   }
 
 observed_at_utc: <实际观察时间>
@@ -887,7 +900,9 @@ console.log(services);
         "target": {"kind": "MCP_CONNECTION", "config_path": "/Users/example/.pulsara/mcp.yaml", "server_id": "docs"},
         "name": "文档服务",
         "status": "已连接，目录已发现。",
-        "instructions": "搜索文档后，根据返回的文档标识取得正文。"
+        "instructions": "搜索文档后，根据返回的文档标识取得正文。",
+        "resource_count": 3,
+        "resource_template_count": 1
       }
     }
   ]
@@ -912,9 +927,9 @@ const inspected = await tools.query_capabilities({
 console.log(inspected);
 ```
 
-directory 的 object.value 为 McpToolListRecord，inspected 的 object.value 为 McpToolDetailRecord。schema 为完整 JSON 对象，可直接访问及组合；JS 不携带原生 tool_result、next 或时间外壳，不隐含返回完整配置、资源或 Prompt。console.log／显式 return 只交付脚本选择的结果，沿 Cell steer 整条处理，不额外加展示预算或分页。
+directory 的 object.value 为 McpToolListRecord，inspected 的 object.value 为 McpToolDetailRecord。schema 为完整 JSON 对象，可直接访问及组合；服务记录的两个可选资源计数也保留 number 类型，未知字段省略。JS 不携带原生 tool_result、next 或时间外壳，不隐含返回完整配置、资源或 Prompt。console.log／显式 return 只交付脚本选择的结果，沿 Cell steer 整条处理，不额外加展示预算或分页。
 
-精确详情示例属于接口准备：输出 description、input_schema、存在时的 output_schema 及 invocation，让模型收到足以编写后续代码的信息。模型随后可原生调用 call_mcp_tool，也可编写业务 Cell 使用同一个引用，不要求重新查询。也允许直接原生调用 query_capabilities 取得详情；不强制先运行准备 Cell。查询结果只在 JS 内存中存在不等于模型已经看到。实际调用与图文组合示例见[MCP 接入草案](mcp.md)；资源读取另行讨论。
+精确详情示例属于接口准备：输出 description、input_schema、存在时的 output_schema 及 invocation，让模型收到足以编写后续代码的信息。模型随后可原生调用 call_mcp_tool，也可编写业务 Cell 使用同一个引用，不要求重新查询。也允许直接原生调用 query_capabilities 取得详情；不强制先运行准备 Cell。查询结果只在 JS 内存中存在不等于模型已经看到。实际调用与图文组合示例见[MCP 接入草案](mcp.md)；资源目录与读取见其[第 4 章](mcp.md#4-read_mcp_resource按需列目录与读取资源)。
 
 ### 3.6 空结果、错误与冻结分页
 
@@ -1372,4 +1387,4 @@ next: null
 
 这些接点用于核对现状，不表示生产代码已实现本草案。实施时接通四个 query_capabilities 分支及各自最小 Target，删除旧复合 Target 参数及其兼容入口、顶层 source_kind 输入和旧展示分页。现有 Skill 页面 ID 不当作通用 Skill 身份；Plugin 稳定实例路径、Hook 配置路径、MCP 配置键及原始工具名由原 owner 解析，不新建 Target 登记表。公开 MCP 查询只接受连接及工具 Target，移除运行实例 Target 的公开 schema、返回字段与教学，不删除底层实例或生命周期。HOST_OVERRIDE 保留现有内部入口且不启用、不消费，不为其增加公开支持。
 
-查询值和对应 JS 声明以本文件为准；reload_capabilities 按第 5 章收敛原生结果，保留既有内部来源、安装、信任、权限、取消和 provider 前缀边界。查询只替换公开定位方式，不能顺带开放管理权限。三个独立 Skill 动作见[能力变更工具草案](manage_capability.md)第 1–3 章，Hook 信任、撤销与启停见该草案第 4–6 章，MCP 共用 config 见第 7 章，ADD_LOCAL_MCP 的独立连接新增见第 8 章，UPDATE_MCP_CONNECTION 的独立／Plugin 局部更新与恢复默认见第 9 章，REMOVE_LOCAL_MCP 及现有清理语义见第 10 章，独立／Plugin MCP 的 OAuth 登录与本地授权清除见第 11、12 章，INSTALL_PLUGIN、SET_PLUGIN_ENABLED、REMOVE_PLUGIN 的统一参数及精简结果见第 13–15 章；独立及 Plugin MCP 连接默认允许 ROOT 和子代理使用，用户可在能力页关闭；config 对象局部更新保留显式范围，Plugin config:null 移除范围覆盖并恢复此默认，模型不填范围。其余安装默认值、启停、信任及审阅流程保持现有产品语义。两处 .agents/skills 保留发现和启停机制，且不由 REMOVE_LOOSE_SKILL 删除，bundled 和 Plugin 内的 Skill 同样不由该动作删除。已有能力对象的管理沿同一最小 Target 在原 owner 内解析，不按当前参考猜测新合同。call_mcp_tool 的共同结果、参数获取和原生／JS 调用示例见[MCP 接入草案](mcp.md)，read_mcp_resource 暂不展开。
+查询值和对应 JS 声明以本文件为准；reload_capabilities 按第 5 章收敛原生结果，保留既有内部来源、安装、信任、权限、取消和 provider 前缀边界。查询只替换公开定位方式，不能顺带开放管理权限。三个独立 Skill 动作见[能力变更工具草案](manage_capability.md)第 1–3 章，Hook 信任、撤销与启停见该草案第 4–6 章，MCP 共用 config 见第 7 章，ADD_LOCAL_MCP 的独立连接新增见第 8 章，UPDATE_MCP_CONNECTION 的独立／Plugin 局部更新与恢复默认见第 9 章，REMOVE_LOCAL_MCP 及现有清理语义见第 10 章，独立／Plugin MCP 的 OAuth 登录与本地授权清除见第 11、12 章，INSTALL_PLUGIN、SET_PLUGIN_ENABLED、REMOVE_PLUGIN 的统一参数及精简结果见第 13–15 章；独立及 Plugin MCP 连接默认允许 ROOT 和子代理使用，用户可在能力页关闭；config 对象局部更新保留显式范围，Plugin config:null 移除范围覆盖并恢复此默认，模型不填范围。其余安装默认值、启停、信任及审阅流程保持现有产品语义。两处 .agents/skills 保留发现和启停机制，且不由 REMOVE_LOOSE_SKILL 删除，bundled 和 Plugin 内的 Skill 同样不由该动作删除。已有能力对象的管理沿同一最小 Target 在原 owner 内解析，不按当前参考猜测新合同。call_mcp_tool 的共同结果、参数获取和原生／JS 调用示例，以及 read_mcp_resource 的两种 Target 分支与返回合同，见[MCP 接入草案](mcp.md)。
