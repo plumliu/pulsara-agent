@@ -2,7 +2,7 @@
 
 共用规则见[原生工具修订草案索引](../PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 1、2 章；完整保存、原生 12k／NEXT、JS 完整返回及 Cell 输出沿[统一交付草案](../PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)，唯一正文及业务字段归属沿[数据库 hardcut 草案](../PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md)。
 
-状态：讨论草案，未实施。本文件确定 query_capabilities 的 SKILL、HOOK、MCP、PLUGIN 四类必填 kind、最小 Target、参数、返回字段、原生／JS 用法和失败语义，以及 reload_capabilities 的无参数原生调用和精简结果。manage_capability 单列在[能力变更工具草案](manage_capability.md)，已确定的管理 action 及参数、结果以该草案为准，其他 action 不由本文件推定。SKILL、HOOK、PLUGIN 沿 ROOT 原生及 Code Mode JS 的来源查询边界，不因分类调整开放子代理的本地来源查询；MCP 保留原调用者的来源及运行目录范围。reload_capabilities 保持仅 ROOT 原生、bypass 权限调用，不提供 JS API。call_mcp_tool 及 read_mcp_resource 的参数、原生／JS 返回和用法见[MCP 接入草案](mcp.md)。本轮只改文档。
+状态：讨论草案，未实施。本文件确定 query_capabilities 的 SKILL、HOOK、MCP、PLUGIN 四类必填 kind、最小 Target、参数、返回字段、原生／JS 用法和失败语义、MCP 关键词搜索，以及 reload_capabilities 的无参数原生调用和精简结果。manage_capability 单列在[能力变更工具草案](manage_capability.md)，已确定的管理 action 及参数、结果以该草案为准，其他 action 不由本文件推定。SKILL、HOOK、PLUGIN 沿 ROOT 原生及 Code Mode JS 的来源查询边界，不因分类调整开放子代理的本地来源查询；MCP 保留原调用者的来源及运行目录范围。reload_capabilities 保持仅 ROOT 原生、bypass 权限调用，不提供 JS API。call_mcp_tool 及 read_mcp_resource 的参数、原生／JS 返回和用法见[MCP 接入草案](mcp.md)。本轮只改文档。
 
 ## 1. query_capabilities：SKILL 分支
 
@@ -604,19 +604,20 @@ NEXT 和导出只读冻结记录，不重新发现 Hook、读取当前配置、�
 
 ## 3. query_capabilities：MCP 分支
 
-### 3.1 三层查询与范围
+### 3.1 查询层次、搜索与范围
 
-MCP 分支只提供三层查询，不把协议支持的全部对象都展开为模型目录：
+MCP 分支保留服务、工具目录、工具精确详情三层查询，并支持按关键词搜索，不把协议支持的全部对象都展开为模型目录：
 
 | 本次参数 | 返回内容 |
 | --- | --- |
-| kind:MCP，不填 target | MCP 服务记录列表 |
+| kind:MCP，不填 target、query | MCP 服务记录列表 |
+| kind:MCP，填写 query，不填 target | 当前范围内的工具与服务混合搜索结果，工具在前 |
 | kind:MCP，target 为 MCP_CONNECTION | 该服务的工具目录 |
 | kind:MCP，target 为 MCP_TOOL | 该工具的完整参数 schema 与实际调用方式 |
 
-顶层 kind 始终必填 MCP，不新增子类别、action 或详细查询开关。服务列表不展开工具 schema；工具目录不为所有工具提前生成调用引用，精确选中工具后才取得对应详情。
+顶层 kind 始终必填 MCP，不新增子类别、action 或详细查询开关。未填写 query 的服务列表不展开工具 schema，工具目录不为所有工具提前生成调用引用；关键词搜索命中的工具直接带完整参数 schema、实际声明的返回 schema 和可用调用引用，无须再精确查询一次才能调用。
 
-Prompt 留在用户 slash 链路，资源和资源模板不在本章展开。服务记录可返回已知的 resource_count 和 resource_template_count，供模型判断是否按需查看；资源目录与具体读取统一由 read_mcp_resource 承担，传 MCP_CONNECTION 列目录，传 MCP_RESOURCE 读具体 URI。本章不增加资源类别或查询分支；相同连接 Target 交给 query_capabilities 仍返回工具目录。ROOT 与子代理通过 call_mcp_tool 使用精确工具详情取得的调用引用，两个 MCP 接入口的参数及返回见[MCP 接入草案](mcp.md)。
+Prompt 留在用户 slash 链路，资源和资源模板不在本章展开，也不进入关键词搜索。服务记录可返回已知的 resource_count 和 resource_template_count，供模型判断是否按需查看；资源目录与具体读取统一由 read_mcp_resource 承担，传 MCP_CONNECTION 列目录，传 MCP_RESOURCE 读具体 URI。本章不增加资源类别或资源查询分支；相同连接 Target 交给 query_capabilities 仍查询工具目录。ROOT 与子代理通过 call_mcp_tool 使用搜索记录或精确工具详情取得的调用引用，两个 MCP 接入口的参数及返回见[MCP 接入草案](mcp.md)。
 
 复用当前来源观察、MCP 目录、路由及调用引用 owner，查询只读取当前可观察事实，不连接服务、执行远端工具或自动刷新目录。本地／Plugin 配置来源保留原 Host home 和 GUI 项目范围；子代理只见其分配的运行目录，不据此开放 ROOT 的安装来源。独立及 Plugin 连接默认允许 ROOT 和子代理，用户可在能力页关闭子代理使用；二者统一通过 call_mcp_tool 调用各自范围内的工具。JS 沿现有 Code Mode 范围使用，不因查询分类改变原权限。
 
@@ -624,22 +625,23 @@ Prompt 留在用户 slash 链路，资源和资源模板不在本章展开。服
 
 ### 3.2 参数与现有 Target
 
-第一层服务列表参数：
+服务列表与跨服务搜索参数：
 
 | 参数 | 类型 | 必填与默认 | 明确含义 |
 | --- | --- | --- | --- |
-| kind | MCP | 必填 | 只查询 MCP 服务 |
+| kind | MCP | 必填 | 只查询 MCP |
+| query | string | 可选 | 非空关键词；省略列服务，填写则搜索当前范围内的工具与服务 |
 | scope | USER／WORKSPACE | 可选，默认不过滤 | 按服务配置来源的作用域筛选 |
-| parent | PLUGIN Target | 可选，默认不限定 Plugin | 只列该 Plugin 提供的服务 |
+| parent | PLUGIN Target | 可选，默认不限定 Plugin | 只查询该 Plugin 提供的服务及其工具 |
 
-第二、三层都只接受以下两个参数，target 放首位：
+连接和工具精确查询只接受以下两个参数，target 放首位：
 
 | 参数 | 类型 | 必填与默认 | 明确含义 |
 | --- | --- | --- | --- |
 | target | MCP_CONNECTION／MCP_TOOL Target | 必填 | 连接 Target 取得工具目录，工具 Target 取得工具精确详情 |
 | kind | MCP | 必填 | 顶层查询类别 |
 
-填写 target 后不混填 scope 或 parent；服务列表的 scope 与 parent 的实际归属冲突时失败。服务内工具目录由连接 target 选择，不再用 parent 传服务。删除顶层 source_kind、offset、limit 和旧重新查询式 next；Target 中不携带 scope、source_kind、plugin_id 或运行实例字段。不接受 null、额外参数、其他种类 Target 或全种类查询。
+填写 target 后不混填 query、scope 或 parent；列表或搜索的 scope 与 parent 的实际归属冲突时失败。服务内工具目录由连接 target 选择，不再用 parent 传服务。删除顶层 source_kind、offset、limit 和旧重新查询式 next；Target 中不携带 scope、source_kind、plugin_id 或运行实例字段。不接受 null、额外参数、其他种类 Target 或全种类查询。
 
 ```typescript
 type McpConnectionTarget = {
@@ -658,11 +660,13 @@ type QueryMcpArgs =
       kind: "MCP";
       scope?: CapabilityScope;
       parent?: PluginTarget;
+      query?: string;
       target?: never;
     }
   | {
       target: McpConnectionTarget | McpToolTarget;
       kind: "MCP";
+      query?: never;
       scope?: never;
       parent?: never;
     };
@@ -672,7 +676,7 @@ parent 复用第 1.3 节的 PLUGIN Target。MCP_CONNECTION 的 config_path 区�
 
 MCP_TOOL 的 server_id 是当前调用范围中由 runtime 返回的实际服务标识，可能与配置文件内的服务键不同；模型不自行转换。remote_tool_name 是服务声明的原始名字，不使用规范化、截短后的 provider 工具名定位或调用。实际调用统一使用详情中的 MCP_TOOL_REF，不把现有随连接生命周期变化的内部 mcp-tool 身份直接当作新公开 ID。
 
-### 3.3 三层精简记录与类型
+### 3.3 精简记录与类型
 
 所有结果均使用 meta/content，记录为 type:object/value，不在顶层重复业务 target。
 
@@ -681,6 +685,7 @@ MCP_TOOL 的 server_id 是当前调用范围中由 runtime 返回的实际服务
 | 服务 | target、name、status，可选 instructions、resource_count、resource_template_count；配置路径使用 target.config_path |
 | 工具目录项 | target、实际 description、简短 status |
 | 工具精确详情 | target、实际 description、input_schema、实际声明的 output_schema、invocation |
+| 工具搜索记录 | 复用工具精确详情的字段与类型；description 改为本次搜索的原文摘录 |
 
 服务的 target.config_path 来自实际配置来源，不伪造路径，也不在服务记录中重复一个 config_path。instructions 只保留该服务实际提供的使用说明，不自动总结或补写。详细连接配置需要时沿 target.config_path 调用 read_file 或使用终端查看，不默认返回命令、args、cwd、endpoint、认证配置及环境变量；查询不自动读取整份配置。
 
@@ -754,15 +759,131 @@ interface QueryMcpFailure {
 type QueryMcpServicesResult = QueryMcpSuccess<McpServiceRecord> | QueryMcpFailure;
 type QueryMcpToolsResult = QueryMcpSuccess<McpToolListRecord> | QueryMcpFailure;
 type QueryMcpToolResult = QueryMcpSuccess<McpToolDetailRecord> | QueryMcpFailure;
+type QueryMcpSearchResult =
+  | QueryMcpSuccess<McpToolDetailRecord | McpServiceRecord>
+  | QueryMcpFailure;
 ```
 
 可调用的 META 详情必须保存完整 input_schema，返回类型和固定 SDK 声明均将其设为必填，不为展示页长裁掉或猜测参数；原生投影允许跨页。只有服务实际声明 output_schema 时才返回，不填 null 占位；它描述成功 structuredContent，不描述整个调用结果，也不约束失败业务值。没有输出 schema 时可使用已知共同包装和 content，或输出完整结果，不强制额外探测调用。UNAVAILABLE 可省略无法提供的 schema，content 的 text 简短说明原因，不能伪造可调用性。查询成功取得“当前不可用”这一事实时不把它混同为查询失败。
 
 所有远端 MCP 工具统一通过 call_mcp_tool 调用，不返回 DIRECT 或独立 tool_name。META 使用原 owner 返回的 MCP_TOOL_REF；UNAVAILABLE 不提供假调用 Target。同一 session 内，原生调用与各个 Cell 共用引用，Cell 结束或模型 epoch 更换本身不使引用失效；ROOT 与子代理各用自己的 session 引用。有效性按该工具实际定义、策略、范围和目标身份核对，权限继续逐次检查。普通同目标重连完成发现且依据未变时可复用原引用；无关工具变化或聚合 runtime 代次更新不使它失效。共同返回沿[MCP 接入草案](mcp.md)，不由查询记录反推资源读取合同。
 
+工具搜索记录和工具精确详情使用同样的两种 Target：记录的 target:MCP_TOOL 用于定位、继续查询工具；invocation.target:MCP_TOOL_REF 是该记录的调用属性，原样交给 call_mcp_tool。可调用记录直接携带 REF，有效绑定重复查询可复用引用，不要求每次查询创建新 REF；不可用记录沿 UNAVAILABLE 分支说明原因。
+
 删除默认详情中的 effect_kind、重复 invocation_notice、内部版本／安装身份、比较链、固定调用教学和独立诊断数组。它们不进入 JS 的精简查询值；实际执行权限、引用有效性、凭据处理及源关联仍由原 owner 承担。有用诊断写 text，不给模型额外管理资格布尔值。
 
-### 3.4 原生三层调用与结果
+### 3.4 搜索、排序与描述摘录
+
+搜索使用内存中的 bm25s，对调用者当前范围内已接纳的目录计算 BM25。现有目录 owner 负责范围和当前事实，bm25s 负责词法评分，结果继续由现有详情及引用 owner 生成；不另建 PostgreSQL MCP 目录、持久搜索索引或调用资格注册表。分词与依赖按实际搜索需求配置，不要求与记忆链路的 PostgreSQL 分析器或分数一致。
+
+工具名称与完整原始描述参与工具匹配；服务名称参与服务匹配。没有词法命中的条目不用于凑足结果。服务命中本身不展开其全部工具，也不因把服务名复制进每条工具记录而制造工具命中。scope 和 parent 在检索前限定实际可见来源，搜索不扩大查询或执行权限。
+
+结果顺序为：工具在前，服务在后；同类内按 BM25 相关性降序，同分按完整 Target 确定排序。同一工具即使命中名称和描述，也只出现一次，按完整 MCP_TOOL Target 去重，不合并不同服务的同名工具。服务和工具都真实命中时可以同时返回，不因服务命中而压下工具，也不因工具命中而删除服务记录。记录直接复用第 3.3 节的 object 形状，由 target.kind 区分，不增加命中层级、matched_fields、评分或其他搜索专属公开字段。
+
+description 只保留一个字段：
+
+| 查询情况 | description |
+| --- | --- |
+| 搜索命中工具描述 | 完整原始描述中第一处词法命中附近的连续原文摘录 |
+| 只命中工具名称，描述没有命中 | 描述开头的原文摘录 |
+| 描述很短 | 完整原文 |
+| 没有描述 | 省略字段 |
+| MCP_TOOL Target 精确查询 | 完整原始描述 |
+
+“第一处”指原文中最早出现的匹配查询词项，沿本次分词和归一规则判断，不是 query 中第一个词或得分最高词的位置。省略的首尾用 … 表示，不生成改写摘要，不增加 snippet、截断布尔值或完整描述副本。BM25 始终使用完整描述评分，选中工具后才取摘录。摘录窗口不取决于原生 12k 页长；摘录是本次搜索的业务值，在保存前确定，原生、JS、NEXT 和导出共用它。
+
+搜索记录的 input_schema 及存在时的 output_schema 保持完整，调用引用按同一工具的完整实际定义核对，不按描述摘录建立引用。需要完整说明时，模型可用记录的 MCP_TOOL Target 精确查询；这不是强制读取或调用前置门槛。
+
+例如跨服务搜索，原生调用为：
+
+```text
+工具：query_capabilities
+参数：
+{"kind":"MCP","query":"github pull request"}
+```
+
+假设工具名称／描述与服务名称都命中，原生投影为以下混合记录；schema、路径和引用仅为示例：
+
+```text
+meta:
+  status: SUCCESS
+
+content:
+  {
+    "target": {"kind":"MCP_TOOL","server_id":"github","remote_tool_name":"search_pull_requests"},
+    "description": "…Search pull requests in GitHub repositories using a query.…",
+    "input_schema": {
+      "type":"object",
+      "properties":{"query":{"type":"string"}},
+      "required":["query"],
+      "additionalProperties":false
+    },
+    "invocation": {
+      "mode":"META",
+      "target":{"kind":"MCP_TOOL_REF","tool_ref":"mcpref:<实际引用ID>"}
+    }
+  }
+  {
+    "target": {"kind":"MCP_CONNECTION","config_path":"/Users/example/.pulsara/mcp.yaml","server_id":"github"},
+    "name":"GitHub",
+    "status":"已连接，工具目录已发现。"
+  }
+
+observed_at_utc: <实际观察时间>
+observation_duration_microseconds: <实际耗时>
+
+tool_result: <本次完整搜索结果的导出 Target>
+next: null
+```
+
+JS 发起相同查询，完整结果仍为 meta/content，工具和服务各占一个 object 项：
+
+```javascript
+const matches = await tools.query_capabilities({
+  kind: "MCP",
+  query: "github pull request"
+});
+console.log(matches);
+```
+
+对应的完整业务值为：
+
+```json
+{
+  "meta": {"status":"SUCCESS"},
+  "content": [
+    {
+      "type":"object",
+      "value": {
+        "target":{"kind":"MCP_TOOL","server_id":"github","remote_tool_name":"search_pull_requests"},
+        "description":"…Search pull requests in GitHub repositories using a query.…",
+        "input_schema": {
+          "type":"object",
+          "properties":{"query":{"type":"string"}},
+          "required":["query"],
+          "additionalProperties":false
+        },
+        "invocation": {
+          "mode":"META",
+          "target":{"kind":"MCP_TOOL_REF","tool_ref":"mcpref:<实际引用ID>"}
+        }
+      }
+    },
+    {
+      "type":"object",
+      "value": {
+        "target":{"kind":"MCP_CONNECTION","config_path":"/Users/example/.pulsara/mcp.yaml","server_id":"github"},
+        "name":"GitHub",
+        "status":"已连接，工具目录已发现。"
+      }
+    }
+  ]
+}
+```
+
+模型从原生结果或准备 Cell 的输出取得所需接口说明后，可以直接原生调用 call_mcp_tool，或编写后续业务 Cell 复用同 session 的 REF；不要求先用 MCP_TOOL 再查一次，也不把 JS 内存中存在 matches 当作模型已看到接口。
+
+### 3.5 原生三层调用与结果
 
 第一层，列 MCP 服务：
 
@@ -879,7 +1000,7 @@ next: null
 
 后两层示例省略的观察时间外壳仍沿共同原生规则；示例 ID 为说明占位，实际身份由既有 owner 和共享 ID 层产生。工具目录不提前带所有工具的 schema 或引用，精确详情不额外展开服务配置、Prompt 或资源。
 
-### 3.5 JS 完整返回与三层组合
+### 3.6 JS 完整返回与三层组合
 
 JS 按相同业务层次查询，取得各层完整的精简业务值：
 
@@ -931,23 +1052,25 @@ directory 的 object.value 为 McpToolListRecord，inspected 的 object.value �
 
 精确详情示例属于接口准备：输出 description、input_schema、存在时的 output_schema 及 invocation，让模型收到足以编写后续代码的信息。模型随后可原生调用 call_mcp_tool，也可编写业务 Cell 使用同一个引用，不要求重新查询。也允许直接原生调用 query_capabilities 取得详情；不强制先运行准备 Cell。查询结果只在 JS 内存中存在不等于模型已经看到。实际调用与图文组合示例见[MCP 接入草案](mcp.md)；资源目录与读取见其[第 4 章](mcp.md#4-read_mcp_resource按需列目录与读取资源)。
 
-### 3.6 空结果、错误与冻结分页
+### 3.7 空结果、错误与冻结分页
 
 正常服务列表为空时为 SUCCESS 和一句“没有找到符合条件的 MCP 服务。”。已完整观察的服务工具目录为空时为 SUCCESS 和一句“该服务当前没有可见工具。”。未关联运行目录、尚未发现目录或目录不可读取时如实说明未知／失败及已知服务状态，不用空列表断言远端没有工具。
 
+搜索正常完成但没有命中时为 SUCCESS 和一句“没有找到匹配的 MCP 服务或工具。”。未命中不表示服务未安装或工具目录为空。请求范围内目录尚未取得或不可完整读取时，沿实际未知／失败规则说明，不把不完整搜索称为完整无匹配。
+
 新查询和新调用引用解析使用当前已接纳、当前范围内的目录，不依附 provider 冻结工具视图。继续复用现有 SDK 通知、完整刷新、已配置周期刷新及重连发现；收到变动通知先按原 owner 暂挡新准入，完整刷新后才确认具体增删。刷新失败或部分目录不可读不确认删除，也不要求每次查询或调用都重新 listing。
 
-某工具 description、input_schema、output_schema、实际执行策略或目标身份变化时，其旧引用按实际依据失效，模型重新查询；不计算原生 schema 兼容、降级或恢复。其他工具未变则保留其引用。换 endpoint、账户或来源不能仅凭同名同 schema 继承旧调用资格；规则见[架构草案第 4 章](../PULSARA_MCP_META_ONLY_CALLING_ARCHITECTURE_DRAFT.zh.md#4-能力发现与模型上下文)。
+某工具的完整原始 description、input_schema、output_schema、实际执行策略或目标身份变化时，其旧引用按实际依据失效，模型重新查询；不计算原生 schema 兼容、降级或恢复。不同 query 或摘录位置不改变工具定义，也不使引用失效。其他工具未变则保留其引用。换 endpoint、账户或来源不能仅凭同名同 schema 继承旧调用资格；规则见[架构草案第 4 章](../PULSARA_MCP_META_ONLY_CALLING_ARCHITECTURE_DRAFT.zh.md#4-能力发现与模型上下文)。
 
 服务记录显示关闭、连接失败等可核实状态，不直接表示查询失败。精确目标不存在、无法完整取得请求的目录或参数分支错误时为 ERROR；取消为 CANCELLED。content 保留原因及实际已取得的业务记录，JS 通过实际存在的 err.result 取得完整失败值；不伪造结果、调用引用或 schema，不新增 partial、错误枚举或恢复任务。
 
 ERROR 写明已知原因及是否派发，不把所有失败都归为引用过期。已知失效引用的本地拒绝说明本次未发送；连接暂不可用、远端业务失败和已发送但结果未确认分别如实报告，不靠重新查询自动重做。服务未通知的变化不保证能提前识别，实际参数或业务错误本身不证明 schema 已变。
 
-三层都先取得本次完整业务值并保存，再由原生按 12k 顺序交付。完整服务 instructions、描述和 schema 不为展示页长裁掉；object 的确定 JSON 文字允许跨页，不能为“schema 必须一页显示”恢复旧拒绝上限。JS 返回完整对象，不套用 12k，也不向程序交付结构化分片。
+三层查询与关键词搜索都先取得本次完整业务值并保存，再由原生按 12k 顺序交付。完整服务 instructions、非搜索查询的完整描述及所有 schema 不为展示页长裁掉；搜索 description 按第 3.4 节确定摘录后完整保存，不在展示时另行裁短。object 的确定 JSON 文字允许跨页，不能为“schema 必须一页显示”恢复旧拒绝上限。JS 返回完整对象，不套用 12k，也不向程序交付结构化分片。
 
-首屏及正常续页的 tool_result 指向同一冻结结果，next 为完整 NEXT Target，原样交给 read_file，不暴露内部位置。NEXT 和导出不扫描配置、重查工具目录、刷新路由、重新生成工具引用或执行远端调用；已接受查询不会因后续连接变化改写。引用按同 session 的进程内 owner 管理；保存、补读或导出引用文字不提供跨重启恢复资格。引用实际失效时由执行 owner 报告，需要新调用事实时显式重新查询，不让 NEXT 刷新。
+首屏及正常续页的 tool_result 指向同一冻结结果，next 为完整 NEXT Target，原样交给 read_file，不暴露内部位置。NEXT 和导出不扫描配置、重查工具目录、重新搜索、重算排序或摘录、刷新路由、重新生成工具引用或执行远端调用；已接受查询不会因后续连接变化改写。引用按同 session 的进程内 owner 管理；保存、补读或导出引用文字不提供跨重启恢复资格。引用实际失效时由执行 owner 报告，需要新调用事实时显式重新查询，不让 NEXT 刷新。
 
-删除当前整页 schema 预算拒绝及 FULL 完整交付后激活的门槛。详情查询结果完整保存、接纳后，引用即可调用；模型即使只读到部分详情，也自行决定是否调用或用 NEXT 续读。runtime 不累计检查 schema 是否读完，原生与 JS 的实际交付回调不决定引用生效。权限、参数和执行器有效性仍在调用时检查。
+删除当前整页 schema 预算拒绝及 FULL 完整交付后激活的门槛。精确详情或搜索结果完整保存、接纳后，其中的引用即可调用；模型即使只读到部分记录，也自行决定是否调用或用 NEXT 续读。runtime 不累计检查 schema 是否读完，原生与 JS 的实际交付回调不决定引用生效。权限、参数和执行器有效性仍在调用时检查。
 
 必须删除旧每个 epoch 1,024 个调用引用上限及其专属拒绝分支和测试，不改成 session 总上限，也不另设替代数量；继续复用有效引用并清理失效引用。上述变化复用现有进程内 owner，不新增数据库引用表、已读资格、交付回执或执行机制。实际保存或交付失败沿共同规则如实结算，不重执行业务，不提供假可读 Target。
 
@@ -1385,6 +1508,6 @@ next: null
 - [当前刷新结果预算前置检查](../src/pulsara_agent/conversation_kernel/capability_management_execution.py)
 - [ROOT 与 bypass 刷新授权](../src/pulsara_agent/conversation_kernel/tool_runtime_authorization.py)
 
-这些接点用于核对现状，不表示生产代码已实现本草案。实施时接通四个 query_capabilities 分支及各自最小 Target，删除旧复合 Target 参数及其兼容入口、顶层 source_kind 输入和旧展示分页。现有 Skill 页面 ID 不当作通用 Skill 身份；Plugin 稳定实例路径、Hook 配置路径、MCP 配置键及原始工具名由原 owner 解析，不新建 Target 登记表。公开 MCP 查询只接受连接及工具 Target，移除运行实例 Target 的公开 schema、返回字段与教学，不删除底层实例或生命周期。HOST_OVERRIDE 保留现有内部入口且不启用、不消费，不为其增加公开支持。
+这些接点用于核对现状，不表示生产代码已实现本草案。实施时接通四个 query_capabilities 分支及各自最小 Target，删除旧复合 Target 参数及其兼容入口、顶层 source_kind 输入和旧展示分页。MCP 搜索按第 3 章使用内存 bm25s、复用详情和引用 owner，并核对工具／服务混合命中、工具去重、描述原文摘录与完整 schema；同一搜索结果的原生、JS、NEXT 和导出保持一致。现有 Skill 页面 ID 不当作通用 Skill 身份；Plugin 稳定实例路径、Hook 配置路径、MCP 配置键及原始工具名由原 owner 解析，不新建 Target 登记表。公开 MCP 查询只接受连接及工具 Target，移除运行实例 Target 的公开 schema、返回字段与教学，不删除底层实例或生命周期。HOST_OVERRIDE 保留现有内部入口且不启用、不消费，不为其增加公开支持。
 
-查询值和对应 JS 声明以本文件为准；reload_capabilities 按第 5 章收敛原生结果，保留既有内部来源、安装、信任、权限、取消和 provider 前缀边界。查询只替换公开定位方式，不能顺带开放管理权限。三个独立 Skill 动作见[能力变更工具草案](manage_capability.md)第 1–3 章，Hook 信任、撤销与启停见该草案第 4–6 章，MCP 共用 config 见第 7 章，ADD_LOCAL_MCP 的独立连接新增见第 8 章，UPDATE_MCP_CONNECTION 的独立／Plugin 局部更新与恢复默认见第 9 章，REMOVE_LOCAL_MCP 及现有清理语义见第 10 章，独立／Plugin MCP 的 OAuth 登录与本地授权清除见第 11、12 章，INSTALL_PLUGIN、SET_PLUGIN_ENABLED、REMOVE_PLUGIN 的统一参数及精简结果见第 13–15 章；独立及 Plugin MCP 连接默认允许 ROOT 和子代理使用，用户可在能力页关闭；config 对象局部更新保留显式范围，Plugin config:null 移除范围覆盖并恢复此默认，模型不填范围。其余安装默认值、启停、信任及审阅流程保持现有产品语义。两处 .agents/skills 保留发现和启停机制，且不由 REMOVE_LOOSE_SKILL 删除，bundled 和 Plugin 内的 Skill 同样不由该动作删除。已有能力对象的管理沿同一最小 Target 在原 owner 内解析，不按当前参考猜测新合同。call_mcp_tool 的共同结果、参数获取和原生／JS 调用示例，以及 read_mcp_resource 的两种 Target 分支与返回合同，见[MCP 接入草案](mcp.md)。
+查询值和对应 JS 声明以本文件为准；reload_capabilities 按第 5 章收敛原生结果，保留既有内部来源、安装、信任、权限、取消和 provider 前缀边界。查询与搜索保留原有来源及执行边界，不能顺带开放管理权限。三个独立 Skill 动作见[能力变更工具草案](manage_capability.md)第 1–3 章，Hook 信任、撤销与启停见该草案第 4–6 章，MCP 共用 config 见第 7 章，ADD_LOCAL_MCP 的独立连接新增见第 8 章，UPDATE_MCP_CONNECTION 的独立／Plugin 局部更新与恢复默认见第 9 章，REMOVE_LOCAL_MCP 及现有清理语义见第 10 章，独立／Plugin MCP 的 OAuth 登录与本地授权清除见第 11、12 章，INSTALL_PLUGIN、SET_PLUGIN_ENABLED、REMOVE_PLUGIN 的统一参数及精简结果见第 13–15 章；独立及 Plugin MCP 连接默认允许 ROOT 和子代理使用，用户可在能力页关闭；config 对象局部更新保留显式范围，Plugin config:null 移除范围覆盖并恢复此默认，模型不填范围。其余安装默认值、启停、信任及审阅流程保持现有产品语义。两处 .agents/skills 保留发现和启停机制，且不由 REMOVE_LOOSE_SKILL 删除，bundled 和 Plugin 内的 Skill 同样不由该动作删除。已有能力对象的管理沿同一最小 Target 在原 owner 内解析，不按当前参考猜测新合同。call_mcp_tool 的共同结果、参数获取和原生／JS 调用示例，以及 read_mcp_resource 的两种 Target 分支与返回合同，见[MCP 接入草案](mcp.md)。
