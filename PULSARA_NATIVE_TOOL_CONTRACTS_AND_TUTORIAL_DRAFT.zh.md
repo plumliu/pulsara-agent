@@ -2,15 +2,15 @@
 
 日期：2026-11-12。
 
-状态：讨论草案，未实施。本文件记录逐个工具已确定的参数、业务返回值、原生交付形状及 Code Mode 用法，也作为后续 bundled skill 的教程底稿。本轮只写文档，不修改工具、数据库、SDK、提示词或 bundled skill。
+状态：所有工具的合同讨论已完成，未实施。本文件记录已确定的参数、业务返回值、原生交付形状及 Code Mode 用法，也作为后续 bundled skill 的教程底稿。本轮只写文档，不修改工具、数据库、SDK、提示词或 bundled skill。
 
 ## 1. 范围与阅读方式
 
-本文件逐步覆盖 Pulsara 原生工具，以及与这些工具对应的 JS API。每个工具应明确读取或操作范围、参数、返回字段、错误含义和可运行的组合方式，并删除不帮助模型理解或继续操作的冗余内容。
+本文件覆盖 Pulsara 原生工具、对应 JS API 及仅 JS 工具。各工具的读取或操作范围、参数、返回字段、错误含义和组合方式已在下列分篇文档中确定。
 
 当前确定范围：
 
-| 工具与分支 | 本轮覆盖内容 |
+| 工具与分支 | 已确定合同 |
 | --- | --- |
 | read_file，PATH Target | 参数、完整业务值、meta/content 包装、状态、行号投影、原生与 JS 示例 |
 | write_file，PATH + content | 创建语义、参数、简短结果、原生与 JS 示例、错误语义 |
@@ -26,6 +26,7 @@
 | wait_message | Subagent 专用、仅原生；可选 timeout_seconds，默认 30、范围 0～300 秒，0 立即检查；收到消息或等待超时均为 SUCCESS，只返回 meta.status 与文字 content，删除公开 state；停止沿现有活动任务取消语义，消息正文仍经正常输入路径独立交付；冻结 12k／NEXT 不重新等待或消费消息 |
 | tools.run_agent | ROOT 专用、仅 JS，数组分派；target、instruction、work_title、materials、depends_on，删除顶层 context；materials 混合 CONTEXT_MATERIAL（仅 kind／turns，1～3）与 WORK，同源项先按 depends_on 处理，其余 WORK 材料须已结束；新建／复用均可显式带入，历史随本次 Work 冻结；结果 meta 仅 status，逐项 object 使用 agent、work、work_status，删除旧三组平行数组及 inspect；完整返回，不使用原生 12k／NEXT |
 | tools.wait_agent | ROOT 专用、仅 JS；互斥 works／agents、settle、timeout_seconds，删除 until；WORK 精确等终态，AGENT 等当前 idle 并可因选中发送者消息返回；meta.status／wait_reason、消息时的 message_sources，逐项 object 返回工作状态或 is_idle；成功结果全量按输入顺序，first 不裁剪，超时 SUCCESS，取消不停止工作、不强求末次读取，通知位置仅归 Cell；完整保存后 JS 全值返回，无原生分页 |
+| tools.decide | ROOT 专用、仅 JS、bypass 权限；condition 与 inputs 必填，逐项独立判断；结果仅 meta.status 与单个 decisions object，空输入成功、失败走实际 err.result；available() 为 Cell 启动时冻结的本地配置检查；完整保存后返回，无原生分页，删除旧展示预算检查，其余底层语义保持现状 |
 | search_sessions | query、lifecycle 参数、同域跨工作区范围、entry 优先与标题兜底，以及只含会话信息和命中来源的 object 记录；不附具体 entry |
 | search_session_content | target、query 参数，单 ID 的 Q₁ Target 与 QA／QAQ 摘录，四种消息标签及原生／JS 完整返回；删除 include_tools 和搜索续查参数 |
 | read_session_content | 可选的原文展开步骤，必填 target、正负 limit；SESSION 从 latest 向前读，单 ID 的 SESSION_ENTRY 从锚点按指定方向读；逐消息 object 及原生／JS 示例 |
@@ -69,9 +70,9 @@
 | manage_capability，SET_PLUGIN_ENABLED | 仅 ROOT 原生、无 JS API；最小 PLUGIN target、action、必填 boolean enabled，内部安装条件由 runtime 核对；完整保留开启审阅（含重复 true）、关闭的组件退出范围及 Hook 信任，关闭不删包、配置、凭据或 OAuth；成功仅同一 Target、meta.status、简短 text，重复正常设置仍成功，不公开阶段枚举；已保存但必要采用失败按 ERROR 说明，原生冻结 12k／NEXT，补页不重新启停 |
 | manage_capability，REMOVE_PLUGIN | 仅 ROOT 原生、无 JS API；最小 PLUGIN target、action，内部安装条件由 runtime 核对；完整保留实例移除、包 GC、数据及源目录保留、凭据／OAuth 和运行组件退出语义，不立即删包或清数据；业务结果仅 meta.status／简短 text，无顶层插件 Target；部分清理失败按 ERROR，已发生删除仍让 runtime 照常处理；content 直接说明已完成操作和失败原因；原生冻结 12k／NEXT，补页不重做删除或 GC |
 
-`read_file` 的 NEXT Target 分支和 `write_file` 的 source 导出分支暂不展开。续读时只需传入运行时返回的完整 Target，不公开或解释内部定位。其他工具按后续讨论逐项补充，不从本节推导尚未确定的业务字段。
+`read_file` 的 NEXT Target 分支和 `write_file` 的 source 导出分支沿统一交付草案；续读时只需传入运行时返回的完整 Target，不公开或解释内部定位。所有工具的参数、结果及调用边界均按本文和对应分篇合同实施。
 
-先按[有序内容统一存储 hardcut](PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md#10-数据库优先与停用期间的分步实施)明确数据库结构与存储基础，允许停用 Pulsara 后先重建新库；随后继续包括历史会话工具在内的全部 native tool 合同讨论，再逐步接通消费者。无需等待全部消费者实现才继续讨论；已定语义保留，未定部分不因建库成为实施合同。
+实施先按[有序内容统一存储 hardcut](PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md#10-数据库优先与停用期间的分步实施)落实数据库结构与存储基础，允许停用 Pulsara 后先重建新库，再按已确定的各工具合同逐步接通并验收消费者。合同讨论完成不表示生产代码或存储已经实施。
 
 本文件与[统一工具结果交付与分页草案](PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)配合使用：该草案定义完整保存、原生 12k 分页、JS 完整返回及 Cell 图文 steer；本文件细化工具本身的合同。这里已明确的工具参数、字段、meta/content 形状及状态表达，以本文件为准。
 
@@ -97,7 +98,7 @@ query_processes 的进程 Target 只放在 content 的每条 object 记录中，
 
 现有观察信息在原生消息顶层并列呈现：`observed_at_utc` 是实际观察时间，`observation_duration_microseconds` 是实际观察耗时，单位为微秒。二者与 target、meta、content、tool_result、next 同层，不放进 meta、content 或嵌套 observation。未测得耗时不得伪造为 0，仍沿既有观察 owner 表达实际可用事实，不为本次修订增加一套计时机制。
 
-JS 的 `tools.read_file`、`tools.write_file`、`tools.edit_file`、`tools.find_files`、`tools.search_file_content`、`tools.exec_process`、`tools.manage_process`、`tools.query_processes`、`tools.query_agents`、`tools.send_agent_message`、`tools.stop_agent`、`tools.run_agent`、`tools.wait_agent`、`tools.view_image`、`tools.read_video_frames`、`tools.read_transcript`、`tools.call_mcp_tool`、`tools.read_mcp_resource`，以及 `tools.query_capabilities` 的 SKILL、HOOK、MCP、PLUGIN 四个分支，成功时直接返回各节定义的完整业务值，不套用原生消息的时间外壳、12k 页预算、tool_result 或 next。数据库内容、JS 值和原生投影来自同一份结果，不保存第二份手工维护的业务正文。
+JS 的 `tools.read_file`、`tools.write_file`、`tools.edit_file`、`tools.find_files`、`tools.search_file_content`、`tools.exec_process`、`tools.manage_process`、`tools.query_processes`、`tools.query_agents`、`tools.send_agent_message`、`tools.stop_agent`、`tools.run_agent`、`tools.wait_agent`、`tools.decide`、`tools.view_image`、`tools.read_video_frames`、`tools.read_transcript`、`tools.call_mcp_tool`、`tools.read_mcp_resource`，以及 `tools.query_capabilities` 的 SKILL、HOOK、MCP、PLUGIN 四个分支，成功时直接返回各节定义的完整业务值，不套用原生消息的时间外壳、12k 页预算、tool_result 或 next。数据库内容、JS 值和原生投影来自同一份结果，不保存第二份手工维护的业务正文。
 
 content 的每项统一为 type/value：文字项的 value 是字符串，图片项的 value 是 IMAGE_REF Target，Target 项的 value 是该工具声明的具体 Target，object 项的 value 是 JSON 对象。find_files 将命中文件保存为 PATH Target 内容项，不并列返回 targets 或重复文字清单；search_file_content 的匹配行和计数使用 object 项；PLUGIN 精确查询使用 text 与 SKILL／HOOK_SOURCE／MCP_CONNECTION Target 项交错返回。原生工具消息及显式 console.log／return 将 Target 项投影为文字引用，将 object 项投影为通用 JSON 文字，不自动打开、读取或加载其中的文件；图片项按当前模型能力投递真实图片或固定文字说明，原生能力不足显示 ERROR，Cell steer 不增加工具状态外壳。console.log 每个参数及显式 return 均递归识别实际输出任意层级的 image 内容项，其他内容呈现一次；不解析引用字符串或扫描未输出变量。普通文字项仍不自动增加分隔符。共同类型见第 2.4 节，投影及准入沿统一交付草案。
 
@@ -198,6 +199,7 @@ object.value 本身是唯一权威业务对象，完整 JSON 文字按需投影�
 | [文件系统工具](native_tools/filesystem.md) | 第 1–5 章：read_file、write_file、edit_file、find_files、search_file_content |
 | [终端工具](native_tools/terminal.md) | 第 1–3 章：exec_process、manage_process、query_processes |
 | [Agent 协作工具](native_tools/agents.md) | 第 1 章：query_agents 三个查询分支；第 2 章：send_agent_message 交付语义及精简结果；二者支持 ROOT／Subagent 原生及 ROOT JS；第 3 章：stop_agent 参数、四个并列 Work 状态计数、逐项状态及原生／JS 示例，仅 ROOT；第 4 章：wait_message，Subagent 专用仅原生，超时 SUCCESS，正文独立交付；前四者沿冻结 12k／NEXT；第 5 章：tools.run_agent 参数、材料、同批引用与返回；第 6 章：tools.wait_agent 的 WORK／AGENT 双分支、完整快照、first／all、消息／超时／取消、返回类型及 JS 示例；后两者仅 ROOT JS、完整返回，无原生分页；第 7 章为实现参考 |
+| [语义判断工具](native_tools/decide.md) | 第 1 章：tools.decide 的两个参数、decisions object、available()、JS 示例、完整保存与错误语义；仅 ROOT JS、bypass 权限，无原生分页；第 2 章为实现参考 |
 | [历史会话工具](native_tools/session_history.md) | 第 1–3 章：search_sessions、search_session_content、read_session_content 的参数、返回类型及原生／JS 示例；单 ID 的 entry 定位、四种消息标签与正负 limit |
 | [Plan 工具](native_tools/plan.md) | 第 1–3 章：enter_plan、ask_plan_question、exit_plan 的参数、行为、返回值及原生示例；10 分钟交互期限、方案双份保存及顶层 PATH Target；仅原生，无 JS API |
 | [记忆工具](native_tools/memory.md) | 第 1–3 章：remember、query_memory、manage_memory 的参数、互斥分支、返回类型、原生示例及失败语义；runtime 自动取得并发条件；仅 ROOT 原生，无 JS API |
