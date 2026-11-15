@@ -141,19 +141,21 @@ Plan 审阅期间将队列消息明确用作修订反馈时，仍提交 REVISE �
 
 当前 prompt_queue_items.initial_context 保存文字数组，work_inputs[].body 保存已取得的材料／依赖正文，消费时还会生成独立 AGENT_MATERIAL entry。这两处纳入正文统一，不能仅删除顶层 inline_content/blob_id 后把嵌套正文留作另一份权威。
 
+tools.run_agent 的公开参数统一由 materials 数组选择材料，支持 {kind:"CONTEXT_MATERIAL",turns:1|2|3} 和 WORK Target；与 depends_on 同源的 WORK 先按依赖处理，只交付一次，其余独立 WORK 材料须已结束。删除顶层 context 及 mode 字段。没有 CONTEXT_MATERIAL 项就不带 ROOT 历史，新建和复用 Agent 均可在每次分派中显式选择。CONTEXT_MATERIAL 不分配独立材料 ID，也不是新正文实体；ROOT 正文仍沿现有对话分组投影，从本次分派对应的已接纳输入快照选取，并随本次 Work 接受、保存，不等排队工作启动后再读取最新 ROOT 对话。具体参数与返回类型见 [Agent 工具草案第 5 章](native_tools/agents.md#5-toolsrun_agentroot-批量分派工作仅-js)。
+
 本次 Work 的初始业务输入统一按以下顺序组装并消费：
 
 ```text
 ROOT 分配的主指令                  AGENT_INSTRUCTION
-→ ROOT 选入的历史材料              AGENT_MATERIAL
+→ materials 中的 ROOT 历史材料     AGENT_MATERIAL
 → depends_on 的依赖结果            AGENT_MATERIAL
-→ 其他显式 materials               AGENT_MATERIAL
+→ materials 中的 WORK 结果         AGENT_MATERIAL
 → 助手执行及后续正常交互
 ```
 
-主指令是本次初始输入组的第一条 entry，turn.initial_entry_id 与原队列的 consumed_entry_id 都指向它，不指向材料。历史材料内部保持所选顺序；依赖结果和其他材料分别按声明顺序，不按完成时间或入库到达时间重排。同一份 Work 已按原规则去除的重复材料不重新插入。不存在的材料类别直接跳过，空材料与未满足依赖仍按下文区分。
+主指令是本次初始输入组的第一条 entry，turn.initial_entry_id 与原队列的 consumed_entry_id 都指向它，不指向材料。历史材料内部保持所选顺序，ROOT 历史与 WORK 材料各自保持在 materials 数组中的相对顺序；依赖结果按声明顺序，不按完成时间或入库到达时间重排。同一份 Work 已按原规则去除的重复材料不重新插入。不存在的材料类别直接跳过，空材料与未满足依赖仍按下文区分。
 
-上述顺序用于本次新增输入组，完整追加在该 Subagent 的已有有效上下文之后；新建时接在其已安装的系统及运行时上下文之后，不把 ROOT 选入的历史材料恢复为该 Subagent 过去发生的交互。ROOT 历史投影、主指令和各份 Work 材料保持真实来源，材料不自动成为新任务要求。复用 Agent 不重新灌入 ROOT 历史，不重排已有 entry、摘要、SYSTEM/tools 或已安装 provider messages。
+上述顺序用于本次新增输入组，完整追加在该 Subagent 的已有有效上下文之后；新建时接在其已安装的系统及运行时上下文之后，不把 ROOT 选入的历史材料恢复为该 Subagent 过去发生的交互。ROOT 历史投影、主指令和各份 Work 材料保持真实来源，材料不自动成为新任务要求。复用 Agent 不自动重复带入 ROOT 历史，允许把本次显式选择的历史作为新材料追加；不重排已有 entry、摘要、SYSTEM/tools 或已安装 provider messages。Agent 忙碌时，本次 Work 与材料一起排队，在该 Work 开始时交付，不插入其他正在运行的 Work。
 
 保持依赖就绪条件：全部成功依赖已满足、材料已按原规则取得后，才沿现有启动事务接受完整初始输入组并发起首次模型调用；依赖失败仍按既有拒绝／结算规则处理。初始输入的计量、首次调用前的压缩和提交确认覆盖主指令及全部材料，不先调用模型再补依赖，不只保留主指令而遗漏后续输入。
 
@@ -226,6 +228,12 @@ inline 与 blob 的选择阈值只决定字节放在哪里，不能决定超过�
 tool_results 增加 public_fields JSON 对象，仅存各工具已声明的非 content 业务字段。它不包含共同 content、原生页、Pulsara 为展示生成的 next／完整结果 Target 或返回值副本。外部业务本身名为 next 等同名字段保持原义，不按字段名过滤，不把它们当作 Pulsara 续读控制。执行状态、观察时间等已有权威列可确定的值从原列投影，不再重复保存。
 
 字段合同由原生工具修订文档或工具已有明确返回类型约束，不作为任意字段兜底。保留缺失与显式 null、JSON 数值类型、数组顺序、失败业务值、MCP structuredContent 等适用语义。当前返回值不是 meta/content 对象的工具，实施前必须明确无损映射，不能为套表擅自改变返回类型。
+
+tools.run_agent 为 ROOT 专用、仅 JS，完整接纳结果沿同一工具结果路径保存。meta 只投影本次 status，content 每项 object 保存 agent、work、work_status，顺序与分派输入一致；不重复保存 agents／works／details 数组、inspect、回显指令或材料正文。该结果与原 Work 输入是不同业务发生，之后 Work 的状态变化不回写已保存接纳结果。JS 完整返回，不生成原生页或 NEXT；准备阶段的同批引用继续由现有进程内 owner 承担，不新增持久批次或材料实体。
+
+tools.wait_agent 同为 ROOT 专用、仅 JS，works／agents 两分支互斥。正常成功观察按一次批量状态读取覆盖全部输入目标并保持输入顺序，first 只改变返回条件，不裁剪结果；WORK 直接读确切队列／entry／turn 的 request_execution 状态，AGENT all 判断同一快照中全部 idle，不累积曾经空闲。结果的 wait_reason、消息返回时的 message_sources 进入已声明 public_fields，逐项 agent／work／work_status 或 agent／is_idle 为共同 object 内容；meta.status 仍从原结算状态投影。实际消息检查沿现有路径，不把消息与工作状态伪装成同一事务快照。失败或取消保留已取得事实，不为凑齐完整最新快照强制额外读取；已确定正常结果不因后来停止改写。结果完整保存后 JS 完整返回，不生成原生页或 NEXT，之后历史展示／导出不重查状态或重新等待。具体合同见 [Agent 工具草案第 6 章](native_tools/agents.md#6-toolswait_agent等待指定-work-或-agent-空闲仅-js)。
+
+AGENT 等待的通知位置继续只归当前 Cell 的进程内 owner：顺序调用抑制已报告通知，重叠调用允许共同报告，不消费正文、不表示模型已读，也不跨 Cell 排他或持久化。仅成功消息观察实际交付 JS 后沿已有可等待交付回调推进本次来源位置；保存／交付失败及 ERROR／CANCELLED 不推进。等待期限、通知位置和来源序号不成为数据库列、消息回执或新实体，实际消息正文仍沿正常输入队列与共同内容路径独立交付。
 
 MCP 查询详情及调用结果沿同一业务字段／有序内容路径保存。MCP_TOOL_REF 由进程内 owner 按 session 管理，原生与各个 Cell 共用；引用可调用性从查询结果完整保存、接纳后成立，不依赖原生详情读完或 JS 交付回调。保存引用文字不形成持久调用资格，NEXT 只读冻结内容，不刷新或激活引用，不新增引用表。实际观察范围和交付记录继续承担原职责。
 
@@ -388,7 +396,7 @@ tool 消息：本页文字、object 的 JSON 文字、原图片位置的 IMAGE_R
 | assistant_message_blocks | content_parts 承担正文、DATA 及调用顺序 | 替换表、生产者、查询和外键，不留助手专用副本 |
 | transcript_entries.inline_content/blob_id/content_digest/content_size/content_media_type/content_codec | 正文进内容行；身份、来源及控制信息归 entry 或原控制 owner | 删除正文载荷组及助手 manifest；逐项承接 draft/Plan/运行时控制事实，不按前缀盲删 |
 | prompt_queue_items 的同组正文载荷 | 队列内容行，消费后经 consumed_entry_id 读 | 删除独立正文及复制正文／图片清单路径 |
-| prompt_queue_items.initial_context、work_inputs[].body 中的正文 | 共同内容、排队期间必要分界及消费后的 entry 归属 | 删除重复正文；现有 Work 依赖关系和满足状态留在业务 owner，不复制到各内容项、不新增消费后永久追溯映射 |
+| prompt_queue_items.initial_context、work_inputs[].body 中的正文 | materials 所选 ROOT 历史／WORK 结果及依赖正文进入共同内容，保留排队分界及消费后的 entry 归属 | 删除重复正文和新建 Agent 专用选择限制；历史随每次显式分派冻结，现有 Work 依赖关系和满足状态留在业务 owner，不复制到各内容项、不新增消费后永久追溯映射 |
 | 排队改 steer 的正文复制和旧双份消费确认 | 同一内容行转移到实际新 owner | 旧队列只留已转向事实；已消费确认经实际 entry 读取，覆盖普通及 Plan 路径 |
 | canonical_image_refs 及专用索引 | image 内容行保存出现顺序并外键引用实际图片资产 | 全表删除，图片直接按资产 ID 读取，不保留来源资格查询；同步接通 fork 和 GC |
 | tool_results.output_body_*、entry 中结果预览 | 业务字段 + 共同内容行 | 删除全文／预览双轨、旧 16 MiB 逻辑上限、展示标记 output_omitted |
@@ -454,7 +462,8 @@ tool 消息：本页文字、object 的 JSON 文字、原图片位置的 IMAGE_R
 | 类型与更新权限 | tool_call 不能挂到用户／结果／队列；允许既定队列归属转移但不改身份、顺序、载荷和 session/workspace，不任意重挂已接受内容 |
 | 排队改 steer | 普通及 Plan 转向不复制正文；旧队列只留状态，转移失败原状回滚；消费确认不再要求双份正文 |
 | Plan 审批 | OPEN 审批保留 RUNNING 原轮且无预先成功结果；决定或超时只关联一次最终结果；修订／取消审批／超时在同一只读轮继续，批准才建立执行续接；直接及队列转向的图文／纯图片反馈按原顺序接受一次，来源、图片引用和回滚正确 |
-| 运行时材料 | 本次输入按主指令、ROOT 历史材料、依赖结果、其他材料顺序接受，initial_entry_id/consumed_entry_id 指向第一条主指令；材料内部顺序确定，既有上下文不重排；来源、依赖就绪及整组提交／计量／压缩正确，空材料和未满足依赖可区分，队列不留第二份正文 |
+| 运行时材料 | materials 的 CONTEXT_MATERIAL 仅含 kind／turns，范围 1～3，新建／复用 Agent 均可显式选择；历史从本次 ROOT 冻结输入取得，不在 Work 启动时重取，不生成材料 ID；主指令、ROOT 历史、依赖结果、WORK 材料按既定顺序接受，initial_entry_id/consumed_entry_id 指向主指令；已有上下文不重排，依赖就绪、整组提交／计量／压缩及空材料区别正确，队列不留第二份正文 |
+| Agent 等待结果 | WORK 含排队、历史终态及同 Agent 多项工作，AGENT all 使用同一 idle 快照；SUCCESS 全量记录按输入顺序，first 不裁剪，超时和 stopped 不误作工具失败；消息正文独立交付，Cell 通知位置仅在成功 JS 交付后推进；取消保留已知事实、不强制末次读取；保存结果冻结，无持久等待实体 |
 | commentary + tool_call | 历史保留文字排除调用；执行和协议仍取得完整调用顺序和参数 |
 | 思考与回放 | 对话不返回摘要／密文，适用 UI 显示及精确回放仍正确 |
 | 完整业务值 | JS/原生/导出同源，缺失/null、类型、顺序及失败值保持，无预览权威 |

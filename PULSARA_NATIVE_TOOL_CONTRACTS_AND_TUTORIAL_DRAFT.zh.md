@@ -20,6 +20,12 @@
 | exec_process | 四个启动参数、工具状态与进程状态分离、运行／退出结果、实际输出及原生与 JS 示例；删除 observe 和公开游标；待观察日志透明暂存 |
 | manage_process | wait、write、close_stdin、kill 四个动作；内部观察位置、完整待观察增量、控制动作、原生与 JS 示例及输入小实验 |
 | query_processes | 可选 PROCESS Target、单查与列表共用的 object 记录、原生与 JS 示例，以及列表无记录与单查未找到的不同状态和说明 |
+| query_agents | 可选 AGENT／WORK target；省略列 Agent，AGENT 列其全部 Work 摘要，WORK 读取指令、状态及实际结果；ROOT／Subagent 原生及 ROOT Code Mode JS；返回 meta.status 与逐条 object／必要 text，删除 cursor、max_items、inspect、root 和来源分页调用；原生冻结 12k／NEXT、JS 完整值，不在补页时刷新工作状态 |
+| send_agent_message | 必填 AGENT target、message，支持 ROOT 别名；仅向接收方当前活动轮次接纳消息，不启动工作、不暂存给空闲或尚未启动的接收方；未发送为 ERROR，只返回 meta.status 与文字 content，删除 recipient、work、delivery，不返回顶层业务 Target；ROOT／Subagent 原生及 ROOT Code Mode JS，NEXT 不重复发送 |
+| stop_agent | 必填 AGENT／WORK target；停止该 Agent 当前及当时已排队工作，或只停止指定 Work；仅 ROOT 原生及 Code Mode JS；返回 meta.status、成功时四个并列 Work 状态计数，以及 text／逐项 WORK target＋work_status 的 object，不返回顶层业务 Target；运行中取消、排队停止、依赖及已提交工具结算保持现有语义，统一冻结 12k／NEXT，不重复停止 |
+| wait_message | Subagent 专用、仅原生；可选 timeout_seconds，默认 30、范围 0～300 秒，0 立即检查；收到消息或等待超时均为 SUCCESS，只返回 meta.status 与文字 content，删除公开 state；停止沿现有活动任务取消语义，消息正文仍经正常输入路径独立交付；冻结 12k／NEXT 不重新等待或消费消息 |
+| tools.run_agent | ROOT 专用、仅 JS，数组分派；target、instruction、work_title、materials、depends_on，删除顶层 context；materials 混合 CONTEXT_MATERIAL（仅 kind／turns，1～3）与 WORK，同源项先按 depends_on 处理，其余 WORK 材料须已结束；新建／复用均可显式带入，历史随本次 Work 冻结；结果 meta 仅 status，逐项 object 使用 agent、work、work_status，删除旧三组平行数组及 inspect；完整返回，不使用原生 12k／NEXT |
+| tools.wait_agent | ROOT 专用、仅 JS；互斥 works／agents、settle、timeout_seconds，删除 until；WORK 精确等终态，AGENT 等当前 idle 并可因选中发送者消息返回；meta.status／wait_reason、消息时的 message_sources，逐项 object 返回工作状态或 is_idle；成功结果全量按输入顺序，first 不裁剪，超时 SUCCESS，取消不停止工作、不强求末次读取，通知位置仅归 Cell；完整保存后 JS 全值返回，无原生分页 |
 | search_sessions | query、lifecycle 参数、同域跨工作区范围、entry 优先与标题兜底，以及只含会话信息和命中来源的 object 记录；不附具体 entry |
 | search_session_content | target、query 参数，单 ID 的 Q₁ Target 与 QA／QAQ 摘录，四种消息标签及原生／JS 完整返回；删除 include_tools 和搜索续查参数 |
 | read_session_content | 可选的原文展开步骤，必填 target、正负 limit；SESSION 从 latest 向前读，单 ID 的 SESSION_ENTRY 从锚点按指定方向读；逐消息 object 及原生／JS 示例 |
@@ -91,7 +97,7 @@ query_processes 的进程 Target 只放在 content 的每条 object 记录中，
 
 现有观察信息在原生消息顶层并列呈现：`observed_at_utc` 是实际观察时间，`observation_duration_microseconds` 是实际观察耗时，单位为微秒。二者与 target、meta、content、tool_result、next 同层，不放进 meta、content 或嵌套 observation。未测得耗时不得伪造为 0，仍沿既有观察 owner 表达实际可用事实，不为本次修订增加一套计时机制。
 
-JS 的 `tools.read_file`、`tools.write_file`、`tools.edit_file`、`tools.find_files`、`tools.search_file_content`、`tools.exec_process`、`tools.manage_process`、`tools.query_processes`、`tools.view_image`、`tools.read_video_frames`、`tools.read_transcript`、`tools.call_mcp_tool`、`tools.read_mcp_resource`，以及 `tools.query_capabilities` 的 SKILL、HOOK、MCP、PLUGIN 四个分支，成功时直接返回各节定义的完整业务值，不套用原生消息的时间外壳、12k 页预算、tool_result 或 next。数据库内容、JS 值和原生投影来自同一份结果，不保存第二份手工维护的业务正文。
+JS 的 `tools.read_file`、`tools.write_file`、`tools.edit_file`、`tools.find_files`、`tools.search_file_content`、`tools.exec_process`、`tools.manage_process`、`tools.query_processes`、`tools.query_agents`、`tools.send_agent_message`、`tools.stop_agent`、`tools.run_agent`、`tools.wait_agent`、`tools.view_image`、`tools.read_video_frames`、`tools.read_transcript`、`tools.call_mcp_tool`、`tools.read_mcp_resource`，以及 `tools.query_capabilities` 的 SKILL、HOOK、MCP、PLUGIN 四个分支，成功时直接返回各节定义的完整业务值，不套用原生消息的时间外壳、12k 页预算、tool_result 或 next。数据库内容、JS 值和原生投影来自同一份结果，不保存第二份手工维护的业务正文。
 
 content 的每项统一为 type/value：文字项的 value 是字符串，图片项的 value 是 IMAGE_REF Target，Target 项的 value 是该工具声明的具体 Target，object 项的 value 是 JSON 对象。find_files 将命中文件保存为 PATH Target 内容项，不并列返回 targets 或重复文字清单；search_file_content 的匹配行和计数使用 object 项；PLUGIN 精确查询使用 text 与 SKILL／HOOK_SOURCE／MCP_CONNECTION Target 项交错返回。原生工具消息及显式 console.log／return 将 Target 项投影为文字引用，将 object 项投影为通用 JSON 文字，不自动打开、读取或加载其中的文件；图片项按当前模型能力投递真实图片或固定文字说明，原生能力不足显示 ERROR，Cell steer 不增加工具状态外壳。console.log 每个参数及显式 return 均递归识别实际输出任意层级的 image 内容项，其他内容呈现一次；不解析引用字符串或扫描未输出变量。普通文字项仍不自动增加分隔符。共同类型见第 2.4 节，投影及准入沿统一交付草案。
 
@@ -191,6 +197,7 @@ object.value 本身是唯一权威业务对象，完整 JSON 文字按需投影�
 | --- | --- |
 | [文件系统工具](native_tools/filesystem.md) | 第 1–5 章：read_file、write_file、edit_file、find_files、search_file_content |
 | [终端工具](native_tools/terminal.md) | 第 1–3 章：exec_process、manage_process、query_processes |
+| [Agent 协作工具](native_tools/agents.md) | 第 1 章：query_agents 三个查询分支；第 2 章：send_agent_message 交付语义及精简结果；二者支持 ROOT／Subagent 原生及 ROOT JS；第 3 章：stop_agent 参数、四个并列 Work 状态计数、逐项状态及原生／JS 示例，仅 ROOT；第 4 章：wait_message，Subagent 专用仅原生，超时 SUCCESS，正文独立交付；前四者沿冻结 12k／NEXT；第 5 章：tools.run_agent 参数、材料、同批引用与返回；第 6 章：tools.wait_agent 的 WORK／AGENT 双分支、完整快照、first／all、消息／超时／取消、返回类型及 JS 示例；后两者仅 ROOT JS、完整返回，无原生分页；第 7 章为实现参考 |
 | [历史会话工具](native_tools/session_history.md) | 第 1–3 章：search_sessions、search_session_content、read_session_content 的参数、返回类型及原生／JS 示例；单 ID 的 entry 定位、四种消息标签与正负 limit |
 | [Plan 工具](native_tools/plan.md) | 第 1–3 章：enter_plan、ask_plan_question、exit_plan 的参数、行为、返回值及原生示例；10 分钟交互期限、方案双份保存及顶层 PATH Target；仅原生，无 JS API |
 | [记忆工具](native_tools/memory.md) | 第 1–3 章：remember、query_memory、manage_memory 的参数、互斥分支、返回类型、原生示例及失败语义；runtime 自动取得并发条件；仅 ROOT 原生，无 JS API |
