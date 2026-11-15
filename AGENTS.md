@@ -84,7 +84,7 @@ Outside the conversation page and its session-scoped controls, pages must use us
 - Do not recreate these labels through fixed `contract_id`/`schema` strings, generations, fingerprints, registries, compatibility wrappers, or negotiation. A label entering a hash or crossing a process/storage boundary does not independently justify it.
 - Remove redundant labels together with their producers, consumers, constraints, and dedicated tests; do not replace those tests with assertions that the removed fields are absent. Preserve tests of actual product behavior and data validity.
 - Actual content revisions, concurrency/lifecycle counters, external protocol versions, and real package/dependency versions retain their independent meanings. Necessary content digests, MACs, and stable identity or durable trust derivation constants follow section 4; they must not become carried internal version fields.
-- Follow [the internal version subtraction specification](PULSARA_INTERNAL_VERSION_LABEL_SUBTRACTION_HARD_CUT_DRAFT.zh.md) for the concrete deletion and retention boundaries.
+- Follow [the internal version subtraction specification](archived_docs/PULSARA_INTERNAL_VERSION_LABEL_SUBTRACTION_HARD_CUT_DRAFT.zh.md) for the concrete deletion and retention boundaries.
 
 ## Execution discipline
 

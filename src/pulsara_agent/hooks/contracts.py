@@ -679,7 +679,6 @@ class ContextOutcome:
 
 @dataclass(frozen=True, slots=True)
 class GateOutcome:
-    updated_input: dict[str, JsonValue] | None = field(default=None, kw_only=True)
     decision: GateDecision = GateDecision.PROCEED
     reason: str | None = None
     context_entries: tuple[HookContextEntry, ...] = ()

@@ -63,7 +63,6 @@ class ValidHandlerContribution:
     reason: str | None = None
     diagnostics: tuple[HookDiagnostic, ...] = ()
     scrub_set: object | None = field(default=None, repr=False, compare=False)
-    updated_input: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,7 +250,6 @@ def _parse_json_object(
         return _neutral(execution, diagnostics)
 
     context: str | None = None
-    updated_input = None
     gate_block = False
     permission: PermissionDecision | None = None
     continuation = False
@@ -262,10 +260,6 @@ def _parse_json_object(
         if not isinstance(specific, dict):
             raise ValueError("hookSpecificOutput must be an object")
         context, gate_block, permission, reason = _parse_specific(execution, specific)
-        if event is HookEventType.PRE_TOOL_USE_EVENT and "updatedInput" in specific:
-            updated_input = specific["updatedInput"]
-            if not isinstance(updated_input, dict):
-                raise ValueError("updatedInput must be a complete tool-arguments object")
 
     if event in _COMMON_CONTROL_EVENTS:
         suppress = value.get("suppressOutput")
@@ -343,7 +337,6 @@ def _parse_json_object(
         explicit_terminalize,
         reason,
         tuple(diagnostics),
-        updated_input=updated_input,
     )
 
 
@@ -376,7 +369,6 @@ def _parse_specific(
             "permissionDecision",
             "permissionDecisionReason",
             "additionalContext",
-            "updatedInput",
         }
         if specific.keys() - allowed:
             raise ValueError("unsupported PreTool output")

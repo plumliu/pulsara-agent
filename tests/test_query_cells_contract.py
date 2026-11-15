@@ -168,7 +168,7 @@ def test_live_query_does_not_reserve_or_consume_formal_output():
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("source", ["\\" * 20000, "// Hook后的冻结源码😀\n" * 5000])
+@pytest.mark.parametrize("source", ["\\" * 20000, "// 冻结源码😀\n" * 5000])
 def test_query_source_uses_complete_quote_and_copyable_next_without_consuming_output(source):
     async def run():
         host = CodeModeHost()
@@ -298,7 +298,7 @@ def _freeze_source(database, text, *, blob):
 @pytest.mark.postgres
 @pytest.mark.parametrize("blob", [False, True])
 def test_frozen_source_read_uses_canonical_inline_and_blob_owner(stage2_migrated_postgres_database, blob):
-    text = "// frozen Hook source 😀\n" * (4000 if blob else 2)
+    text = "// frozen source 😀\n" * (4000 if blob else 2)
     repository, lease, attempt_id, _ = _freeze_source(stage2_migrated_postgres_database, text, blob=blob)
     assert repository.read_code_mode_source(session_id=lease.guard.session_id, attempt_id=attempt_id,
                                            deadline_monotonic=monotonic() + 30) == text
@@ -322,10 +322,10 @@ def test_corrupt_blob_source_is_not_successful_empty_source(stage2_migrated_post
 
 
 @pytest.mark.postgres
-def test_real_host_hook_path_source_and_ingress_retry_preserve_original_record(
+def test_real_host_path_source_and_ingress_retry_preserve_original_record(
     tmp_path, monkeypatch, stage2_migrated_postgres_database,
 ):
-    """Real Hook→source freeze→query, while an immutable output retries admission."""
+    """Source stays frozen after file changes while an immutable output retries admission."""
     import threading
     import pulsara_agent.conversation_kernel.host as kernel_host
     from pulsara_agent.conversation_kernel.host import KernelHostCore
@@ -341,16 +341,14 @@ def test_real_host_hook_path_source_and_ingress_retry_preserve_original_record(
 
     home, workspace = tmp_path / "home", tmp_path / "workspace"
     workspace.mkdir()
-    original = "throw new Error('original request must never execute');\n"
-    executed = "// Hook-selected frozen source 😀\nconsole.log('ACTUAL_FROZEN_EXECUTED');\n"
+    executed = "// frozen source 😀\nconsole.log('ACTUAL_FROZEN_EXECUTED');\n"
     changed = "throw new Error('modified file must never execute');\n"
-    (workspace / "original.js").write_text(original)
     source_path = workspace / "executed.js"
     source_path.write_text(executed)
-    hook_log, hook = tmp_path / "hook-input.json", tmp_path / "rewrite-hook.py"
+    hook_log, hook = tmp_path / "hook-input.json", tmp_path / "review-hook.py"
     hook.write_text("import json,pathlib,sys\n" +
         f"pathlib.Path({str(hook_log)!r}).write_text(sys.stdin.read())\n" +
-        "print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','updatedInput':{'path':'executed.js'}}}))\n")
+        "print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','additionalContext':'Review the execution output.'}}))\n")
     _install_trusted_sources(home=home, workspace_root=workspace, workspace_config=None,
         user_config={"hooks":{"PreToolUse":[{"matcher":"^exec_cell$","hooks":[{
             "type":"command","command":shlex.join([sys.executable,str(hook)]),"timeout":5}]}]}})
@@ -371,7 +369,7 @@ def test_real_host_hook_path_source_and_ingress_retry_preserve_original_record(
     async def stream(request):
         index = len(model.requests)
         if index == 1:
-            payloads = _tool_call("exec_cell",random_id("call"),{"path":"original.js"})
+            payloads = _tool_call("exec_cell",random_id("call"),{"path":"executed.js"})
         elif index in {2,3}:
             message = next(m for m in reversed(request.compiled_input.messages) if m.role is MessageRole.TOOL_RESULT)
             body = json.loads(str(decode_tool_result_observation(text_part_values(message.content)[0])["body"]))
@@ -411,7 +409,7 @@ def test_real_host_hook_path_source_and_ingress_retry_preserve_original_record(
             assert candidates[0].content.record == {"kind":"log","text":"ACTUAL_FROZEN_EXECUTED"}
             assert source_path.read_text() == changed
             hook_input = json.loads(hook_log.read_text())
-            assert hook_input["tool_name"] == "exec_cell" and hook_input["tool_input"] == {"path":"original.js"}
+            assert hook_input["tool_name"] == "exec_cell" and hook_input["tool_input"] == {"path":"executed.js"}
             assert observed[0]["next"] is None
         finally:
             release_ingress.set()

@@ -1,6 +1,6 @@
 # Pulsara Hook 独立消息修订草案
 
-状态：讨论草案，独立消息投影未实施。本文件确定给模型阅读的 Hook 附加文字如何承载和交付；输入候选隔离按第 3 节落实，不表示新外壳已经启用。Hook 的阻止、参数修改、权限裁决和续接控制保持现有底层语义。普通 runtime observation、压缩与 Plan 续接沿[Runtime Observation 修订草案](PULSARA_RUNTIME_OBSERVATION_REVISION_DRAFT.zh.md)；Hook 执行反馈独立交付，安装、移除、信任及启停均不产生 runtime observation。
+状态：讨论草案，独立消息投影未实施。本文件确定给模型阅读的 Hook 附加文字如何承载和交付；输入候选隔离按第 3 节落实，不表示新外壳已经启用。Hook 的阻止、权限裁决和续接控制保持现有底层语义；PreToolUse 不修改工具参数。普通 runtime observation、压缩与 Plan 续接沿[Runtime Observation 修订草案](PULSARA_RUNTIME_OBSERVATION_REVISION_DRAFT.zh.md)；Hook 执行反馈独立交付，安装、移除、信任及启停均不产生 runtime observation。
 
 ## 1. 模型可见消息
 
@@ -41,7 +41,7 @@ Hook 文字继续作为运行时附加消息交付，沿既有 provider 消息�
 | --- | --- | --- |
 | SessionStart | 当前生命周期定义的启动点，包括压缩后的 source=compact；保留已有阻止语义 | 同步或已就绪的有效文字随启动点之后首次实际模型调用尝试交付；后台晚到沿第 3 节，压缩后的新输出不回填旧消息 |
 | UserPromptSubmit | 对应输入提交时的检查；保留现有阻止语义及实际输入来源 | 同步或已就绪文字随实际采用的对应输入在同次模型调用中尝试交付；后台晚到沿第 3 节，仍须通过原输入采用关系，不提前交给别的 turn |
-| PreToolUse | 工具执行前检查、阻止或在既有支持范围内修改参数 | 附加文字在该工具结果或拒绝结果之后、后续模型调用前尝试交付；不插到模型生成该调用之前；Plan 跨 turn 处理沿第 4 节 |
+| PreToolUse | 工具执行前检查或阻止，参数保持原请求 | 附加文字在该工具结果或拒绝结果之后、后续模型调用前尝试交付；不插到模型生成该调用之前；Plan 跨 turn 处理沿第 4 节 |
 | PermissionRequest | 由原权限流程处理允许、拒绝及原因 | 不产生普通附加正文，不为该事件发送空 Hook 消息；裁决结果沿既有权限／工具结果路径表达，不承诺新增自定义原因原文转发 |
 | PostToolUse | 工具执行和结果结算后的反馈 | 有有效附加文字时，在对应工具结果之后、后续模型调用前尝试交付；Plan 跨 turn 处理沿第 4 节 |
 | PreCompact | 压缩前检查及阻止 | 不产生普通附加正文；保持既有压缩控制和诊断路径，不发空消息 |
@@ -75,14 +75,15 @@ SessionStart、SubagentStart、UserPromptSubmit 继续支持现行允许的普�
 
 本文件不把 Hook 的正式输出协议简化成 event／text。独立外壳只负责模型可读文字，以下控制仍由现有解析器、dispatcher 和业务 owner 执行：
 
+PreToolUse 可以检查即将执行的参数、阻止调用并说明原因，不替换工具参数。需要调整时由模型显式提交新调用；工具自身的参数校验、默认值、路径解析和源码冻结仍沿既有 owner 处理，不新增有效参数副本。未支持的改参输出沿现有严格解析与诊断处理，不做兼容采用。
+
 | 控制 | 保持的行为 |
 | --- | --- |
 | 阻止执行 | PreToolUse 等事件的实际阻止决定仍在原安全点生效，不执行被阻止操作；原因沿既有工具结果、输入拒绝或生命周期结果表达 |
-| 参数修改 | 在当前已支持的普通工具路径中，PreToolUse 的 updatedInput 继续使用现有完整参数替换、校验、冻结及派发路径；不借新外壳扩大支持范围，也不改成让模型自行决定是否采用的提示 |
 | 权限裁决 | PermissionRequest 继续由原权限流程处理；不新增 PreToolUse 的放行能力、自定义原因原文转发或附加正文，不让文字替代确认或提升权限 |
 | 续接控制 | Stop／SubagentStop 的结束优先级、既有次数保护及取消结算保持现状；只投影最终胜出且实际采用的续接原因，结算时由真实 steer 等既有条件抑制的续接不另发原因 |
 
-Plan 控制工具当前不消费 PreToolUse 的 updatedInput，本次不顺带增加其参数替换能力。成功进入／退出规划并完成原 turn 时，同步 PreToolUse 正文按现有路径退役，PostToolUse 附加正文不自动转发到后继 turn；runtime 控制的结束、新 turn 和恢复权限均保持原语义，不因统一展示外壳扩大跨 turn 转发。
+成功进入／退出规划并完成原 turn 时，同步 PreToolUse 正文按现有路径退役，PostToolUse 附加正文不自动转发到后继 turn；runtime 控制的结束、新 turn 和恢复权限均保持原语义，不因统一展示外壳扩大跨 turn 转发。
 
 同时保留现有来源解析、启用设置、信任、作用域、凭据秘密清理、执行超时与副作用结算。修改展示外壳不重新授予信任、不删除管理能力，也不改变已接纳操作的结果。阻止原因已经由工具或输入结果表达时，不为了新消息格式额外复制一条控制通知。
 
@@ -113,6 +114,6 @@ Hook 安装、移除、信任、撤销信任、启用和停用均不主动通知
 | [生命周期 Hook](src/pulsara_agent/conversation_kernel/runner_hooks.py)、[工具执行](src/pulsara_agent/conversation_kernel/tool_execution.py)及[输入接纳](src/pulsara_agent/conversation_kernel/host_prompts.py) | 保持控制和结算，只衔接新的模型可读消息 |
 | [runner 响应后预算预留](src/pulsara_agent/conversation_kernel/runner.py) | 替换旧 _hook_output_source_upper 包装计量，核对新 JSON 正文、预留和实际 wire 字节／token 一致 |
 
-行为核对应覆盖：启动／输入／工具前后输出的实际顺序，ROOT 与子代理归属，多处理器同次输出和同文不同事件，PreToolUse 阻止及参数修改、PermissionRequest 裁决、Stop／SubagentStop 续接和结束不变，无正文事件不发空消息，排队输入未采用不交付，后台晚到不唤醒或回插历史，实际秘密不进入正文，以及压缩、Plan 续接与同 epoch 前缀连续性保持。保留有意义的控制与交付验证，不新增只证明旧字段不存在的测试。
+行为核对应覆盖：启动／输入／工具前后输出的实际顺序，ROOT 与子代理归属，多处理器同次输出和同文不同事件，PreToolUse 阻止及附加文字、PermissionRequest 裁决、Stop／SubagentStop 续接和结束不变，无正文事件不发空消息，排队输入未采用不交付，后台晚到不唤醒或回插历史，实际秘密不进入正文，以及压缩、Plan 续接与同 epoch 前缀连续性保持。保留有意义的控制与交付验证，不新增只证明旧字段不存在的测试。
 
 输入隔离另覆盖：活动 A 期间排队 B、B 的后台正文先于／晚于采用到达、同步拒绝与取消、启动确认失败及确认后执行前中断、相同输入 ID 的失败尝试重试、scope 关闭，以及已成功采用后后台正常晚到。压缩另覆盖 active／idle 的 compact 启动时机、可选输入准备失败舍弃与不重做；Plan 另覆盖其既有参数和跨 turn 正文边界。

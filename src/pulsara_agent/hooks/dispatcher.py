@@ -631,10 +631,7 @@ def _aggregate(
             contexts,
             diagnostics,
         )
-    # Every handler receives the same original input. The last declared complete
-    # replacement wins deterministically; deny still prevents any dispatch.
-    updated = next((item.updated_input for item in reversed(valid) if item.updated_input is not None), None)
-    return GateOutcome(context_entries=contexts, diagnostics=diagnostics, updated_input=updated)
+    return GateOutcome(context_entries=contexts, diagnostics=diagnostics)
 
 
 async def _acquire_lock_before_deadline(

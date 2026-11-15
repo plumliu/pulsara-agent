@@ -16,13 +16,14 @@ from pulsara_agent.conversation_kernel.tool_execution import (
 from pulsara_agent.conversation_kernel.tool_invocations import (
     ToolInvocationSource, ToolInvocationSourceKind, current_tool_invocation,
 )
-from pulsara_agent.hooks.contracts import ContextOutcome, GateDecision, GateOutcome
-from pulsara_agent.hooks.context import _causal_identity
+from pulsara_agent.hooks.contracts import ContextOutcome, GateDecision, GateOutcome, HookContextEntry, HookEventType
+from pulsara_agent.hooks.context import HookContextOwner, _causal_identity
+from pulsara_agent.hooks.executor import HookSecretScrubSet
 from pulsara_agent.identity import random_id
 from pulsara_agent.ports.tool_execution import ToolOutputSourceFormatHint
-from pulsara_agent.primitives.context import canonical_json_bytes, freeze_json
+from pulsara_agent.primitives.context import canonical_json_bytes, freeze_json, thaw_json
 from pulsara_agent.primitives.permission import PermissionMode
-from tests.test_round9_2_hook_subsystem import _scope
+from tests.test_round9_2_hook_subsystem import _Estimator, _definition, _scope
 
 
 def _fixture(tmp_path, dispatch, *, same_agent=False):
@@ -51,47 +52,93 @@ def _fixture(tmp_path, dispatch, *, same_agent=False):
     return owner, scope, request, facts, prepared, source, refs
 
 
-@pytest.mark.parametrize("rewrite", ["title", "reuse_reserved_identity", "unknown", "oversize_title", "later_block", "fifo_cycle"])
-def test_pre_hooks_preserve_index_and_revalidate_whole_batch(tmp_path, rewrite):
+@pytest.mark.parametrize("block_at", [None, 0, 1])
+def test_pre_hooks_keep_member_inputs_context_and_ordered_blocking(tmp_path, block_at):
     observed = []
-    refs = None
+    definition = _definition(tmp_path, HookEventType.PRE_TOOL_USE_EVENT, "noop")
+    scrub = HookSecretScrubSet.capture()
 
     async def dispatch(envelope, **kwargs):
         observed.append(envelope)
         index = envelope.causal_ref.member_index
-        updated = dict(envelope.public_input.tool_input)
-        updated["work_title"] = f"final {index}"
-        if index == 0 and rewrite == "fifo_cycle":
-            updated["depends_on"] = [refs["works"][1]]
-        if index == 1:
-            if rewrite == "reuse_reserved_identity":
-                updated["target"] = refs["agents"][index]
-            elif rewrite == "unknown":
-                updated["unknown"] = True
-            elif rewrite == "oversize_title":
-                updated["work_title"] = "字" * 86
-            elif rewrite == "later_block":
-                return GateOutcome(decision=GateDecision.BLOCK, reason="later refused")
-        return GateOutcome(updated_input=updated)
+        return GateOutcome(
+            decision=GateDecision.BLOCK if index == block_at else GateDecision.PROCEED,
+            reason="member refused" if index == block_at else None,
+            context_entries=(HookContextEntry(definition, 0, index + 1,
+                f"context for member {index}", scrub),),
+        )
 
-    owner, scope, request, facts, prepared, source, refs = _fixture(tmp_path, dispatch, same_agent=rewrite == "fifo_cycle")
+    owner, scope, request, facts, prepared, source, _ = _fixture(tmp_path, dispatch)
+    owner._hook_context = HookContextOwner()
+    owner._hook_context.register_scope(scope)
+    original_arguments = thaw_json(prepared.resolved_arguments)
 
     async def run():
         token = current_tool_invocation.set(source)
-        reservations = _batch_reservations.set([])
+        pending = []
+        reservations = _batch_reservations.set(pending)
         try:
             outcome, outer = await owner._dispatch_pre_tool(view=object(), scope=scope,
                 prepared=prepared, turn_id=source.turn_id, assistant_entry_id=None,
                 tool_call_id=source.invocation_id, request=request, canonical_facts=facts)
-            assert [event.causal_ref.member_index for event in observed] == [0, 1]
+            expected_indices = list(range(2 if block_at is None else block_at + 1))
+            assert [event.causal_ref.member_index for event in observed] == expected_indices
             assert all(event.causal_ref.invocation_id == source.invocation_id for event in observed)
-            assert len({_causal_identity(event.causal_ref) for event in observed}) == 2
+            assert len({_causal_identity(event.causal_ref) for event in observed}) == len(expected_indices)
+            for index, event in enumerate(observed):
+                assert event.public_input.tool_input == original_arguments["members"][index]["parameters"]
+                assert event.public_input.input_origin == ToolInvocationSourceKind.CODE_MODE_CALL.value
             assert outer.member_index is None and outer.invocation_id == source.invocation_id
-            assert outcome.decision is (GateDecision.PROCEED if rewrite == "title" else GateDecision.BLOCK)
-            if rewrite == "title":
-                assert [item["parameters"]["work_title"] for item in outcome.updated_input["members"]] == ["final 0", "final 1"]
+            assert outcome.decision is (GateDecision.PROCEED if block_at is None else GateDecision.BLOCK)
+            assert outcome.reason == (None if block_at is None else "member refused")
+            assert thaw_json(prepared.resolved_arguments) == original_arguments
+            for reservation in pending:
+                reservation.commit()
+            context = owner._hook_context.freeze_for_target(
+                scope_kind=scope.kind.value, session_id=scope.session_id, estimator=_Estimator())
+            assert context is not None
+            contributions = context.reservation.batch.contributions
+            assert [item.text for item in contributions] == [
+                f"context for member {index}" for index in expected_indices
+            ]
+            assert all(("member_index", index) in item.occurrence.causal_identity
+                       for index, item in zip(expected_indices, contributions, strict=True))
+            context.reservation.retire()
         finally:
+            for reservation in pending:
+                reservation.retire()
             _batch_reservations.reset(reservations)
+            current_tool_invocation.reset(token)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("invalid", ["duplicate_work", "fifo_cycle"])
+def test_invalid_batch_is_rejected_before_member_hooks(tmp_path, invalid):
+    observed = []
+
+    async def dispatch(envelope, **kwargs):
+        observed.append(envelope)
+        return GateOutcome()
+
+    owner, scope, request, facts, prepared, source, refs = _fixture(
+        tmp_path, dispatch, same_agent=invalid == "fifo_cycle")
+    arguments = thaw_json(prepared.resolved_arguments)
+    if invalid == "duplicate_work":
+        arguments["members"][1]["work_id"] = arguments["members"][0]["work_id"]
+    else:
+        arguments["members"][0]["parameters"]["depends_on"] = [refs["works"][1]]
+    prepared = PreparedResolvedToolInvocation("run_agent", "run_agent", freeze_json(arguments))
+
+    async def run():
+        token = current_tool_invocation.set(source)
+        try:
+            with pytest.raises(ValueError, match="Work identities must be unique|waiting cycle"):
+                await owner._dispatch_pre_tool(view=object(), scope=scope, prepared=prepared,
+                    turn_id=source.turn_id, assistant_entry_id=None,
+                    tool_call_id=source.invocation_id, request=request, canonical_facts=facts)
+            assert observed == []
+        finally:
             current_tool_invocation.reset(token)
 
     asyncio.run(run())

@@ -393,8 +393,8 @@ def test_real_host_stop_and_frozen_large_outputs_use_canonical_owners(mode, tmp_
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('rewrite', ['valid', 'identity', 'profile', 'profile_null'])
-def test_batch_pre_hooks_use_each_run_member_and_one_real_invocation(rewrite, tmp_path):
+@pytest.mark.parametrize('blocked', [False, True])
+def test_batch_pre_hooks_use_each_run_member_and_one_real_invocation(blocked, tmp_path):
     from types import SimpleNamespace
     from pulsara_agent.identity import random_id
     from pulsara_agent.conversation_kernel.tool_execution import ToolBatchExecutor, CodeModeToolRequest, CodeModeCallFacts, _batch_reservations
@@ -417,14 +417,10 @@ def test_batch_pre_hooks_use_each_run_member_and_one_real_invocation(rewrite, tm
         peers = prepare_batch_refs([{} for _ in specs])
         arguments = {'members':[{'agent_id':peers['agents'][index]['agent_id'],
             'work_id':peers['works'][index]['work_id'],'parameters':spec} for index,spec in enumerate(specs)]}
-        replacement = {'instruction':'rewritten by hook'}
-        if rewrite == 'identity':
-            replacement['target'] = {'kind':'AGENT','agent_id':random_id('session')}
-        elif rewrite in ('profile', 'profile_null'):
-            replacement['profile'] = 'research_worker' if rewrite == 'profile' else None
-        definition = _definition(tmp_path, HookEventType.PRE_TOOL_USE_EVENT, 'rewrite')
-        response = json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','updatedInput':replacement}}).encode()
-        executor = _ScriptedExecutor({'rewrite':(0,response,b'')})
+        definition = _definition(tmp_path, HookEventType.PRE_TOOL_USE_EVENT, 'review')
+        response = json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse',
+            **({'permissionDecision':'deny', 'permissionDecisionReason':'member refused'} if blocked else {})}}).encode()
+        executor = _ScriptedExecutor({'review':(0,response,b'')})
         dispatcher = KernelHookDispatcher(initial_view=_view(tmp_path,(definition,)),workspace_root=tmp_path,
             credential_boundary=ProcessCredentialBoundary(),executor=executor)
         owner = object.__new__(ToolBatchExecutor)
@@ -445,15 +441,16 @@ def test_batch_pre_hooks_use_each_run_member_and_one_real_invocation(rewrite, tm
                 turn_id=turn_id,assistant_entry_id=None,tool_call_id=call_id,
                 request=CodeModeToolRequest(scope.session_id,'test',None,FrozenModelCallMemoryContext()),
                 canonical_facts=CodeModeCallFacts(permission,SessionContentRange(0)))
-            assert len(executor.calls) == 2
-            assert [request.public_stdin['tool_name'] for request in executor.calls] == ['run_agent','run_agent']
-            assert [request.public_stdin['tool_input']['instruction'] for request in executor.calls] == ['first original','second original']
+            expected_instructions = ['first original'] if blocked else ['first original','second original']
+            assert len(executor.calls) == len(expected_instructions)
+            assert [request.public_stdin['tool_name'] for request in executor.calls] == ['run_agent'] * len(expected_instructions)
+            assert [request.public_stdin['tool_input']['instruction'] for request in executor.calls] == expected_instructions
             assert all(request.public_stdin['tool_use_id'] == call_id for request in executor.calls)
             assert all(request.public_stdin['input_origin'] == 'CODE_MODE_CALL' for request in executor.calls)
             assert causal.invocation_id == call_id
-            assert result.decision is (GateDecision.PROCEED if rewrite == 'valid' else GateDecision.BLOCK)
-            if rewrite == 'valid':
-                assert all(member['parameters'] == replacement for member in result.updated_input['members'])
+            assert result.decision is (GateDecision.BLOCK if blocked else GateDecision.PROCEED)
+            if blocked:
+                assert result.reason == 'member refused'
         finally:
             current_tool_invocation.reset(source_token)
             _batch_reservations.reset(reservation_token)
@@ -523,8 +520,8 @@ def test_two_cells_and_native_batch_share_leaf_without_serializing_physical_wait
 
 
 @pytest.mark.postgres
-@pytest.mark.parametrize('rewrite', ['valid', 'identity', 'profile', 'profile_null', 'later_block', 'title_boundary', 'budget'])
-def test_batch_hooks_reject_invalid_rewrites_and_keep_accepted_work_after_post_failure(rewrite, tmp_path, monkeypatch, stage2_migrated_postgres_database):
+@pytest.mark.parametrize('scenario_kind', ['post_failure', 'later_block', 'budget'])
+def test_batch_hooks_block_atomically_and_keep_accepted_work_after_post_failure(scenario_kind, tmp_path, monkeypatch, stage2_migrated_postgres_database):
     from pulsara_agent.identity import random_id
     from pulsara_agent.conversation_kernel.host import KernelHostCore
     from pulsara_agent.conversation_kernel.tool_execution import ToolBatchExecutor
@@ -548,39 +545,25 @@ def test_batch_hooks_reject_invalid_rewrites_and_keep_accepted_work_after_post_f
         member = values.get('_member_index')
         if member is not None:
             member_posts.append(member)
-        if member == 0 and rewrite == 'valid':
+        if member == 0 and scenario_kind == 'post_failure':
             raise RuntimeError('injected member post failure after actual batch admission')
         return await original_post(owner, **values)
     def observe_diagnostic(owner, offer):
         if offer.public_payload.get('outcome') == 'POST_TOOL_HOOK_FAILED':
             diagnostics.append(offer.public_payload)
         original_offer(owner, offer)
-    async def change_pre_identity(owner, **values):
+    async def block_second_member(owner, **values):
         outcome, causal = await original_pre(owner, **values)
         if values.get('_member_index') is not None:
             member_pres.append(values['_member_index'])
-        if rewrite in {'valid', 'budget'} and values.get('_member_index') is not None:
-            from pulsara_agent.primitives.context import thaw_json
-            updated = thaw_json(values['prepared'].resolved_arguments)
-            updated['work_title'] = f"final title {values['_member_index']}"
-            return replace(outcome, updated_input=updated), causal
-        if rewrite == 'later_block' and values.get('_member_index') == 1:
+        if scenario_kind == 'later_block' and values.get('_member_index') == 1:
             from pulsara_agent.hooks.contracts import GateDecision
             return replace(outcome, decision=GateDecision.BLOCK, reason='second member refused'), causal
-        if rewrite == 'title_boundary' and values.get('_member_index') == 1:
-            return replace(outcome, updated_input={'instruction':'changed', 'work_title':'字' * 86}), causal
-        if rewrite in {'identity', 'profile', 'profile_null'} and values.get('_member_index') == 0:
-            updated = {'instruction':'changed by hook'}
-            if rewrite == 'identity':
-                updated['target'] = {'kind':'AGENT','agent_id':random_id('session')}
-            else:
-                updated['profile'] = 'research_worker' if rewrite == 'profile' else None
-            return replace(outcome, updated_input=updated), causal
         return outcome, causal
-    monkeypatch.setattr(ToolBatchExecutor,'_dispatch_pre_tool',change_pre_identity)
+    monkeypatch.setattr(ToolBatchExecutor,'_dispatch_pre_tool',block_second_member)
     monkeypatch.setattr(ToolBatchExecutor,'_dispatch_post_tool',fail_one_member)
     monkeypatch.setattr(ToolBatchExecutor,'_offer_operational_best_effort',observe_diagnostic)
-    if rewrite == 'budget':
+    if scenario_kind == 'budget':
         from pulsara_agent.conversation_kernel.subagents.collaboration_api import CollaborationToolPort
         invoke = CollaborationToolPort.invoke
         async def quote_after_hooks(owner, *, tool_name, arguments, invocation_context):
@@ -599,7 +582,7 @@ def test_batch_hooks_reject_invalid_rewrites_and_keep_accepted_work_after_post_f
         else:
             root_calls += 1
             if root_calls == 1:
-                code = 'try { const admitted=await tools.run_agent([{instruction:"first work"},{instruction:"second work"}]);const finished=await tools.wait_agent({agents:[...new Map(admitted.agents.map(a=>[a.agent_id,a])).values()],until:"idle"});console.log(admitted);console.log(finished); } catch(error) { console.log({rejected:error.code}); }'
+                code = 'try { const admitted=await tools.run_agent([{instruction:"first work",work_title:"first title"},{instruction:"second work",work_title:"second title"}]);const finished=await tools.wait_agent({agents:[...new Map(admitted.agents.map(a=>[a.agent_id,a])).values()],until:"idle"});console.log(admitted);console.log(finished); } catch(error) { console.log({rejected:error.code}); }'
                 payloads = _tool_call('exec_cell',random_id('call'),{'code':code})
             else:
                 if root_calls == 2:
@@ -624,18 +607,18 @@ def test_batch_hooks_reject_invalid_rewrites_and_keep_accepted_work_after_post_f
             await session.update_model_call_binding(test_model_binding(runtime))
             result = await session.run_turn(PromptContent.text('admit a batch'),requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
             assert result.final_text == 'BATCH_ACCEPTED'
-            records = await _settled_formal_records(session, expected=2 if rewrite == 'valid' else 1)
+            records = await _settled_formal_records(session, expected=2 if scenario_kind == 'post_failure' else 1)
             batch = json.loads(next(record['text'] for record in records if record['kind']=='log'))
             with session.repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,deadline_monotonic=monotonic()+10) as connection:
                 rows = connection.execute("SELECT r.result_state,r.attempt_id FROM pulsara_v3.tool_results r JOIN pulsara_v3.tool_invocations i ON i.session_id=r.session_id AND i.id=r.invocation_id WHERE i.session_id=%s AND i.source_kind='CODE_MODE_CALL' AND i.tool_name='run_agent'",(root_session_id,)).fetchall()
                 assert len(rows) == 1
-                if rewrite != 'valid':
-                    expected = 'APPLICATION_ERROR' if rewrite == 'budget' else 'PERMISSION_DENIED'
+                if scenario_kind != 'post_failure':
+                    expected = 'APPLICATION_ERROR' if scenario_kind == 'budget' else 'PERMISSION_DENIED'
                     assert batch == {'rejected':expected}
                     assert rows[0][0] == expected
-                    assert (rows[0][1] is not None) is (rewrite == 'budget')
-                    if rewrite == 'budget':
-                        assert len(budget_quotes) == 1 and all(f'final title {i}' in budget_quotes[0] for i in range(2))
+                    assert (rows[0][1] is not None) is (scenario_kind == 'budget')
+                    if scenario_kind == 'budget':
+                        assert len(budget_quotes) == 1 and all(title in budget_quotes[0] for title in ('first title', 'second title'))
                     assert member_pres == [0, 1]
                     assert connection.execute('SELECT count(*) FROM pulsara_v3.sessions WHERE root_session_id=%s',(root_session_id,)).fetchone()[0] == 0
                     assert not diagnostics
@@ -646,11 +629,11 @@ def test_batch_hooks_reject_invalid_rewrites_and_keep_accepted_work_after_post_f
                     assert len(diagnostics) == 1 and diagnostics[0]['member_index'] == 0
                     work_ids = [item['work_id'] for item in batch['works']]
                     assert connection.execute('SELECT count(*) FROM pulsara_v3.prompt_queue_items WHERE id=ANY(%s)',(work_ids,)).fetchone()[0] == 2
-                    assert [item['work_title'] for item in batch['details']] == ['final title 0', 'final title 1']
+                    assert [item['work_title'] for item in batch['details']] == ['first title', 'second title']
                     titles = dict(connection.execute('SELECT id,work_title FROM pulsara_v3.prompt_queue_items WHERE id=ANY(%s)',(work_ids,)).fetchall())
-                    assert [titles[work] for work in work_ids] == ['final title 0', 'final title 1']
+                    assert [titles[work] for work in work_ids] == ['first title', 'second title']
                     original = connection.execute("SELECT original_arguments FROM pulsara_v3.tool_invocations WHERE session_id=%s AND tool_name='run_agent'",(root_session_id,)).fetchone()[0]
-                    assert all('work_title' not in item['parameters'] for item in original['members'])
+                    assert [item['parameters']['work_title'] for item in original['members']] == ['first title', 'second title']
                     assert connection.execute('SELECT count(*) FROM pulsara_v3.tool_execution_attempts WHERE id=%s',(rows[0][1],)).fetchone()[0] == 1
                     assert rows[0][0] == 'SUCCESS' and rows[0][1] is not None
         finally:

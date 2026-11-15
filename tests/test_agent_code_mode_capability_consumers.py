@@ -268,28 +268,34 @@ def test_code_cell_inspect_executes_actual_mcp_without_provider_install_and_reje
     asyncio.run(scenario())
 
 
-def test_pretool_hook_complete_argument_replacement_is_validated_and_deny_wins(tmp_path):
+def test_pretool_hook_deny_wins_and_preserves_ordered_additional_context(tmp_path):
     import json
     from pulsara_agent.hooks.contracts import GateDecision
     from pulsara_agent.hooks.dispatcher import _aggregate
-    from pulsara_agent.hooks.output_parser import parse_handler_output, ValidHandlerContribution, InvalidHandlerOutput
+    from pulsara_agent.hooks.output_parser import parse_handler_output, ValidHandlerContribution
     from tests.test_round9_2_hook_subsystem import _definition, _execution
-    definition = _definition(tmp_path, HookEventType.PRE_TOOL_USE_EVENT, "rewrite")
+    definition = _definition(tmp_path, HookEventType.PRE_TOOL_USE_EVENT, "review")
 
-    def parse(value, *, asynchronous=False):
-        return parse_handler_output(_execution(replace(definition, asynchronous=asynchronous),
-            stdout=json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", **value}}).encode()))
+    def parse(value):
+        execution = _execution(definition,
+            stdout=json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", **value}}).encode())
+        contribution = parse_handler_output(execution)
+        assert isinstance(contribution, ValidHandlerContribution)
+        return replace(contribution, scrub_set=execution.scrub_set)
 
-    first = parse({"updatedInput": {"code": "return 1;"}})
-    second = parse({"updatedInput": {"path": "script.js"}})
+    first = parse({"additionalContext": "Read the project instructions."})
+    second = parse({"additionalContext": "Check the execution results."})
     assert isinstance(first, ValidHandlerContribution)
-    assert _aggregate(HookEventType.PRE_TOOL_USE_EVENT, (first, second), continuation_already_used=False).updated_input == {"path": "script.js"}
-    assert isinstance(parse({"updatedInput": []}), InvalidHandlerOutput)
-    assert isinstance(parse({"updatedInput": {}}, asynchronous=True), InvalidHandlerOutput)
-    denied = parse({"updatedInput": {"code": "return 2;"}, "permissionDecision": "deny"})
-    outcome = _aggregate(HookEventType.PRE_TOOL_USE_EVENT, (first, denied), continuation_already_used=False)
+    proceeding = _aggregate(HookEventType.PRE_TOOL_USE_EVENT, (first, second), continuation_already_used=False)
+    assert proceeding.decision is GateDecision.PROCEED
+    assert [entry.text for entry in proceeding.context_entries] == [
+        "Read the project instructions.", "Check the execution results."
+    ]
+    denied = parse({"permissionDecision": "deny", "permissionDecisionReason": "Execution is blocked."})
+    outcome = _aggregate(HookEventType.PRE_TOOL_USE_EVENT, (first, denied, second), continuation_already_used=False)
     assert outcome.decision is GateDecision.BLOCK
-    assert outcome.updated_input is None
+    assert outcome.reason == "Execution is blocked."
+    assert outcome.context_entries == proceeding.context_entries
 
 
 def test_shared_hook_dispatch_exposes_real_subagent_session_and_instruction_origin(tmp_path):

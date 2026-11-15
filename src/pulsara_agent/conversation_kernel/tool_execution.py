@@ -582,11 +582,9 @@ class ToolBatchExecutor:
     async def _dispatch_batch_pre_tool(self, *, view, scope, prepared, turn_id,
                                       assistant_entry_id, tool_call_id, request, canonical_facts):
         from pulsara_agent.hooks.contracts import GateOutcome
-        from .subagents.collaboration_contracts import parse_batch_members, validate_batch_identities, agent_target, work_target
+        from .subagents.collaboration_contracts import parse_batch_members
         arguments = thaw_json(prepared.resolved_arguments)
-        members = parse_batch_members(arguments)
-        refs = {"agents": [agent_target(member.agent_id) for member in members],
-                "works": [work_target(member.work_id) for member in members]}
+        parse_batch_members(arguments)
         diagnostics = []
         blocked = None
         for index, concrete in enumerate(arguments["members"]):
@@ -602,24 +600,13 @@ class ToolBatchExecutor:
                     entries=outcome.context_entries)
                 if reservation is not None:
                     _batch_reservations.get().append(reservation)
-            if outcome.updated_input is not None:
-                concrete["parameters"] = outcome.updated_input
             if outcome.decision is GateDecision.BLOCK:
                 blocked = outcome.reason or "HOOK_BLOCKED"
                 break
-        if blocked is None:
-            try:
-                validate_batch_identities(arguments, refs)
-                resolved_members = parse_batch_members(arguments)
-                if any(original.create_agent != resolved.create_agent
-                       for original, resolved in zip(members, resolved_members)):
-                    raise ValueError("batch target creation or reuse changed after preparation")
-            except ValueError as error:
-                blocked = str(error)
         causal = PreToolRef(turn_id, assistant_entry_id, tool_call_id, "run_agent",
             invocation_id=current_tool_invocation.get().invocation_id)
         return GateOutcome(decision=GateDecision.BLOCK if blocked is not None else GateDecision.PROCEED,
-            reason=blocked, diagnostics=tuple(diagnostics), updated_input=arguments), causal
+            reason=blocked, diagnostics=tuple(diagnostics)), causal
 
     async def _dispatch_pre_tool(
         self,
@@ -1190,15 +1177,6 @@ class ToolBatchExecutor:
                                 pending_hook_context_reservations.append(
                                     pre_context_reservation
                                 )
-                        if pre_outcome.updated_input is not None and pre_outcome.decision is not GateDecision.BLOCK:
-                            invocation_arguments = dict(pre_outcome.updated_input)
-                            rewritten = self._tools.prepare_resolved_invocation(
-                                tool_name=call.tool_name, arguments=invocation_arguments, surface_borrow=surface_borrow)
-                            if isinstance(rewritten, PreparedToolPreparationRejection):
-                                pre_outcome = replace(pre_outcome, decision=GateDecision.BLOCK,
-                                    reason=rewritten.authorization.public_message)
-                            else:
-                                post_invocation = rewritten
                         if pre_outcome.decision is GateDecision.BLOCK:
                             hook_blocked = True
                             authorization = KernelToolAuthorization(

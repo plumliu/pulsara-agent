@@ -770,6 +770,7 @@ def test_round9_2_single_parser_control_matrix_and_invalid_output(
         ).encode(),
     )
     assert isinstance(pre, ValidHandlerContribution) and pre.gate_block
+    assert pre.context_text == "pre context" and pre.reason == "policy"
     permission = parsed(
         HookEventType.PERMISSION_REQUEST_EVENT,
         stdout=b'{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow","message":"reviewed"}}}',
@@ -804,6 +805,10 @@ def test_round9_2_single_parser_control_matrix_and_invalid_output(
             HookEventType.PRE_TOOL_USE_EVENT,
             b'{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}',
         ),
+        (
+            HookEventType.PRE_TOOL_USE_EVENT,
+            b'{"hookSpecificOutput":{"hookEventName":"PreToolUse","updatedInput":{"command":"replacement"}}}',
+        ),
         (HookEventType.POST_TOOL_USE_EVENT, b'{"continue":false}'),
         (HookEventType.POST_TOOL_USE_EVENT, b'{"updatedMCPToolOutput":{}}'),
         (HookEventType.STOP_EVENT, b"plain continuation"),
@@ -830,6 +835,43 @@ def test_round9_2_single_parser_control_matrix_and_invalid_output(
         ),
         InvalidHandlerOutput,
     )
+
+
+def test_pretool_unsupported_output_is_rejected_as_one_contribution(tmp_path: Path) -> None:
+    definition = _definition(tmp_path, HookEventType.PRE_TOOL_USE_EVENT, "check")
+    rejected = parse_handler_output(
+        _execution(
+            definition,
+            stdout=json.dumps(
+                {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "additionalContext": "invalid contribution context",
+                        "updatedInput": {"command": "replacement"},
+                    }
+                }
+            ).encode(),
+        )
+    )
+    assert isinstance(rejected, InvalidHandlerOutput)
+    assert [item.code for item in rejected.diagnostics] == ["HOOK_OUTPUT_UNSUPPORTED"]
+    accepted = ValidHandlerContribution(
+        definition,
+        1,
+        0,
+        context_text="independent valid context",
+        scrub_set=HookSecretScrubSet.capture(),
+    )
+    outcome = _aggregate(
+        HookEventType.PRE_TOOL_USE_EVENT,
+        (rejected, accepted),
+        continuation_already_used=False,
+    )
+    assert isinstance(outcome, GateOutcome)
+    assert outcome.decision is GateDecision.PROCEED
+    assert [item.text for item in outcome.context_entries] == ["independent valid context"]
+    assert outcome.diagnostics == rejected.diagnostics
 
 
 def test_round9_2_ordered_aggregation_precedence_and_once_guard(tmp_path: Path) -> None:

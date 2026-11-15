@@ -2,7 +2,9 @@
 
 共用规则见[原生工具修订草案索引](../PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 1、2 章。
 
-## 1. read_file：PATH Target
+## 1. read_file：PATH／NEXT Target
+
+第 1.1–1.9 节定义 PATH 文本读取，原生与 JS 共用该分支；第 1.10 节定义仅原生可用的 NEXT 冻结结果续读。`tools.read_file` 只接受 PATH，不提供 NEXT 参数或返回声明。
 
 ### 1.1 用途与范围
 
@@ -159,7 +161,7 @@ content 是内容项数组，即使本次只有纯文字也不返回裸字符串
 
 `next:null` 只表示本次请求范围的保存结果已正常交付完，不表示文件已读到末尾，也不表示所有文件内容已经检查。是否读取了全文由调用范围和实际正文决定。
 
-大文件可以内部流式处理或分块保存，但 JS 正常返回仍是完整业务值，不是第一页、读取句柄或懒加载代理。原生分页只读取这次已保存的正文，不重新打开源文件；原文件后来变化不改写该份结果。
+大文件允许内部流式处理、分批准备，内容存储沿[数据库草案第 5.3 节](../PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md#53-现有-blob-承载与后续实验)的现有 blob 路径。JS 正常返回仍是完整业务值，不是第一页、读取句柄或懒加载代理。原生分页只读取这次已保存的正文，不重新打开源文件；原文件后来变化不改写该份结果。
 
 负向 offset 仅在本次读取时，按该次文件的实际总行数解析一次并确定请求范围；next 继续读取这份固定保存结果，不重新按文件末尾定位，也不随文件后续增长或缩短移动范围。
 
@@ -260,7 +262,7 @@ console.log({
   target: {"kind":"PATH","path":"demo.txt"}
 ```
 
-该请求先取得全文，不因首屏最多 12k 而只保存首屏内容。原生未读完时提供 next；这里不展开 NEXT 的参数或内部位置。
+该请求先取得全文，不因首屏最多 12k 而只保存首屏内容。原生未读完时提供 next，按第 1.10 节原样传给原生 read_file；内部位置不向模型展开。
 
 JS 全文处理：
 
@@ -397,48 +399,159 @@ try {
 - 文件缺失、非普通文件、不支持的编码、参数拒绝、运行时错误和取消沿既有边界结算；仅真实存在的完整失败业务值进入 err.result，不分页、不重执行业务。失败值仅有 target、meta.status、content，已知且有用的文件事实写入 content，不返回可选文件属性。
 - 公开 meta.status 仅使用 SUCCESS、ERROR、CANCELLED；具体错误原因、路径和有用提示进入 content。原生与 JS 使用同一完整失败业务值，不带 meta.error、替代错误代码字段、`_hint` 或重复业务 message。
 
-## 2. write_file：PATH + content
+### 1.10 NEXT Target：仅原生续读冻结结果
+
+NEXT 分支读取同一次已保存工具结果的后续正文，每次按共同 12k 规则交付一页。它适用于各工具的冻结结果，不限于 PATH 文件正文；不重新执行原工具、打开源文件或媒体、查询实时状态、继续扫描或请求远端下一业务页。原结果的业务范围和内容不因续读扩大或更新。该分支仅原生可用，不接入 Code Mode。
+
+参数只有一个：
+
+| 参数 | 必填 | 明确含义 |
+| --- | --- | --- |
+| target | 是 | 上一页返回的完整 NEXT Target，原样传入 |
+
+该分支只接受 target，不接受 offset、limit、continuation 或额外字段。NEXT 由 runtime 生成，其内部定位不向模型展开；不新增 NEXT 实体、ID 或注册表。完整 SESSION_ENTRY 结果 Target 用于 write_file 导出，不作为续读参数；普通历史 entry 和 Cell steer 也不通过该分支读取。
+
+正常续读的原生返回形状：
+
+```text
+observed_at_utc: <本次续读的观察时间>
+observation_duration_microseconds: <实际可用耗时>
+
+meta:
+  status: SUCCESS
+
+content:
+  <原冻结结果在本页的实际正文>
+
+tool_result: {"kind":"SESSION_ENTRY","entry_id":"entry:<原结果ID>"}
+next: <原结果再下一页的完整 NEXT Target；末页为 null>
+```
+
+meta.status 只表达本次续读状态，不覆盖原操作的业务事实。读取一份 ERROR／CANCELLED 业务结果时，续读本身可以成功；原业务状态及其他公开字段在原结果的确定正文投影中保留。content 就是本页实际正文，不增加“续读成功”的说明，不回显输入 NEXT，不另外返回顶层业务 target 或文件属性。来源为 PATH 读取时仍按第 1.4 节恢复实际文件行号；其他结果不因此获得文件行号。
+
+tool_result 始终指向原完整结果；next 只指向该结果在本页之后的位置，不为 read_file 自己建立另一条分页链。例如：
+
+```text
+原工具交付 R 的第 1 页：tool_result → R，next → N2
+read_file(target=N2)：交付 R 的第 2 页，tool_result → R，next → N3
+read_file(target=N3)：交付 R 的第 3 页，tool_result → R，next → null
+```
+
+N2／N3 只是运行时返回值的示意名称，不是公开 ID 或需模型构造的字段。连续阅读使用每次实际返回的新 NEXT；再次传同一个 NEXT 仍从同一位置读取，不是自动前移的全局游标。每次页面按当时准入条件确定；已经接受的观察范围及返回 NEXT 保持固定，不因后来预算改变而重新切页。
+
+内容按原结果的确定顺序继续，包括尚未交付的公开业务字段投影及有序 content。text 和 object 的 JSON 文字投影可以跨页；图片与独立 Target 项保持完整。object 内部的 target 等字段仍是普通 JSON 文字，不提升为独立 Target，也不成为不可拆单位。不重排图文、不补发上一页说明，不新增图片与文字的绑定标记。
+
+例如一个很长的 object 字符串先交付了前半段，后面依次还有图片、文字和文件引用；以下仅展示切分位置。上一页末尾是：
+
+```text
+{
+  "summary": "前半段
+```
+
+下一次原生调用：
+
+```text
+工具：read_file
+参数：
+  target: <上一页返回的完整 NEXT Target>
+```
+
+若剩余内容可在一页交付，结果可为以下形状，省略共同观察时间。content 开头明确作为上一页 JSON 的正文续片展示，不伪装成完整 JSON 对象，不补造括号、字段或新 object 值；片段提示只是展示说明，不写回原正文：
+
+```text
+meta:
+  status: SUCCESS
+
+content:
+  （原结果正文续片）
+  后半段"
+  }
+  图片引用：{"kind":"IMAGE_REF","image_ref":"image:<A>"}
+  处理完成。
+  {"kind":"PATH","path":"output/report.txt"}
+
+tool_result: {"kind":"SESSION_ENTRY","entry_id":"entry:<原结果ID>"}
+next: null
+```
+
+模型支持图片时，以当前续读调用的 tool_call_id 和相同 IMAGE_REF 关联该页的真实图片附件，顺序仍为 JSON 续片 → 图片 → 后文 → 文件引用。附属 user 图片消息属于这一页的 provider 投影，不是新用户输入，不新建人类 entry。单图超额、模型不支持图片或图片实际读取失败沿共同图片投影规则，不为 NEXT 增加另一套媒体路径。
+
+正常续读只复用已保存结果；既有调用／观察及投影记录保存原结果身份与实际交付范围，不另存原全文、当前页或剩余后缀，不把“本次读到一页”变成新的正文权威。恢复已接受观察按固定范围取内容，不重跑 NEXT 或原业务，不改写同一 epoch 的已安装前缀。
+
+错误及取消沿既有规则：
+
+| 情况 | 原生处理 |
+| --- | --- |
+| 原结果可定位，但整页无法交付 | ERROR，说明原因；保留原 tool_result 和指向实际未交付起点的 NEXT，不将该页记为已交付 |
+| 图片能力不足或单图读取失败，文字投影已交付 | ERROR，图片位置保留引用和具体原因，其余内容继续；按实际交付范围推进 next，结束可为 null，不记为已看图 |
+| NEXT 无效或原结果不可读 | ERROR，content 说明读取失败，不伪造原结果 Target；实际产生并完整保存的错误说明可返回自己的 tool_result，交付完该说明时 next:null 不表示原结果读完 |
+| 本次续读实际取消 | CANCELLED，按实际结算保留已知事实，不取消或重做原业务，不伪造交付完成 |
+| 参数校验等更早失败，未产生业务值 | 沿现有运行时错误通道报告，不伪造正文或结果 Target |
+
+采用本合同后须验证：原生参数仅 target、JS 只接受 PATH；跨工具冻结结果和公开字段完整续接；超长文字／object 中途切分、图片及独立 Target 的顺序；原 tool_result 与后继 NEXT 的连续性；原文件及运行状态变化不回写结果；失败占位、取消与整页未交付不误报完成；来源与实际范围记录不造成第二份正文。本轮仅确定文档合同。
+
+## 2. write_file：创建文本或导出完整工具结果
 
 ### 2.1 用途与范围
 
-在指定 PATH 创建新的普通 UTF-8 文本文件。原生调用与 `tools.write_file` 使用相同参数和创建语义：成功后返回简短的创建说明及必要事实，不回传写入全文。
+在指定 PATH 创建新文件：content 分支按普通 UTF-8 文本规则写入提供的文字，tool_result_target 分支写入已保存工具结果的完整 UTF-8 文字投影。原生调用与 ROOT Code Mode 的 `tools.write_file` 共用参数、返回值和创建语义；调用角色及权限沿既有入口，不因导出增加访问范围。成功后返回简短说明及必要事实，不回传写入全文。
 
 保持现有 PATH 支持和权限边界：工作区相对路径、绝对路径及 `~` 路径仍由既有 owner 解析和授权。允许写入的目标可按现有方式创建缺失的父目录；支持绝对路径不等于无条件允许工作区外写入。
 
 write_file 只创建新文件。目标已存在时拒绝，不覆盖、不追加；普通文件、目录、符号链接和悬空符号链接均不能被替换。并发期间目标出现时同样拒绝，继续复用现有原子不覆盖发布机制。不增加 overwrite、append 或其他模式参数。
 
-本节只定义 PATH + content，不定义 source 导出输入及续读行为。
+本节确定 content 与 tool_result_target 两个互斥输入分支；原生结果续读使用第 1.10 节的 read_file NEXT 分支。
 
 ### 2.2 最简参数表
 
 | 参数 | 类型 | 必填与默认 | 明确含义 |
 | --- | --- | --- | --- |
 | target | PATH Target | 必填 | `{"kind":"PATH","path":"…"}`；指定要创建的新文件 |
-| content | string | 必填，无默认值 | 完整的待写入文本；空字符串表示创建空文件 |
+| content | string | 文本分支必填，无默认值 | 完整的待写入文本；空字符串表示创建空文件 |
+| tool_result_target | 完整工具结果的 SESSION_ENTRY Target | 导出分支必填 | 此前返回的完整 tool_result 引用；导出整份保存结果 |
 
-输入 content 是字符串；返回值的 content 是内容项对象数组。二者承担不同职责，不要求为了统一名称把写入参数也改成数组。
+content 和 tool_result_target 必须且只能提供一个；两个分支都只接受各自列出的字段，混填、都不填、null 或额外字段均拒绝。输入 content 是字符串；返回值的 content 是内容项对象数组。二者承担不同职责，不要求为了统一名称把写入参数也改成数组。
 
 ```typescript
+type ToolResultTarget = {kind: "SESSION_ENTRY"; entry_id: string};
+
 interface WriteFilePathContentArgs {
   target: PathTarget;
   content: string;
+  tool_result_target?: never;
 }
+
+interface WriteFilePathToolResultArgs {
+  target: PathTarget;
+  tool_result_target: ToolResultTarget;
+  content?: never;
+}
+
+type WriteFileArgs = WriteFilePathContentArgs | WriteFilePathToolResultArgs;
 ```
 
-文本按 UTF-8 编码写入，保留 CRLF、LF 和末尾有／无换行，不进行换行归一化，也不自动补换行或 BOM。若字符串本身以 U+FEFF 开头，该字符照常编码写入。空字符串实际写入 0 字节。
+content 分支按 UTF-8 编码写入，保留 CRLF、LF 和末尾有／无换行，不进行换行归一化，也不自动补换行或 BOM。若字符串本身以 U+FEFF 开头，该字符照常编码写入。空字符串实际写入 0 字节。
 
 读写衔接时须注意：read_file 将文件开头的 UTF-8 BOM 解析为 meta.had_utf8_bom，正文不包含被解析的开头 BOM。直接连接其 content 文字并传给 write_file，不会自动恢复该 BOM，因此不保证复制出的文件与原文件逐字节相同。需要保留时，由脚本根据该事实显式恢复开头的 U+FEFF；不新增工具参数或隐式补 BOM 行为。
 
-沿用现有普通文本边界：设备路径、已识别的二进制扩展名、含 NUL 的内容及无法编码为 UTF-8 的字符串不接受。不用原生 12k 页预算限制输入字符串大小，也不因展示余量不足缩短写入内容；实际资源不足如实失败。
+content 分支沿用现有普通文本校验：设备路径、已识别的二进制扩展名、含 NUL 的内容及无法编码为 UTF-8 的字符串不接受。不用原生 12k 页预算限制输入字符串大小，也不因展示余量不足缩短写入内容；实际资源不足如实失败。
+
+tool_result_target 的 kind 固定为 SESSION_ENTRY，只含 kind、entry_id；运行时还须确认它确实指向可读的完整工具结果。NEXT、普通历史消息和 Cell steer 不作为导出来源，不能仅凭 kind 相同就接受任意 entry。沿既有源访问范围检查，不新增已读资格、导出登记或公开归属字段。
+
+导出覆盖该结果的完整确定性文字投影，与模型已读页数无关，不要求先用 NEXT 读完。业务值本身为纯文字时保留其文字字节；结构化结果投影全部公开业务字段及有序正文，不只截取当前页或其中一个字段。text 保留原文字，object 沿共同缩进 JSON 投影，图片保留原位置的 IMAGE_REF 文字引用，不复制图片字节或生成媒体包，也不因当前模型图片能力改变导出内容。内部执行事实不进入公开导出。
+
+tool_result_target 分支按完整投影的 UTF-8 字节写入，不套用 content 分支的 NUL 或二进制扩展名拒绝规则。例如正文含 NUL 时，按其实际投影写入，不删除、替换或截断该字符；目标文件后缀不改变导出编码。两分支共用目标解析与授权、原子不覆盖发布、实际写入及取消结算；返回值和错误语义仍按本章处理。
+
+只读取已有保存结果，不重新执行原工具、打开原来源文件或媒体、追取远端下一页或包含尚未产生的输出。导出无法完整取得来源时按错误处理，不发布截短文件；不新增格式选择、恢复游标或自动重试。
 
 ### 2.3 成功返回值与类型
 
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
 | target | PATH Target | 实际创建的文件；工作区内使用相对路径，工作区外使用绝对路径 |
-| meta.status | SUCCESS | 本次文件创建成功 |
-| meta.bytes_written | 非负整数 | 此次实际写入的字节数；包含输入自身的 BOM 字节，空文件为 0 |
-| content | TextPart[] | 简短的创建说明，可包含路径；不回传写入全文 |
+| meta.status | SUCCESS | 本次文件创建或完整结果导出成功，与来源操作的业务状态分开 |
+| meta.bytes_written | 非负整数 | 此次实际写入的 UTF-8 字节数；包含实际 BOM 字节，空文件为 0 |
+| content | TextPart[] | 简短的创建或导出说明，可包含路径；不回传写入全文 |
 
 删除 files_modified：单文件创建的目标已由 target 表达，不再重复提供一个路径数组。不增加回显全文、行数或其他非必要属性。
 
@@ -460,13 +573,17 @@ type WriteFilePathValue = WriteFilePathSuccess | WriteFilePathFailure;
 interface WriteFilePathToolError extends Error {
   result?: WriteFilePathFailure;
 }
+
+declare function write_file(args: WriteFileArgs): Promise<WriteFilePathSuccess>;
 ```
 
 `tools.write_file` 正常完成时返回 WriteFilePathSuccess。走异常通道且确有完整失败业务值时，err.result 为 WriteFilePathFailure；meta 只含 status，实际已知的写入事实进入 content。失败值不返回 bytes_written，不从计划写入的字符串计算属性冒充实际写入事实，也不默认填写 bytes_written:0。
 
+两个分支复用上述返回类型；导出成功的 content 可为“已导出完整工具结果。”，不回显 tool_result_target、来源正文或另加统计。原工具的 ERROR／CANCELLED 结果同样可以导出：文件成功创建时，本次 write_file 为 SUCCESS，导出内容仍保留来源操作的真实业务状态。
+
 ### 2.4 原生交付与 JS 返回
 
-完整业务结果保存的是创建说明、target 和 meta，不把输入全文复制进结果正文。完整结果的 tool_result Target 因而指向这份创建结果，不等同于目标文件的全文。
+完整业务结果保存的是创建／导出说明、target 和 meta，不把输入或导出全文复制进结果正文。原生返回的 tool_result Target 因而指向本次写入结果，不等同于目标文件的全文，也不改指被导出的原结果。
 
 原生结果沿统一 12k 规则分页，另加顶层观察信息、tool_result 和 next。简短创建说明通常可整条交付，此时 next:null。创建说明及错误说明不是原文件正文，不添加 read_file 专用的行号。
 
@@ -532,7 +649,78 @@ console.log({content: result.content});
 
 创建空文件时同样填写 content，只是值为 `""`；成功返回 bytes_written:0 和简短创建说明，不把空输入解释为缺少参数。
 
-### 2.6 错误与取消
+### 2.6 教程：导出完整工具结果
+
+模型已取得真实 tool_result Target，且 output/result.txt 尚不存在时，原生调用参数如下；示例中的 entry ID 是占位：
+
+```text
+工具：write_file
+参数：
+{
+  "target": {"kind":"PATH","path":"output/result.txt"},
+  "tool_result_target": {"kind":"SESSION_ENTRY","entry_id":"entry:<原工具结果ID>"}
+}
+```
+
+成功原生结果示意，省略共同观察时间：
+
+```text
+target: {"kind":"PATH","path":"output/result.txt"}
+
+meta:
+  status: SUCCESS
+  bytes_written: <实际导出字节数>
+
+content:
+  已导出完整工具结果。
+
+tool_result: <本次导出说明结果的完整 Target>
+next: null
+```
+
+若该来源是带图片的失败结果，文件仍包含它的完整错误事实、有序正文及图片引用；本次状态只表达导出是否成功，不改写原结果。
+
+对应 JS 调用直接使用模型此前已知的实际引用，不依赖脚本内存中的结果自动变成模型已知信息：
+
+```javascript
+const result = await tools.write_file({
+  target: {kind: "PATH", path: "output/result.txt"},
+  tool_result_target: {kind: "SESSION_ENTRY", entry_id: "entry:<原工具结果ID>"}
+});
+console.log({target: result.target, bytes_written: result.meta.bytes_written, content: result.content});
+```
+
+原生和 JS 示例是同一操作的两种写法，不应顺序执行到同一路径并期待再次创建成功。JS 成功值使用 WriteFilePathSuccess，不附原生 tool_result／next。
+
+来源无法读取时，原生失败结果可为：
+
+```text
+target: {"kind":"PATH","path":"output/result.txt"}
+
+meta:
+  status: ERROR
+
+content:
+  无法读取该工具结果，未创建 output/result.txt。
+
+tool_result: <本次错误说明的完整 Target>
+next: null
+```
+
+上述 tool_result／next 假定错误结果确已完整保存并正常交付；不冒充已导出原结果。JS 失败仍沿异常通道：
+
+```javascript
+try {
+  await tools.write_file({
+    target: {kind: "PATH", path: "output/result.txt"},
+    tool_result_target: {kind: "SESSION_ENTRY", entry_id: "entry:<原工具结果ID>"}
+  });
+} catch (err) {
+  console.log(err.result !== undefined ? err.result : String(err.message ?? err));
+}
+```
+
+### 2.7 错误与取消
 
 错误使用[第 2 节](../PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md#2-本轮确定的结果表达)的同一合同：meta.status 仅为 ERROR 或 CANCELLED，原因、路径和确有帮助的提示进入 content，不返回 meta.error、`_hint` 或另一组公开错误代码。
 
@@ -584,15 +772,20 @@ try {
 
 不把所有失败都说成“文件未创建”。沿现有创建 owner 的实际结算事实说明：确定未创建时才说未创建；已经发布但后续确认失败时，说明文件已发布而完成无法确认；无法确定时，说明目标可能已创建，并提示先检查路径再决定是否重试。父目录已创建等已知效果也不能被否认。使用相同的 ERROR 和说明文字即可，不增加不确定状态、发布标记或重试任务。
 
+导出分支还须覆盖来源不可读、不是完整工具结果、使用 NEXT 或混填 content 等失败；沿参数校验或实际错误通道报告原因，不静默改用另一分支。目标已存在仍按同一不覆盖规则拒绝。来源原业务失败不等于本次导出失败；本次实际读取、投影、创建、确认、结果保存或交付失败才报告对应错误。未产生业务值时不伪造 err.result 或完整结果 Target。
+
 write_file 与 edit_file 使用同一提交边界结算取消：提交前取消且确认目标文件未创建时，返回 CANCELLED；已创建父目录等已知效果仍如实写入 content。进入不可安全中断的提交阶段后，须等待实际创建结算，不能先返回取消、再让后台创建继续生效。创建完成且结果正常产生时返回 SUCCESS；后到的取消不将已完成创建改报为未执行，可停止后续工作。
 
 实际写入、确认、结果保存或交付失败时返回 ERROR，content 保留创建事实或不确定性，不自动重新写入，也不把它伪装为普通的“目标未创建”错误。参数或运行时失败没有业务结果时，不伪造 err.result；结果的保存和交付失败沿统一草案处理，不增加公开状态或并列结果字段。
 
-### 2.7 实施核对点
+### 2.8 实施核对点
 
 以下是采用本合同后的行为验证要求，本轮未实施或运行验证：
 
-- PATH + content 的原生与 JS 参数一致；空字符串可创建空文件，缺少 content 仍是参数错误。
+- 两个分支的原生与 JS 参数一致；content 与 tool_result_target 恰选一个，混填、都不填及额外字段被拒绝；空 content 可创建空文件。
+- tool_result_target 只导出可读完整工具结果，拒绝 NEXT、普通历史消息及 Cell steer；未读完分页、原业务 ERROR／CANCELLED 不妨碍完整导出，导出状态独立。
+- content 分支保留普通文本校验；导出分支完整写入 UTF-8 投影，不因 NUL 或二进制扩展名拒绝，不删除或替换原字符；目标授权、原子不覆盖及取消边界共用。
+- 结构化值包含全部公开字段和有序正文，图片仅保留引用；不复制原工具结果到本次写入结果，不重执行业务、不读取后续源内容或重新获取图片。
 - 保持路径授权及原子不覆盖创建；已有普通文件、目录、符号链接、悬空链接和并发出现的目标均不被替换。
 - 实际 UTF-8 字节保留 CRLF、LF、末尾换行及显式 U+FEFF；bytes_written 与实际字节一致，无公开文件修订字段。
 - read_file 正文不含被解析的开头 BOM，write_file 不隐式恢复 BOM；脚本显式恢复时按实际字符串编码写入。

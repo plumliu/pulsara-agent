@@ -2,18 +2,19 @@
 
 日期：2026-11-12。
 
-状态：所有工具的合同讨论已完成，未实施。本文件记录已确定的参数、业务返回值、原生交付形状及 Code Mode 用法，也作为后续 bundled skill 的教程底稿。本轮只写文档，不修改工具、数据库、SDK、提示词或 bundled skill。
+状态：各工具族的逐项合同讨论已完成，包含 read_file 原生 NEXT 续读与 write_file 完整结果导出，已定合同未实施。本文件记录已确定的参数、业务返回值、原生交付形状及 Code Mode 用法，也作为后续 bundled skill 的教程底稿。本轮只写文档，不修改工具、数据库、SDK、提示词或 bundled skill。
 
 ## 1. 范围与阅读方式
 
-本文件覆盖 Pulsara 原生工具、对应 JS API 及仅 JS 工具。各工具的读取或操作范围、参数、返回字段、错误含义和组合方式已在下列分篇文档中确定。
+本文件覆盖 Pulsara 原生工具、对应 JS API 及仅 JS 工具。各工具已确定的读取或操作范围、参数、返回字段、错误含义和组合方式见下列分篇文档；NEXT 续读与完整结果导出的共同原则沿统一交付草案，具体接口与示例见文件工具草案。NEXT 分支仅原生，tools.read_file 只接受 PATH。
 
 当前确定范围：
 
 | 工具与分支 | 已确定合同 |
 | --- | --- |
 | read_file，PATH Target | 参数、完整业务值、meta/content 包装、状态、行号投影、原生与 JS 示例 |
-| write_file，PATH + content | 创建语义、参数、简短结果、原生与 JS 示例、错误语义 |
+| read_file，NEXT Target | 仅原生，唯一 target 参数原样接收 NEXT；meta.status 与实际正文 content，tool_result 始终指向原完整结果，next 指原结果再下一页；冻结 12k 续读保持图文顺序，object 可跨页，无重复正文或新的分页链，不提供 JS 分支 |
+| write_file，PATH + content／tool_result_target | 两个互斥输入分支；content 沿普通文本校验，完整结果导出不因 NUL 或二进制扩展名拒绝；共用目标授权、原子不覆盖与取消结算，返回 PATH、meta.status、成功时实际 bytes_written 和简短 content，含原生／JS 示例及错误语义 |
 | edit_file，PATH Target | 精确唯一替换、整文件替换、空文件规则、diff 返回、原生与 JS 示例、错误语义 |
 | find_files，目录 PATH Target | target 在先的最简参数、Target 内容项、无匹配说明、原生与 JS 示例、扫描失败及取消 |
 | search_file_content，PATH Target | target 在先的参数、三种输出模式、匹配行及非重叠匹配次数、object 内容项、原生与 JS 示例 |
@@ -70,7 +71,7 @@
 | manage_capability，SET_PLUGIN_ENABLED | 仅 ROOT 原生、无 JS API；最小 PLUGIN target、action、必填 boolean enabled，内部安装条件由 runtime 核对；完整保留开启审阅（含重复 true）、关闭的组件退出范围及 Hook 信任，关闭不删包、配置、凭据或 OAuth；成功仅同一 Target、meta.status、简短 text，重复正常设置仍成功，不公开阶段枚举；已保存但必要采用失败按 ERROR 说明，原生冻结 12k／NEXT，补页不重新启停 |
 | manage_capability，REMOVE_PLUGIN | 仅 ROOT 原生、无 JS API；最小 PLUGIN target、action，内部安装条件由 runtime 核对；完整保留实例移除、包 GC、数据及源目录保留、凭据／OAuth 和运行组件退出语义，不立即删包或清数据；业务结果仅 meta.status／简短 text，无顶层插件 Target；部分清理失败按 ERROR，已发生删除仍让 runtime 照常处理；content 直接说明已完成操作和失败原因；原生冻结 12k／NEXT，补页不重做删除或 GC |
 
-`read_file` 的 NEXT Target 分支和 `write_file` 的 source 导出分支沿统一交付草案；续读时只需传入运行时返回的完整 Target，不公开或解释内部定位。所有工具的参数、结果及调用边界均按本文和对应分篇合同实施。
+`write_file` 的 tool_result_target 分支与 content 二选一，按完整 SESSION_ENTRY 结果 Target 导出全部保存内容，与模型已读页数无关；原生与 ROOT JS 共用参数、返回值和错误语义，详见[文件工具草案第 2 章](native_tools/filesystem.md#2-write_file创建文本或导出完整工具结果)。`read_file` 的 NEXT 分支仅原生，唯一 target 参数原样传递运行时返回的 NEXT，不公开内部定位；每次交付原冻结结果的一页，tool_result 指向原完整结果，next 指原结果再下一页，详见[第 1.10 节](native_tools/filesystem.md#110-next-target仅原生续读冻结结果)。JS 的 tools.read_file 只接受 PATH。
 
 实施先按[有序内容统一存储 hardcut](PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md#10-数据库优先与停用期间的分步实施)落实数据库结构与存储基础，允许停用 Pulsara 后先重建新库，再按已确定的各工具合同逐步接通并验收消费者。合同讨论完成不表示生产代码或存储已经实施。
 
@@ -98,7 +99,7 @@ query_processes 的进程 Target 只放在 content 的每条 object 记录中，
 
 现有观察信息在原生消息顶层并列呈现：`observed_at_utc` 是实际观察时间，`observation_duration_microseconds` 是实际观察耗时，单位为微秒。二者与 target、meta、content、tool_result、next 同层，不放进 meta、content 或嵌套 observation。未测得耗时不得伪造为 0，仍沿既有观察 owner 表达实际可用事实，不为本次修订增加一套计时机制。
 
-JS 的 `tools.read_file`、`tools.write_file`、`tools.edit_file`、`tools.find_files`、`tools.search_file_content`、`tools.exec_process`、`tools.manage_process`、`tools.query_processes`、`tools.query_agents`、`tools.send_agent_message`、`tools.stop_agent`、`tools.run_agent`、`tools.wait_agent`、`tools.decide`、`tools.view_image`、`tools.read_video_frames`、`tools.read_transcript`、`tools.call_mcp_tool`、`tools.read_mcp_resource`，以及 `tools.query_capabilities` 的 SKILL、HOOK、MCP、PLUGIN 四个分支，成功时直接返回各节定义的完整业务值，不套用原生消息的时间外壳、12k 页预算、tool_result 或 next。数据库内容、JS 值和原生投影来自同一份结果，不保存第二份手工维护的业务正文。
+JS 的 `tools.read_file`、`tools.write_file`、`tools.edit_file`、`tools.find_files`、`tools.search_file_content`、`tools.exec_process`、`tools.manage_process`、`tools.query_processes`、`tools.query_agents`、`tools.send_agent_message`、`tools.stop_agent`、`tools.run_agent`、`tools.wait_agent`、`tools.decide`、`tools.search_sessions`、`tools.search_session_content`、`tools.read_session_content`、`tools.view_image`、`tools.read_video_frames`、`tools.read_transcript`、`tools.call_mcp_tool`、`tools.read_mcp_resource`，以及 `tools.query_capabilities` 的 SKILL、HOOK、MCP、PLUGIN 四个分支，成功时直接返回各节定义的完整业务值，不套用原生消息的时间外壳、12k 页预算、tool_result 或 next。数据库内容、JS 值和原生投影来自同一份结果，不保存第二份手工维护的业务正文。
 
 content 的每项统一为 type/value：文字项的 value 是字符串，图片项的 value 是 IMAGE_REF Target，Target 项的 value 是该工具声明的具体 Target，object 项的 value 是 JSON 对象。find_files 将命中文件保存为 PATH Target 内容项，不并列返回 targets 或重复文字清单；search_file_content 的匹配行和计数使用 object 项；PLUGIN 精确查询使用 text 与 SKILL／HOOK_SOURCE／MCP_CONNECTION Target 项交错返回。原生工具消息及显式 console.log／return 将 Target 项投影为文字引用，将 object 项投影为通用 JSON 文字，不自动打开、读取或加载其中的文件；图片项按当前模型能力投递真实图片或固定文字说明，原生能力不足显示 ERROR，Cell steer 不增加工具状态外壳。console.log 每个参数及显式 return 均递归识别实际输出任意层级的 image 内容项，其他内容呈现一次；不解析引用字符串或扫描未输出变量。普通文字项仍不自动增加分隔符。共同类型见第 2.4 节，投影及准入沿统一交付草案。
 
@@ -120,7 +121,7 @@ content 的每项统一为 type/value：文字项的 value 是字符串，图片
 
 exec_process、manage_process 的进程状态是独立业务事实：meta.status 表达工具调用是否成功，meta.process_status 与 exit_code 表达命令是否结束及怎样退出。正常启动、观察或完成控制动作并取得结果时，即使进程仍在运行或以非零退出码结束，工具调用均为 SUCCESS，JS 正常返回；不能因命令退出码非零而抛 ToolError。主动 kill 成功也为 SUCCESS，不将目标进程被终止等同于工具调用 CANCELLED。
 
-read_file、write_file、edit_file、find_files、search_file_content 的业务错误沿异常通道返回；在 `catch (err)` 中，err 是 JS 异常对象，`err.result` 是它携带的完整失败业务值，不是枚举或错误代码。确实存在该业务值时，也使用 target/meta/content 结构，meta.status 为 ERROR 或 CANCELLED，全部内容保留且不分页。两个搜索工具的失败业务值包含原因及实际已取得的文件或业务记录，不把它截成程序页。query_processes 同样沿异常通道提供实际存在的完整失败业务值，但按[第 3 节](native_tools/terminal.md#3-query_processes进程清单与元数据)只使用 meta/content，不重复顶层 target。view_image 的实际失败业务值同样由 err.result 完整提供，具体形状见[多媒体工具草案](native_tools/media.md#17-错误取消及交付失败)，不生成假图片项。参数或运行时失败若没有业务结果，就不伪造 err.result。不把旧的重复结果 ID、读取指令、可用性布尔值或内部错误分类带回新的公开包装。
+read_file 的 PATH 分支、write_file、edit_file、find_files、search_file_content 的业务错误沿异常通道返回；在 `catch (err)` 中，err 是 JS 异常对象，`err.result` 是它携带的完整失败业务值，不是枚举或错误代码。确实存在该业务值时，也使用 target/meta/content 结构，meta.status 为 ERROR 或 CANCELLED，全部内容保留且不分页。两个搜索工具的失败业务值包含原因及实际已取得的文件或业务记录，不把它截成程序页。query_processes 同样沿异常通道提供实际存在的完整失败业务值，但按[第 3 节](native_tools/terminal.md#3-query_processes进程清单与元数据)只使用 meta/content，不重复顶层 target。view_image 的实际失败业务值同样由 err.result 完整提供，具体形状见[多媒体工具草案](native_tools/media.md#17-错误取消及交付失败)，不生成假图片项。参数或运行时失败若没有业务结果，就不伪造 err.result。不把旧的重复结果 ID、读取指令、可用性布尔值或内部错误分类带回新的公开包装。
 
 read_video_frames、read_transcript 的实际失败业务值同样通过 err.result 完整提供，具体形状见[多媒体工具草案](native_tools/media.md)第 2.7、3.6 节。转录失败保留已取得文字和真实未完成区间，不增加 partial 状态；原生 NEXT 只读冻结失败结果，不继续识别或重试 ASR。
 
@@ -196,7 +197,7 @@ object.value 本身是唯一权威业务对象，完整 JSON 文字按需投影�
 
 | 文档 | 工具章节 |
 | --- | --- |
-| [文件系统工具](native_tools/filesystem.md) | 第 1–5 章：read_file、write_file、edit_file、find_files、search_file_content |
+| [文件系统工具](native_tools/filesystem.md) | 第 1–5 章：read_file、write_file、edit_file、find_files、search_file_content；第 1.10 节为仅原生 NEXT 续读、图文顺序及 object 跨页，JS read_file 只接受 PATH；第 2 章包含 content／tool_result_target 互斥输入、完整结果导出及原生／JS 示例 |
 | [终端工具](native_tools/terminal.md) | 第 1–3 章：exec_process、manage_process、query_processes |
 | [Agent 协作工具](native_tools/agents.md) | 第 1 章：query_agents 三个查询分支；第 2 章：send_agent_message 交付语义及精简结果；二者支持 ROOT／Subagent 原生及 ROOT JS；第 3 章：stop_agent 参数、四个并列 Work 状态计数、逐项状态及原生／JS 示例，仅 ROOT；第 4 章：wait_message，Subagent 专用仅原生，超时 SUCCESS，正文独立交付；前四者沿冻结 12k／NEXT；第 5 章：tools.run_agent 参数、材料、同批引用与返回；第 6 章：tools.wait_agent 的 WORK／AGENT 双分支、完整快照、first／all、消息／超时／取消、返回类型及 JS 示例；后两者仅 ROOT JS、完整返回，无原生分页；第 7 章为实现参考 |
 | [语义判断工具](native_tools/decide.md) | 第 1 章：tools.decide 的两个参数、decisions object、available()、JS 示例、完整保存与错误语义；仅 ROOT JS、bypass 权限，无原生分页；第 2 章为实现参考 |

@@ -704,4 +704,4 @@ MCP 另核对：每个新 turn 首次输入与本次实际采用的用户主动 
 
 记忆召回另按第 11 节及[记忆 CRUD 草案第 6 节](PULSARA_MEMORY_CRUD_HARD_CUT_DRAFT.zh.md#6-搜索索引与自动召回)核对：三部分仅投影为一条 source／body 消息，body 保持对象数组；偏好刷新、混合召回和旧记忆失效核对只随新采用 ROOT 真人消息／主动 steer，普通工具续跑、运行时新 turn 或压缩本身均不触发；偏好追加与全量替换正确，i 为累计有效内容而非上轮结果，旧版通知不误伤新版；读取失败整条说明不可用且不推进 P／i；正常读取后三部分无待交付内容不发空消息，偏好全量替换和清空仍交付。
 
-本文件不因通知调整而改动 MCP 查询、执行、记忆召回或其他控制语义。Plugin 自身的安装、移除及启停不单独生成 observation，其 Skill／MCP 组件的实际变化按对应规则处理。Hook 的模型附加文字与事件交付沿[独立消息草案](PULSARA_HOOK_CONTEXT_MESSAGE_REVISION_DRAFT.zh.md)，删除旧 HOOK_CONTEXT source，不在 pulsara_runtime_observation 中发送 Hook 信息。Hook 安装、移除、信任、撤销信任和启停均不主动通知模型；能力查询与管理工具的正常结果保留，阻止、参数修改、权限裁决和续接控制保持现状。
+本文件不因通知调整而改动 MCP 查询、执行、记忆召回或其他控制语义。Plugin 自身的安装、移除及启停不单独生成 observation，其 Skill／MCP 组件的实际变化按对应规则处理。Hook 的模型附加文字与事件交付沿[独立消息草案](PULSARA_HOOK_CONTEXT_MESSAGE_REVISION_DRAFT.zh.md)，删除旧 HOOK_CONTEXT source，不在 pulsara_runtime_observation 中发送 Hook 信息。Hook 安装、移除、信任、撤销信任和启停均不主动通知模型；能力查询与管理工具的正常结果保留，阻止、权限裁决和续接控制保持现状，工具参数不由 Hook 改写。

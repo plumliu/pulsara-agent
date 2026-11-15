@@ -476,7 +476,7 @@ interface ReadSessionContentFailure {
 
 顶层不重复会话 Target，不保留 items、内部 sequence、命中分数、partial、逐消息 read 指引或公开的范围游标。role 已表达消息标签，不再并列 label 或另一套角色分类。text 是用户／助手正文的历史阅读投影，不承诺包含被排除的调用、结果或思考。
 
-图片沿既有历史阅读方式，在正文中保留位置说明及符合原 workspace 资格的图片引用，不自动加载真实图片。需要时由模型另行调用 view_image。跨工作区的会话文字可读，不因此扩大图片读取资格；object 内的图片引用不触发真实图像投递。批注及引用的身份、原始文字和必要说明沿共同历史投影保留。
+图片在 text 的原位置保留说明及已有的完整 IMAGE_REF Target 文字，不自动加载真实图片。每条消息的 target 仍为该消息的 SESSION_ENTRY；图片引用不替换消息 Target，也不另建 images 数组。模型可将图片引用传给 view_image，凭资产存在性及有效性读取，不检查图片的 session、workspace 或来源资格，其他会话和工作区的已知引用同样适用。object 内的引用文字不触发真实图像投递。批注及引用的身份、原始文字和必要说明沿共同历史投影保留。
 
 ### 3.5 原生与 JS 示例
 
