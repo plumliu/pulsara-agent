@@ -4955,7 +4955,6 @@ function projectEntries(
         role: 'user',
         userKind,
         scheduledInput: projectScheduledInput(entry.scheduled_input),
-        cellOutput: entry.entry_kind === 'TERMINAL_OBSERVATION' && entry.content?.inline_content !== undefined ? decodeCellOutput(entry.content).source : undefined,
         time: formatTime(entry.accepted_at_utc),
         body: entry.entry_kind === 'PLAN_CONTINUATION'
           ? continuationBody ?? ''
@@ -5225,7 +5224,6 @@ function projectQueuedPrompts(control: ProtocolCanonicalControl): QueuedPrompt[]
         inputOrigin: item.input_origin,
         ...(item.input_origin === 'AGENT_INSTRUCTION' ? {workTitle: item.work_title ?? null} : {}),
         scheduledInput: projectScheduledInput(item.scheduled_input),
-        cellOutput: item.input_origin === 'CELL_OUTPUT' && item.content?.inline_content !== undefined ? decodeCellOutput(item.content).source : undefined,
         waitingOn: item.waiting_on?.length ? item.waiting_on : undefined,
         deliveryMode: deliveryMode(item.delivery_mode),
         targetTurnId: item.target_turn_id || undefined,
@@ -5617,24 +5615,10 @@ function projectScheduledInput(value: ProtocolEntry['scheduled_input']): Message
   return value ? { taskId: value.task_id, taskRevision: numeric(value.task_revision), dueAtUtc: value.due_at_utc, triggerSource: value.trigger_source } : undefined;
 }
 
-function decodeCellOutput(content: ProtocolContent | undefined): { source: NonNullable<Message['cellOutput']>; text: string } {
-  const value = JSON.parse(decodeContent(content)) as Record<string, unknown>;
-  if (typeof value.cell_id !== 'string' || typeof value.source_turn_id !== 'string'
-    || typeof value.source_exec_attempt_id !== 'string' || typeof value.record_sequence !== 'number' || !value.record || typeof value.record !== 'object') {
-    throw new RuntimeApiError('CONTENT_INTEGRITY_INVALID', '脚本输出格式无效。', true);
-  }
-  const record = value.record as Record<string, unknown>;
-  const kind = String(record.kind ?? '');
-  const text = typeof record.text === 'string' ? record.text
-    : JSON.stringify(kind === 'error' ? record.error : record, null, 2);
-  return { source: { cellId: value.cell_id, sourceTurnId: value.source_turn_id, sourceExecAttemptId: value.source_exec_attempt_id, recordSequence: value.record_sequence, kind }, text };
-}
-
 function decodePromptContent(
   content: ProtocolContent | undefined,
   owner: { kind: 'entry'; entryId: string } | { kind: 'queue'; queueItemId: string },
 ): CanonicalPromptContent {
-  if (content?.media_type === 'application/vnd.pulsara.terminal-observation+json') return { parts: [{ type: 'text', text: decodeCellOutput(content).text }] };
   if (!content?.inline_content || content.media_type !== PROMPT_BODY_MEDIA_TYPE) {
     throw new RuntimeApiError('CONTENT_INTEGRITY_INVALID', '输入正文格式无效。', true);
   }

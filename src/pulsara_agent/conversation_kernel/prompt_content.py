@@ -79,7 +79,9 @@ class CanonicalPromptImageDescriptor:
             raise ValueError("canonical prompt image dimensions are invalid")
 
 
-CanonicalPromptBodyPart = LLMTextPart | PromptAnnotationPart | CanonicalPromptImageDescriptor
+CanonicalPromptBodyPart = (
+    LLMTextPart | PromptAnnotationPart | CanonicalPromptImageDescriptor
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,19 +91,14 @@ class CanonicalPromptBody:
     def __post_init__(self) -> None:
         if not isinstance(self.parts, tuple):
             raise TypeError("canonical prompt body parts must be an immutable tuple")
-        if not self.parts:
-            raise ValueError("canonical prompt body must contain parts")
         if any(
-            not isinstance(part, (LLMTextPart, PromptAnnotationPart, CanonicalPromptImageDescriptor))
+            not isinstance(
+                part,
+                (LLMTextPart, PromptAnnotationPart, CanonicalPromptImageDescriptor),
+            )
             for part in self.parts
         ):
             raise TypeError("canonical prompt body contains an invalid part")
-        if not any(
-            isinstance(part, (CanonicalPromptImageDescriptor, PromptAnnotationPart))
-            or (isinstance(part, LLMTextPart) and part.text != "")
-            for part in self.parts
-        ):
-            raise ValueError("canonical prompt body has no content")
         prompt_content_text_utf8_bytes(self.parts)
 
 
@@ -288,11 +285,17 @@ def canonical_prompt_body_resource_quote(
         image_occurrence_encoded_bytes=image_bytes,
         multipart_bytes=multipart_bytes,
         canonical_expanded_bytes=multipart_bytes,
-        epoch_logical_bytes=llm_content_logical_bytes(prompt_provider_parts(tuple(
-            part for part in body.parts if not isinstance(part, CanonicalPromptImageDescriptor)
-        ))) + sum(
-            part.encoded_bytes + len(part.media_type.encode("utf-8"))
-            for part in images
+        epoch_logical_bytes=llm_content_logical_bytes(
+            prompt_provider_parts(
+                tuple(
+                    part
+                    for part in body.parts
+                    if not isinstance(part, CanonicalPromptImageDescriptor)
+                )
+            )
+        )
+        + sum(
+            part.encoded_bytes + len(part.media_type.encode("utf-8")) for part in images
         ),
         image_occurrences=len(images),
         visual_image_tokens=sum(
@@ -309,30 +312,36 @@ def prompt_content_resource_quote(
     content: FrozenPromptContent,
 ) -> PromptContentResourceQuote:
     quote = canonical_prompt_body_resource_quote(canonical_prompt_body(content))
-    if quote.epoch_logical_bytes != llm_content_logical_bytes(prompt_provider_parts(content.parts)):
+    if quote.epoch_logical_bytes != llm_content_logical_bytes(
+        prompt_provider_parts(content.parts)
+    ):
         raise ValueError("canonical prompt logical byte quote drifted")
     return quote
 
 
-def bind_prompt_images(content: FrozenPromptContent, workspace_id: str) -> FrozenPromptContent:
-    require_id(workspace_id, "workspace")
+def bind_prompt_images(content: FrozenPromptContent) -> FrozenPromptContent:
     parts: list[FrozenPromptPart] = []
     for part in content.parts:
         if isinstance(part, LLMImagePart):
-            expected = derive_id("image", "content", workspace_id, part.media_type,
-                                 PROMPT_IMAGE_BLOB_CODEC, part.content_digest)
+            expected = derive_id(
+                "image",
+                "content",
+                part.media_type,
+                PROMPT_IMAGE_BLOB_CODEC,
+                part.content_digest,
+            )
             if part.image_ref is not None and part.image_ref != expected:
-                raise ValueError("image reference does not match its workspace/content")
-            part = replace(part, image_ref=expected)
+                raise ValueError("image reference does not match its immutable content")
+            if part.image_ref is None:
+                part = replace(part, image_ref=expected)
         parts.append(part)
     return FrozenPromptContent(tuple(parts))
 
 
 def freeze_canonical_prompt(
-    content: FrozenPromptContent, *, workspace_id: str | None = None,
+    content: FrozenPromptContent,
 ) -> FrozenCanonicalPrompt:
-    if workspace_id is not None:
-        content = bind_prompt_images(content, workspace_id)
+    content = bind_prompt_images(content)
     if not isinstance(content, FrozenPromptContent):
         raise TypeError("canonical prompt requires frozen prompt content")
     return FrozenCanonicalPrompt(

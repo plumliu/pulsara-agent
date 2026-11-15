@@ -12,7 +12,7 @@ from pulsara_agent.llm.input import (
     PromptAnnotationPart,
     PromptAnnotationSource,
 )
-from pulsara_agent.conversation_kernel.prompt_storage import _read_body
+from pulsara_agent.conversation_kernel.content_parts import read_content_parts
 from pulsara_agent.conversation_kernel.visualization import assistant_display_body
 
 
@@ -55,21 +55,12 @@ def validate_annotation_sources(
             ).fetchone()
             if entry is None:
                 raise AnnotationSourceInvalid("批注来源不是当前会话的已保存回复")
-            rows = connection.execute(
-                """SELECT * FROM pulsara_v3.assistant_message_blocks
-                   WHERE session_id=%s AND assistant_entry_id=%s AND block_kind='TEXT'
-                   ORDER BY block_ordinal""",
-                (session_id, source.entry_id),
-            ).fetchall()
             texts = [
-                _read_body(
-                    connection,
-                    row=row,
-                    workspace_id=str(entry["workspace_id"]),
-                    expected_media_type="text/plain",
-                    expected_codec="utf-8",
-                ).decode("utf-8")
-                for row in rows
+                part.value
+                for part in read_content_parts(
+                    connection, entry_id=source.entry_id, session_id=session_id
+                )
+                if part.type == "text"
             ]
             bodies[source.entry_id] = assistant_display_body(texts)
         if utf16_slice(bodies[source.entry_id], source.start, source.end) != part.quote:

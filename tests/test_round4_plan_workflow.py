@@ -70,22 +70,22 @@ from pulsara_agent.terminal_protocol.v3_gateway import (
 from tests.support.round3 import authorize_direct_tool, prepare_test_direct_tool_surface
 
 
-def _accepted_resolution(interaction_id: str) -> AcceptedPlanResolution:
+def _accepted_resolution(interaction_id: str, *, tool_name="ask_plan_question") -> AcceptedPlanResolution:
     settlement = build_accepted_canonical_tool_result_settlement(
         session_id='session:5dyf7lfzp7z22pphjtostkgsjm',
         scope_kind=ModelInputScopeKind.ROOT,
         turn_id='turn:qb63tb3eshpbkryzmq6wzhzt2u',
         assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
         call_ordinal=0,
-        tool_name="ask_plan_question",
+        tool_name=tool_name,
         tool_call_id="call:question",
-        public_arguments=freeze_json({"question": "continue?"}),
+        public_arguments=freeze_json({"question": "continue?"} if tool_name == "ask_plan_question" else {"plan": "方案"}),
         result_id='result:u7k6t7ochy3esuwmrmpwweg6he',
         result_entry_id='entry:6roaferm4dcrranslov7yn2ze4',
         accepted_entry_sequence=3,
         result_state="SUCCESS",
         result_origin_kind="PLAN_CONTROL",
-        canonical_body='{"answer_kind":"OPTION","selected_option_ordinal":0}',
+        canonical_body=('{"answer_kind":"OPTION","selected_option_ordinal":0}' if tool_name == "ask_plan_question" else "用户已决定方案审批。"),
         observed_at=datetime(2026, 8, 24, tzinfo=timezone.utc),
         observation_origin=ToolObservationOrigin.PLAN_CONTROL,
     )
@@ -100,7 +100,6 @@ def _accepted_resolution(interaction_id: str) -> AcceptedPlanResolution:
         continuation_entry_id=None,
         handoff_created_at_commit=False,
         workflow_revision=3,
-        question_result_entry_id='entry:6roaferm4dcrranslov7yn2ze4',
         tool_result_settlement=settlement,
     )
 
@@ -336,7 +335,7 @@ def test_round4_question_recommendation_is_optional_but_at_most_one() -> None:
 def test_round4_question_waiter_accepts_resolution_before_publish_and_await() -> None:
     async def scenario() -> None:
         coordinator = KernelPlanInteractionCoordinator()
-        waiter = await coordinator.prepare_question(
+        waiter = await coordinator.prepare_interaction(
             interaction_id="interaction:question", origin_turn_id='turn:qb63tb3eshpbkryzmq6wzhzt2u'
         )
         resolution = _accepted_resolution(waiter.interaction_id)
@@ -349,7 +348,7 @@ def test_round4_question_waiter_accepts_resolution_before_publish_and_await() ->
                 {"question": "继续吗？", "options": [], "allow_free_text": True}
             ),  # type: ignore[arg-type]
         )
-        await coordinator.publish_open(waiter, question)
+        await coordinator.publish_open(waiter, question=question)
         assert await coordinator.wait(waiter) == resolution
         assert await coordinator.current_open() is None
         await coordinator.aclose()
@@ -360,7 +359,7 @@ def test_round4_question_waiter_accepts_resolution_before_publish_and_await() ->
 def test_round4_question_waiter_caller_cancel_only_detaches() -> None:
     async def scenario() -> None:
         coordinator = KernelPlanInteractionCoordinator()
-        waiter = await coordinator.prepare_question(
+        waiter = await coordinator.prepare_interaction(
             interaction_id="interaction:question", origin_turn_id='turn:qb63tb3eshpbkryzmq6wzhzt2u'
         )
         waiting = asyncio.create_task(coordinator.wait(waiter))
@@ -448,9 +447,9 @@ def test_round4_plan_resolution_attempts_reject_semantic_aliases() -> None:
         interaction_id="interaction:draft",
         decision=PlanDraftDecision.REVISE,
         canonical_prompt=frozen_test_prompt("revise"),
-        continuation_turn_id='turn:jjzniqafrhueclodwupf5biizu',
-        continuation_entry_id='entry:6bcuku2wtuwy53duyyfzcwowka',
-        continuation_context_binding_revision_id="revision:review",
+        continuation_turn_id=None,
+        continuation_entry_id=None,
+        continuation_context_binding_revision_id=None,
     )
     _, _, feedback_first = plan_draft_review_semantic_candidate(
         workflow_id='plan:77cfhga7h5ie7742nfxdapwdvu',
@@ -458,9 +457,9 @@ def test_round4_plan_resolution_attempts_reject_semantic_aliases() -> None:
         interaction_id="interaction:draft",
         decision=PlanDraftDecision.REVISE,
         canonical_prompt=frozen_test_prompt("first"),
-        continuation_turn_id='turn:jjzniqafrhueclodwupf5biizu',
-        continuation_entry_id='entry:6bcuku2wtuwy53duyyfzcwowka',
-        continuation_context_binding_revision_id="revision:review",
+        continuation_turn_id=None,
+        continuation_entry_id=None,
+        continuation_context_binding_revision_id=None,
     )
     _, _, feedback_conflict = plan_draft_review_semantic_candidate(
         workflow_id='plan:77cfhga7h5ie7742nfxdapwdvu',
@@ -468,9 +467,9 @@ def test_round4_plan_resolution_attempts_reject_semantic_aliases() -> None:
         interaction_id="interaction:draft",
         decision=PlanDraftDecision.REVISE,
         canonical_prompt=frozen_test_prompt("second"),
-        continuation_turn_id='turn:jjzniqafrhueclodwupf5biizu',
-        continuation_entry_id='entry:6bcuku2wtuwy53duyyfzcwowka',
-        continuation_context_binding_revision_id="revision:review",
+        continuation_turn_id=None,
+        continuation_entry_id=None,
+        continuation_context_binding_revision_id=None,
     )
 
     async def scenario(first: str, conflict: str) -> None:
@@ -616,11 +615,12 @@ class _PlanProtocolHost:
             interaction_id=str(kwargs["interaction_id"]),
             interaction_status="REVISION_REQUESTED",
             resume_permission_mode=PermissionMode.ACCEPT_EDITS,
-            continuation_turn_id='turn:cwreltr7rhjexfkabu36w36ntq',
-            continuation_entry_id='entry:z5syrvyrbobpni5pree77ewau4',
+            continuation_turn_id=None,
+            continuation_entry_id=None,
             handoff_created_at_commit=False,
             workflow_revision=4,
             draft_decision=PlanDraftDecision.REVISE,
+            tool_result_settlement=_accepted_resolution(str(kwargs["interaction_id"]), tool_name="exit_plan").tool_result_settlement,
         )
         self._draft_winners[command_id] = (candidate, accepted)
         return accepted
@@ -794,6 +794,7 @@ def test_round4_existing_draft_winner_precedes_root_slot_reservation() -> None:
             handoff_created_at_commit=False,
             workflow_revision=4,
             draft_decision=PlanDraftDecision.APPROVE,
+            tool_result_settlement=_accepted_resolution("interaction:draft", tool_name="exit_plan").tool_result_settlement,
         )
 
         class Repository:
@@ -822,6 +823,8 @@ def test_round4_existing_draft_winner_precedes_root_slot_reservation() -> None:
         host._lease = Lease()  # type: ignore[attr-defined]
         host.repository = Repository()  # type: ignore[attr-defined]
         host._io = IO()  # type: ignore[attr-defined]
+        host._plan_interactions = KernelPlanInteractionCoordinator()
+        host._lock = asyncio.Lock()
         blocker = asyncio.Event()
         active = asyncio.create_task(blocker.wait())
         host._active_task = active  # type: ignore[attr-defined]
@@ -915,6 +918,12 @@ def test_round4_force_exit_fence_rejects_every_new_resolution_write() -> None:
             (PlanDraftDecision.CANCEL, None),
         ):
             host = await new_host()
+            host._plan_interactions = KernelPlanInteractionCoordinator()
+            host._active_task = asyncio.current_task()
+            host._active_turn_id = 'turn:qb63tb3eshpbkryzmq6wzhzt2u'
+            await host._plan_interactions.prepare_interaction(
+                interaction_id="interaction:draft", origin_turn_id=host._active_turn_id,
+            )
             with pytest.raises(ConversationKernelConflict, match="force exit"):
                 await KernelHostSession.resolve_plan_draft_review(
                     host,
@@ -926,6 +935,7 @@ def test_round4_force_exit_fence_rejects_every_new_resolution_write() -> None:
                     revision_prompt=PromptContent.text(feedback) if feedback is not None else None,
                 )
             await host._plan_continuations.aclose()  # noqa: SLF001
+            await host._plan_interactions.aclose()
         assert Repository.writes == 0
 
     asyncio.run(scenario())

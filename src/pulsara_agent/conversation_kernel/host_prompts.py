@@ -205,7 +205,7 @@ class _HostPromptOperations:
             deadline_monotonic=self._canonical_deadline(),
         )
         canonical_prompt = freeze_canonical_prompt(
-            frozen_content, workspace_id=self.workspace.workspace_key
+            frozen_content
         )
         command = command_id or random_id("command")
         requested = requested_permission_mode or self._launch_permission_mode
@@ -329,7 +329,7 @@ class _HostPromptOperations:
                 deadline_monotonic=self._canonical_deadline(),
             )
             canonical_prompt = freeze_canonical_prompt(
-                frozen_content, workspace_id=self.workspace.workspace_key
+                frozen_content
             )
         except ValueError as exc:
             return KernelCommandOutcome(

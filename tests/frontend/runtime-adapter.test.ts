@@ -902,7 +902,7 @@ describe('exact prompt projection', () => {
         entry('prompt-a', 'A', 1, 'USER_MESSAGE'),
         entry('answer-a', 'A', 2, 'ASSISTANT_MESSAGE'),
         // B was started by Cell output, then interrupted before assistant output.
-        { ...entry('cell-b', 'B', 3, 'TERMINAL_OBSERVATION'), input_origin: 'CELL_OUTPUT', content: { media_type: 'application/vnd.pulsara.terminal-observation+json', inline_content: btoa(JSON.stringify({cell_id:'cell:b',source_turn_id:'turn:source',source_exec_attempt_id:'attempt:b',record_sequence:1,record:{kind:'log',text:'text'}})) } },
+        { ...entry('cell-b', 'B', 3, 'TERMINAL_OBSERVATION'), input_origin: 'CELL_OUTPUT', content: inlinePrompt('text') },
         entry('prompt-c', 'C', 4, 'USER_MESSAGE'),
         { ...entry('material', 'C', 5, 'USER_MESSAGE'), input_origin: 'AGENT_MATERIAL' },
       ], control: {} } },
@@ -3838,4 +3838,52 @@ it('restores media ranges without automatic display and opens only new actual re
   const late = await connection.observe();
   expect(late.mediaRanges).toEqual([]);
   expect(late.mediaReadStarts).toEqual([]);
+});
+
+it.each([['empty', ''], ['inline', '汉🙂\r\n\ud800\n末尾\udfff'], ['large', 'x'.repeat(70000) + '\ud800\r\n']])(
+  'round trips current Cell common text through message and queue projections: %s', async (_size, raw) => {
+    const source = {source_session_id:'session-1', source_turn_id:'turn:source', source_tool_attempt_id:'attempt:cell'};
+    const body = inlinePrompt(raw);
+    const entries = [{entry_id:'entry:cell-current', turn_id:'turn:current', entry_sequence:'1', entry_kind:'TERMINAL_OBSERVATION',
+      input_origin:'CELL_OUTPUT', scope_kind:'ROOT', content:body,
+      input_source:{...source, queue_item_id:'queue:consumed-cell', delivery_mode:'STEER_ACTIVE_TURN'}}];
+    const queue = [{queue_item_id:'queue:current-cell', queue_sequence:'2', status:'PENDING', delivery_mode:'NEW_TURN',
+      input_origin:'CELL_OUTPUT', ...source, content:body}];
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(connectPayload(entries, {prompt_queue:queue, prompt_queue_total_count:'1'}, [], {})), {status:200})));
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    const message = connection.current().messages.find(item => item.id === 'entry:cell-current');
+    expect(message).toMatchObject({body:raw, inputOrigin:'CELL_OUTPUT', promptContent:{parts:[{type:'text',text:raw}]},
+      inputSource:{sourceKind:'cell', sourceSessionId:'session-1', sourceTurnId:'turn:source', sourceExecAttemptId:'attempt:cell'}});
+    expect(connection.current().queuedPrompts[0]).toMatchObject({queueItemId:'queue:current-cell', inputOrigin:'CELL_OUTPUT',
+      sourceKind:'cell', sourceSessionId:'session-1', sourceTurnId:'turn:source', sourceExecAttemptId:'attempt:cell',
+      content:{parts:[{type:'text',text:raw}]}});
+  },
+);
+
+it('hydrates and caches empty Cell content from the same current queue and entry wire projection', async () => {
+  const source = {source_session_id:'session-1',source_turn_id:'turn:source',source_tool_attempt_id:'attempt:cell'};
+  const entry = {entry_id:'entry:empty-cell',turn_id:'turn:current',entry_sequence:'1',entry_kind:'TERMINAL_OBSERVATION',
+    input_origin:'CELL_OUTPUT',scope_kind:'ROOT',content:blobPrompt(''),
+    input_source:{...source,queue_item_id:'queue:consumed-cell',delivery_mode:'STEER_ACTIVE_TURN'}};
+  const queue = {queue_item_id:'queue:empty-cell',queue_sequence:'2',status:'PENDING',delivery_mode:'NEW_TURN',
+    input_origin:'CELL_OUTPUT',...source,content:blobPrompt('')};
+  const reads: Record<string,unknown>[] = [];
+  stubRuntimeFetch(vi.fn(async (input:RequestInfo|URL, init?:RequestInit) => {
+    if (String(input).endsWith('/read-content')) {
+      reads.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify(contentChunk(promptBody(''))), {status:200});
+    }
+    return new Response(JSON.stringify(connectPayload([entry],{prompt_queue:[queue],prompt_queue_total_count:'1'})), {status:200});
+  }));
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  await connection.hydrateEntries(['entry:empty-cell']);
+  await vi.waitFor(() => expect(connection.current().queuedPrompts[0].contentUnavailable).toBe(false));
+  expect(connection.current().messages[0]).toMatchObject({body:'',contentState:'ready',inputOrigin:'CELL_OUTPUT',
+    promptContent:{parts:[{type:'text',text:''}]},inputSource:{sourceKind:'cell',sourceExecAttemptId:'attempt:cell'}});
+  expect(connection.current().queuedPrompts[0]).toMatchObject({sourceKind:'cell',sourceExecAttemptId:'attempt:cell',content:{parts:[{type:'text',text:''}]}});
+  expect(reads).toHaveLength(2);
+  expect(reads).toEqual(expect.arrayContaining([expect.objectContaining({entry_id:'entry:empty-cell'}),expect.objectContaining({queue_item_id:'queue:empty-cell'})]));
+  await connection.hydrateEntries(['entry:empty-cell']);
+  connection.current();
+  expect(reads).toHaveLength(2);
 });

@@ -27,10 +27,6 @@ from pulsara_agent.llm.input import (
     frozen_tool_result_public_text,
 )
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
-from pulsara_agent.primitives.tool_result_projection import (
-    project_tool_result_storage_body,
-)
-from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from pulsara_agent.tools.builtins.media import (
     MEDIA_TOOL_NAMES,
     validate_media_arguments,
@@ -232,25 +228,15 @@ def test_real_frames_and_annotation_use_production_dispatch(tmp_path):
                 },
             )
             assert annotation.state == "SUCCESS"
-            raw = json.loads(annotation.content)
-            assert raw == {
-                "media_annotation": "added",
+            assert annotation.result_facts == {
                 "canonical_path": str(path.resolve()),
                 "file_mtime_ns": str(path.stat().st_mtime_ns),
             }
-            public = project_tool_result_storage_body(
-                annotation.content.decode(),
-                ToolObservationOrigin.BUILTIN,
-                tool_name="annotate_media",
-                result_state="SUCCESS",
-            )
-            assert json.loads(public) == {"media_annotation": "added"}
-            assert (
-                project_tool_result_storage_body(
-                    annotation.content.decode(), ToolObservationOrigin.BUILTIN
-                )
-                == annotation.content.decode()
-            )
+            assert annotation.public_value() == {
+                "target": {"kind": "PATH", "path": path.name},
+                "meta": {"status": "SUCCESS"},
+                "content": [{"type": "text", "value": "已添加时间标注。"}],
+            }
         finally:
             await port.aclose()
             await validator.aclose()

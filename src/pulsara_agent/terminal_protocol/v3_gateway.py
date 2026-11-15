@@ -37,7 +37,10 @@ from pulsara_agent.conversation_kernel.user_control import (
     UserControlTarget,
     UserControlTargetKind,
 )
-from pulsara_agent.conversation_kernel.tool_outputs import PostgresToolOutputReadPort
+from pulsara_agent.conversation_kernel.tool_outputs import (
+    PostgresToolOutputReadPort,
+    project_tool_result_export,
+)
 from pulsara_agent.primitives.text_paging import TextPosition, paginate_text
 from pulsara_agent.primitives.tool_result_budget import ToolResultPageBoundary
 from pulsara_agent.conversation_kernel.live import LiveObservationKind
@@ -1375,9 +1378,10 @@ class TerminalKernelProtocolServer:
                 session_id=session_id, deadline_monotonic=monotonic() + 10.0,
             )
             port = PostgresToolOutputReadPort(connection_provider, session_id=session_id, workspace_id=workspace_id)
-            body = await asyncio.to_thread(port.read_body,
+            body = await asyncio.to_thread(port.read_result,
                 {"kind": "SESSION_ENTRY", "entry_id": request.result_entry_id})
-            page = await asyncio.to_thread(paginate_text, body.content.decode("utf-8"),
+            text = project_tool_result_export(body.value).decode("utf-8")
+            page = await asyncio.to_thread(paginate_text, text,
                 position=position, max_chars=request.max_chars, fits=lambda _text, _next: True)
         except KeyError:
             return _error(request.request_id, "TOOL_OUTPUT_MISSING")
@@ -1387,8 +1391,6 @@ class TerminalKernelProtocolServer:
             return _error(request.request_id, "TOOL_OUTPUT_UNAVAILABLE")
         chunk = wire.ToolOutputTextChunk(
             request_id=request.request_id, result_entry_id=request.result_entry_id,
-            source_coverage=body.source_coverage.value,
-            source_coverage_reason=body.source_coverage_reason.value if body.source_coverage_reason else "",
             text=page.text,
             position=wire.ToolOutputTextPosition(**page.start.public_value()),
         )

@@ -95,8 +95,7 @@ export function decodeCanonicalPromptContent(
     throw new Error('输入正文格式无效。');
   }
   if (!isRecord(raw) || !hasExactKeys(raw, ['parts'])
-    || !Array.isArray(raw.parts)
-    || raw.parts.length === 0) {
+    || !Array.isArray(raw.parts)) {
     throw new Error('输入正文格式无效。');
   }
   let refOrdinal = 0;
@@ -136,9 +135,6 @@ export function decodeCanonicalPromptContent(
     refOrdinal += 1;
     return result;
   });
-  if (!parts.some((part) => part.type !== 'text' || part.text !== '')) {
-    throw new Error('输入正文格式无效。');
-  }
   return { parts };
 }
 

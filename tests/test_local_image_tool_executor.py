@@ -425,7 +425,7 @@ def test_view_image_reference_uses_the_canonical_port_without_local_validation(
     read_error,
     expected_error,
 ) -> None:
-    image = bound_test_image("image/png", b"canonical-image", 4, 3, workspace_id="workspace:wdl6b3mtrkghwnvjo4an3ekbau")
+    image = bound_test_image("image/png", b"canonical-image", 4, 3)
     quoted_contents = []
 
     class ReferencePort:

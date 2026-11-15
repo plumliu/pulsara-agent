@@ -28,16 +28,10 @@ from pulsara_agent.conversation_kernel.session_content import (
 )
 from pulsara_agent.conversation_kernel.session_search import search_session_page
 from pulsara_agent.conversation_kernel.tool_execution import ToolBatchExecutor
-from pulsara_agent.conversation_kernel.tool_outputs import ToolOutputProcessor
 from pulsara_agent.ports.session_content import SessionContentRange
-from pulsara_agent.ports.tool_output import ToolOutputBodyCandidate
 from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 from pulsara_agent.primitives.context import canonical_json_bytes, freeze_json
-from pulsara_agent.ports.tool_execution import (
-    ToolOutputSourceCoverage,
-    ToolOutputSourceFormatHint,
-    ToolOutputSourceCoverageReason,
-)
+from pulsara_agent.conversation_kernel.content_parts import ResultPart
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from tests.test_conversation_fork import (
     repo as repo,
@@ -121,7 +115,6 @@ def blob_answer(repo, lease, text, *, extra_blocks=()):
         lease.guard,
         cut=cut,
         entry_id=entry,
-        parent_content=InlineContent.from_bytes(b"manifest"),
         blocks=(AssistantTextBlock(identity("block"), body), *extra_blocks),
         complete_turn=True,
         actor_id="model:test",
@@ -138,7 +131,6 @@ def saved_calls(repo, lease, blocks):
         lease.guard,
         cut=cut,
         entry_id=entry,
-        parent_content=InlineContent.from_bytes(b"manifest"),
         blocks=blocks,
         complete_turn=False,
         actor_id="model:test",
@@ -301,17 +293,7 @@ def test_tool_result_search_uses_canonical_owner_and_read_keeps_all_saved_result
     )
     result_id = identity("entry")
     text = 'result-needle read_session_content {"items":["ordinary output"]}'
-    projection = prepare_output(ToolOutputProcessor(repo.connection_provider),
-        session_id=lease.guard.session_id,
-        workspace_id=workspace,
-        result_entry_id=result_id,
-        public_output=text,
-        native_output=text,
-        output_body_candidate=None,
-        output_omitted=False,
-        public_format=ToolOutputSourceFormatHint.TEXT,
-        deadline_monotonic=monotonic() + 30,
-    )
+    projection = prepare_output(content_parts=(ResultPart("text", text),))
     accepted = build_prepared_tool_result_acceptance(
         guard=lease.guard,
         workspace_id=workspace,
@@ -322,12 +304,8 @@ def test_tool_result_search_uses_canonical_owner_and_read_keeps_all_saved_result
         tool_call_id=call,
         attempt_id=attempt,
         result_state=state,
-        canonical_preview_content=projection.canonical_preview,
-        output_body=projection.output_body,
-        source_coverage=projection.source_coverage,
-        output_omitted=projection.output_omitted,
-        source_coverage_reason=projection.source_coverage_reason,
-        output_unavailability_reason=projection.output_unavailability_reason,
+        public_fields=projection.public_fields,
+        content_parts=projection.content_parts,
         actor_id="tool:test",
         observed_at=datetime.now(timezone.utc),
         observation_duration_microseconds=None,
@@ -785,20 +763,11 @@ def test_archive_missing_directory_and_fork_are_cold_own_history_only(
     assert not workspace_root.exists()
 
 
-@pytest.mark.parametrize(
-    "retained, unavailable", [(False, False), (True, False), (False, True)]
-)
-def test_cross_session_tool_reads_exact_body_without_repeating_preview(
-    repo, retained, unavailable, stage2_migrated_postgres_database
+def test_cross_session_tool_reads_exact_frozen_body_and_detects_corruption(
+    repo, stage2_migrated_postgres_database
 ):
-    from tests.support.tool_outputs import (
-        _install_tool_call,
-        RecordingOutputPublisher,
-    )
-    from pulsara_agent.conversation_kernel.tool_outputs import (
-        KnownOutputPublicationFailure,
-        ToolOutputContentError,
-    )
+    from tests.support.tool_outputs import _install_tool_call
+    from pulsara_agent.conversation_kernel.repository import ConversationKernelConflict
 
     caller = new_session(repo)
     workspace = identity("workspace")
@@ -807,38 +776,9 @@ def test_cross_session_tool_reads_exact_body_without_repeating_preview(
         "begin\n" + "x" * 50000 + "\nuniquemiddleneedle\n" + "z" * 50000 + "\nend"
     )
     result_id = identity("entry")
-    candidate = ToolOutputBodyCandidate(
-        text=source,
-        source_coverage=ToolOutputSourceCoverage.RETAINED_SNAPSHOT
-        if retained
-        else ToolOutputSourceCoverage.COMPLETE,
-        source_coverage_reason=ToolOutputSourceCoverageReason.TERMINAL_RETENTION_GAP
-        if retained
-        else None,
-        source_format=ToolOutputSourceFormatHint.TEXT,
-    )
-    processor = ToolOutputProcessor(
-        repo.connection_provider,
-        **(
-            {
-                "publisher": RecordingOutputPublisher(
-                    failure=KnownOutputPublicationFailure("storage unavailable")
-                )
-            }
-            if unavailable
-            else {}
-        ),
-    )
-    projection = prepare_output(processor,
-        session_id=lease.guard.session_id,
-        workspace_id=workspace,
-        result_entry_id=result_id,
-        public_output=json.dumps({"exit_code": 23, "output": source}),
-        native_output=json.dumps({"exit_code": 23, "output_preview": "native preview only"}),
-        output_body_candidate=candidate,
-        output_omitted=True,
-        public_format=ToolOutputSourceFormatHint.JSON,
-        deadline_monotonic=monotonic() + 30,
+    projection = prepare_output(
+        public_fields={"exit_code": 23},
+        content_parts=(ResultPart("text", source),),
     )
     accepted = build_prepared_tool_result_acceptance(
         guard=lease.guard,
@@ -850,13 +790,8 @@ def test_cross_session_tool_reads_exact_body_without_repeating_preview(
         tool_call_id=call,
         attempt_id=attempt,
         result_state="SUCCESS",
-        canonical_preview_content=projection.canonical_preview,
-        output_body=projection.output_body,
-        source_coverage=projection.source_coverage,
-        output_omitted=projection.output_omitted,
-        source_coverage_reason=projection.source_coverage_reason,
-        output_unavailability_reason=projection.output_unavailability_reason,
-        required_facts={"exit_code": 23},
+        public_fields=projection.public_fields,
+        content_parts=projection.content_parts,
         actor_id="terminal",
         observed_at=datetime.now(timezone.utc),
         observation_duration_microseconds=None,
@@ -887,14 +822,6 @@ def test_cross_session_tool_reads_exact_body_without_repeating_preview(
         == []
     )
     found = invoke('search_session_content', target={'kind': 'SESSION', 'session_id': lease.guard.session_id}, query='uniquemiddleneedle', include_tools=True)
-    if unavailable:
-        assert found["items"] == []
-        page = invoke(target={'kind': 'SESSION_ENTRY', 'session_id': lease.guard.session_id, 'entry_id': result_id}, include_tools=True, limit=1)
-        assert page["items"][0]["text"] == "[Saved tool output is unavailable.]"
-        assert page["items"][0]["output_unavailability_reason"] == "BODY_PUBLICATION_FAILED"
-        assert page["items"][0]["source_coverage"] == "COMPLETE"
-        assert _cursor(page) is None
-        return
     assert any(
         m["target"]["entry_id"] == result_id and "uniquemiddleneedle" in m["text"]
         for m in found["items"][0]["messages"]
@@ -912,19 +839,20 @@ def test_cross_session_tool_reads_exact_body_without_repeating_preview(
         page = invoke(cursor=_cursor(page))
     combined = "".join(parts)
     assert combined == source
-    assert "native preview only" not in combined
-    assert page["items"][0]["result_facts"] == {"exit_code": 23}
-    if retained:
-        assert page["items"][0]["source_coverage"] == "RETAINED_SNAPSHOT"
-    # Declared readable output corruption must not silently fall back to preview.
+    # Corrupt canonical bytes must fail rather than silently supply another value.
     import psycopg
 
     with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
+        blob_id = connection.execute(
+            "SELECT blob_id FROM pulsara_v3.content_parts WHERE entry_id=%s AND type='text'",
+            (result_id,),
+        ).fetchone()[0]
+        assert blob_id is not None
         connection.execute(
             "UPDATE pulsara_v3.blobs SET body=%s WHERE id=%s",
-            (b"x" * len(source.encode()), projection.output_body.blob_id),
+            (b"x" * len(source.encode()), blob_id),
         )
-    with pytest.raises(ToolOutputContentError):
+    with pytest.raises(ConversationKernelConflict):
         invoke(target={'kind': 'SESSION_ENTRY', 'session_id': lease.guard.session_id, 'entry_id': result_id}, include_tools=True)
 
 

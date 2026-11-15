@@ -269,6 +269,7 @@ def test_tool_null_scope_preserves_filtered_pages_and_service_all_sessions(
                 permission_mode=DEFAULT_PERMISSION_MODE,
                 page_budget=ToolResultPageBudget(tool_call_id="schedule-page"),
             )
+            page = page.value
             ids.extend(row["target"]["task_id"] for row in page["tasks"])
             assert all(
                 row["session"]["session_id"] == lease.guard.session_id for row in page["tasks"]
@@ -284,7 +285,7 @@ def test_tool_null_scope_preserves_filtered_pages_and_service_all_sessions(
             permission_mode=DEFAULT_PERMISSION_MODE,
             page_budget=ToolResultPageBudget(tool_call_id="schedule-other-page"),
         )
-        assert [row["target"]["task_id"] for row in selected["tasks"]] == [other["id"]]
+        assert [row["target"]["task_id"] for row in selected.value["tasks"]] == [other["id"]]
         all_ids = []
         cursor = None
         while True:
@@ -339,7 +340,8 @@ def test_atomic_enqueue_cursor_and_independent_occurrence_snapshots(owner):
     assert rows[0]["scheduled_due_at"] == t["next_run_at"]
     from pulsara_agent.conversation_kernel.prompt_storage import hydrate_canonical_prompt_owner
     with owner[0].connection_provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=monotonic() + 30,
+        lane=PostgresConnectionLane.INSPECTOR, row_factory=dict_row,
+        deadline_monotonic=monotonic() + 30,
     ) as connection:
         frozen = hydrate_canonical_prompt_owner(connection, row=rows[1], queue_item_id=rows[1]["id"])
     assert frozen.content == FrozenPromptContent.text("new task")

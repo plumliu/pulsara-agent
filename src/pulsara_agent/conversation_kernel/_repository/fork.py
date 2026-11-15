@@ -10,7 +10,7 @@ from time import monotonic
 
 from psycopg import Connection, IsolationLevel, sql
 from psycopg.rows import dict_row
-from psycopg.types.json import Jsonb
+from psycopg.types.json import Json, Jsonb
 
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionContinuationMode,
@@ -20,10 +20,6 @@ from pulsara_agent.conversation_kernel.compaction.prompt import (
     build_compaction_snapshot_carrier,
 )
 from pulsara_agent.conversation_kernel.prompt_storage import (
-    copy_canonical_prompt_refs,
-    hydrate_canonical_prompt_owner,
-    materialize_canonical_prompt,
-    insert_canonical_prompt_refs,
     materialize_compaction_snapshot,
 )
 from pulsara_agent.conversation_kernel.contracts import InlineContent
@@ -34,14 +30,10 @@ from pulsara_agent.primitives.context import context_fingerprint, thaw_json
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from .contracts import (
     ConversationKernelConflict,
-    _content_columns,
 )
-from pulsara_agent.conversation_kernel.annotations import remap_annotation_sources
-from pulsara_agent.conversation_kernel.prompt_content import (
-    PROMPT_BODY_MEDIA_TYPE,
-    freeze_canonical_prompt,
+from pulsara_agent.conversation_kernel.content_parts import (
+    ContentPartDraft, decode_content_part, write_content_parts,
 )
-from pulsara_agent.llm.input import PromptAnnotationPart
 from .locking import lock_canonical_identities, lock_session_admission
 
 
@@ -50,16 +42,6 @@ class CanonicalForkCreation:
     child_session_id: str
     created: bool
     public_code: str
-
-
-_CONTENT_COLUMNS = (
-    "inline_content",
-    "blob_id",
-    "content_digest",
-    "content_size",
-    "content_media_type",
-    "content_codec",
-)
 
 
 def _insert(connection: Connection, table: str, values: dict[str, object]) -> None:
@@ -228,7 +210,7 @@ class _ForkOperations:
                         raise TimeoutError(
                             "Fork canonical transaction deadline expired"
                         )
-                    values = {key: entry[key] for key in _CONTENT_COLUMNS}
+                    values = {}
                     source_id = str(entry["id"])
                     values.update(
                         id=entry_map[source_id],
@@ -265,72 +247,32 @@ class _ForkOperations:
                                 int(entry["provider_input_through_sequence"])
                             ),
                         )
-                    publication = None
-                    if (
-                        entry["entry_kind"] in {"USER_MESSAGE", "USER_STEER"}
-                        and entry["content_media_type"] == PROMPT_BODY_MEDIA_TYPE
-                    ):
-                        original = hydrate_canonical_prompt_owner(
-                            connection,
-                            row=entry,
-                            transcript_entry_id=source_id,
-                        ).content
-                        if any(
-                            isinstance(part, PromptAnnotationPart)
-                            for part in original.parts
-                        ):
-                            publication = materialize_canonical_prompt(
-                                connection,
-                                publisher=self._canonical_content_publisher,
-                                workspace_id=material.workspace_id,
-                                prompt=freeze_canonical_prompt(
-                                    remap_annotation_sources(original, entry_map)
-                                ),
-                            )
-                            values.update(
-                                zip(
-                                    _CONTENT_COLUMNS, _content_columns(publication.body)
-                                )
-                            )
                     _insert(connection, "transcript_entries", values)
-                    if publication is not None:
-                        insert_canonical_prompt_refs(
-                            connection,
-                            session_id=child_session_id,
-                            workspace_id=material.workspace_id,
-                            transcript_entry_id=entry_map[source_id],
-                            image_blob_ids=publication.image_blob_ids,
-                        )
-                        continue
-                    copy_canonical_prompt_refs(
-                        connection,
-                        session_id=source_session_id,
-                        target_session_id=child_session_id,
-                        workspace_id=material.workspace_id,
-                        source_transcript_entry_id=source_id,
-                        target_transcript_entry_id=entry_map[source_id],
-                    )
-                for block in material.blocks:
-                    values = {
-                        key: block[key]
-                        for key in (
-                            *_CONTENT_COLUMNS,
-                            "block_ordinal",
-                            "block_kind",
-                            "tool_call_id",
-                            "tool_name",
-                        )
-                    }
+                for part in material.content_parts:
+                    source_entry_id = str(part["entry_id"])
+                    values = {key: part[key] for key in (
+                        "ordinal", "type", "inline_value", "blob_id", "tool_call_id", "tool_name", "data_media_type", "data_codec",
+                    )}
                     values.update(
-                        id=derive_id("block", "fork", child_session_id, str(block["id"])),
-                        session_id=child_session_id,
-                        workspace_id=material.workspace_id,
-                        assistant_entry_id=entry_map[str(block["assistant_entry_id"])],
-                        tool_arguments=None
-                        if block["tool_arguments"] is None
-                        else Jsonb(thaw_json(block["tool_arguments"])),
+                        id=derive_id("block", "fork", child_session_id, str(part["id"])),
+                        session_id=child_session_id, workspace_id=material.workspace_id,
+                        entry_id=entry_map[source_entry_id], queue_item_id=None,
+                        tool_arguments=None if part["tool_arguments"] is None else Jsonb(thaw_json(part["tool_arguments"])),
                     )
-                    _insert(connection, "assistant_message_blocks", values)
+                    if part["type"] == "annotation":
+                        annotation = dict(decode_content_part(connection, part).value)
+                        if annotation.get("source") is not None:
+                            source = dict(annotation["source"])
+                            child_source = entry_map.get(source["entry_id"])
+                            annotation["source"] = None if child_source is None else {**source, "entry_id": child_source}
+                        write_content_parts(
+                            connection, session_id=child_session_id, workspace_id=material.workspace_id,
+                            entry_id=entry_map[source_entry_id], start_ordinal=int(part["ordinal"]),
+                            publisher=self._canonical_content_publisher,
+                            parts=(ContentPartDraft("annotation", annotation, id=values["id"]),),
+                        )
+                    else:
+                        _insert(connection, "content_parts", values)
                 for replay in replay_map.values():
                     replay_entry_kind = next(
                         str(entry["entry_kind"])
@@ -365,6 +307,7 @@ class _ForkOperations:
                     }
                     values.pop("entry_sequence")
                     values["result_facts"] = Jsonb(values["result_facts"])
+                    values["public_fields"] = Json(values["public_fields"])
                     values.update(
                         id=derive_id("result", "fork", child_session_id, str(result["id"])),
                         session_id=child_session_id,
@@ -396,8 +339,6 @@ class _ForkOperations:
                             "blob_id": visualization["blob_id"],
                             "failure_code": visualization["failure_code"],
                             "failure_detail": visualization["failure_detail"],
-                            "width": visualization["width"],
-                            "height": visualization["height"],
                         },
                     )
                 for closure in material.required_tool_closures:

@@ -185,7 +185,11 @@ def wait_agent_parameters_schema() -> dict:
                 "uniqueItems": True,
                 "items": target_schema("AGENT"),
             },
-            "until": {"type": "string", "enum": ["work_end", "idle"], "default": "idle"},
+            "until": {
+                "type": "string",
+                "enum": ["work_end", "idle"],
+                "default": "idle",
+            },
             "settle": {"type": "string", "enum": ["all", "first"], "default": "all"},
             "timeout_seconds": _wait_timeout_schema(),
         },
@@ -272,43 +276,59 @@ def validate_assignment_parameters(arguments: Mapping[str, object]) -> None:
 
 
 def validate_work_inputs(value: object) -> tuple[dict, ...]:
-    """Validate the queue-owned input facts without changing their identities."""
+    """Validate metadata-only boundaries for one queue's initial input group."""
     if not isinstance(value, (list, tuple)):
         raise ValueError("Work inputs must be an array")
-    result = []
-    sources = set()
-    positions = set()
-    for item in value:
-        item = closed(
-            item,
-            {"kind", "source_work_id", "ordinal", "body"},
-            {"kind", "source_work_id", "ordinal", "body"},
-        )
-        kind, source, ordinal, body = (
-            item[k] for k in ("kind", "source_work_id", "ordinal", "body")
-        )
-        if kind not in {"dependency", "material"}:
+    result, sources, positions, ranges = [], set(), set(), []
+    order = {"instruction": 0, "context": 1, "dependency": 2, "material": 3}
+    for raw in value:
+        if not isinstance(raw, Mapping):
+            raise ValueError("Work input must be an object")
+        kind = raw.get("kind")
+        if kind not in order:
             raise ValueError("invalid Work input kind")
-        require_id(source, "queue")
-        if type(ordinal) is not int or ordinal < 0:
-            raise ValueError("invalid Work input ordinal")
-        if not isinstance(body, str) and not (kind == "dependency" and body is None):
-            raise ValueError("invalid Work input body")
-        if source in sources or (kind, ordinal) in positions:
-            raise ValueError("duplicate Work input identity")
-        sources.add(source)
-        positions.add((kind, ordinal))
+        fields = {"kind", "ordinal", "content_start", "content_count"}
+        if kind in {"dependency", "material"}:
+            fields |= {"source_work_id", "ready"}
+        item = closed(raw, fields, fields)
+        for name in ("ordinal", "content_start", "content_count"):
+            if type(item[name]) is not int or item[name] < 0:
+                raise ValueError("invalid Work input boundary")
+        position = (kind, item["ordinal"])
+        if position in positions:
+            raise ValueError("duplicate Work input position")
+        positions.add(position)
+        if kind in {"dependency", "material"}:
+            source = require_id(item["source_work_id"], "queue")
+            if source in sources or type(item["ready"]) is not bool:
+                raise ValueError("invalid Work input source or readiness")
+            if not item["ready"] and (kind != "dependency" or item["content_count"]):
+                raise ValueError("only unresolved dependencies may be unready")
+            sources.add(source)
+        if item["content_count"]:
+            span = (
+                item["content_start"],
+                item["content_start"] + item["content_count"],
+            )
+            if any(span[0] < stop and start < span[1] for start, stop in ranges):
+                raise ValueError("overlapping Work input content")
+            ranges.append(span)
         result.append(dict(item))
-    return tuple(
-        sorted(result, key=lambda x: (x["kind"] != "dependency", x["ordinal"]))
-    )
+    result.sort(key=lambda item: (order[item["kind"]], item["ordinal"]))
+    if result and (
+        result[0]["kind"] != "instruction"
+        or result[0]["ordinal"] != 0
+        or sum(x["kind"] == "instruction" for x in result) != 1
+    ):
+        raise ValueError("Work inputs require one leading instruction")
+    return tuple(result)
 
 
 def pending_work_dependencies(value: object) -> tuple[dict, ...]:
     return tuple(
         item
         for item in validate_work_inputs(value)
-        if item["kind"] == "dependency" and item["body"] is None
+        if item["kind"] == "dependency" and not item["ready"]
     )
 
 

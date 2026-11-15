@@ -11,12 +11,14 @@ from psycopg import Connection, sql
 from pulsara_agent.storage.migrations.contracts import postgres_schema_fingerprint
 from pulsara_agent.storage.migrations.manifest import (
     CONVERSATION_KERNEL_RUNTIME_PRIVILEGES,
+    CONVERSATION_KERNEL_RUNTIME_COLUMN_PRIVILEGES,
 )
 
 
 @dataclass(frozen=True, slots=True)
 class CleanRuntimeGrantPolicy:
     relation_privileges: dict[str, tuple[str, ...]]
+    column_privileges: dict[str, dict[str, tuple[str, ...]]]
     function_privileges: dict[str, tuple[str, ...]]
     policy_fingerprint: str
 
@@ -33,6 +35,12 @@ def build_postgres_runtime_grant_policy() -> CleanRuntimeGrantPolicy:
     }
     if relations != CONVERSATION_KERNEL_RUNTIME_PRIVILEGES:
         raise RuntimeError("clean runtime grant artifact drifted")
+    columns = {
+        str(relation): {str(column): tuple(privileges) for column, privileges in grants.items()}
+        for relation, grants in payload["column_grants"].items()
+    }
+    if columns != CONVERSATION_KERNEL_RUNTIME_COLUMN_PRIVILEGES:
+        raise RuntimeError("clean runtime column grant artifact drifted")
     functions = {
         str(name): tuple(str(item) for item in privileges)
         for name, privileges in payload["function_grants"].items()
@@ -40,6 +48,7 @@ def build_postgres_runtime_grant_policy() -> CleanRuntimeGrantPolicy:
     return CleanRuntimeGrantPolicy(
         relation_privileges=relations,
         function_privileges=functions,
+        column_privileges=columns,
         policy_fingerprint=postgres_schema_fingerprint(
             "pulsara:conversation-kernel-runtime-grants:v1",
             _freeze_json(payload),
@@ -105,6 +114,26 @@ class PostgresRuntimeGrantExecutor:
                     {"relation": relation, "privileges": required},
                 )
             )
+        for relation, columns in policy.column_privileges.items():
+            all_columns = connection.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema='pulsara_v3' AND table_name=%s ORDER BY ordinal_position",
+                (relation,),
+            ).fetchall()
+            column_names = sql.SQL(", ").join(sql.Identifier(str(row[0])) for row in all_columns)
+            connection.execute(
+                sql.SQL("REVOKE SELECT ({}), INSERT ({}), UPDATE ({}), REFERENCES ({}) ON TABLE pulsara_v3.{} FROM {}").format(
+                    column_names, column_names, column_names, column_names,
+                    sql.Identifier(relation), sql.Identifier(runtime_role),
+                )
+            )
+            for column, privileges in columns.items():
+                connection.execute(
+                    sql.SQL("GRANT {} ({}) ON TABLE pulsara_v3.{} TO {}").format(
+                        sql.SQL(", ").join(sql.SQL(item) for item in privileges),
+                        sql.Identifier(column), sql.Identifier(relation), sql.Identifier(runtime_role),
+                    )
+                )
         for function_identity, required in policy.function_privileges.items():
             if required != ("EXECUTE",):
                 raise RuntimeError("clean runtime function grant is not closed")

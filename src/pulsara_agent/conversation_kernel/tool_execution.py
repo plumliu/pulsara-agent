@@ -37,7 +37,6 @@ from pulsara_agent.conversation_kernel.assembler import (
 from pulsara_agent.llm.input import (
     FrozenPromptContent,
     LLMTextPart,
-    frozen_tool_result_public_text,
 )
 
 
@@ -59,12 +58,9 @@ from pulsara_agent.conversation_kernel.input_continuity import (
 
 from pulsara_agent.conversation_kernel.contracts import (
     CanonicalContent,
-    InlineContent,
     WriterLease,
 )
 from pulsara_agent.conversation_kernel.prompt_content import (
-    PROMPT_BODY_CODEC,
-    PROMPT_BODY_MEDIA_TYPE,
     freeze_canonical_prompt,
 )
 
@@ -103,6 +99,8 @@ from pulsara_agent.conversation_kernel.extensions import (
 from pulsara_agent.conversation_kernel.tool_outputs import (
     ToolOutputProcessor,
 )
+from pulsara_agent.ports.tool_output import AcceptedToolResultProjectionError, ToolResultSaveError
+from pulsara_agent.ports.tool_execution import thaw_tool_json_object
 
 from pulsara_agent.conversation_kernel.tool_contracts import (
     AcceptedCanonicalToolResultSettlement,
@@ -125,7 +123,6 @@ from pulsara_agent.conversation_kernel.tool_contracts import (
 
 from pulsara_agent.conversation_kernel.repository import (
     AcceptedEntry,
-    AcceptedMemoryToolResult,
     ConversationKernelRepository,
     ConversationKernelConflict,
     PreparedToolRemoteIdentityPublication,
@@ -146,9 +143,7 @@ from pulsara_agent.tools.builtins.media import IMAGE_TOOL_NAMES, parse_image_too
 
 
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
-from pulsara_agent.ports.tool_output import tool_output_read_call
 from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
-from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
 
 
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
@@ -492,19 +487,18 @@ class ToolBatchExecutor:
                 raise RuntimeError("program invocation did not settle exactly one result")
             result, settlement = captured[0]
             metadata = settlement.public_projection.metadata
-            read = (tool_output_read_call(metadata.session_id, metadata.result_entry_id)
-                    if metadata.output_available else None)
-            value = result.public_value()
+            accepted_value = await self._io.run(
+                self._repository.read_accepted_tool_result_observation,
+                session_id=metadata.session_id, result_id=metadata.result_id,
+                deadline_monotonic=self._canonical_deadline(),
+            )
+            value = accepted_value["value"]
             async def delivered():
                 callback = result.delivery_succeeded
                 if callback is not None:
                     returned = await asyncio.to_thread(callback)
                     if returned is not None:
                         await returned
-                install = getattr(self._tools, "install_code_cell_tool_result_delivery", None)
-                if install is not None:
-                    install(result_entry_id=settlement.result_entry_id,
-                            cell_id=invocation.cell_id, borrow=borrow)
             accepted_result_id = settlement.result_id
             accepted_session_id = snapshot.request.session_id
             accepted_sequence = invocation.sequence
@@ -518,14 +512,28 @@ class ToolBatchExecutor:
             failure_message = (value.get("message") or value.get("error") or settlement.result_state) if isinstance(value, dict) else value
             return CodeModeToolResult(value=value, state=settlement.result_state,
                 result_id=settlement.result_id, result_entry_id=settlement.result_entry_id,
-                read=read, output_available=metadata.output_available,
-                required_facts=metadata.required_facts,
-                source_coverage=metadata.source_coverage.value,
-                source_coverage_reason=(None if metadata.source_coverage_reason is None else metadata.source_coverage_reason.value),
+                output_available=metadata.output_unavailability_reason is None,
                 output_unavailability_reason=(None if metadata.output_unavailability_reason is None else metadata.output_unavailability_reason.value),
                 error_code=None if success else settlement.result_state,
                 error_message=None if success else str(failure_message),
                 delivery_succeeded=delivered, read_undelivered=read_undelivered)
+        except ToolResultSaveError as error:
+            return CodeModeToolResult(
+                value=thaw_tool_json_object(error.known_value),
+                state=error.result_state,
+                error_code=error.reason.value,
+                error_message=str(error),
+            )
+        except AcceptedToolResultProjectionError as error:
+            return CodeModeToolResult(
+                value=thaw_tool_json_object(error.known_value),
+                state=error.result_state,
+                result_id=error.result_id,
+                result_entry_id=error.result_entry_id,
+                output_available=True,
+                error_code="RESULT_PROJECTION_FAILED",
+                error_message=str(error),
+            )
         finally:
             _code_result.reset(result_token)
             _code_invocation.reset(invocation_token)
@@ -1867,9 +1875,16 @@ class ToolBatchExecutor:
                     ),
                     name=f"kernel-tool-result-settlement:{result_entry_id}",
                 )
-                settlement, cancellation = await _await_tool_result_settlement(
-                    settlement_task
-                )
+                try:
+                    settlement, cancellation = await _await_tool_result_settlement(
+                        settlement_task
+                    )
+                except AcceptedToolResultProjectionError:
+                    # This error is emitted only after canonical acceptance and
+                    # the process-local COMMITTED settlement. Cleanup must not
+                    # discard an effect merely because its display failed.
+                    unsettled_process_local_effect = None
+                    raise
                 if settlement.process_local_effect_committed:
                     unsettled_process_local_effect = None
                 await self._finish_hooked_tool_result(
@@ -2218,90 +2233,149 @@ class ToolBatchExecutor:
                 actor_id=tool_name,
             )
             await self._publish_tool_remote_identity_exact(remote_identity_candidate)
-        from pulsara_agent.conversation_kernel.tool_result_display import project_native_tool_result
-        from pulsara_agent.primitives.tool_result_budget import ToolResultPageBoundary
+        from pulsara_agent.conversation_kernel.content_parts import ResultPart
+        from pulsara_agent.conversation_kernel.prompt_storage import publish_prompt_images
+        from pulsara_agent.conversation_kernel.tool_outputs import (
+            assemble_tool_business_value, project_tool_result_export,
+        )
+        from pulsara_agent.llm.input import LLMImagePart
+        from pulsara_agent.ports.tool_execution import ToolBusinessValue
+        from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
+        from psycopg.rows import dict_row
 
-        budget = result.page_budget or ToolResultPageBudget(
-            tool_call_id=tool_call_id,
-            result_target={"kind": "SESSION_ENTRY", "session_id": session_id, "entry_id": result_entry_id})
-        multimodal_text = None
-        if isinstance(result.content, FrozenPromptContent):
-            multimodal_text = frozen_tool_result_public_text(result.content, tool_name=tool_name)
-            if not budget.fits_logical(
-                multimodal_text,
-                model_visible_memory_fact_ids=result.model_visible_memory_fact_ids,
-            ):
-                # Producers must page/repack before returning. Keep this final
-                # acceptance guard on the same physical carrier boundary: a
-                # missed producer check is a typed result, never text-only image
-                # success or an exception that abandons the entire turn. Current
-                # provider allowance belongs to final dispatch, not settlement.
-                facts = {"error": "RESULT_BUDGET_EXCEEDED"}
-                result = replace(
-                    result, state="APPLICATION_ERROR", content=json.dumps(
-                        facts, ensure_ascii=False, separators=(",", ":")
-                    ).encode("utf-8"), public_format=ToolOutputSourceFormatHint.JSON,
-                    page_complete=True, required_facts=facts,
-                )
-        if isinstance(result.content, bytes) and result.public_format is ToolOutputSourceFormatHint.JSON:
-            from pulsara_agent.primitives.tool_result_projection import preserved_tool_result_facts
-            result = replace(result, required_facts={
-                **preserved_tool_result_facts(result.content.decode("utf-8")),
-                **dict(result.required_facts),
-            })
-        canonical_prompt = None
-        direct_memory = result.memory_mutation is not None
-        output_body = None
-        output_unavailability_reason = None
-        source_coverage = ToolOutputSourceCoverage.COMPLETE
-        source_coverage_reason = None
-        output_omitted = False
-        if direct_memory:
-            if result.state != "SUCCESS" or result.output_body_candidate is not None:
-                raise ValueError("direct memory write cannot publish provisional body")
-            # The accepting transaction replaces this with its actual final receipt.
-            canonical_preview = InlineContent.from_bytes(b"{}", media_type="text/plain", codec="utf-8")
-            result_text = ""
+        canonical_content = None
+        if isinstance(result.content, ToolBusinessValue):
+            business_value = result.content
         elif isinstance(result.content, FrozenPromptContent):
-            if result.output_body_candidate is not None:
-                raise ValueError("image content cannot enter text body storage")
-            canonical_prompt = freeze_canonical_prompt(result.content, workspace_id=workspace_id)
-            canonical_preview = InlineContent.from_bytes(
-                canonical_prompt.body, media_type=PROMPT_BODY_MEDIA_TYPE, codec=PROMPT_BODY_CODEC)
-            assert multimodal_text is not None
-            result_text = multimodal_text
+            # The image owner publishes immutable assets. A detached asset does
+            # not make a result readable; the result transaction owns acceptance.
+            prompt = freeze_canonical_prompt(result.content)
+            def publish_images() -> None:
+                with self._repository.connection_provider.connection(
+                    lane=PostgresConnectionLane.ARTIFACT, row_factory=dict_row,
+                    deadline_monotonic=self._canonical_deadline(),
+                ) as connection:
+                    publish_prompt_images(connection, prompt=prompt)
+            parts = []
+            for item in prompt.content.parts:
+                if isinstance(item, LLMTextPart):
+                    parts.append(ResultPart("text", item.text))
+                elif isinstance(item, LLMImagePart):
+                    parts.append(ResultPart("image", {"kind": "IMAGE_REF", "image_ref": item.image_ref}))
+                else:
+                    raise TypeError("tool output contains unsupported non-business content")
+            business_value = ToolBusinessValue(content=tuple(parts))
+            canonical_content = prompt.content
+            try:
+                await self._io.run(publish_images)
+            except StaleHostWriter:
+                raise
+            except Exception as error:
+                from psycopg import InterfaceError, OperationalError
+                from pulsara_agent.ports.tool_output import ToolOutputUnavailableReason
+                known_value = assemble_tool_business_value(public_fields=business_value.public_fields,
+                    content_parts=business_value.content, result_state=result.state)
+                reason = (ToolOutputUnavailableReason.BODY_PUBLICATION_UNCONFIRMED
+                    if isinstance(error, (TimeoutError, ConnectionError, InterfaceError, OperationalError))
+                    else ToolOutputUnavailableReason.BODY_PUBLICATION_FAILED)
+                raise ToolResultSaveError(reason=reason, known_value=known_value,
+                    result_state=result.state, cause=error) from error
+
         else:
-            public_output = result.content.decode("utf-8")
-            body = await self._io.run(
-                self._tool_output_processor.materialize_body,
-                session_id=session_id, workspace_id=workspace_id, result_entry_id=result_entry_id,
-                public_output=public_output, output_body_candidate=result.output_body_candidate,
-                public_format=result.public_format, deadline_monotonic=self._canonical_deadline(),
-            )
-            arguments = dict(
-                public_output=public_output,
-                native_output=None if result.native_output is None else result.native_output.decode("utf-8"),
-                page_complete=result.page_complete, required_facts=result.required_facts,
-                output_available=body.output_body is not None,
-                output_unavailability_reason=body.output_unavailability_reason,
+            # An explicitly supplied complete physical observation takes
+            # precedence over a producer's display string. Serialized JSON is
+            # text here; E producers supply their declared fields directly.
+            text = (result.output_body_candidate.text if result.output_body_candidate is not None
+                    else result.content.decode("utf-8"))
+            business_value = ToolBusinessValue(content=(ResultPart("text", text),))
+        public_value = assemble_tool_business_value(public_fields=business_value.public_fields,
+            content_parts=business_value.content, result_state=result.state)
+        try:
+            prepared_output = self._tool_output_processor.prepare(
+                business_value=business_value, result_facts=result.result_facts)
+            prepared_acceptance = build_prepared_tool_result_acceptance(
+                guard=self._writer_lease.guard,
+                workspace_id=workspace_id,
+                result_id=result_id,
+                result_entry_id=result_entry_id,
+                turn_id=turn_id,
+                assistant_entry_id=assistant_entry_id,
+                tool_call_id=tool_call_id,
+                attempt_id=attempt_id,
+                result_state=result.state,
+                public_fields=prepared_output.public_fields,
+                content_parts=prepared_output.content_parts,
+                result_facts=prepared_output.result_facts,
+                observed_at=observed_at,
+                observation_duration_microseconds=(
+                    None
+                    if result.physical_observation is None
+                    else result.physical_observation.elapsed_microseconds
+                ),
+                observation_origin_kind=observation_origin,
+                trusted_tool_reported_duration_microseconds=(
+                    None
+                    if result.trusted_observation is None
+                    else result.trusted_observation.duration_microseconds
+                ),
+                actor_id=tool_name,
                 model_visible_memory_fact_ids=result.model_visible_memory_fact_ids,
             )
-            try:
-                result_text, output_omitted = project_native_tool_result(page_budget=budget, **arguments)
-            except ToolResultPageBoundary:
-                # An exact physical outcome must still settle if its actual
-                # follow-up window changed.  This is not provider delivery:
-                # the final dispatch owner must admit/compact the frozen P.
-                result_text, output_omitted = project_native_tool_result(
-                    page_budget=replace(budget, accepts_provider_body=None), **arguments)
-            prepared_output = self._tool_output_processor.prepare(
-                body=body, native_output=result_text, output_omitted=output_omitted)
-            canonical_preview = prepared_output.canonical_preview
-            output_body = prepared_output.output_body
-            output_unavailability_reason = prepared_output.output_unavailability_reason
-            source_coverage = prepared_output.source_coverage
-            source_coverage_reason = prepared_output.source_coverage_reason
-        if attempt_id is not None and not direct_memory:
+        except StaleHostWriter:
+            raise
+        except Exception as error:
+            from pulsara_agent.ports.tool_output import ToolOutputUnavailableReason
+
+            raise ToolResultSaveError(reason=ToolOutputUnavailableReason.BODY_PUBLICATION_FAILED,
+                known_value=public_value, result_state=result.state, cause=error) from error
+        try:
+            accepted = await self._accept_tool_result_exact(prepared_acceptance)
+        except StaleHostWriter:
+            # A process-local exact return is never handed to a replacement
+            # Host.  The durable attempt remains result-less and readers derive
+            # the unknown outcome.
+            self._offer_operational_best_effort(
+                OperationalHookOffer(
+                    event_type=OperationalHookType.TOOL_INVOCATION_OBSERVED,
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    public_payload={
+                        "tool_name": tool_name,
+                        "effect_class": _tool_effect_class(
+                            tool_name, invocation_arguments, result.effect_class
+                        ),
+                        "physical_timing": result.physical_timing,
+                        "outcome": "EXACT_RETURN_STALE_WRITER",
+                    },
+                )
+            )
+            raise
+        effect_committed = False
+        if result.process_local_settlement is not None:
+            local_settlement = await self._tools.settle_process_local_effect(
+                result.process_local_settlement,
+                ProcessLocalEffectSettlementDisposition.COMMITTED,
+            )
+            if (
+                local_settlement.outcome
+                is not ProcessLocalEffectSettlementOutcome.INSTALLED
+            ):
+                raise RuntimeError(
+                    "canonical ToolResult did not install its process-local effect"
+                )
+            effect_committed = True
+        projection_error = None
+        try:
+            result_text = project_tool_result_export(public_value).decode("utf-8")
+        except StaleHostWriter:
+            raise
+        except Exception as error:
+            projection_error = AcceptedToolResultProjectionError(
+                known_value=public_value, result_state=result.state,
+                result_id=result_id, result_entry_id=accepted.entry_id, cause=error,
+            )
+            result_text = str(projection_error)
+        if attempt_id is not None:
             if tool_result_block_id is None or live_attribution is None:
                 raise RuntimeError("physical tool settlement lost live attribution")
             if result_text and (live_sink is None or not live_sink.emitted):
@@ -2333,123 +2407,6 @@ class ToolBatchExecutor:
                 block_kind=LiveBlockKind.TOOL_RESULT,
                 **live_attribution,
             )
-        prepared_acceptance = build_prepared_tool_result_acceptance(
-            guard=self._writer_lease.guard,
-            workspace_id=workspace_id,
-            result_id=result_id,
-            result_entry_id=result_entry_id,
-            turn_id=turn_id,
-            assistant_entry_id=assistant_entry_id,
-            tool_call_id=tool_call_id,
-            attempt_id=attempt_id,
-            result_state=result.state,
-            canonical_preview_content=canonical_preview,
-            canonical_prompt=canonical_prompt,
-            output_body=output_body,
-            output_unavailability_reason=output_unavailability_reason,
-            output_omitted=output_omitted,
-            required_facts=result.required_facts,
-            source_coverage=source_coverage,
-            source_coverage_reason=source_coverage_reason,
-            observed_at=observed_at,
-            observation_duration_microseconds=(
-                None
-                if result.physical_observation is None
-                else result.physical_observation.elapsed_microseconds
-            ),
-            observation_origin_kind=observation_origin,
-            trusted_tool_reported_duration_microseconds=(
-                None
-                if result.trusted_observation is None
-                else result.trusted_observation.duration_microseconds
-            ),
-            actor_id=tool_name,
-            memory_mutation=result.memory_mutation,
-            model_visible_memory_fact_ids=result.model_visible_memory_fact_ids,
-        )
-        try:
-            accepted = await self._accept_tool_result_exact(prepared_acceptance)
-        except StaleHostWriter:
-            # A process-local exact return is never handed to a replacement
-            # Host.  The durable attempt remains result-less and readers derive
-            # the unknown outcome.
-            self._offer_operational_best_effort(
-                OperationalHookOffer(
-                    event_type=OperationalHookType.TOOL_INVOCATION_OBSERVED,
-                    session_id=session_id,
-                    turn_id=turn_id,
-                    public_payload={
-                        "tool_name": tool_name,
-                        "effect_class": _tool_effect_class(
-                            tool_name, invocation_arguments, result.effect_class
-                        ),
-                        "physical_timing": result.physical_timing,
-                        "outcome": "EXACT_RETURN_STALE_WRITER",
-                    },
-                )
-            )
-            raise
-        if direct_memory:
-            if not isinstance(accepted, AcceptedMemoryToolResult):
-                raise RuntimeError("direct memory writer returned no canonical result")
-            result_text = accepted.canonical_body
-            result = replace(
-                result, content=result_text.encode("utf-8"), native_output=None,
-                required_facts=json.loads(result_text), page_complete=True,
-                public_format=ToolOutputSourceFormatHint.JSON,
-                model_visible_memory_fact_ids=accepted.model_visible_memory_fact_ids,
-            )
-            if (
-                tool_name == "remember"
-                and accepted.result_state == "SUCCESS"
-                and json.loads(result_text).get("status") == "SAVED"
-            ):
-                self._tools.offer_memory_embedding_wake()
-            if attempt_id is not None:
-                assert tool_result_block_id is not None and live_attribution is not None
-                if result_text:
-                    self._live_bus.offer_nowait(
-                        event_type=LiveEventType.TOOL_RESULT_DELTA,
-                        session_id=session_id,
-                        turn_id=turn_id,
-                        draft_identity=result_entry_id,
-                        payload=ToolResultDeltaPayload(tool_result_block_id, result_text),
-                        block_id=tool_result_block_id,
-                        block_ordinal=0,
-                        block_kind=LiveBlockKind.TOOL_RESULT,
-                        **live_attribution,
-                    )
-                self._live_bus.offer_nowait(
-                    event_type=LiveEventType.TOOL_RESULT_END,
-                    session_id=session_id,
-                    turn_id=turn_id,
-                    draft_identity=result_entry_id,
-                    payload=ToolResultEndPayload(
-                        tool_result_block_id,
-                        accepted.result_state,
-                        result_text,
-                        len(result_text.encode("utf-8")),
-                        live_digest(result_text),
-                    ),
-                    block_id=tool_result_block_id,
-                    block_ordinal=0,
-                    block_kind=LiveBlockKind.TOOL_RESULT,
-                    **live_attribution,
-                )
-        effect_committed = False
-        if result.process_local_settlement is not None:
-            local_settlement = await self._tools.settle_process_local_effect(
-                result.process_local_settlement,
-                ProcessLocalEffectSettlementDisposition.COMMITTED,
-            )
-            if (
-                local_settlement.outcome
-                is not ProcessLocalEffectSettlementOutcome.INSTALLED
-            ):
-                raise RuntimeError(
-                    "canonical ToolResult did not install its process-local effect"
-                )
-            effect_committed = True
         if attempt_id is not None:
             assert live_attribution is not None
             self._live_bus.offer_settlement_nowait(
@@ -2460,6 +2417,8 @@ class ToolBatchExecutor:
                 committed_entry_id=accepted.entry_id,
                 **live_attribution,
             )
+        if projection_error is not None:
+            raise projection_error from projection_error.cause
         if result.physical_timing != "ON_TIME":
             self._offer_operational_best_effort(
                 OperationalHookOffer(
@@ -2494,11 +2453,7 @@ class ToolBatchExecutor:
             result_id=result_id,
             result_entry_id=result_entry_id,
             accepted_entry_sequence=accepted.entry_sequence,
-            result_state=(
-                accepted.result_state
-                if isinstance(accepted, AcceptedMemoryToolResult)
-                else prepared_acceptance.result_state
-            ),
+            result_state=prepared_acceptance.result_state,
             result_origin_kind=(
                 "PHYSICAL_ATTEMPT"
                 if prepared_acceptance.attempt_id is not None
@@ -2513,26 +2468,13 @@ class ToolBatchExecutor:
                 prepared_acceptance.trusted_tool_reported_duration_microseconds
             ),
             observation_origin=prepared_acceptance.observation_origin_kind,
-            output_omitted=prepared_acceptance.output_omitted,
-            output_available=direct_memory or prepared_acceptance.output_body is not None,
-            required_facts=(result.required_facts if direct_memory else prepared_acceptance.required_facts),
-            source_coverage=prepared_acceptance.source_coverage,
-            source_coverage_reason=prepared_acceptance.source_coverage_reason,
             output_unavailability_reason=prepared_acceptance.output_unavailability_reason,
-            model_visible_memory_fact_ids=(
-                accepted.model_visible_memory_fact_ids
-                if isinstance(accepted, AcceptedMemoryToolResult)
-                else prepared_acceptance.model_visible_memory_fact_ids
-            ),
-            canonical_content=(
-                result.content
-                if isinstance(result.content, FrozenPromptContent)
-                else None
-            ),
+            model_visible_memory_fact_ids=prepared_acceptance.model_visible_memory_fact_ids,
+            canonical_content=canonical_content,
         )
         capture = _code_result.get()
         if capture is not None:
-            capture.append((result, settlement))
+            capture.append((replace(result, content=business_value), settlement))
         return _KnownToolResultSettlementOutcome(
             settlement=settlement,
             process_local_effect_committed=effect_committed,
@@ -2581,41 +2523,44 @@ class ToolBatchExecutor:
         self,
         candidate: PreparedToolResultAcceptance,
     ) -> AcceptedEntry:
-        try:
-            return await self._io.run(
-                self._repository.accept_tool_result,
-                self._writer_lease.guard,
-                candidate=candidate,
-                deadline_monotonic=self._canonical_deadline(),
-            )
-        except Exception:
-            winner = await self._io.run(
-                self._repository.confirm_tool_result_winner,
-                self._writer_lease.guard,
-                candidate=candidate,
-                deadline_monotonic=self._canonical_deadline(),
-            )
-            if winner is not None:
-                return winner
-        # The first write was proven absent.  Reissue only the exact frozen
-        # canonical candidate; the physical tool is never invoked again.
-        try:
-            return await self._io.run(
-                self._repository.accept_tool_result,
-                self._writer_lease.guard,
-                candidate=candidate,
-                deadline_monotonic=self._canonical_deadline(),
-            )
-        except Exception:
-            winner = await self._io.run(
-                self._repository.confirm_tool_result_winner,
-                self._writer_lease.guard,
-                candidate=candidate,
-                deadline_monotonic=self._canonical_deadline(),
-            )
-            if winner is None:
+        from pulsara_agent.conversation_kernel.tool_outputs import assemble_tool_business_value
+        from pulsara_agent.ports.tool_output import ToolResultSaveError, ToolOutputUnavailableReason
+
+        known_value = assemble_tool_business_value(public_fields=candidate.public_fields,
+            content_parts=candidate.content_parts, result_state=candidate.result_state)
+        # Preserve the existing two canonical-write attempts. Only a confirmed
+        # absent candidate may be resubmitted; business execution is never called.
+        for attempt in range(2):
+            try:
+                return await self._io.run(
+                    self._repository.accept_tool_result, self._writer_lease.guard,
+                    candidate=candidate, deadline_monotonic=self._canonical_deadline(),
+                )
+            except StaleHostWriter:
                 raise
-            return winner
+            except Exception as write_error:
+                try:
+                    winner = await self._io.run(
+                        self._repository.confirm_tool_result_winner, self._writer_lease.guard,
+                        candidate=candidate, deadline_monotonic=self._canonical_deadline(),
+                    )
+                except StaleHostWriter:
+                    raise
+                except Exception as confirmation_error:
+                    raise ToolResultSaveError(
+                        reason=ToolOutputUnavailableReason.BODY_PUBLICATION_UNCONFIRMED,
+                        known_value=known_value, result_state=candidate.result_state,
+                        cause=confirmation_error,
+                    ) from confirmation_error
+                if winner is not None:
+                    return winner
+                if attempt == 1:
+                    raise ToolResultSaveError(
+                        reason=ToolOutputUnavailableReason.BODY_PUBLICATION_FAILED,
+                        known_value=known_value, result_state=candidate.result_state,
+                        cause=write_error,
+                    ) from write_error
+        raise AssertionError("canonical result save did not settle")
 
 
 

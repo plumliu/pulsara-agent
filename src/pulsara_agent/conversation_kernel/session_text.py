@@ -1,12 +1,9 @@
 """Shared canonical text decoding for UI discovery and model history queries."""
 
-from hashlib import sha256
 import itertools
 import re
 
 from pulsara_agent.conversation_kernel.prompt_content import (
-    PROMPT_BODY_MEDIA_TYPE,
-    decode_canonical_prompt_body,
     CanonicalPromptImageDescriptor,
 )
 from pulsara_agent.llm.input import (
@@ -20,8 +17,8 @@ from pulsara_agent.llm.input import (
 def prompt_history_text(parts, *, image_references: bool | None):
     """Project typed parts, keeping generated image spans out of lexical fields.
 
-    None is the caller-neutral search display; bool selects same/other-workspace
-    exact reading. Spans belong to this view, not to a stored authorization.
+    None is the caller-neutral search display; bool selects exact image
+    references. Spans belong to this view, not to a stored authorization.
     """
     shown, segments, bounds = [], [], []
     offset = 0
@@ -30,17 +27,12 @@ def prompt_history_text(parts, *, image_references: bool | None):
         if is_image:
             if image_references is None:
                 text = HISTORICAL_IMAGE_MARKER
-            elif image_references:
+            else:
                 text = image_reference_text(
                     image_ref=part.image_ref,
                     media_type=part.media_type,
                     width=part.width,
                     height=part.height,
-                )
-            else:
-                text = (
-                    f"[另一工作区的历史图片；{part.media_type}；"
-                    "此处未包含图像内容，不属于当前工作区的图片读取范围]"
                 )
         elif isinstance(part, LLMTextPart):
             text = part.text
@@ -70,25 +62,10 @@ def display_title(row):
 def decode_saved_text(row):
     if row["kind"] == "title":
         return display_title(row)
-    content = row["content"]
-    if content is None:
-        raise RuntimeError("saved session content is missing")
-    content = bytes(content)
-    if (
-        len(content) != row["size"]
-        or "sha256:" + sha256(content).hexdigest() != row["digest"]
-    ):
-        raise RuntimeError("saved session content is corrupt")
-    try:
-        if row["kind"] == "user" or row.get("media_type") == PROMPT_BODY_MEDIA_TYPE:
-            return "\n".join(
-                p.text if isinstance(p, LLMTextPart) else p.comment or ""
-                for p in decode_canonical_prompt_body(content).parts
-                if isinstance(p, (LLMTextPart, PromptAnnotationPart))
-            )
-        return content.decode("utf-8")
-    except (ValueError, TypeError) as exc:
-        raise RuntimeError("saved session content cannot be decoded") from exc
+    value = row["value"]
+    if not isinstance(value, str):
+        raise RuntimeError("saved session text value is invalid")
+    return value
 
 
 def entry_documents(rows):

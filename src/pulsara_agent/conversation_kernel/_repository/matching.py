@@ -3,34 +3,65 @@
 from __future__ import annotations
 
 from typing import Mapping
-from pulsara_agent.conversation_kernel.contracts import BlobContent, CanonicalContent, CommittedEventDraft, EntryKind, InlineContent, PromptDeliveryMode
+from hashlib import sha256
+from pulsara_agent.conversation_kernel.contracts import (
+    CanonicalContent,
+    CommittedEventDraft,
+    EntryKind,
+    InlineContent,
+    PromptDeliveryMode,
+)
 from pulsara_agent.conversation_kernel.vocabulary import SubjectSlot
 from pulsara_agent.model_input.contracts import CanonicalInputOriginKind
-from pulsara_agent.conversation_kernel.steer import PreparedSteerConsumptionCandidate, PreparedSteerResourceRejection
+from pulsara_agent.conversation_kernel.steer import (
+    PreparedSteerConsumptionCandidate,
+    PreparedSteerResourceRejection,
+)
 
 from .contracts import (
     ConversationKernelConflict,
 )
 
+
 class _MatchingOperations:
     @staticmethod
-    def _content_from_row(row: Mapping[str, object]) -> CanonicalContent:
-        if row["inline_content"] is not None:
-            return InlineContent(
-                canonical_bytes=bytes(row["inline_content"]),
-                digest=str(row["content_digest"]),
-                size=int(row["content_size"]),
-                media_type=str(row["content_media_type"]),
-                codec=str(row["content_codec"]),
-            )
-        return BlobContent(
-            blob_id=str(row["blob_id"]),
-            digest=str(row["content_digest"]),
-            size=int(row["content_size"]),
-            media_type=str(row["content_media_type"]),
-            codec=str(row["content_codec"]),
-        )
+    def _content_from_row(connection, row: Mapping[str, object]) -> CanonicalContent:
+        from pulsara_agent.conversation_kernel.content_parts import read_content_parts
+        from .queue_content import read_input_owner, input_body_storage
 
+        if (
+            row.get("entry_kind")
+            in {"USER_MESSAGE", "USER_STEER", "TERMINAL_OBSERVATION"}
+            or "queue_sequence" in row
+        ):
+            value = read_input_owner(
+                connection,
+                row=row,
+                queue_item_id=str(row["id"]) if "queue_sequence" in row else None,
+                transcript_entry_id=str(row["id"]) if "entry_sequence" in row else None,
+            )
+            return input_body_storage(value)
+        parts = read_content_parts(
+            connection, session_id=str(row["session_id"]), entry_id=str(row["id"])
+        )
+        if len(parts) == 1 and parts[0].type == "data":
+            body, media_type, codec = parts[0].value, parts[0].data_media_type, parts[0].data_codec
+        elif all(part.type == "text" for part in parts):
+            body, media_type, codec = (
+                "".join(part.value for part in parts).encode("utf-8"),
+                "text/plain", "utf-8",
+            )
+        else:
+            raise ConversationKernelConflict(
+                "content does not have a single canonical byte projection"
+            )
+        return InlineContent(
+            canonical_bytes=body,
+            digest="sha256:" + sha256(body).hexdigest(),
+            size=len(body),
+            media_type=media_type,
+            codec=codec,
+        )
 
 
 def _prompt_steer_row_matches_candidate(
@@ -38,27 +69,13 @@ def _prompt_steer_row_matches_candidate(
 ) -> bool:
     if row is None:
         return False
-    content = candidate.body_storage
-    storage_matches = (
-        (
-            bytes(row["inline_content"]) == content.canonical_bytes
-            and row["blob_id"] is None
-        )
-        if isinstance(content, InlineContent)
-        else (row["inline_content"] is None and str(row["blob_id"]) == content.blob_id)
-    )
     return bool(
         str(row["id"]) == candidate.queue_item_id
         and int(row["queue_sequence"]) == candidate.queue_sequence
         and row["command_id"] == candidate.command_id
         and str(row["delivery_mode"]) == PromptDeliveryMode.STEER_ACTIVE_TURN.value
-        and row['input_origin'] == candidate.input_origin.value
+        and row["input_origin"] == candidate.input_origin.value
         and str(row["target_turn_id"]) == candidate.exact_target_turn_id
-        and str(row["content_digest"]) == content.digest
-        and int(row["content_size"]) == content.size
-        and str(row["content_media_type"]) == content.media_type
-        and str(row["content_codec"]) == content.codec
-        and storage_matches
     )
 
 
@@ -68,10 +85,6 @@ def _prompt_steer_row_matches_resource_rejection(
 ) -> bool:
     if row is None:
         return False
-    try:
-        content = _MatchingOperations._content_from_row(row)
-    except (KeyError, TypeError, ValueError):
-        return False
     return bool(
         str(row["delivery_mode"]) == PromptDeliveryMode.STEER_ACTIVE_TURN.value
         and str(row["session_id"]) == candidate.session_id
@@ -80,7 +93,6 @@ def _prompt_steer_row_matches_resource_rejection(
         and int(row["queue_sequence"]) == candidate.queue_sequence
         and row["command_id"] == candidate.command_id
         and str(row["target_turn_id"]) == candidate.exact_target_turn_id
-        and content == candidate.content
     )
 
 
@@ -90,26 +102,17 @@ def _accepted_steer_entry_matches(
 ) -> bool:
     if row is None:
         return False
-    content = candidate.body_storage
-    storage_matches = (
-        (
-            bytes(row["inline_content"]) == content.canonical_bytes
-            and row["blob_id"] is None
-        )
-        if isinstance(content, InlineContent)
-        else (row["inline_content"] is None and str(row["blob_id"]) == content.blob_id)
-    )
     return bool(
         str(row["id"]) == candidate.new_entry_id
         and str(row["turn_id"]) == candidate.exact_target_turn_id
         and int(row["entry_sequence"]) == candidate.expected_entry_sequence
-        and str(row["entry_kind"]) == (EntryKind.TERMINAL_OBSERVATION.value if candidate.input_origin is CanonicalInputOriginKind.CELL_OUTPUT else EntryKind.USER_STEER.value)
-        and row['input_origin'] == candidate.input_origin.value
-        and str(row["content_digest"]) == content.digest
-        and int(row["content_size"]) == content.size
-        and str(row["content_media_type"]) == content.media_type
-        and str(row["content_codec"]) == content.codec
-        and storage_matches
+        and str(row["entry_kind"])
+        == (
+            EntryKind.TERMINAL_OBSERVATION.value
+            if candidate.input_origin is CanonicalInputOriginKind.CELL_OUTPUT
+            else EntryKind.USER_STEER.value
+        )
+        and row["input_origin"] == candidate.input_origin.value
     )
 
 

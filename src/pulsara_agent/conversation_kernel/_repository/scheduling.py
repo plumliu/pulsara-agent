@@ -33,10 +33,8 @@ from pulsara_agent.conversation_kernel.session_text import display_title, keywor
 from pulsara_agent.llm.model_connections import model_call_binding_from_dict
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.context import context_fingerprint
-from pulsara_agent.conversation_kernel.prompt_storage import (
-    canonical_prompt_owner_is_exact,
-    hydrate_canonical_prompt_owner,
-)
+from .queue_content import read_input_owner
+from .prompts import queued_input_owner_is_exact
 from pulsara_agent.conversation_kernel.prompt_content import freeze_canonical_prompt
 from pulsara_agent.llm.input import FrozenPromptContent, LLMTextPart
 from .locking import lock_session_admission
@@ -898,7 +896,7 @@ class _ScheduledTaskOperations:
             or q["requested_permission_mode"] is not None
         ):
             raise ScheduledTaskError("COMMAND_CONFLICT", "原立即运行补充输入不自洽。")
-        prompt = hydrate_canonical_prompt_owner(c, row=q, queue_item_id=q["id"])
+        prompt = read_input_owner(c, row=q, queue_item_id=q["id"])
         if len(prompt.content.parts) != 1 or not isinstance(
             prompt.content.parts[0], LLMTextPart
         ):
@@ -935,7 +933,7 @@ class _ScheduledTaskOperations:
                 command["target_queue_item_id"] != candidate.queue_item_id
                 or q["client_submission_id"] != candidate.client_submission_id
                 or not self._scheduled_queue_matches(q, candidate)
-                or not canonical_prompt_owner_is_exact(
+                or not queued_input_owner_is_exact(
                     c,
                     row=q,
                     expected=candidate.canonical_prompt,

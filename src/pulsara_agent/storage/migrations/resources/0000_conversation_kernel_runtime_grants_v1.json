@@ -62,7 +62,7 @@
       "SELECT",
       "INSERT"
     ],
-    "assistant_message_blocks": [
+    "content_parts": [
       "SELECT",
       "INSERT"
     ],
@@ -98,10 +98,6 @@
       "UPDATE",
       "DELETE"
     ],
-    "canonical_image_refs": [
-      "SELECT",
-      "INSERT"
-    ],
     "interaction_decisions": [
       "SELECT",
       "INSERT"
@@ -120,11 +116,6 @@
       "SELECT",
       "INSERT",
       "UPDATE",
-      "DELETE"
-    ],
-    "memory_relations": [
-      "SELECT",
-      "INSERT",
       "DELETE"
     ],
     "memory_embeddings": [
@@ -162,21 +153,31 @@
     "enforce_imported_history_invariants()": [
       "EXECUTE"
     ],
-    "enforce_memory_relation_endpoints()": [
-      "EXECUTE"
-    ],
     "seal_memory_fact()": [
       "EXECUTE"
     ],
-    "seal_memory_relation()": [
+    "enforce_session_root()": [
       "EXECUTE"
     ],
-    "enforce_session_root()": [
+    "enforce_content_part_invariants()": [
+      "EXECUTE"
+    ],
+    "enforce_queue_material_metadata()": [
       "EXECUTE"
     ]
   },
   "forbidden_runtime_grants": [
     "CREATE ON SCHEMA public",
     "INSERT|UPDATE|DELETE ON public.pulsara_schema_migrations"
-  ]
+  ],
+  "column_grants": {
+    "content_parts": {
+      "entry_id": [
+        "UPDATE"
+      ],
+      "queue_item_id": [
+        "UPDATE"
+      ]
+    }
+  }
 }

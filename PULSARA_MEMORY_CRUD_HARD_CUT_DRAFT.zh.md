@@ -2,7 +2,7 @@
 
 日期：2026-11-13。
 
-状态：产品与数据库修订草案，未实施。本轮只修改文档，确定记忆对象、管理语义、runtime observation 的隐式召回及存储删改边界；工具参数和返回值已在[记忆工具草案](native_tools/memory.md)确定，具体存储与消费者衔接在实施中逐项闭合。
+状态：记忆目标 DDL 及约束纳入[实施计划](PULSARA_HARD_CUT_IMPLEMENTATION_PLAN.zh.md)的 A 批 clean-v0；CRUD 服务、模型工具、页面及隐式召回的完整接入仍待相应工作包完成，不能恢复正常使用。本文确定记忆对象、管理语义、runtime observation 的隐式召回及存储删改边界；工具参数和返回值见[记忆工具草案](native_tools/memory.md)。
 
 ## 1. 目标与文档边界
 

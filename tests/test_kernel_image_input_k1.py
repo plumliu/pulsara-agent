@@ -62,7 +62,7 @@ def _validated_image(
         width=width,
         height=height,
     )
-    return bind_prompt_images(FrozenPromptContent((image,)), "workspace:" + "a" * 26).parts[0]
+    return bind_prompt_images(FrozenPromptContent((image,))).parts[0]
 
 
 def test_prompt_content_is_one_ordered_typed_ingress_vocabulary() -> None:

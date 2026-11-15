@@ -390,7 +390,7 @@ class CanonicalProtocolReader:
             ).fetchall()
             selected, used = [], 0
             for row in rows[:limit]:
-                item = self._queue_control(row)
+                item = self._queue_control(connection, row)
                 size = item.ByteSize() + 8
                 if used + size > MAXIMUM_SNAPSHOT_BYTES:
                     break
@@ -414,15 +414,15 @@ class CanonicalProtocolReader:
                 "SELECT * FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND id=%s",
                 (session_id, queue_item_id),
             ).fetchone()
-            return None if row is None else self._queue_control(row)
+            return None if row is None else self._queue_control(connection, row)
 
     @staticmethod
-    def _queue_control(row):
+    def _queue_control(connection, row):
         target = wire.PromptQueueControl(
             queue_item_id=str(row["id"]), queue_sequence=int(row["queue_sequence"]),
             status=str(row["status"]), input_origin=str(row["input_origin"]),
             delivery_mode=str(row["delivery_mode"]), target_turn_id=str(row["target_turn_id"] or ""),
-            content=_content_reference(row), command_id=str(row["command_id"] or ""),
+            content=_content_reference(_owner_display_content(connection, row, queue=True)), command_id=str(row["command_id"] or ""),
             accepted_at_utc=_utc(row["accepted_at"]),
             source_session_id=str(row["source_session_id"] or ""),
             source_work_id=str(row["source_work_id"] or ""),
@@ -430,7 +430,7 @@ class CanonicalProtocolReader:
             source_tool_attempt_id=str(row["source_tool_attempt_id"] or ""),
             consumed_entry_id=str(row["consumed_entry_id"] or ""),
             waiting_on=[str(item["source_work_id"]) for item in row["work_inputs"]
-                        if row["status"] == "PENDING" and item["kind"] == "dependency" and item["body"] is None],
+                        if row["status"] == "PENDING" and item["kind"] == "dependency" and not item["ready"]],
         )
         if row["input_origin"] == "AGENT_INSTRUCTION" and row["work_title"] is not None:
             target.work_title = row["work_title"]
@@ -1355,7 +1355,7 @@ class CanonicalProtocolReader:
         if is_valid_id(block_id, "reasoning-block") and reasoning_ordinal is None:
             raise ValueError("reasoning ordinal is required")
         with self._connection(deadline_monotonic) as connection:
-            session = self._session(connection, session_id)
+            self._session(connection, session_id)
             if reasoning_ordinal is not None:
                 derived = self._resolve_reasoning_content(
                     connection, session_id=session_id, entry_id=entry_id,
@@ -1367,8 +1367,7 @@ class CanonicalProtocolReader:
                 from pulsara_agent.conversation_kernel.prompt_storage import read_image_reference_in_connection
                 from pulsara_agent.conversation_kernel.prompt_content import MAXIMUM_PROMPT_MULTIPART_BYTES
                 image = read_image_reference_in_connection(
-                    connection, session_id=session_id, workspace_id=str(session["workspace_id"]),
-                    image_ref=image_ref, maximum_encoded_bytes=MAXIMUM_PROMPT_MULTIPART_BYTES,
+                    connection, image_ref=image_ref, maximum_encoded_bytes=MAXIMUM_PROMPT_MULTIPART_BYTES,
                 )
                 return {"validated_image": image, "inline_content": None,
                         "blob_id": image.image_ref, "content_digest": "sha256:" + sha256(image.immutable_bytes).hexdigest(),
@@ -1392,45 +1391,22 @@ class CanonicalProtocolReader:
                     row.update({key: facts[key] for key in ("image_ref", "width", "height")})
             elif queue_item_id is not None:
                 row = connection.execute(
-                    """
-                    SELECT session_id, workspace_id, inline_content, blob_id,
-                           content_digest, content_size, content_media_type,
-                           content_codec, status,
-                           consumed_entry_id
-                    FROM pulsara_v3.prompt_queue_items
-                    WHERE session_id = %s AND id = %s
-                    """,
+                    "SELECT * FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND id=%s",
                     (session_id, queue_item_id),
                 ).fetchone()
                 if row is not None and str(row["status"]) != "PENDING":
                     raise CanonicalQueueContentNotPending(
-                        queue_item_id=queue_item_id,
-                        status=str(row["status"]),
-                        consumed_entry_id=(
-                            str(row["consumed_entry_id"])
-                            if row["consumed_entry_id"] is not None
-                            else None
-                        ),
+                        queue_item_id=queue_item_id, status=str(row["status"]),
+                        consumed_entry_id=str(row["consumed_entry_id"]) if row["consumed_entry_id"] else None,
                     )
             elif block_id:
                 row = connection.execute(
-                    """
-                    SELECT b.inline_content, b.blob_id, b.content_digest,
-                           b.content_size, b.content_media_type, b.content_codec
-                    FROM pulsara_v3.assistant_message_blocks AS b
-                    WHERE b.session_id = %s AND b.assistant_entry_id = %s AND b.id = %s
-                    """,
+                    "SELECT * FROM pulsara_v3.content_parts WHERE session_id=%s AND entry_id=%s AND id=%s",
                     (session_id, entry_id, block_id),
                 ).fetchone()
             else:
                 row = connection.execute(
-                    """
-                    SELECT session_id, workspace_id, entry_kind, inline_content,
-                           blob_id, content_digest, content_size,
-                           content_media_type, content_codec
-                    FROM pulsara_v3.transcript_entries
-                    WHERE session_id = %s AND id = %s
-                    """,
+                    "SELECT * FROM pulsara_v3.transcript_entries WHERE session_id=%s AND id=%s",
                     (session_id, entry_id),
                 ).fetchone()
             if row is None:
@@ -1453,7 +1429,11 @@ class CanonicalProtocolReader:
                     queue_item_id=queue_item_id,
                     transcript_entry_id=entry_id,
                 )
-            return dict(row)
+            if visualization_ordinal is not None:
+                return dict(row)
+            if block_id:
+                return _part_display_content(connection, row)
+            return _owner_display_content(connection, row, queue=queue_item_id is not None)
 
     def tool_output_workspace(
         self, *, session_id: str, deadline_monotonic: float,
@@ -1608,32 +1588,24 @@ class CanonicalProtocolReader:
 
     @staticmethod
     def _assistant_part_sizes(connection, session_id, entry_ids):
-        # Binary DataRow: 1+4 framing, 2 field count, 20*4 cell lengths = 87.
-        # Other fields use exact wire sizes. Only uncompressed JSONB is quoted
-        # from its physical size, without formatting a deep future body. After
-        # bounded admission, _assistant_batchable_ids permits flat scalar
-        # objects: strings expand by at most 6 for JSON escaping, and scale-0
-        # signed-int64 numbers need <=20 characters (covered by 6*their JSONB
-        # datum/JEntry bytes). JSON punctuation fits the same bound. Compressed,
-        # nested and other numeric bodies retain the ordinary candidate read.
         values = connection.execute(
             """SELECT assistant_entry_id,
                  CASE WHEN bool_or(raw_bytes IS NULL) THEN NULL ELSE sum(raw_bytes) END AS raw_bytes FROM (
-                 SELECT assistant_entry_id,
-                   87::bigint + octet_length(assistant_entry_id) + 5 + octet_length(id) + 4
-                   + octet_length(block_kind) + coalesce(octet_length(tool_call_id),0)
+                 SELECT entry_id AS assistant_entry_id,
+                   91::bigint + 2 * octet_length(entry_id) + octet_length(id)
+                   + octet_length(session_id) + octet_length(workspace_id) + 9
+                   + octet_length(type) + coalesce(octet_length(tool_call_id),0)
                    + coalesce(octet_length(tool_name),0)
                    + CASE WHEN pg_column_compression(tool_arguments) IS NOT NULL THEN NULL
                           ELSE coalesce(6 * pg_column_size(tool_arguments)::bigint,0) END
-                   + coalesce(octet_length(inline_content),0) + coalesce(octet_length(blob_id),0)
-                   + coalesce(octet_length(content_digest),0) + CASE WHEN content_size IS NULL THEN 0 ELSE 8 END
-                   + coalesce(octet_length(content_media_type),0) + coalesce(octet_length(content_codec),0) AS raw_bytes
-                 FROM pulsara_v3.assistant_message_blocks
-                 WHERE session_id=%s AND assistant_entry_id=ANY(%s)
+                   + coalesce(octet_length(inline_value),0) + coalesce(octet_length(blob_id),0)
+                   + coalesce(octet_length(data_media_type),0) + coalesce(octet_length(data_codec),0) AS raw_bytes
+                 FROM pulsara_v3.content_parts WHERE session_id=%s AND entry_id=ANY(%s)
                  UNION ALL
                  SELECT assistant_entry_id,
-                   87::bigint + octet_length(assistant_entry_id) + 6 + octet_length(assistant_entry_kind)
-                   + octet_length(codec_kind) + octet_length(payload_bytes) + octet_length(payload_digest) + 8 + 8
+                   91::bigint + octet_length(assistant_entry_id) + octet_length(assistant_entry_kind)
+                   + octet_length(session_id) + octet_length(workspace_id) + 6
+                   + octet_length(codec_kind) + octet_length(payload_bytes) + octet_length(payload_digest) + 16
                  FROM pulsara_v3.provider_assistant_replay_fragments
                  WHERE session_id=%s AND assistant_entry_id=ANY(%s)
                ) sizes GROUP BY assistant_entry_id""",
@@ -1650,8 +1622,8 @@ class CanonicalProtocolReader:
         values = connection.execute(
             """SELECT e.id FROM pulsara_v3.transcript_entries e
                WHERE e.session_id=%s AND e.id=ANY(%s) AND NOT EXISTS (
-                 SELECT 1 FROM pulsara_v3.assistant_message_blocks b
-                 WHERE b.session_id=e.session_id AND b.assistant_entry_id=e.id
+                 SELECT 1 FROM pulsara_v3.content_parts b
+                 WHERE b.session_id=e.session_id AND b.entry_id=e.id
                    AND b.tool_arguments IS NOT NULL AND CASE
                      WHEN jsonb_typeof(b.tool_arguments)<>'object' THEN TRUE
                      ELSE EXISTS (
@@ -1670,23 +1642,22 @@ class CanonicalProtocolReader:
     @staticmethod
     def _assistant_parts_batch(connection, session_id, entry_ids):
         rows = connection.execute(
-            """SELECT assistant_entry_id AS relation_entry_id, 'BLOCK' AS relation_kind,
-                      id, block_ordinal, block_kind, tool_call_id, tool_name,
-                      convert_to(tool_arguments::text,'UTF8') AS tool_arguments, inline_content,
-                      blob_id, content_digest, content_size, content_media_type, content_codec,
+            """SELECT entry_id AS relation_entry_id, 'BLOCK' AS relation_kind,
+                      id, session_id, workspace_id, entry_id, queue_item_id, ordinal, type,
+                      inline_value, blob_id, tool_call_id, tool_name,
+                      convert_to(tool_arguments::text,'UTF8') AS tool_arguments, data_media_type, data_codec,
                       NULL::text AS assistant_entry_kind, NULL::text AS codec_kind,
                       NULL::bytea AS payload_bytes, NULL::text AS payload_digest,
                       NULL::bigint AS payload_size, NULL::bigint AS item_count
-               FROM pulsara_v3.assistant_message_blocks
-               WHERE session_id=%s AND assistant_entry_id=ANY(%s)
+               FROM pulsara_v3.content_parts WHERE session_id=%s AND entry_id=ANY(%s)
                UNION ALL
-               SELECT assistant_entry_id, 'REPLAY', NULL::text, NULL::integer, NULL::text,
-                      NULL::text, NULL::text, NULL::bytea, NULL::bytea,
-                      NULL::text, NULL::text, NULL::bigint, NULL::text, NULL::text,
+               SELECT assistant_entry_id, 'REPLAY', NULL::text, session_id, workspace_id,
+                      NULL::text, NULL::text, NULL::integer, NULL::text, NULL::bytea,
+                      NULL::text, NULL::text, NULL::text, NULL::bytea, NULL::text, NULL::text,
                       assistant_entry_kind, codec_kind, payload_bytes, payload_digest, payload_size, item_count::bigint
                FROM pulsara_v3.provider_assistant_replay_fragments
                WHERE session_id=%s AND assistant_entry_id=ANY(%s)
-               ORDER BY relation_entry_id, relation_kind, block_ordinal""",
+               ORDER BY relation_entry_id, relation_kind, ordinal""",
             (session_id, entry_ids, session_id, entry_ids), binary=True,
         ).fetchall()
         parts = {entry_id: ([], None) for entry_id in entry_ids}
@@ -1717,12 +1688,11 @@ class CanonicalProtocolReader:
                       result.id AS tool_result_id, result.attempt_id, result.tool_call_entry_id, result.tool_call_id,
                       invocation.id AS invocation_id, invocation.source_kind, invocation.source_exec_attempt_id,
                       invocation.call_sequence, invocation.tool_name, invocation.original_arguments,
-                      result.result_state, result.result_facts, (result.output_body_inline_content IS NOT NULL OR result.output_body_blob_id IS NOT NULL) AS output_body_available, result.output_source_coverage,
-                      result.output_omitted, result.output_source_coverage_reason,
+                      result.result_state, result.result_facts, result.public_fields,
+                      result.output_unavailability_reason IS NULL AS output_body_available,
                       result.output_unavailability_reason,
                       queue.id AS queue_item_id, queue.command_id, queue.delivery_mode, queue.source_session_id, queue.source_work_id,
                       queue.source_turn_id, queue.source_tool_attempt_id, queue.work_title,
-                      revision.command_id AS revision_command_id,
                       CASE e.entry_owner_kind
                         WHEN 'EXECUTED_TURN' THEN t.status IN ('COMPLETED', 'INTERRUPTED') AND t.final_entry_id=e.id
                         WHEN 'IMPORTED_HISTORY' THEN g.status IN ('COMPLETED', 'INTERRUPTED') AND g.final_entry_id=e.id
@@ -1751,16 +1721,6 @@ class CanonicalProtocolReader:
                  WHERE e.entry_owner_kind='EXECUTED_TURN' AND e.entry_kind IN ('USER_MESSAGE', 'USER_STEER', 'TERMINAL_OBSERVATION')
                    AND session_id=e.session_id AND consumed_entry_id=e.id LIMIT 1
                ) queue ON true
-               LEFT JOIN LATERAL (
-                 SELECT c.command_id FROM pulsara_v3.plan_interactions i
-                 JOIN pulsara_v3.session_commands c ON c.session_id=i.session_id
-                   AND c.target_plan_interaction_id=i.id AND c.command_id=i.resolution_command_id
-                   AND c.command_kind='RESOLVE_PLAN_INTERACTION'
-                 WHERE e.entry_owner_kind='EXECUTED_TURN' AND e.entry_kind='USER_MESSAGE'
-                   AND queue.id IS NULL AND i.session_id=e.session_id
-                   AND i.decision_continuation_entry_id=e.id AND i.kind='DRAFT_REVIEW'
-                   AND i.status='REVISION_REQUESTED' LIMIT 1
-               ) revision ON true
                WHERE e.session_id=%s AND e.id=ANY(%s)""",
             (session_id, [str(row["id"]) for row in rows]),
         ).fetchall()
@@ -1796,9 +1756,9 @@ class CanonicalProtocolReader:
         else:
             blocks = connection.execute(
                 """
-                SELECT * FROM pulsara_v3.assistant_message_blocks
-                WHERE session_id = %s AND assistant_entry_id = %s
-                ORDER BY block_ordinal
+                SELECT * FROM pulsara_v3.content_parts
+                WHERE session_id = %s AND entry_id = %s
+                ORDER BY ordinal
                 """,
                 (row["session_id"], entry_id),
             ).fetchall() if root_assistant else ()
@@ -1841,7 +1801,7 @@ class CanonicalProtocolReader:
             provider_input_through_sequence=int(
                 row["provider_input_through_sequence"] or 0
             ),
-            content=_content_reference(row),
+            content=_content_reference(_owner_display_content(connection, row)),
             accepted_at_utc=_utc(row["accepted_at"]),
             input_origin=str(row["input_origin"] or ""),
         )
@@ -1854,8 +1814,7 @@ class CanonicalProtocolReader:
                     """SELECT result.attempt_id, result.tool_call_entry_id, result.tool_call_id, result.result_state,
                               invocation.id AS invocation_id, invocation.source_kind, invocation.source_exec_attempt_id,
                               invocation.call_sequence, invocation.tool_name, invocation.original_arguments, result.result_facts,
-                              (output_body_inline_content IS NOT NULL OR output_body_blob_id IS NOT NULL) AS output_body_available, output_source_coverage,
-                              output_omitted, output_source_coverage_reason,
+                              result.public_fields, result.output_unavailability_reason IS NULL AS output_body_available,
                               output_unavailability_reason
                        FROM pulsara_v3.tool_results result
                        JOIN pulsara_v3.tool_invocations invocation
@@ -1868,8 +1827,8 @@ class CanonicalProtocolReader:
             result.tool_result.CopyFrom(wire.CanonicalToolResult(
                 assistant_entry_id=str(tool_result["tool_call_entry_id"] or ""),
                 attempt_id=str(tool_result["attempt_id"] or ""),
-                invocation_id=str(tool_result["invocation_id"]),
-                source_kind=str(tool_result["source_kind"]),
+                invocation_id=str(tool_result["invocation_id"] or ""),
+                source_kind=str(tool_result["source_kind"] or ""),
                 source_exec_attempt_id=str(tool_result["source_exec_attempt_id"] or ""),
                 call_sequence=int(tool_result["call_sequence"] or 0),
                 tool_name=str(tool_result["tool_name"] or ""),
@@ -1878,9 +1837,7 @@ class CanonicalProtocolReader:
                 result_state=str(tool_result["result_state"]),
                 result_facts_json=json.dumps(tool_result["result_facts"], ensure_ascii=False, separators=(",", ":")),
                 output_body_available=bool(tool_result["output_body_available"]),
-                source_coverage=str(tool_result["output_source_coverage"]),
-                output_omitted=bool(tool_result["output_omitted"]),
-                source_coverage_reason=str(tool_result["output_source_coverage_reason"] or ""),
+                source_coverage="COMPLETE",
                 output_unavailability_reason=str(tool_result["output_unavailability_reason"] or ""),
             ))
         if (
@@ -1909,31 +1866,6 @@ class CanonicalProtocolReader:
                 ))
                 if row["input_origin"] == "AGENT_INSTRUCTION" and source["work_title"] is not None:
                     result.input_source.work_title = source["work_title"]
-            elif row["entry_kind"] == "USER_MESSAGE":
-                revision = (
-                    {"command_id": related["revision_command_id"]}
-                    if related is not None and related["revision_command_id"] is not None else None
-                )
-                if related is None:
-                    revision = connection.execute(
-                        """SELECT c.command_id
-                           FROM pulsara_v3.plan_interactions AS i
-                           JOIN pulsara_v3.session_commands AS c
-                             ON c.session_id = i.session_id
-                            AND c.target_plan_interaction_id = i.id
-                            AND c.command_id = i.resolution_command_id
-                            AND c.command_kind = 'RESOLVE_PLAN_INTERACTION'
-                           WHERE i.session_id = %s
-                             AND i.decision_continuation_entry_id = %s
-                             AND i.kind = 'DRAFT_REVIEW'
-                             AND i.status = 'REVISION_REQUESTED'""",
-                        (row["session_id"], entry_id),
-                    ).fetchone()
-                if revision is not None:
-                    result.input_source.CopyFrom(wire.CanonicalInputSource(
-                        command_id=str(revision["command_id"]),
-                        delivery_mode="NEW_TURN",
-                    ))
         if combined_assistant:
             reasoning = self._project_reasoning_blocks(stored_row, replay)
         elif root_assistant and related is not None and not related["has_replay"]:
@@ -1961,8 +1893,8 @@ class CanonicalProtocolReader:
             )
             item = result.blocks.add(
                 block_id=str(block["id"]),
-                ordinal=int(block["block_ordinal"]),
-                block_kind=str(block["block_kind"]),
+                ordinal=int(block["ordinal"]),
+                block_kind=str(block["type"]).upper(),
                 tool_call_id=str(block["tool_call_id"] or ""),
                 tool_name=str(block["tool_name"] or ""),
                 # A display prefix can end in the middle of a UTF-8 code point.
@@ -1979,8 +1911,8 @@ class CanonicalProtocolReader:
                 ),
                 tool_arguments_size=len(arguments),
             )
-            if block["block_kind"] in ("TEXT", "DATA"):
-                item.content.CopyFrom(_content_reference(block))
+            if block["type"] in ("text", "data"):
+                item.content.CopyFrom(_content_reference(_part_display_content(connection, block, metadata_only=True)))
         if row["entry_kind"] == "ASSISTANT_MESSAGE" and (related is None or related["has_visualizations"]):
             from pulsara_agent.conversation_kernel.visualization import saved_visualizations
             for facts in saved_visualizations(connection, str(row["session_id"]), entry_id):
@@ -1989,33 +1921,15 @@ class CanonicalProtocolReader:
 
     @staticmethod
     def _assistant_parts(connection, session_id: str, entry_id: str):
-        """Co-read one admitted assistant's blocks and replay carrier.
-
-        UNION keeps the carrier singular instead of duplicating its potentially
-        large bytes for every block. ROOT final messages keep their separate
-        reads so fork TEXT/blob validation cannot overlap a new replay carrier.
-        """
-        rows = connection.execute(
-            """SELECT 'BLOCK' AS relation_kind, id, block_ordinal, block_kind,
-                      tool_call_id, tool_name, tool_arguments, inline_content,
-                      blob_id, content_digest, content_size, content_media_type, content_codec,
-                      NULL::text AS assistant_entry_kind, NULL::text AS codec_kind,
-                      NULL::bytea AS payload_bytes, NULL::text AS payload_digest,
-                      NULL::bigint AS payload_size, NULL::bigint AS item_count
-               FROM pulsara_v3.assistant_message_blocks
-               WHERE session_id=%s AND assistant_entry_id=%s
-               UNION ALL
-               SELECT 'REPLAY', NULL::text, NULL::integer, NULL::text,
-                      NULL::text, NULL::text, NULL::jsonb, NULL::bytea,
-                      NULL::text, NULL::text, NULL::bigint, NULL::text, NULL::text,
-                      assistant_entry_kind, codec_kind, payload_bytes, payload_digest, payload_size, item_count
-               FROM pulsara_v3.provider_assistant_replay_fragments
-               WHERE session_id=%s AND assistant_entry_id=%s
-               ORDER BY relation_kind, block_ordinal""",
-            (session_id, entry_id, session_id, entry_id),
+        blocks = connection.execute(
+            "SELECT * FROM pulsara_v3.content_parts WHERE session_id=%s AND entry_id=%s ORDER BY ordinal",
+            (session_id, entry_id),
         ).fetchall()
-        blocks = tuple(row for row in rows if row["relation_kind"] == "BLOCK")
-        replay = next((row for row in rows if row["relation_kind"] == "REPLAY"), None)
+        replay = connection.execute(
+            """SELECT assistant_entry_kind,codec_kind,payload_bytes,payload_digest,payload_size,item_count
+               FROM pulsara_v3.provider_assistant_replay_fragments WHERE session_id=%s AND assistant_entry_id=%s""",
+            (session_id, entry_id),
+        ).fetchone()
         return blocks, replay
 
     @staticmethod
@@ -2097,9 +2011,9 @@ class CanonicalProtocolReader:
             """
             SELECT i.*, b.tool_arguments
             FROM pulsara_v3.plan_interactions AS i
-            JOIN pulsara_v3.assistant_message_blocks AS b
+            JOIN pulsara_v3.content_parts AS b
               ON b.session_id = i.session_id
-             AND b.assistant_entry_id = i.assistant_entry_id
+             AND b.entry_id = i.assistant_entry_id
              AND b.tool_call_id = i.tool_call_id
             WHERE i.session_id = %s AND i.status = 'OPEN'
             """,
@@ -2336,7 +2250,7 @@ class CanonicalProtocolReader:
             ).fetchall() if total else ()
             used, loaded, cursor = 0, 0, 0
             for row in rows:
-                item = self._queue_control(row)
+                item = self._queue_control(connection, row)
                 size = item.ByteSize() + 8
                 if used + size > lane_bytes:
                     break
@@ -2460,25 +2374,88 @@ def _entry_kind(value: str) -> int:
         raise RuntimeError("unknown canonical entry kind") from exc
 
 
+def _display_content(content: bytes, *, media_type="text/plain", codec="utf-8"):
+    return {"inline_content": content, "blob_id": None,
+            "content_digest": "sha256:" + sha256(content).hexdigest(),
+            "content_size": len(content), "content_media_type": media_type, "content_codec": codec}
+
+
+def _part_display_content(connection, row, *, metadata_only=False):
+    if metadata_only and row["blob_id"] is not None and row["type"] in {"text", "data"}:
+        blob = connection.execute(
+            "SELECT logical_digest,logical_size,media_type,codec FROM pulsara_v3.blobs WHERE id=%s",
+            (row["blob_id"],),
+        ).fetchone()
+        if blob is None:
+            raise ConversationKernelConflict("display content blob is missing")
+        return {"inline_content": None, "blob_id": row["blob_id"],
+                "content_digest": blob["logical_digest"], "content_size": blob["logical_size"],
+                "content_media_type": blob["media_type"], "content_codec": blob["codec"]}
+    from pulsara_agent.conversation_kernel.content_parts import decode_content_part
+    part = decode_content_part(connection, row)
+    if part.type == "text":
+        return _display_content(part.value.encode("utf-8"))
+    if part.type == "data":
+        return _display_content(part.value, media_type=part.data_media_type, codec=part.data_codec)
+    raise ValueError("this content part has no standalone display body")
+
+
+def _owner_display_content(connection, row, *, queue=False):
+    from pulsara_agent.conversation_kernel.content_parts import read_content_parts
+    owner = {"queue_item_id": str(row["id"])} if queue else {"entry_id": str(row["id"])}
+    limits = {}
+    if queue:
+        if row["status"] == "CONSUMED":
+            owner = {"entry_id": str(row["consumed_entry_id"])}
+        elif row["work_inputs"]:
+            instruction = row["work_inputs"][0]
+            limits = {"ordinal_start": instruction["content_start"],
+                      "ordinal_stop": instruction["content_start"] + instruction["content_count"]}
+    elif row["entry_kind"] in {"ASSISTANT_MESSAGE", "ASSISTANT_TOOL_REQUEST"}:
+        return _display_content(b"")
+    elif row["entry_kind"] == "TOOL_RESULT":
+        from pulsara_agent.conversation_kernel.tool_outputs import read_accepted_tool_business_value, project_tool_result_export
+        result = connection.execute(
+            "SELECT * FROM pulsara_v3.tool_results WHERE session_id=%s AND result_entry_id=%s",
+            (row["session_id"], row["id"]),
+        ).fetchone()
+        if result is None:
+            raise ValueError("canonical tool result is missing its relational row")
+        if result["output_unavailability_reason"] is not None:
+            return _display_content(("Tool result content could not be accepted: " + result["output_unavailability_reason"]).encode("utf-8"))
+        return _display_content(project_tool_result_export(read_accepted_tool_business_value(connection, result)))
+    parts = read_content_parts(connection, session_id=str(row["session_id"]), **owner, **limits)
+    if (queue and row["input_origin"] == "CELL_OUTPUT") or (
+        not queue and row["entry_kind"] == "TERMINAL_OBSERVATION"
+    ):
+        from pulsara_agent.conversation_kernel.prompt_content import PROMPT_BODY_MEDIA_TYPE
+        if any(part.type != "text" for part in parts):
+            raise ValueError("Cell display content requires text")
+        # JSON transports the original JavaScript code units, including lone
+        # surrogates. This is an ephemeral wire projection, never saved body.
+        body = {"parts": [{"type": "text", "text": part.value} for part in parts]}
+        return _display_content(
+            json.dumps(body, ensure_ascii=True, separators=(",", ":")).encode("utf-8"),
+            media_type=PROMPT_BODY_MEDIA_TYPE,
+        )
+    if queue or row["entry_kind"] in {"USER_MESSAGE", "USER_STEER"}:
+        from pulsara_agent.conversation_kernel.prompt_storage import content_parts_to_prompt
+        from pulsara_agent.conversation_kernel.prompt_content import PROMPT_BODY_MEDIA_TYPE
+        return _display_content(content_parts_to_prompt(connection, parts).body, media_type=PROMPT_BODY_MEDIA_TYPE)
+    if any(part.type != "text" for part in parts):
+        raise ValueError("control entry requires textual display content")
+    return _display_content("".join(part.value for part in parts).encode("utf-8"))
+
+
 def _content_reference(row: Mapping[str, object]) -> wire.CanonicalContentReference:
-    inline = row.get("inline_content")
-    blob_id = row.get("blob_id")
-    digest = str(row.get("content_digest") or "")
-    size = int(row.get("content_size") or 0)
-    result = wire.CanonicalContentReference(
-        kind=wire.INLINE if inline is not None else wire.CANONICAL_BLOB,
-        inline_content=bytes(inline or b""),
-        digest=digest,
-        size=size,
-        media_type=str(row.get("content_media_type") or ""),
-        codec=str(row.get("content_codec") or ""),
+    content = row["inline_content"]
+    inline = content is not None and len(content) <= MAXIMUM_REASONING_INLINE_BYTES
+    return wire.CanonicalContentReference(
+        kind=wire.INLINE if inline else wire.CANONICAL_BLOB,
+        inline_content=bytes(content) if inline else b"",
+        digest=str(row["content_digest"]), size=int(row["content_size"]),
+        media_type=str(row["content_media_type"]), codec=str(row["content_codec"]),
     )
-    if result.kind == wire.INLINE:
-        if blob_id is not None or len(result.inline_content) != size:
-            raise RuntimeError("canonical inline content edge is corrupt")
-    elif inline is not None or blob_id is None:
-        raise RuntimeError("canonical blob content edge is corrupt")
-    return result
 
 
 def _reasoning_content_reference(content: bytes) -> wire.CanonicalContentReference:

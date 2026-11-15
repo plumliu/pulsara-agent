@@ -630,13 +630,13 @@ class EditFileTool(WorkspaceTool):
                 if not budget.fits(json_text(payload)):
                     native_payload = {**required, "changed_windows": changed_windows,
                                       "changed_windows_truncated": windows_truncated}
-                    while changed_windows and not budget.fits(json_text(native_payload), include_read=budget.read is not None):
+                    while changed_windows and not budget.fits(json_text(native_payload)):
                         changed_windows = changed_windows[:-1]
                         seen_intervals = seen_intervals[:-1]
                         windows_truncated = True
                         native_payload = {**required, "changed_windows": changed_windows,
                                           "changed_windows_truncated": True}
-                    if not budget.fits(json_text(native_payload), include_read=budget.read is not None):
+                    if not budget.fits(json_text(native_payload)):
                         return _text_boundary(self, call, required["target"],
                             ToolResultPageBoundary("The edit receipt does not fit. The file was not changed."))
                     payload = {**required, "changed_windows": changed_windows,

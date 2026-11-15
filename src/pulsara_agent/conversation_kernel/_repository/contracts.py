@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pulsara_agent.identity import derive_id
+from pulsara_agent.identity import derive_id, require_id
 from pulsara_agent.conversation_kernel.tool_invocations import ToolInvocationSource, current_tool_invocation
 
 
@@ -23,12 +23,6 @@ from pulsara_agent.conversation_kernel.contracts import (
     InlineContent,
     canonical_digest,
 )
-from pulsara_agent.conversation_kernel.memory.writes import (
-    PreparedMemoryMutation,
-    PreparedRememberWrite,
-    PreparedMemoryRelationWrite,
-    memory_mutation_manifest,
-)
 from pulsara_agent.conversation_kernel.limits import (
     PLAN_CONTROL_RESULT_INLINE_HARD_BYTES,
     STAGE2_LIMITS,
@@ -46,10 +40,10 @@ from pulsara_agent.conversation_kernel.repository_errors import (
     ConversationKernelConflict,
 )
 from pulsara_agent.ports.tool_output import ToolOutputUnavailableReason
+from pulsara_agent.ports.tool_execution import ToolBusinessValue
+from pulsara_agent.conversation_kernel.content_parts import ResultPart
 from pulsara_agent.ports.tool_execution import (
-    ToolOutputSourceCoverage,
-    ToolOutputSourceCoverageReason,
-    FrozenToolJsonDict, freeze_tool_json_object, thaw_tool_json_object,
+    FrozenToolJsonDict, freeze_tool_json_object,
 )
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
@@ -379,31 +373,6 @@ class PreparedToolRemoteIdentityPublication:
             raise ValueError("prepared tool remote identity publication is invalid")
 
 
-class ToolResultSideBranchKind(StrEnum):
-    NONE = "NONE"
-    MEMORY_MUTATION = "MEMORY_MUTATION"
-
-
-@dataclass(frozen=True, slots=True)
-class NoToolResultSideBranch:
-    branch_kind: ToolResultSideBranchKind = ToolResultSideBranchKind.NONE
-
-
-@dataclass(frozen=True, slots=True)
-class PreparedMemoryMutationSideBranch:
-    mutation: PreparedMemoryMutation
-    branch_kind: ToolResultSideBranchKind = ToolResultSideBranchKind.MEMORY_MUTATION
-
-    def __post_init__(self) -> None:
-        if not isinstance(
-            self.mutation, (PreparedRememberWrite, PreparedMemoryRelationWrite)
-        ):
-            raise TypeError("memory side branch requires a frozen mutation")
-
-
-ToolResultSideBranch = NoToolResultSideBranch | PreparedMemoryMutationSideBranch
-
-
 @dataclass(frozen=True, slots=True)
 class PreparedToolResultAcceptance:
     session_id: str
@@ -415,27 +384,35 @@ class PreparedToolResultAcceptance:
     tool_call_id: str
     attempt_id: str | None
     result_state: str
-    canonical_preview_content: InlineContent
-    canonical_prompt: FrozenCanonicalPrompt | None
-    output_body: CanonicalContent | None
+    public_fields: FrozenToolJsonDict
+    content_parts: tuple[ResultPart, ...]
     output_unavailability_reason: ToolOutputUnavailableReason | None
-    source_coverage: ToolOutputSourceCoverage
-    output_omitted: bool
-    source_coverage_reason: ToolOutputSourceCoverageReason | None
     observed_at: datetime
     observation_duration_microseconds: int | None
     observation_origin_kind: ToolObservationOrigin
     trusted_tool_reported_duration_microseconds: int | None
     actor_id: str
     tool_result_occurrence: CommittedEventDraft
-    side_branch: ToolResultSideBranch
     model_visible_memory_fact_ids: tuple[str, ...] = ()
-    required_facts: FrozenToolJsonDict = field(default_factory=FrozenToolJsonDict)
-    candidate_fingerprint: str = field(init=False)
+    result_facts: FrozenToolJsonDict = field(default_factory=FrozenToolJsonDict)
     invocation_source: ToolInvocationSource | None = field(default_factory=current_tool_invocation.get)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "required_facts", freeze_tool_json_object(self.required_facts))
+        for value, kind in ((self.session_id, "session"), (self.workspace_id, "workspace"),
+                (self.result_id, "result"), (self.result_entry_id, "entry"), (self.turn_id, "turn")):
+            require_id(value, kind)
+        if self.assistant_entry_id is not None:
+            require_id(self.assistant_entry_id, "entry")
+        if self.attempt_id is not None:
+            require_id(self.attempt_id, "attempt")
+        declared = ToolBusinessValue(self.public_fields, self.content_parts)
+        object.__setattr__(self, "public_fields", declared.public_fields)
+        object.__setattr__(self, "content_parts", declared.content)
+        object.__setattr__(self, "result_facts", freeze_tool_json_object(self.result_facts))
+        if self.output_unavailability_reason is not None and not isinstance(
+            self.output_unavailability_reason, ToolOutputUnavailableReason
+        ):
+            raise TypeError("result unavailability must describe an actual publication failure")
         if not all(
             (
                 self.session_id,
@@ -449,18 +426,6 @@ class PreparedToolResultAcceptance:
             )
         ):
             raise ValueError("prepared tool result identity is incomplete")
-        if not isinstance(self.canonical_preview_content, InlineContent):
-            raise TypeError("prepared tool result preview must be inline")
-        if self.canonical_prompt is not None:
-            if not isinstance(self.canonical_prompt, FrozenCanonicalPrompt):
-                raise TypeError("prepared ToolResult prompt must be canonical")
-            if (
-                self.canonical_preview_content.canonical_bytes
-                != self.canonical_prompt.body
-                or self.canonical_preview_content.media_type != PROMPT_BODY_MEDIA_TYPE
-                or self.canonical_preview_content.codec != PROMPT_BODY_CODEC
-            ):
-                raise ValueError("prepared ToolResult prompt body does not exact-join")
         attempted_states = {
             "SUCCESS",
             "INVALID_ARGUMENTS",
@@ -480,19 +445,6 @@ class PreparedToolResultAcceptance:
             self.attempt_id is not None and self.result_state not in attempted_states
         ):
             raise ValueError("prepared tool result attempt/state union is invalid")
-        deferred_body = isinstance(self.side_branch, PreparedMemoryMutationSideBranch) or self.canonical_prompt is not None
-        if not deferred_body and (self.output_body is None) != (self.output_unavailability_reason is not None):
-            raise ValueError("prepared result body availability is inconsistent")
-        if self.output_body is not None and self.output_unavailability_reason is not None:
-            raise ValueError("available result body cannot carry unavailability")
-        if type(self.output_omitted) is not bool:
-            raise TypeError("prepared output_omitted must be a boolean")
-        if (self.source_coverage is ToolOutputSourceCoverage.COMPLETE) != (
-            self.source_coverage_reason is None
-        ):
-            raise ValueError("prepared tool result coverage is inconsistent")
-        if self.canonical_preview_content.size > 65_536:
-            raise ValueError("prepared tool result preview exceeds its hard bound")
         if (
             len(self.model_visible_memory_fact_ids)
             > MAXIMUM_TOOL_RESULT_MEMORY_PROVENANCE_ITEMS
@@ -533,9 +485,6 @@ class PreparedToolResultAcceptance:
             ToolObservationOrigin.PLAN_CONTROL,
         }:
             raise ValueError("prepared physical result has a nonphysical origin")
-        body = self.output_body
-        if body is not None and (body.codec != "utf-8" or body.size > STAGE2_LIMITS.canonical_blob_hard_bytes):
-            raise ValueError("prepared output body descriptor is invalid")
         expected_event_id = derive_id("event", "accepted", self.session_id, "TOOL_RESULT_ACCEPTED", "ENTRY", self.result_entry_id, "")
         occurrence = self.tool_result_occurrence
         if (
@@ -555,28 +504,6 @@ class PreparedToolResultAcceptance:
             }
         ):
             raise ValueError("prepared tool result occurrence is not exact")
-        if isinstance(self.side_branch, NoToolResultSideBranch):
-            if self.side_branch.branch_kind is not ToolResultSideBranchKind.NONE:
-                raise ValueError("prepared no-side-branch discriminator is invalid")
-        elif isinstance(self.side_branch, PreparedMemoryMutationSideBranch):
-            if (
-                self.side_branch.branch_kind
-                is not ToolResultSideBranchKind.MEMORY_MUTATION
-                or self.result_state != "SUCCESS"
-                or self.attempt_id is None
-                or self.actor_id not in {"remember", "mark_memory_relation"}
-                or (self.actor_id == "remember")
-                != isinstance(self.side_branch.mutation, PreparedRememberWrite)
-            ):
-                raise ValueError("prepared memory mutation side branch is not exact")
-        else:
-            raise TypeError("prepared tool result side branch is not closed")
-        payload = _prepared_tool_result_manifest(self)
-        object.__setattr__(
-            self,
-            "candidate_fingerprint",
-            canonical_digest("pulsara:prepared-tool-result-acceptance:v1", payload),
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -717,14 +644,13 @@ class PreparedPlanToolBatch:
             in {PlanToolControlKind.ENTER, PlanToolControlKind.EXIT}
             and not self.idempotent_existing
         )
-        if continuation != all(
-            value is not None
-            for value in (
-                self.continuation_turn_id,
-                self.continuation_entry_id,
-                self.continuation_context_binding_revision_id,
-            )
-        ):
+        continuation_values = (
+            self.continuation_turn_id,
+            self.continuation_entry_id,
+            self.continuation_context_binding_revision_id,
+        )
+        if ((continuation and any(value is None for value in continuation_values))
+            or (not continuation and any(value is not None for value in continuation_values))):
             raise ValueError("prepared Plan continuation union is invalid")
         interaction = not rejected and self.control_kind in {
             PlanToolControlKind.QUESTION,
@@ -739,11 +665,14 @@ class PreparedPlanToolBatch:
                 raise ValueError("rejected Plan batch result identity is absent")
             if self.idempotent_existing:
                 raise ValueError("rejected Plan control cannot be idempotent")
-        elif self.control_kind is PlanToolControlKind.QUESTION:
+        elif self.control_kind in {PlanToolControlKind.QUESTION, PlanToolControlKind.DRAFT}:
             if selected.result_id is not None:
-                raise ValueError("open Plan question cannot preinstall its result")
+                raise ValueError("open Plan interaction cannot preinstall its result")
+            if any(item.result_id is None for index, item in enumerate(self.calls)
+                   if index != self.selected_call_ordinal):
+                raise ValueError("unselected Plan batch calls require their final results")
         elif selected.result_id is None:
-            raise ValueError("Plan enter/draft result identity is absent")
+            raise ValueError("Plan control result identity is absent")
         if rejected:
             pass
         elif self.control_kind is PlanToolControlKind.ENTER:
@@ -855,15 +784,19 @@ class AcceptedPlanResolution:
     continuation_entry_id: str | None
     handoff_created_at_commit: bool
     workflow_revision: int
-    question_result_entry_id: str | None = None
+    tool_result_settlement: AcceptedCanonicalToolResultSettlement
     draft_decision: PlanDraftDecision | None = None
-    tool_result_settlement: AcceptedCanonicalToolResultSettlement | None = None
 
     def __post_init__(self) -> None:
-        if (self.question_result_entry_id is not None) != (
-            self.tool_result_settlement is not None
-        ):
-            raise ValueError("Plan question settlement union is incomplete")
+        if not isinstance(self.tool_result_settlement, AcceptedCanonicalToolResultSettlement):
+            raise TypeError("Plan resolution requires its final result settlement")
+        if (self.continuation_turn_id is None) != (self.continuation_entry_id is None):
+            raise ValueError("Plan resolution continuation identity is incomplete")
+        if self.draft_decision is not None:
+            if (self.draft_decision is PlanDraftDecision.APPROVE) != (
+                self.continuation_turn_id is not None
+            ):
+                raise ValueError("only Plan approval creates an execution turn")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1276,12 +1209,13 @@ def plan_draft_review_semantic_candidate(
         raise ValueError("Plan revision requires a complete canonical prompt")
     if source_queue_item_id is not None and decision is not PlanDraftDecision.REVISE:
         raise ValueError("Only a Plan revision can consume a queued prompt")
-    creates_turn = decision in {PlanDraftDecision.APPROVE, PlanDraftDecision.REVISE}
+    creates_turn = decision is PlanDraftDecision.APPROVE
     continuation_values = (
         continuation_turn_id, continuation_entry_id,
         continuation_context_binding_revision_id,
     )
-    if creates_turn != all(value is not None for value in continuation_values):
+    if ((creates_turn and any(value is None for value in continuation_values))
+        or (not creates_turn and any(value is not None for value in continuation_values))):
         raise ValueError("Plan review continuation union is invalid")
     semantic_digest = canonical_digest(
         "pulsara:resolve-plan-draft:v2",
@@ -1327,71 +1261,6 @@ def _event_manifest(event: CommittedEventDraft) -> dict[str, object]:
     }
 
 
-def _prepared_tool_result_manifest(
-    candidate: PreparedToolResultAcceptance,
-) -> dict[str, object]:
-    body = candidate.output_body
-    side = candidate.side_branch
-    side_payload: dict[str, object]
-    if isinstance(side, NoToolResultSideBranch):
-        side_payload = {"branch_kind": side.branch_kind.value}
-    else:
-        side_payload = {
-            "branch_kind": side.branch_kind.value,
-            "mutation": memory_mutation_manifest(side.mutation),
-        }
-    return {
-        "session_id": candidate.session_id,
-        "workspace_id": candidate.workspace_id,
-        "result_id": candidate.result_id,
-        "result_entry_id": candidate.result_entry_id,
-        "turn_id": candidate.turn_id,
-        "assistant_entry_id": candidate.assistant_entry_id,
-        "tool_call_id": candidate.tool_call_id,
-        "attempt_id": candidate.attempt_id,
-        "result_state": candidate.result_state,
-        "canonical_preview_content": _content_manifest(
-            candidate.canonical_preview_content
-        ),
-        "canonical_prompt": (
-            None
-            if candidate.canonical_prompt is None
-            else {
-                "images": tuple(
-                    {
-                        "ref_ordinal": occurrence.ref_ordinal,
-                        "part_index": occurrence.part_index,
-                        "digest": occurrence.image.content_digest,
-                        "encoded_bytes": len(occurrence.image.immutable_bytes),
-                        "media_type": occurrence.image.media_type,
-                        "width": occurrence.image.width,
-                        "height": occurrence.image.height,
-                    }
-                    for occurrence in candidate.canonical_prompt.image_occurrences
-                )
-            }
-        ),
-        "output_body": None if body is None else _content_manifest(body),
-        "output_unavailability_reason": None if candidate.output_unavailability_reason is None else candidate.output_unavailability_reason.value,
-        "source_coverage": candidate.source_coverage.value,
-        "source_coverage_reason": None if candidate.source_coverage_reason is None else candidate.source_coverage_reason.value,
-        "output_omitted": candidate.output_omitted,
-        "observed_at": canonical_utc_timestamp(candidate.observed_at),
-        "observation_duration_microseconds": (
-            candidate.observation_duration_microseconds
-        ),
-        "observation_origin_kind": candidate.observation_origin_kind.value,
-        "trusted_tool_reported_duration_microseconds": (
-            candidate.trusted_tool_reported_duration_microseconds
-        ),
-        "actor_id": candidate.actor_id,
-        "model_visible_memory_fact_ids": candidate.model_visible_memory_fact_ids,
-        "required_facts": thaw_tool_json_object(candidate.required_facts),
-        "tool_result_occurrence": _event_manifest(candidate.tool_result_occurrence),
-        "side_branch": side_payload,
-    }
-
-
 def build_prepared_tool_result_acceptance(
     *,
     guard: HostWriterGuard,
@@ -1403,21 +1272,16 @@ def build_prepared_tool_result_acceptance(
     tool_call_id: str,
     attempt_id: str | None,
     result_state: str,
-    canonical_preview_content: InlineContent,
-    output_body: CanonicalContent | None,
-    output_unavailability_reason: ToolOutputUnavailableReason | None,
-    source_coverage: ToolOutputSourceCoverage,
-    output_omitted: bool,
-    source_coverage_reason: ToolOutputSourceCoverageReason | None,
+    public_fields: Mapping[str, object],
+    content_parts: tuple[ResultPart, ...],
     observed_at: datetime,
     observation_duration_microseconds: int | None,
     observation_origin_kind: ToolObservationOrigin,
     trusted_tool_reported_duration_microseconds: int | None,
     actor_id: str,
-    canonical_prompt: FrozenCanonicalPrompt | None = None,
-    memory_mutation: PreparedMemoryMutation | None = None,
+    output_unavailability_reason: ToolOutputUnavailableReason | None = None,
     model_visible_memory_fact_ids: tuple[str, ...] = (),
-    required_facts: Mapping[str, object] | None = None,
+    result_facts: Mapping[str, object] | None = None,
 ) -> PreparedToolResultAcceptance:
     """Freeze every semantic field before the first canonical write."""
 
@@ -1432,10 +1296,6 @@ def build_prepared_tool_result_acceptance(
         occurred_at=observed_at,
         payload={"tool_call_id": tool_call_id, "result_state": result_state},
     )
-    if memory_mutation is None:
-        side_branch: ToolResultSideBranch = NoToolResultSideBranch()
-    else:
-        side_branch = PreparedMemoryMutationSideBranch(mutation=memory_mutation)
     return PreparedToolResultAcceptance(
         session_id=guard.session_id,
         workspace_id=workspace_id,
@@ -1446,14 +1306,10 @@ def build_prepared_tool_result_acceptance(
         tool_call_id=tool_call_id,
         attempt_id=attempt_id,
         result_state=result_state,
-        canonical_preview_content=canonical_preview_content,
-        required_facts=freeze_tool_json_object(required_facts or {}),
-        canonical_prompt=canonical_prompt,
-        output_body=output_body,
+        public_fields=freeze_tool_json_object(public_fields),
+        content_parts=content_parts,
+        result_facts=freeze_tool_json_object(result_facts or {}),
         output_unavailability_reason=output_unavailability_reason,
-        source_coverage=source_coverage,
-        output_omitted=output_omitted,
-        source_coverage_reason=source_coverage_reason,
         observed_at=observed_at,
         observation_duration_microseconds=observation_duration_microseconds,
         observation_origin_kind=observation_origin_kind,
@@ -1462,6 +1318,5 @@ def build_prepared_tool_result_acceptance(
         ),
         actor_id=actor_id,
         tool_result_occurrence=tool_result_occurrence,
-        side_branch=side_branch,
         model_visible_memory_fact_ids=model_visible_memory_fact_ids,
     )

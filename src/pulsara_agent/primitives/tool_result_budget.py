@@ -8,12 +8,10 @@ pretending that a provider window has been reserved for it.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import json
 from typing import Callable, Mapping
 
-from pulsara_agent.ports.tool_output import tool_output_read_call
+from pulsara_agent.identity import require_id
 from pulsara_agent.ports.tool_execution import freeze_tool_json_object
-from pulsara_agent.primitives.context import canonical_json_bytes
 from pulsara_agent.primitives.tool_observation import (
     MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES,
 )
@@ -24,19 +22,6 @@ from pulsara_agent.primitives.tool_result_projection import (
 
 class ToolResultPageBoundary(ValueError):
     """The smallest complete result unit cannot fit this call's allowance."""
-
-
-def with_output_read(body: str, read: Mapping[str, object]) -> str:
-    """Add recovery to an explicitly JSON native projection.
-
-    This function is for Pulsara-owned JSON projections, not a guess about the
-    format of a business TEXT value.  TEXT previews must be wrapped by their
-    projection owner before calling it.
-    """
-    value = json.loads(body)
-    if not isinstance(value, dict):
-        raise ValueError("native projection with a read call must be a JSON object")
-    return canonical_json_bytes({**value, "read": dict(read)}).decode("utf-8")
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,28 +39,16 @@ class ToolResultPageBudget:
             target = self.result_target
             if target.get("kind") != "SESSION_ENTRY" or set(target) != {"kind", "session_id", "entry_id"}:
                 raise ValueError("a result recovery quote requires the complete original SESSION_ENTRY target")
-            tool_output_read_call(target["session_id"], target["entry_id"])
+            require_id(target["session_id"], "session")
+            require_id(target["entry_id"], "entry")
             object.__setattr__(self, "result_target", freeze_tool_json_object(target))
-
-    @property
-    def read(self) -> dict[str, object] | None:
-        return (
-            None if self.result_target is None
-            else tool_output_read_call(self.result_target["session_id"], self.result_target["entry_id"])
-        )
 
     def fits(
         self,
         body: str,
         *,
         model_visible_memory_fact_ids: tuple[str, ...] = (),
-        include_read: bool = False,
     ) -> bool:
-        if include_read:
-            read = self.read
-            if read is None:
-                raise ValueError("recovery quote requires the original result target")
-            body = with_output_read(body, read)
         if not self.fits_logical(
             body,
             model_visible_memory_fact_ids=model_visible_memory_fact_ids,

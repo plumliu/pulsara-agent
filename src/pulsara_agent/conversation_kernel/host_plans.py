@@ -607,6 +607,8 @@ class _HostPlanOperations:
                 self.repository.read_plan_revision_queue_prompt,
                 session_id=self.session_id,
                 source_queue_item_id=source_queue_item_id,
+                command_id=command_id,
+                interaction_id=interaction_id,
                 deadline_monotonic=self._canonical_deadline(),
             )
         elif revision_prompt is not None:
@@ -615,12 +617,9 @@ class _HostPlanOperations:
                 deadline_monotonic=self._canonical_deadline(),
             )
             canonical_prompt = freeze_canonical_prompt(
-                frozen_content, workspace_id=self.workspace.workspace_key
+                frozen_content
             )
-        creates_turn = decision in {
-            PlanDraftDecision.APPROVE,
-            PlanDraftDecision.REVISE,
-        }
+        creates_turn = decision is PlanDraftDecision.APPROVE
         continuation_turn_id = (
             derive_id("turn", "plan-review", self.session_id, command_id)
             if creates_turn
@@ -666,62 +665,62 @@ class _HostPlanOperations:
             continuation_context_binding_revision_id=continuation_revision_id,
             deadline_monotonic=self._canonical_deadline(),
         )
-        if existing is not None:
-            return existing
         if (
-            write_expected_writer_generation is not None
+            existing is None
+            and write_expected_writer_generation is not None
             and write_expected_writer_generation != self.writer_generation
         ):
             raise ConversationKernelConflict(
                 "Plan resolution writer generation is stale"
             )
-        reserved = False
         write_reservation: CompactionWriteReservation | None = None
         attempt_id = ("plan-review-continuation", command_id)
 
         async def admit() -> AcceptedPlanResolution:
             try:
                 occurred_at = datetime.now().astimezone()
-                try:
-                    resolution = await self._io.run(
-                        self.repository.resolve_plan_draft_review,
-                        self._lease.guard,
-                        command_id=command_id,
-                        workflow_id=workflow_id,
-                        expected_workflow_revision=expected_workflow_revision,
-                        interaction_id=interaction_id,
-                        decision=decision,
-                        canonical_prompt=canonical_prompt,
-                        source_queue_item_id=source_queue_item_id,
-                        continuation_turn_id=continuation_turn_id,
-                        continuation_entry_id=continuation_entry_id,
-                        continuation_context_binding_revision_id=(
-                            continuation_revision_id
-                        ),
-                        occurred_at=occurred_at,
-                        actor_id=self.host_session_id,
-                        deadline_monotonic=self._canonical_deadline(),
-                    )
-                except Exception:
-                    resolution = await self._io.run(
-                        self.repository.resolve_plan_draft_review,
-                        self._lease.guard,
-                        command_id=command_id,
-                        workflow_id=workflow_id,
-                        expected_workflow_revision=expected_workflow_revision,
-                        interaction_id=interaction_id,
-                        decision=decision,
-                        canonical_prompt=canonical_prompt,
-                        source_queue_item_id=source_queue_item_id,
-                        continuation_turn_id=continuation_turn_id,
-                        continuation_entry_id=continuation_entry_id,
-                        continuation_context_binding_revision_id=(
-                            continuation_revision_id
-                        ),
-                        occurred_at=occurred_at,
-                        actor_id=self.host_session_id,
-                        deadline_monotonic=self._canonical_deadline(),
-                    )
+                resolution = existing
+                if resolution is None:
+                    try:
+                        resolution = await self._io.run(
+                            self.repository.resolve_plan_draft_review,
+                            self._lease.guard,
+                            command_id=command_id,
+                            workflow_id=workflow_id,
+                            expected_workflow_revision=expected_workflow_revision,
+                            interaction_id=interaction_id,
+                            decision=decision,
+                            canonical_prompt=canonical_prompt,
+                            source_queue_item_id=source_queue_item_id,
+                            continuation_turn_id=continuation_turn_id,
+                            continuation_entry_id=continuation_entry_id,
+                            continuation_context_binding_revision_id=(
+                                continuation_revision_id
+                            ),
+                            occurred_at=occurred_at,
+                            actor_id=self.host_session_id,
+                            deadline_monotonic=self._canonical_deadline(),
+                        )
+                    except Exception:
+                        resolution = await self._io.run(
+                            self.repository.resolve_plan_draft_review,
+                            self._lease.guard,
+                            command_id=command_id,
+                            workflow_id=workflow_id,
+                            expected_workflow_revision=expected_workflow_revision,
+                            interaction_id=interaction_id,
+                            decision=decision,
+                            canonical_prompt=canonical_prompt,
+                            source_queue_item_id=source_queue_item_id,
+                            continuation_turn_id=continuation_turn_id,
+                            continuation_entry_id=continuation_entry_id,
+                            continuation_context_binding_revision_id=(
+                                continuation_revision_id
+                            ),
+                            occurred_at=occurred_at,
+                            actor_id=self.host_session_id,
+                            deadline_monotonic=self._canonical_deadline(),
+                        )
                 self._queue_wake.set()
                 if source_queue_item_id is not None:
                     self._hook_context.retire_prompt_candidate(
@@ -729,15 +728,10 @@ class _HostPlanOperations:
                         prompt_candidate_id=source_queue_item_id,
                     )
                 if resolution.continuation_turn_id is None:
-                    if reserved:
-                        await self._release_plan_continuation_reservation()
+                    await self._plan_interactions.settle(interaction_id=interaction_id, resolution=resolution)
                     return resolution
                 assert resolution.continuation_entry_id is not None
-                handoff_kind = (
-                    PlanHandoffKind.APPROVED_PLAN
-                    if decision is PlanDraftDecision.APPROVE
-                    else PlanHandoffKind.REVISION_REQUESTED
-                )
+                handoff_kind = PlanHandoffKind.APPROVED_PLAN
                 try:
                     inspection = await self._inspect_plan_continuation(
                         turn_id=resolution.continuation_turn_id,
@@ -750,7 +744,7 @@ class _HostPlanOperations:
                         inspection, self._lease.guard
                     )
                     if disposition is PlanContinuationDisposition.HISTORICAL_TERMINAL:
-                        await self._release_plan_continuation_reservation()
+                        await self._plan_interactions.settle(interaction_id=interaction_id, resolution=resolution)
                         return resolution
                     started_group = await self._io.run(
                         self.repository.read_started_turn_input_group,
@@ -762,7 +756,10 @@ class _HostPlanOperations:
                         command_id=command_id,
                         inspection=inspection,
                         started_input_group=started_group,
+                        origin_task=waiter.owner_task,
+                        origin_turn_id=waiter.origin_turn_id,
                     ):
+                        await self._plan_interactions.settle(interaction_id=interaction_id, resolution=resolution)
                         return resolution
                 except BaseException:
                     # FULL canonical acceptance already owns the successor;
@@ -776,31 +773,32 @@ class _HostPlanOperations:
                     interaction_id=interaction_id,
                     handoff_kind=handoff_kind,
                 )
-                await self._release_plan_continuation_reservation()
+                await self._plan_interactions.settle(interaction_id=interaction_id, resolution=resolution)
                 return resolution
-            except BaseException:
-                if reserved:
-                    await self._release_plan_continuation_reservation()
-                raise
             finally:
                 if write_reservation is not None:
                     await self._release_compaction_write_reservation(write_reservation)
 
         async with self._lock:
+            # A canonical winner can precede its process-local handoff. Join
+            # that admitted attempt, or finish the already-confirmed decision
+            # if its write/confirmation failed while this waiter remained live.
+            waiter = await self._plan_interactions.current_waiter(interaction_id)
+            if waiter is None:
+                if existing is not None:
+                    return existing
+                raise ConversationKernelConflict("Plan review has no active origin waiter")
 
             def reserve_new_attempt() -> None:
-                nonlocal reserved, write_reservation
-                write_reservation = self._admit_plan_resolution_write_locked(
-                    creates_turn=creates_turn
-                )
-                reserved = creates_turn
-                if creates_turn:
-                    self._external_new_turn_cancellation_intent = (
-                        ActiveTurnCancellationIntent(
-                            continuation_turn_id,
-                            self._session_scope_kind,
-                        )
-                    )
+                nonlocal write_reservation
+                if (
+                    self._active_task is not waiter.owner_task
+                    or self._active_turn_id != waiter.origin_turn_id
+                    or waiter.owner_task.done()
+                    or waiter.owner_task.cancelling()
+                ):
+                    raise ConversationKernelConflict("Plan review origin is no longer running")
+                write_reservation = self._admit_plan_resolution_write_locked(creates_turn=False)
 
             attempt = self._plan_continuations.start(
                 attempt_id=attempt_id,
@@ -851,39 +849,36 @@ class _HostPlanOperations:
         command_id: str,
         inspection: PlanContinuationInspection,
         started_input_group: StartedTurnInputGroup | None,
+        origin_task: asyncio.Task,
+        origin_turn_id: str,
     ) -> bool:
         async with self._lock:
-            self._retire_done_active_root_locked()
             if (
                 self._closing
                 or self._plan_exit_fence
                 or not self._inspection_owned_by_current_host(inspection)
-                or not self._external_new_turn_accepting
-                or self._active_task is not None
-                or (
-                    self._external_new_turn_cancellation_intent is not None
-                    and self._external_new_turn_cancellation_intent.cause is not None
-                )
+                or self._active_task is not origin_task
+                or self._active_turn_id != origin_turn_id
+                or origin_task.done()
+                or origin_task.cancelling()
+                or self._active_cancellation_intent is None
+                or self._active_cancellation_intent.cause is not None
             ):
                 return False
-            self._tools.current_work_owner.bind_continuation_if_present(
-                scope_kind=self._session_scope_kind,
-                turn_id=inspection.turn_id,
+            if self._pending_root_successor is not None:
+                raise ConversationKernelConflict("ROOT chain already owns a pending successor")
+            self._pending_root_successor = _PendingRootSuccessorHandoff(
+                owner_task=origin_task,
+                attempt_id=("plan-review-continuation", command_id),
+                origin_turn_id=origin_turn_id,
+                successor_turn_id=inspection.turn_id,
+                successor_entry_id=inspection.initial_entry_id,
+                workflow_id=inspection.workflow_id,
+                interaction_id=inspection.interaction_id,
+                handoff_kind=inspection.handoff_kind,
+                started_input_group=started_input_group,
             )
-            self._install_active_root_task_locked(
-                turn_id=inspection.turn_id,
-                command_id=command_id,
-                name=f"kernel-plan-review-turn:{inspection.turn_id}",
-                cancellation_intent=self._external_new_turn_cancellation_intent,
-                run=lambda intent: self._run_accepted_root_chain(
-                    inspection.turn_id,
-                    intent,
-                    started_input_group=started_input_group,
-                ),
-            )
-            self._external_new_turn_accepting = False
-            self._external_new_turn_cancellation_intent = None
-            self._external_new_turn_settled.set()
+            self._active_root_phase = RootChainPhase.SUCCESSOR_COMMITTED_PENDING_HANDOFF
             return True
 
     def _starting_turn_cancellation_cause(self, turn_id: str):

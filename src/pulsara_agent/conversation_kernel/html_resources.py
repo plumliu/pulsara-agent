@@ -20,7 +20,6 @@ import tinycss2
 from tinycss2.ast import StringToken
 from tinycss2.serializer import _serialize_to
 
-from pulsara_agent.conversation_kernel.blob import MAXIMUM_BLOB_BYTES
 from pulsara_agent.conversation_kernel.prompt_content import (
     MAXIMUM_PROMPT_MULTIPART_BYTES,
 )
@@ -68,7 +67,7 @@ def _check_deadline(deadline_monotonic):
         raise TimeoutError("HTML resource preparation deadline expired")
 
 
-class _BoundedText:
+class _HtmlText:
     def __init__(self, deadline):
         self.output = BytesIO()
         self.deadline = deadline
@@ -76,8 +75,6 @@ class _BoundedText:
     def write(self, text):
         _check_deadline(self.deadline)
         encoded = text.encode("utf-8")
-        if self.output.tell() + len(encoded) > MAXIMUM_BLOB_BYTES:
-            raise HtmlResourceError("HTML_RESOURCES_TOO_LARGE")
         self.output.write(encoded)
 
     def bytes(self):
@@ -111,8 +108,6 @@ def _path(value, base):
 def _data_url(body, media_type, *, deadline_monotonic):
     _check_deadline(deadline_monotonic)
     prefix = f"data:{media_type};base64,"
-    if len(prefix) + 4 * ((len(body) + 2) // 3) > MAXIMUM_BLOB_BYTES:
-        raise HtmlResourceError("HTML_RESOURCES_TOO_LARGE")
     return prefix + base64.b64encode(body).decode("ascii")
 
 
@@ -135,7 +130,7 @@ def _parse_html(body, *, deadline_monotonic):
 
 
 def _serialize_html(document, *, deadline_monotonic):
-    writer = _BoundedText(deadline_monotonic)
+    writer = _HtmlText(deadline_monotonic)
     serializer = html5lib.serializer.HTMLSerializer(
         quote_attr_values="always",
         omit_optional_tags=False,
@@ -237,7 +232,7 @@ def _replace_css_url(token, value):
 
 
 def _serialize_css(nodes, *, deadline_monotonic):
-    writer = _BoundedText(deadline_monotonic)
+    writer = _HtmlText(deadline_monotonic)
     # tinycss2's public serialize() collects an unbounded list before joining.
     # Its writer primitive supplies the same grammar/escaping with our existing
     # blob boundary enforced during construction; no serializer is copied.
@@ -256,7 +251,6 @@ async def freeze_html_resources(
 
     document = await run(_parse_html, body)
     cache = {}
-    html_size = len(body)
     changed = False
     if base_url is not None:
         for element in list(document.getElementsByTagName("base")):
@@ -267,11 +261,8 @@ async def freeze_html_resources(
         head.insertBefore(base, head.firstChild)
         changed = True
 
-    def replace_size(old, new):
-        nonlocal html_size, changed
-        html_size += len(new.encode("utf-8")) - len(old.encode("utf-8"))
-        if html_size > MAXIMUM_BLOB_BYTES:
-            raise HtmlResourceError("HTML_RESOURCES_TOO_LARGE")
+    def observe_replacement(old, new):
+        nonlocal changed
         changed |= old != new
 
     async def resource(value, base, kind):
@@ -325,7 +316,6 @@ async def freeze_html_resources(
 
     async def css(text, base, inline):
         nodes, slots = await run(_css_slots, text, inline)
-        size = len(text.encode("utf-8"))
         edited = False
         for token, value, kind in slots:
             if value.lower().startswith("data:"):
@@ -335,9 +325,6 @@ async def freeze_html_resources(
             if value.startswith("#"):
                 continue
             new = await resource(value, base, "image")
-            size += len(new.encode("utf-8")) - len(value.encode("utf-8"))
-            if size > MAXIMUM_BLOB_BYTES:
-                raise HtmlResourceError("HTML_RESOURCES_TOO_LARGE")
             _replace_css_url(token, new)
             edited = True
         return await run(_serialize_css, nodes) if edited else text
@@ -378,17 +365,17 @@ async def freeze_html_resources(
             ):
                 raise HtmlResourceError("HTML_RESOURCE_INTEGRITY_UNSUPPORTED")
             new = await resource(value, access_path.parent, kind)
-            replace_size(value, new)
+            observe_replacement(value, new)
             element.setAttribute(attribute, new)
         if tag == "video" and element.getAttribute("poster").strip(_HTML_SPACE):
             value = element.getAttribute("poster")
             new = await resource(value, access_path.parent, "image")
-            replace_size(value, new)
+            observe_replacement(value, new)
             element.setAttribute("poster", new)
         if element.hasAttribute("style"):
             value = element.getAttribute("style")
             new = await css(value, access_path.parent, True)
-            replace_size(value, new)
+            observe_replacement(value, new)
             element.setAttribute("style", new)
         if tag == "style" and element.getAttribute("type").lower() in {"", "text/css"}:
             value = "".join(
@@ -401,7 +388,7 @@ async def freeze_html_resources(
                 # CSS serialization may decode \3c into '<'. Raw-text HTML
                 # does not recognize entities, so use a CSS-equivalent escape.
                 new = re.sub(r"<(?=/style)", r"\\3c ", new, flags=re.IGNORECASE)
-                replace_size(value, new)
+                observe_replacement(value, new)
                 for child in list(element.childNodes):
                     element.removeChild(child)
                 element.appendChild(document.createTextNode(new))

@@ -7,7 +7,7 @@ source, decoder, transcript and image owners into one atomic result candidate.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 from time import monotonic
 
@@ -25,8 +25,11 @@ from pulsara_agent.llm.input import (
     PromptImagePart,
 )
 from pulsara_agent.ports.tool_execution import (
+    FrozenToolJsonDict,
+    ToolBusinessValue,
     ToolOutputSourceFormatHint,
     encode_tool_public_json,
+    freeze_tool_json_object,
 )
 from pulsara_agent.tools.builtins.media import validate_media_arguments
 from .asr_cache import AsrMediaKey
@@ -51,8 +54,12 @@ from .transcript import TranscriptService
 @dataclass(frozen=True, slots=True)
 class MediaExecutionResult:
     state: str
-    content: bytes | FrozenPromptContent
+    content: bytes | FrozenPromptContent | ToolBusinessValue
     public_format: ToolOutputSourceFormatHint = ToolOutputSourceFormatHint.JSON
+    result_facts: FrozenToolJsonDict = field(default_factory=FrozenToolJsonDict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "result_facts", freeze_tool_json_object(self.result_facts))
 
 
 async def execute_media(
@@ -128,10 +135,16 @@ async def execute_media(
         )
         if tool.name == "annotate_media":
             source.assert_unchanged()
-            return result(
-                "SUCCESS",
-                {
-                    "media_annotation": "added",
+            from pulsara_agent.conversation_kernel.content_parts import ResultPart
+            from pulsara_agent.tools.builtins.filesystem import _relpath, file_target
+
+            return MediaExecutionResult(
+                state="SUCCESS",
+                content=ToolBusinessValue(
+                    public_fields={"target": file_target(_relpath(source.path, tool.workspace_root))},
+                    content=(ResultPart("text", "已添加时间标注。"),),
+                ),
+                result_facts={
                     "canonical_path": str(source.path),
                     "file_mtime_ns": str(source.modified_ns),
                 },
@@ -377,7 +390,7 @@ async def render_prepared_frame_page(
                 PromptImagePart(image.data, image.mime) for image in candidate.images
             ))), deadline_monotonic=deadline,
         )
-        content = bind_prompt_images(content, workspace_id=workspace_id)
+        content = bind_prompt_images(content)
         logical_fits = page_budget.fits_logical(candidate.text)
         if allowance.accepts_page(
             content=content, source=image_source, tool_name="read_video_frames",

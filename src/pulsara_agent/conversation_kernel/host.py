@@ -586,8 +586,6 @@ class KernelHostSession(
             ),
             image_reference_read_port=PostgresCanonicalImageReferenceReadPort(
                 repository.connection_provider,
-                session_id=session_id,
-                workspace_id=workspace.workspace_key,
             ),
             scheduled_tasks=scheduled_tasks,
             memory_domain_id=workspace.memory_domain.memory_domain_id,

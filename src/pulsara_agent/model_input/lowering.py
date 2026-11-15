@@ -45,7 +45,6 @@ from pulsara_agent.primitives.tool_result_projection import (
     ToolResultLogicalMessageKind,
     decode_provider_tool_result_observation,
     provider_neutral_message_logical_bytes,
-    project_tool_result_storage_body,
     render_provider_tool_result_logical_message,
     _maximum_tool_result_page_timing,
 )
@@ -200,7 +199,7 @@ def lower_canonical_item(
         )
     text = provider_input_item_text(item)
     if kind is FrozenProviderInputItemKind.TERMINAL_OBSERVATION:
-        return LoweredCanonicalItem(item, LLMMessage.user(_terminal_observation_provider_text(text)))
+        return LoweredCanonicalItem(item, LLMMessage.user(text))
     if kind is FrozenProviderInputItemKind.PLAN_CONTINUATION:
         return LoweredCanonicalItem(
             item,
@@ -369,9 +368,6 @@ def _tool_result_message(
     assert item.tool_call_id is not None
     metadata = item.tool_result_context
     assert metadata is not None
-    projected_body = project_tool_result_storage_body(
-        body, metadata.timing.observation_origin
-    )
     rendered = render_provider_tool_result_logical_message(
         message_kind=(
             ToolResultLogicalMessageKind.TOOL_RESULT
@@ -379,7 +375,7 @@ def _tool_result_message(
             else ToolResultLogicalMessageKind.LATE_TOOL_OUTCOME
         ),
         tool_call_id=item.tool_call_id,
-        body=projected_body,
+        body=body,
         result_state=metadata.result_state,
         timing=metadata.timing,
         model_visible_memory_ids=metadata.model_visible_memory_fact_ids,
@@ -403,15 +399,6 @@ def _project_tool_result_closure(text: str) -> str:
             raise ValueError("tool result closure disposition is invalid")
         disposition = value["disposition"]
     return canonical_json_bytes({"disposition": disposition}).decode("utf-8")
-
-
-def _terminal_observation_provider_text(text: str) -> str:
-    from pulsara_agent.ports.terminal_observation import CellOutputContent
-    value = CellOutputContent.from_bytes(text.encode("utf-8"))
-    # This validated canonical JSON already preserves JavaScript lone UTF-16
-    # surrogates through escapes. Embed its exact bytes; decoding to Python
-    # scalars and re-encoding would either reject them or rewrite the body.
-    return '{"pulsara_terminal_observation":' + value.canonical_bytes().decode("utf-8") + '}'
 
 
 def _project_plan_continuation(text: str) -> str:

@@ -20,7 +20,7 @@ CONVERSATION_KERNEL_RELATIONS = (
     "session_context_genesis",
     "imported_tool_call_closures",
     "transcript_entries",
-    "assistant_message_blocks",
+    "content_parts",
     "assistant_visualizations",
     "provider_assistant_replay_fragments",
     "tool_invocations",
@@ -28,12 +28,10 @@ CONVERSATION_KERNEL_RELATIONS = (
     "tool_results",
     "prompt_queue_items",
     "scheduled_tasks",
-    "canonical_image_refs",
     "interaction_decisions",
     "plan_workflows",
     "plan_interactions",
     "memory_facts",
-    "memory_relations",
     "memory_embeddings",
     "blobs",
     "agent_events",
@@ -54,7 +52,7 @@ CONVERSATION_KERNEL_RUNTIME_PRIVILEGES = {
     "session_context_genesis": ("SELECT", "INSERT"),
     "imported_tool_call_closures": ("SELECT", "INSERT"),
     "transcript_entries": ("SELECT", "INSERT"),
-    "assistant_message_blocks": ("SELECT", "INSERT"),
+    "content_parts": ("SELECT", "INSERT"),
     "assistant_visualizations": ("SELECT", "INSERT"),
     "provider_assistant_replay_fragments": ("SELECT", "INSERT"),
     "tool_invocations": ("SELECT", "INSERT"),
@@ -62,18 +60,20 @@ CONVERSATION_KERNEL_RUNTIME_PRIVILEGES = {
     "tool_results": ("SELECT", "INSERT"),
     "prompt_queue_items": ("SELECT", "INSERT", "UPDATE"),
     "scheduled_tasks": ("SELECT", "INSERT", "UPDATE", "DELETE"),
-    "canonical_image_refs": ("SELECT", "INSERT"),
     "interaction_decisions": ("SELECT", "INSERT"),
     "plan_workflows": ("SELECT", "INSERT", "UPDATE"),
     "plan_interactions": ("SELECT", "INSERT", "UPDATE"),
     "memory_facts": ("SELECT", "INSERT", "UPDATE", "DELETE"),
-    "memory_relations": ("SELECT", "INSERT", "DELETE"),
     "memory_embeddings": ("SELECT", "INSERT", "UPDATE", "DELETE"),
     "blobs": ("SELECT", "INSERT", "DELETE"),
     "agent_events": ("SELECT", "INSERT"),
     "history_search_documents": ("SELECT", "INSERT", "UPDATE", "DELETE"),
     "asr_cache": ("SELECT", "INSERT", "UPDATE", "DELETE"),
 }
+CONVERSATION_KERNEL_RUNTIME_COLUMN_PRIVILEGES = {
+    "content_parts": {"entry_id": ("UPDATE",), "queue_item_id": ("UPDATE",)},
+}
+
 if tuple(CONVERSATION_KERNEL_RUNTIME_PRIVILEGES) != CONVERSATION_KERNEL_RELATIONS:
     raise RuntimeError("clean runtime grant catalog is not exhaustive")
 
@@ -179,6 +179,7 @@ PULSARA_LEGACY_PUBLIC_RELATION_NAMES = frozenset(
 __all__ = [
     "CONVERSATION_KERNEL_RELATIONS",
     "CONVERSATION_KERNEL_RUNTIME_PRIVILEGES",
+    "CONVERSATION_KERNEL_RUNTIME_COLUMN_PRIVILEGES",
     "PULSARA_LEGACY_PUBLIC_RELATION_NAMES",
     "CleanPostgresSchemaManifest",
     "build_postgres_schema_manifest",

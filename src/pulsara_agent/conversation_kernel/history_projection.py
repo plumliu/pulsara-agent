@@ -8,22 +8,16 @@ from typing import Literal
 
 from pulsara_agent.conversation_kernel.prompt_content import (
     CanonicalPromptImageDescriptor,
-    PROMPT_BODY_MEDIA_TYPE,
 )
 from pulsara_agent.conversation_kernel.prompt_storage import (
     validate_canonical_prompt_owner_metadata,
 )
-from pulsara_agent.conversation_kernel.session_text import (
-    decode_saved_text,
-    prompt_history_text,
-)
-from pulsara_agent.conversation_kernel.tool_outputs import read_tool_output_content
 from pulsara_agent.llm.input import (
     LLMTextPart,
     PromptAnnotationPart,
     HISTORICAL_IMAGE_MARKER,
 )
-from pulsara_agent.primitives.context import canonical_json_bytes
+from pulsara_agent.conversation_kernel.content_parts import decode_content_part
 
 
 class _AssistantHistoryBatch:
@@ -55,19 +49,14 @@ class _AssistantHistoryBatch:
         ids = [entry["id"] for entry in assistants]
         self.blocks = {entry_id: [] for entry_id in ids}
         rows = connection.execute(
-            """SELECT a.id,a.assistant_entry_id,a.block_kind,a.tool_name,a.tool_arguments,
-               COALESCE(a.inline_content,b.body) AS content,
-               a.content_size AS size,a.content_digest AS digest,'assistant' AS kind
-               FROM pulsara_v3.assistant_message_blocks a
-               LEFT JOIN pulsara_v3.blobs b
-                 ON b.id=a.blob_id AND b.workspace_id=a.workspace_id
-               WHERE a.session_id=%s AND a.assistant_entry_id=ANY(%s::text[])
-                 AND (a.block_kind='TEXT' OR (%s AND a.block_kind='TOOL_CALL'))
-               ORDER BY a.assistant_entry_id,a.block_ordinal""",
-            (session_id, ids, include_tools),
+            """SELECT p.* FROM pulsara_v3.content_parts p
+               WHERE p.session_id=%s AND p.entry_id=ANY(%s::text[])
+                 AND p.type='text'
+               ORDER BY p.entry_id,p.ordinal""",
+            (session_id, ids),
         ).fetchall()
         for row in rows:
-            self.blocks[row["assistant_entry_id"]].append(row)
+            self.blocks[row["entry_id"]].append(row)
         self.finals = {
             row["final_entry_id"]
             for row in connection.execute(
@@ -95,19 +84,7 @@ class _AssistantHistoryBatch:
     def block_text(self, block):
         key = block["id"]
         if key not in self._text:
-            if block["block_kind"] == "TEXT":
-                text = decode_saved_text(block)
-                # The verified immutable text serves both views. Do not retain
-                # all raw payload bytes alongside it for the rest of the build.
-                block["content"] = None
-            else:
-                import json
-
-                text = (
-                    block["tool_name"]
-                    + "\n"
-                    + json.dumps(block["tool_arguments"], ensure_ascii=False)
-                )
+            text = decode_content_part(self.connection, block).value
             self._text[key] = text
         return self._text[key]
 
@@ -136,7 +113,9 @@ def canonical_history_message(
     body_ranges = None
     result_metadata = {}
     if kind in {"USER_MESSAGE", "USER_STEER"}:
-        if entry["scheduled_input"] is not None:
+        if entry["scheduled_input"] is not None or entry.get("input_origin") not in {
+            "HUMAN_MESSAGE", "HUMAN_STEER", "AGENT_INSTRUCTION",
+        }:
             return None
         role = "user"
         parts = validate_canonical_prompt_owner_metadata(
@@ -191,127 +170,40 @@ def canonical_history_message(
             offset += len(display)
         label = "用户补充" if kind == "USER_STEER" else "用户输入"
     else:
-        if kind not in {"ASSISTANT_MESSAGE", "ASSISTANT_TOOL_REQUEST", "TOOL_RESULT"}:
+        if kind not in {"ASSISTANT_MESSAGE", "ASSISTANT_TOOL_REQUEST"}:
             return None
-        if kind == "TOOL_RESULT":
-            if not include_tools:
-                return None
-            fact = connection.execute(
-                """SELECT r.*,CASE WHEN r.result_record_kind='IMPORTED_HISTORY'
-                  OR i.source_kind='MODEL_TOOL_CALL' THEN a.tool_name ELSE i.tool_name END AS tool_name,
-                  CASE r.result_record_kind WHEN 'IMPORTED_HISTORY'
-                  THEN 'MODEL_TOOL_CALL' ELSE i.source_kind END AS source_kind
-                FROM pulsara_v3.tool_results r LEFT JOIN pulsara_v3.tool_invocations i
-                  ON i.session_id=r.session_id AND i.id=r.invocation_id
-                LEFT JOIN pulsara_v3.assistant_message_blocks a ON a.session_id=r.session_id
-                  AND a.assistant_entry_id=r.tool_call_entry_id AND a.tool_call_id=r.tool_call_id
-                  AND a.block_kind='TOOL_CALL'
-                WHERE r.session_id=%s AND r.result_entry_id=%s""",
-                (entry["session_id"], entry["id"]),
-            ).fetchone()
-            if fact is None or fact["tool_name"] is None or fact["source_kind"] is None:
-                raise RuntimeError("saved tool result canonical edge is missing")
-            if fact["source_kind"] != "MODEL_TOOL_CALL":
-                return None
-            if fact["tool_name"] in {
-                "search_sessions",
-                "search_session_content",
-                "read_session_content",
-            }:
-                return None
-            result_metadata["result_state"] = fact["result_state"]
-            if fact["result_facts"]:
-                result_metadata["result_facts"] = fact["result_facts"]
-            if fact["output_source_coverage"] != "COMPLETE":
-                result_metadata["source_coverage"] = fact["output_source_coverage"]
-                result_metadata["source_coverage_reason"] = fact["output_source_coverage_reason"]
-            if fact["output_unavailability_reason"] is not None:
-                result_metadata["output_unavailability_reason"] = fact["output_unavailability_reason"]
-            if entry["content_media_type"] == PROMPT_BODY_MEDIA_TYPE:
-                parts = validate_canonical_prompt_owner_metadata(
-                    connection, row=entry, transcript_entry_id=entry["id"]
-                ).parts
-                text, source_segments, image_bounds = prompt_history_text(
-                    parts, image_references=None
-                )
-            elif fact["output_unavailability_reason"] is None:
-                text = read_tool_output_content(connection, fact).decode("utf-8")
-                source_segments, image_bounds = ((0, text),), ()
-            else:
-                text = "[Saved tool output is unavailable.]"
-                source_segments, image_bounds = (), ()
-            if fact["result_facts"]:
-                facts = canonical_json_bytes(fact["result_facts"]).decode("utf-8")
-                prefix = "Tool result facts:\n" + facts + "\nTool output:\n"
-                source_segments = ((len("Tool result facts:\n"), facts),) + tuple(
-                    (len(prefix) + at, value) for at, value in source_segments
-                )
-                image_bounds = tuple((len(prefix) + a, len(prefix) + b) for a, b in image_bounds)
-                text = prefix + text
-            role, label, shown = "tool", "工具结果", [fact["tool_name"] + "\n" + text]
-            prefix_size = len(fact["tool_name"]) + 1
-            segments = ((0, fact["tool_name"]),) + tuple(
-                (prefix_size + at, value) for at, value in source_segments
+        if assistant_content is None:
+            assistant_content = _AssistantHistoryBatch(
+                connection,
+                entry["session_id"],
+                (entry,),
+                include_tools=include_tools,
             )
-            fields = [
+        elif assistant_content.connection is not connection:
+            raise RuntimeError("history source batch belongs to another connection")
+        blocks = assistant_content.blocks[entry["id"]]
+        shown, fields, offset = [], [], 0
+        for block in blocks:
+            text = assistant_content.block_text(block)
+            if shown:
+                offset += 1
+            fields.append(
                 {
-                    "block": None,
+                    "block": block["id"],
                     "part": None,
-                    "field": "tool_result",
-                    "text": value,
-                    "display_start": at,
+                    "field": "text",
+                    "text": text,
+                    "display_start": offset,
                 }
-                for at, value in segments
-            ]
-            body_ranges = [[at, at + len(value)] for at, value in segments]
-            atomic_ranges = [
-                [prefix_size + a, prefix_size + b] for a, b in image_bounds
-            ]
-            annotated = False
-        else:
-            if assistant_content is None:
-                assistant_content = _AssistantHistoryBatch(
-                    connection,
-                    entry["session_id"],
-                    (entry,),
-                    include_tools=include_tools,
-                )
-            elif assistant_content.connection is not connection:
-                raise RuntimeError("history source batch belongs to another connection")
-            blocks = assistant_content.blocks[entry["id"]]
-            shown, fields, offset = [], [], 0
-            for block in blocks:
-                if block["block_kind"] != "TEXT":
-                    if not include_tools:
-                        continue
-                    if block["tool_name"] in {
-                        "search_sessions",
-                        "search_session_content",
-                        "read_session_content",
-                    }:
-                        continue
-                text = assistant_content.block_text(block)
-                if shown:
-                    offset += 1
-                fields.append(
-                    {
-                        "block": block["id"],
-                        "part": None,
-                        "field": "text"
-                        if block["block_kind"] == "TEXT"
-                        else "tool_call",
-                        "text": text,
-                        "display_start": offset,
-                    }
-                )
-                shown.append(text)
-                offset += len(text)
-            if not shown:
-                return None
-            role, annotated = "assistant", False
-            label = (
-                "助手回答" if entry["id"] in assistant_content.finals else "助手进展"
             )
+            shown.append(text)
+            offset += len(text)
+        if not shown:
+            return None
+        role, annotated = "assistant", False
+        label = (
+            "助手回答" if entry["id"] in assistant_content.finals else "助手进展"
+        )
     from pulsara_agent.conversation_kernel.session_text import (
         visualization_history_text,
     )

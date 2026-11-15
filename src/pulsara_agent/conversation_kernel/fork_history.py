@@ -25,10 +25,9 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionSnapshotCarrier,
 )
 from pulsara_agent.conversation_kernel.prompt_storage import (
-    hydrate_canonical_prompt_owner,
     hydrate_canonical_snapshot_owner,
 )
-from pulsara_agent.conversation_kernel.prompt_content import PROMPT_BODY_MEDIA_TYPE
+from pulsara_agent.conversation_kernel.content_parts import decode_content_part
 from pulsara_agent.conversation_kernel.blob import PostgresCanonicalBlobStore
 from pulsara_agent.conversation_kernel.repository_errors import (
     ConversationKernelConflict,
@@ -89,7 +88,7 @@ class FrozenForkHistoricalMaterial:
     snapshot_carrier: CompactionSnapshotCarrier | None
     imported_groups: tuple[FrozenForkGroup, ...]
     entries: tuple[Mapping[str, object], ...]
-    blocks: tuple[Mapping[str, object], ...]
+    content_parts: tuple[Mapping[str, object], ...]
     tool_results: tuple[Mapping[str, object], ...]
     visualizations: tuple[Mapping[str, object], ...]
     required_tool_closures: tuple[Mapping[str, object], ...]
@@ -152,62 +151,16 @@ def read_fork_anchor(
         return None
     if row[prefix + "_base"] not in {"FULL_HISTORY", "SNAPSHOT"}:
         return None
-    inline_blocks = (
-        tuple(
-            sorted(
-                (
-                    block
-                    for block in candidate_blocks
-                    if block["block_kind"] == "TEXT"
-                    and block["content_codec"] == "utf-8"
-                ),
-                key=lambda block: block["block_ordinal"],
-            )
-        )
-        if candidate_blocks is not None
-        else None
-    )
-    # The protocol already loaded this candidate's complete block rows. Reuse
-    # only a wholly inline TEXT set; a mixed/blob set keeps the original whole
-    # query and its adaptation point. Eligibility and validation stay here.
-    if inline_blocks is not None and all(
-        block["inline_content"] is not None for block in inline_blocks
-    ):
-        blocks = tuple(
-            {
-                "block_ordinal": block["block_ordinal"],
-                "content_digest": block["content_digest"],
-                "content_size": block["content_size"],
-                "body": block["inline_content"],
-            }
-            for block in inline_blocks
-        )
-    else:
-        blocks = connection.execute(
-            """SELECT b.block_ordinal, b.content_digest, b.content_size,
-                  COALESCE(b.inline_content, blob.body) AS body
-           FROM pulsara_v3.assistant_message_blocks AS b
-           LEFT JOIN pulsara_v3.blobs AS blob ON blob.id = b.blob_id AND blob.workspace_id = b.workspace_id
-           WHERE b.session_id = %s AND b.assistant_entry_id = %s
-             AND b.block_kind = 'TEXT' AND b.content_codec = 'utf-8'
-           ORDER BY b.block_ordinal""",
-            (session_id, entry_id),
-        ).fetchall()
-    from hashlib import sha256
-
+    blocks = candidate_blocks if candidate_blocks is not None else connection.execute(
+        """SELECT * FROM pulsara_v3.content_parts
+           WHERE session_id=%s AND entry_id=%s AND type='text' ORDER BY ordinal""",
+        (session_id, entry_id),
+    ).fetchall()
     for block in blocks:
-        if block["body"] is None:
+        if block["type"] != "text":
             continue
-        body = bytes(block["body"])
-        if (
-            len(body) != int(block["content_size"])
-            or "sha256:" + sha256(body).hexdigest() != block["content_digest"]
-        ):
-            continue
-        try:
-            nonempty = bool(body.decode("utf-8").strip())
-        except UnicodeDecodeError:
-            continue
+        part = decode_content_part(connection, block)
+        nonempty = bool(part.value.strip())
         if nonempty:
             model = model_call_binding_from_dict(row[prefix + "_model"])
             if model is None:
@@ -218,7 +171,7 @@ def read_fork_anchor(
                 source_entry_sequence=int(row["entry_sequence"]),
                 owner_kind=str(row["entry_owner_kind"]),
                 settled_status=str(status),
-                nonempty_text_block_ordinal=int(block["block_ordinal"]),
+                nonempty_text_block_ordinal=int(block["ordinal"]),
                 anchor_model_call_binding=model,
                 base_kind=base,
                 source_through_sequence=(
@@ -238,11 +191,11 @@ def read_fork_historical_material(
     reader: CanonicalProviderInputReader,
 ) -> FrozenForkHistoricalMaterial:
     from pulsara_agent.conversation_kernel.reader import (
+        assistant_content_part_text,
         _next_assistant_cuts,
         historical_source_attribution,
         historical_tool_closure_kind,
         _project_plan_continuation_storage,
-        _validate_terminal_observation_content,
         _read_retained_prefix_rows,
         _require_snapshot_active_request,
     )
@@ -323,7 +276,7 @@ def read_fork_historical_material(
     results = []
     replays = []
     groups = {}
-    block_bodies = {}
+    decoded_parts = {}
     blocks_by_entry = {}
     # Prefix references and the effective suffix share the original row copy
     # path, so child ownership, image refs and every cut use the same mapping.
@@ -358,15 +311,15 @@ def read_fork_historical_material(
             break
         ids = [str(row["id"]) for row in page]
         page_blocks = connection.execute(
-            "SELECT * FROM pulsara_v3.assistant_message_blocks WHERE session_id = %s "
-            "AND assistant_entry_id = ANY(%s) ORDER BY assistant_entry_id, block_ordinal",
+            "SELECT * FROM pulsara_v3.content_parts WHERE session_id = %s "
+            "AND entry_id = ANY(%s) ORDER BY entry_id, ordinal",
             (source_session_id, ids),
         ).fetchall()
         page_visualizations = connection.execute(
-            """SELECT v.*, b.logical_digest, b.logical_size, b.media_type, b.codec
+            """SELECT v.*, b.logical_digest, b.logical_size, b.media_type, b.codec, b.width, b.height, b.workspace_id AS blob_workspace_id
                FROM pulsara_v3.assistant_visualizations AS v
                LEFT JOIN pulsara_v3.blobs AS b
-                 ON b.id = v.blob_id AND b.workspace_id = v.workspace_id
+                 ON b.id = v.blob_id
                WHERE v.session_id = %s AND v.assistant_entry_id = ANY(%s)
                ORDER BY v.assistant_entry_id, v.ordinal""",
             (source_session_id, ids),
@@ -395,22 +348,16 @@ def read_fork_historical_material(
                     blob_id=str(row["blob_id"]),
                     expected_digest=str(row["logical_digest"]),
                     expected_size=int(row["logical_size"]),
-                    expected_workspace_id=str(session["workspace_id"]),
+                    expected_workspace_id=None if row["blob_workspace_id"] is None else str(session["workspace_id"]),
                     expected_media_type=str(row["media_type"]),
                     expected_codec=str(row["codec"]),
                 )
             visualizations.append(MappingProxyType(dict(row)))
         for block in page_blocks:
-            if block["block_kind"] in {"TEXT", "DATA"}:
-                block_bodies[str(block["id"])] = reader._read_content(
-                    block,
-                    deadline_monotonic=deadline_monotonic,
-                    connection=connection,
-                ).decode("utf-8")
+            part = decode_content_part(connection, block)
+            decoded_parts[str(block["id"])] = part
             blocks.append(MappingProxyType(dict(block)))
-            blocks_by_entry.setdefault(str(block["assistant_entry_id"]), []).append(
-                block
-            )
+            blocks_by_entry.setdefault(str(block["entry_id"]), []).append(block)
         for raw in page:
             prefix = (
                 "executed" if raw["entry_owner_kind"] == "EXECUTED_TURN" else "imported"
@@ -466,40 +413,11 @@ def read_fork_historical_material(
                 raw[prefix + "_final"],
                 outcome,
             )
-            # Validate original content too: assistant manifests remain storage
-            # data and are never used in place of their ordered blocks.
-            # Storage manifests never consume the canonical provider budget.
-            if raw["entry_kind"] in {"USER_MESSAGE", "USER_STEER"}:
-                if raw["content_media_type"] != PROMPT_BODY_MEDIA_TYPE:
-                    raise ConversationKernelConflict(
-                        "Fork ROOT human prompt is not canonical typed content"
-                    )
-                prompt = hydrate_canonical_prompt_owner(
-                    connection,
-                    row=raw,
-                    transcript_entry_id=str(raw["id"]),
-                )
-                body = prompt.body
-            else:
-                body = reader._read_content(
-                    raw,
-                    deadline_monotonic=deadline_monotonic,
-                    connection=connection,
-                )
             attributed = historical_source_attribution(raw)
-            if raw["content_codec"] == "utf-8":
-                text = body.decode("utf-8")
+            if raw["entry_kind"] in {"PLAN_CONTINUATION", "TERMINAL_OBSERVATION"}:
+                text = reader._entry_text(connection, str(raw["id"]), source_session_id)
                 if raw["entry_kind"] == "PLAN_CONTINUATION":
                     _project_plan_continuation_storage(attributed, text)
-                elif raw["entry_kind"] == "TERMINAL_OBSERVATION":
-                    _validate_terminal_observation_content(body)
-            elif raw["entry_kind"] not in {
-                "ASSISTANT_MESSAGE",
-                "ASSISTANT_TOOL_REQUEST",
-            }:
-                raise ConversationKernelConflict(
-                    "Fork request/result encoding is not UTF-8"
-                )
             entry = {
                 key: value
                 for key, value in raw.items()
@@ -523,7 +441,7 @@ def read_fork_historical_material(
         )
     entry_ids = {str(row["id"]) for row in entries}
     call_ids = {
-        str(b["assistant_entry_id"]) for b in blocks if b["block_kind"] == "TOOL_CALL"
+        str(b["entry_id"]) for b in blocks if b["type"] == "tool_call"
     }
     # Results are copied only when their request is in the effective window.
     raw_results = (
@@ -554,6 +472,7 @@ def read_fork_historical_material(
             )
         safe = dict(raw)
         safe["result_facts"] = freeze_tool_json_object(raw["result_facts"])
+        safe["public_fields"] = freeze_tool_json_object(raw["public_fields"])
         for key, value in safe.items():
             if isinstance(value, list):
                 safe[key] = tuple(value)
@@ -566,17 +485,6 @@ def read_fork_historical_material(
         ):
             safe.pop(key)
         results.append(MappingProxyType(safe))
-        blob_id = raw["output_body_blob_id"]
-        if blob_id is not None:
-            body_blob = connection.execute(
-                "SELECT id, workspace_id, logical_digest, logical_size, media_type, codec "
-                "FROM pulsara_v3.blobs WHERE id = %s AND workspace_id = %s",
-                (blob_id, session["workspace_id"]),
-            ).fetchone()
-            if body_blob is None:
-                raise ConversationKernelConflict(
-                    "Fork output body does not exact-join its workspace"
-                )
     tool_state = reader._load_tool_state(
         connection,
         source_session_id,
@@ -587,9 +495,9 @@ def read_fork_historical_material(
     by_id = {str(row["id"]): row for row in entries}
     closures = []
     for block in blocks:
-        if block["block_kind"] != "TOOL_CALL":
+        if block["type"] != "tool_call":
             continue
-        entry_id = str(block["assistant_entry_id"])
+        entry_id = str(block["entry_id"])
         target = cuts.get(entry_id, anchor.source_entry_sequence)
         state = tool_state[(entry_id, str(block["tool_call_id"]))]
         result = state.get("result")
@@ -632,7 +540,7 @@ def read_fork_historical_material(
         calls = []
         text_parts = []
         for block in blocks_by_entry.get(str(entry["id"]), ()):
-            if block["block_kind"] == "TOOL_CALL":
+            if block["type"] == "tool_call":
                 arguments = canonical_json_bytes(block["tool_arguments"]).decode(
                     "utf-8"
                 )
@@ -647,12 +555,13 @@ def read_fork_historical_material(
                     ("TOOL_CALL", block["tool_call_id"], block["tool_name"], arguments)
                 )
             else:
-                text = block_bodies[str(block["id"])]
+                part = decoded_parts[str(block["id"])]
+                text = assistant_content_part_text(part)
                 text_parts.append(text)
                 ordered.append(
                     ("TEXT", text)
-                    if block["block_kind"] == "TEXT"
-                    else ("DATA", block["content_media_type"], text)
+                    if block["type"] == "text"
+                    else ("DATA", part.data_media_type, text)
                 )
         public = provider_assistant_public_projection_fingerprint(
             text="".join(text_parts),
@@ -715,7 +624,7 @@ def read_fork_historical_material(
         snapshot_carrier=carrier,
         imported_groups=frozen_groups,
         entries=tuple(entries),
-        blocks=tuple(
+        content_parts=tuple(
             MappingProxyType(
                 {
                     **b,
@@ -724,7 +633,7 @@ def read_fork_historical_material(
                     else freeze_json(b["tool_arguments"]),
                 }
             )
-            for b in blocks
+            for b in blocks if str(b["entry_id"]) in actual_ids
         ),
         tool_results=tuple(results),
         visualizations=tuple(visualizations),

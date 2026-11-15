@@ -777,7 +777,7 @@ def test_k2_host_queued_image_hook_is_empty_once_and_conflict_is_exact(
     assert [value["prompt"] for value in logs].count("different") == 0
     assert len(logs) == 2
     assert model.semantic_input is not None
-    projected_image = bound_test_image("image/png", image_bytes, 7, 5, workspace_id=derive_id("workspace", "project", workspace.resolve().as_posix()))
+    projected_image = bound_test_image("image/png", image_bytes, 7, 5)
     assert any(
         message.role is MessageRole.USER
         and message.content
@@ -1566,7 +1566,6 @@ def test_round9_2_compact_before_resumed_first_open_supersedes_resume_once(
         budget = prior.prepared_call.compile_binding.effective_input_budget_tokens
         prior_ratio = prior_tokens / budget
         trigger_ratio = min(0.8, prior_ratio + 0.005)
-        target_ratio = max(0.001, trigger_ratio - 0.001)
         await core.close_session(first.host_session_id)
 
         resumed = await core.resume_session(

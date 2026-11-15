@@ -13,7 +13,6 @@ from aiohttp import web
 from aiohttp.helpers import content_disposition_header
 
 from .file_preview import FilePreviewError, PAGE_BYTES, identity
-from pulsara_agent.conversation_kernel.blob import MAXIMUM_BLOB_BYTES
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.html_resources import freeze_html_resources
 from time import monotonic
@@ -165,9 +164,9 @@ class FilePreviewHttp:
         return web.json_response(result, headers=HEADERS)
 
     async def snapshot(self, request):
-        # The canonical HTML envelope already has this bound. Do not raise the
-        # application's unrelated request limit merely to bind one snapshot.
-        body = await self.body(request.clone(client_max_size=MAXIMUM_BLOB_BYTES))
+        # Snapshot storage has no separate whole-body size cap. Other routes
+        # retain the application's request limits.
+        body = await self.body(request.clone(client_max_size=0))
         path, html = body.get("path"), body.get("html")
         if not isinstance(path, str) or not isinstance(html, str):
             raise ValueError("HTML snapshot requires path and html")

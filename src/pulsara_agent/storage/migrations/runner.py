@@ -444,6 +444,23 @@ def _verify_runtime_grants(connection: Connection, runtime_role: str) -> None:
                     PostgresSchemaFailureCode.PRIVILEGE_MISSING,
                     "clean runtime relation grants are not exact",
                 )
+    policy = build_postgres_runtime_grant_policy()
+    for relation, columns in policy.column_privileges.items():
+        observed_columns = connection.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema='pulsara_v3' AND table_name=%s", (relation,)
+        ).fetchall()
+        for row in observed_columns:
+            column = str(_cell(row, 0, "column_name"))
+            allowed_row = connection.execute(
+                "SELECT pg_catalog.has_column_privilege(%s,%s,%s,'UPDATE') AS allowed",
+                (runtime_role, f"pulsara_v3.{relation}", column),
+            ).fetchone()
+            if bool(_cell(allowed_row, 0, "allowed")) != ("UPDATE" in columns.get(column, ())):
+                raise PostgresSchemaError(
+                    PostgresSchemaFailureCode.PRIVILEGE_MISSING,
+                    "clean runtime content-owner column grants are not exact",
+                )
     for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE"):
         allowed_row = connection.execute(
             "SELECT pg_catalog.has_table_privilege(%s, "

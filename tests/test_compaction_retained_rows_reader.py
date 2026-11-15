@@ -53,7 +53,6 @@ def _answer(repo, guard, turn, text):
         guard,
         cut=cut,
         entry_id=entry_id,
-        parent_content=InlineContent.from_bytes(b"manifest"),
         blocks=(
             AssistantTextBlock(
                 random_id("block"), InlineContent.from_bytes(text.encode())
@@ -81,9 +80,6 @@ def test_reader_keeps_sparse_prefix_images_and_effective_q_across_compactions(re
         image_body.getvalue(),
         8,
         6,
-        workspace_id=repo.read_session_workspace_id(
-            guard, deadline_monotonic=monotonic() + 30
-        ),
     )
     content = FrozenPromptContent(
         (LLMTextPart("preserve this exact request " * 150), image)

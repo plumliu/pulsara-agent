@@ -25,6 +25,7 @@ from pulsara_agent.ports.session_content import (
 )
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from pulsara_agent.conversation_kernel.root_status import LATEST_ROOT_SUMMARY_SQL
+from pulsara_agent.conversation_kernel.content_parts import decode_content_part
 
 # UI page/preview budgets, never a cap on the corpus searched.
 MAX_PAGE_SIZE = SESSION_QUERY_MAX_ITEMS
@@ -44,34 +45,37 @@ WHERE s.memory_domain_id=%s AND (%s='ALL' OR s.lifecycle=%s)
 """
 
 _DOCUMENT_SQL = (
-    """
-WITH sessions AS MATERIALIZED ("""
-    + _SESSION_SQL
-    + """), documents AS (
+    "WITH sessions AS MATERIALIZED (" + _SESSION_SQL + """), documents AS (
  SELECT s.id AS session_id, NULL::text AS entry_id, 0::bigint AS sequence,
-        0::integer AS ordinal, 'title'::text AS kind, NULL::bytea AS content,
-        NULL::text AS digest, NULL::bigint AS size,
+        0::integer AS ordinal, 'title'::text AS kind, NULL::text AS part_id,
+        NULL::text AS type, NULL::bytea AS inline_value, NULL::text AS blob_id,
         NULL::timestamptz AS accepted_at, NULL::jsonb AS scheduled_input FROM sessions s
  UNION ALL
- SELECT e.session_id, e.id, e.entry_sequence, 0, 'user',
-        COALESCE(e.inline_content,b.body), e.content_digest,e.content_size, e.accepted_at,e.scheduled_input
+ SELECT e.session_id,e.id,e.entry_sequence,p.ordinal,
+        CASE WHEN e.entry_kind IN ('USER_MESSAGE','USER_STEER') THEN 'user' ELSE 'assistant' END,
+        p.id,p.type,p.inline_value,p.blob_id,e.accepted_at,e.scheduled_input
  FROM sessions s JOIN pulsara_v3.transcript_entries e ON e.session_id=s.id
- LEFT JOIN pulsara_v3.blobs b ON b.id=e.blob_id AND b.workspace_id=e.workspace_id
- WHERE e.entry_kind IN ('USER_MESSAGE','USER_STEER')
- UNION ALL
- SELECT e.session_id,e.id,e.entry_sequence,a.block_ordinal,'assistant',
-        COALESCE(a.inline_content,b.body),a.content_digest,a.content_size,e.accepted_at,e.scheduled_input
- FROM sessions s JOIN pulsara_v3.transcript_entries e ON e.session_id=s.id
- JOIN pulsara_v3.assistant_message_blocks a ON a.assistant_entry_id=e.id AND a.session_id=e.session_id
- LEFT JOIN pulsara_v3.blobs b ON b.id=a.blob_id AND b.workspace_id=a.workspace_id
- WHERE e.entry_kind IN ('ASSISTANT_MESSAGE','ASSISTANT_TOOL_REQUEST')
-   AND a.block_kind='TEXT'
+ JOIN pulsara_v3.content_parts p ON p.entry_id=e.id AND p.session_id=e.session_id
+ WHERE p.type IN ('text','annotation') AND (
+   (e.entry_kind IN ('USER_MESSAGE','USER_STEER') AND e.scheduled_input IS NULL
+      AND e.input_origin IN ('HUMAN_MESSAGE','HUMAN_STEER','AGENT_INSTRUCTION')) OR
+   (e.entry_kind IN ('ASSISTANT_MESSAGE','ASSISTANT_TOOL_REQUEST') AND p.type='text'))
 )
-SELECT s.*,d.entry_id,d.sequence,d.ordinal,d.kind,d.content,d.digest,d.size,d.accepted_at,d.scheduled_input
+SELECT s.*,d.entry_id,d.sequence,d.ordinal,d.kind,d.part_id,d.type,d.inline_value,d.blob_id,d.accepted_at,d.scheduled_input
 FROM sessions s JOIN documents d ON d.session_id=s.id
 ORDER BY s.id,d.sequence DESC,d.ordinal ASC
 """
 )
+
+
+def _decoded_documents(connection, rows):
+    for row in rows:
+        if row["kind"] == "title":
+            yield row
+            continue
+        part = decode_content_part(connection, {**row, "id": row["part_id"]})
+        value = part.value if part.type == "text" else part.value.get("comment") or ""
+        yield {**row, "value": value}
 
 
 def _position(row):
@@ -166,7 +170,7 @@ def search_session_page(
                             and row["entry_id"] != current_range.excluded_entry_id
                         )
                     )
-                    candidates = entry_documents(scoped) if patterns else scoped
+                    candidates = entry_documents(_decoded_documents(connection, scoped)) if patterns else scoped
                     for row in candidates:
                         if monotonic() >= deadline_monotonic:
                             raise TimeoutError("session search deadline exceeded")

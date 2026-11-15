@@ -12,10 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from time import monotonic
 
-from pulsara_agent.conversation_kernel.contracts import (
-    CanonicalContent,
-    HostWriterGuard,
-)
+from pulsara_agent.conversation_kernel.contracts import HostWriterGuard
 from pulsara_agent.conversation_kernel.execution_watchdogs import (
     KernelExecutionDeadlineFactory,
     KernelWatchdogOwner,
@@ -53,7 +50,6 @@ class PreparedAssistantMessageSettlement:
     guard: HostWriterGuard
     cut: PreparedProviderInputCut
     entry_id: str
-    parent_content: CanonicalContent = field(repr=False)
     blocks: tuple[AssistantBlock, ...] = field(repr=False)
     complete_turn: bool
     occurred_at: datetime
@@ -267,7 +263,6 @@ class AssistantMessageSettlementOwner:
                         candidate.guard,
                         cut=candidate.cut,
                         entry_id=candidate.entry_id,
-                        parent_content=candidate.parent_content,
                         blocks=candidate.blocks,
                         visualizations=candidate.visualizations,
                         provider_replay=candidate.provider_replay,
@@ -288,7 +283,6 @@ class AssistantMessageSettlementOwner:
                             candidate.guard,
                             cut=candidate.cut,
                             entry_id=candidate.entry_id,
-                            parent_content=candidate.parent_content,
                             blocks=candidate.blocks,
                             visualizations=candidate.visualizations,
                             provider_replay=candidate.provider_replay,

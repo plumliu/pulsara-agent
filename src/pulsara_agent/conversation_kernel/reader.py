@@ -10,6 +10,7 @@ from __future__ import annotations
 from pulsara_agent.identity import require_id
 from pulsara_agent.conversation_kernel.contracts import CanonicalContent
 from pulsara_agent.scheduling.contracts import ScheduledProvenance
+from pulsara_agent.ports.terminal_observation import cell_output_provider_text
 
 from pulsara_agent.conversation_kernel.interruption import (
     read_executed_notices,
@@ -30,19 +31,14 @@ from pulsara_agent.conversation_kernel.repository_errors import (
     ConversationKernelConflict,
 )
 
-from pulsara_agent.conversation_kernel.prompt_content import (
-    PROMPT_BODY_MEDIA_TYPE,
-    canonical_prompt_body_bytes,
-)
+from pulsara_agent.conversation_kernel.content_parts import ContentPart, decode_content_part
 from pulsara_agent.conversation_kernel.prompt_storage import (
     hydrate_canonical_prompt_owner,
     hydrate_canonical_snapshot_owner,
 )
 from pulsara_agent.llm.input import (
-    FrozenPromptContent,
     LLMImagePart,
     LLMTextPart,
-    frozen_tool_result_public_text,
 )
 from pulsara_agent.primitives.context import canonical_json_bytes
 from pulsara_agent.model_input.contracts import (
@@ -96,11 +92,6 @@ from pulsara_agent.model_input.continuity import (
     FULL_HISTORY_CONTEXT_BASE_IDENTITY,
 )
 from pulsara_agent.ports.tool_output import ToolOutputUnavailableReason
-from pulsara_agent.ports.tool_execution import (
-    ToolOutputSourceCoverage,
-    ToolOutputSourceCoverageReason,
-    freeze_tool_json_object,
-)
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
     context_fingerprint,
@@ -130,9 +121,6 @@ from pulsara_agent.primitives.tool_observation import (
 )
 from pulsara_agent.primitives.tool_result_projection import (
     classify_tool_result_delivery,
-)
-from pulsara_agent.ports.terminal_observation import (
-    CellOutputContent,
 )
 from pulsara_agent.llm.provider_replay import ProviderReplayTargetCompatibilityFact
 from pulsara_agent.storage.postgres_connection_provider import (
@@ -365,10 +353,42 @@ class CanonicalProviderInputReader:
                     provider_input_through_sequence=cut.provider_input_through_sequence,
                     scope_kind=scope_kind,
                 )
+            from pulsara_agent.conversation_kernel.prompt_storage import validate_canonical_prompt_owner_metadata
+            from pulsara_agent.conversation_kernel.prompt_content import canonical_prompt_body_resource_quote
+            prompt_bytes = 0
+            prompt_rows = connection.execute(
+                """SELECT e.* FROM pulsara_v3.transcript_entries e
+                   WHERE e.session_id=%s AND e.entry_kind IN ('USER_MESSAGE','USER_STEER')
+                     AND (e.entry_sequence>%s OR e.id=ANY(%s::text[]))
+                     AND e.entry_sequence<=%s ORDER BY e.entry_sequence""",
+                (cut.session_id, floor, list(retained_entry_ids), cut.provider_input_through_sequence),
+            ).fetchall()
+            for prompt_row in prompt_rows:
+                body = validate_canonical_prompt_owner_metadata(
+                    connection, row=prompt_row, transcript_entry_id=str(prompt_row["id"]),
+                )
+                prompt_bytes += canonical_prompt_body_resource_quote(body).canonical_expanded_bytes
+            cell_output_bytes = 0
+            cell_rows = connection.execute(
+                """SELECT id FROM pulsara_v3.transcript_entries
+                   WHERE session_id=%s AND entry_kind='TERMINAL_OBSERVATION'
+                     AND (entry_sequence>%s OR id=ANY(%s::text[]))
+                     AND entry_sequence<=%s ORDER BY entry_sequence""",
+                (cut.session_id, floor, list(retained_entry_ids), cut.provider_input_through_sequence),
+            ).fetchall()
+            for cell_row in cell_rows:
+                text = self._entry_text(connection, str(cell_row["id"]), cut.session_id)
+                cell_output_bytes += len(cell_output_provider_text(text).encode("utf-8"))
             quote = connection.execute(
                 """
                 WITH selected_entries AS (
-                    SELECT e.id, e.entry_kind, e.content_size
+                    SELECT e.id, e.entry_kind,
+                           (SELECT COALESCE(sum(COALESCE(octet_length(p.inline_value),pb.logical_size)),0)
+                            FROM pulsara_v3.content_parts p LEFT JOIN pulsara_v3.blobs pb ON pb.id=p.blob_id
+                            WHERE p.entry_id=e.id AND p.type <> 'image')
+                           + COALESCE((SELECT octet_length(r.public_fields::text)
+                                       FROM pulsara_v3.tool_results r
+                                       WHERE r.session_id=e.session_id AND r.result_entry_id=e.id),0) AS content_size
                     FROM pulsara_v3.transcript_entries AS e
                     WHERE e.session_id = %s
                       AND (e.entry_kind <> 'TOOL_RESULT' OR NOT EXISTS (SELECT 1 FROM pulsara_v3.tool_results cr JOIN pulsara_v3.tool_invocations ci ON ci.id=cr.invocation_id WHERE cr.session_id=e.session_id AND cr.result_entry_id=e.id AND ci.source_kind='CODE_MODE_CALL'))
@@ -386,8 +406,6 @@ class CanonicalProviderInputReader:
                         coalesce(sum(
                             CASE
                               WHEN entry_kind IN (
-                                  'USER_MESSAGE', 'USER_STEER',
-                                  'TERMINAL_OBSERVATION',
                                   'PLAN_CONTINUATION'
                               ) THEN content_size
                               WHEN entry_kind = 'TOOL_RESULT'
@@ -398,22 +416,26 @@ class CanonicalProviderInputReader:
                     FROM selected_entries
                 ),
                 selected_blocks AS (
-                    SELECT b.block_kind, b.content_size,
+                    SELECT b.type, COALESCE(octet_length(b.inline_value), payload.logical_size,0) AS content_size,
+                           COALESCE(b.data_codec, payload.codec) AS data_codec,
                            b.tool_arguments, b.tool_call_id
-                    FROM pulsara_v3.assistant_message_blocks AS b
+                    FROM pulsara_v3.content_parts AS b
                     JOIN selected_entries AS e
-                      ON e.id = b.assistant_entry_id
-                    ORDER BY b.assistant_entry_id, b.block_ordinal
+                      ON e.id = b.entry_id
+                    LEFT JOIN pulsara_v3.blobs payload ON payload.id=b.blob_id
+                    WHERE e.entry_kind IN ('ASSISTANT_MESSAGE','ASSISTANT_TOOL_REQUEST')
+                    ORDER BY b.entry_id, b.ordinal
 
                 ),
                 entry_image_totals AS (
                     SELECT coalesce(sum(b.logical_size), 0) AS image_bytes
-                    FROM pulsara_v3.canonical_image_refs AS r
+                    FROM pulsara_v3.content_parts AS r
                     JOIN selected_entries AS e
-                      ON e.id = r.transcript_entry_id
+                      ON e.id = r.entry_id
                      AND r.session_id = %s
                     JOIN pulsara_v3.blobs AS b
-                      ON b.id = r.blob_id AND b.workspace_id = r.workspace_id
+                      ON b.id = r.blob_id
+                    WHERE r.type='image' AND e.entry_kind NOT IN ('USER_MESSAGE','USER_STEER')
                 ),
                 base_snapshot_totals AS (
                     SELECT count(*) AS item_count,
@@ -425,17 +447,20 @@ class CanonicalProviderInputReader:
                     SELECT
                         count(*) AS total_blocks,
                         count(*) FILTER (
-                            WHERE block_kind = 'TOOL_CALL'
+                            WHERE type = 'tool_call'
                         ) AS tool_calls,
                         coalesce(sum(
                             CASE
-                              WHEN block_kind IN ('TEXT', 'DATA')
+                              WHEN type='data' AND data_codec<>'utf-8'
+                                  THEN octet_length(jsonb_build_object(
+                                      'kind','binary_content','codec',data_codec,'size',content_size)::text)
+                              WHEN type IN ('text', 'data')
                                   THEN content_size
                               ELSE octet_length(tool_arguments::text)
                             END
                         ), 0) AS block_bytes,
                         coalesce(sum(
-                            CASE WHEN block_kind = 'TOOL_CALL'
+                            CASE WHEN type = 'tool_call'
                               THEN 512 + 6 * octet_length(tool_call_id)
                               ELSE 0
                             END
@@ -487,6 +512,8 @@ class CanonicalProviderInputReader:
                 ),
                 selected_canonical_expanded_bytes=(
                     int(quote["base_expanded_bytes"])
+                    + prompt_bytes
+                    + cell_output_bytes
                     + int(quote["entry_bytes"])
                     + int(quote["image_bytes"])
                     + int(quote["block_bytes"])
@@ -846,8 +873,6 @@ class CanonicalProviderInputReader:
                        e.imported_source_plan_workflow_id,
                        e.imported_source_plan_interaction_id,
                        e.imported_source_plan_handoff_kind,
-                       e.blob_id, e.content_digest, e.content_size,
-                       e.content_media_type, e.content_codec,
                        CASE e.entry_owner_kind WHEN 'EXECUTED_TURN' THEN t.status
                             WHEN 'IMPORTED_HISTORY' THEN g.status END AS owning_turn_status
                 FROM pulsara_v3.transcript_entries AS e
@@ -905,22 +930,6 @@ class CanonicalProviderInputReader:
                 session_id=cut.session_id,
                 entries=entries,
             )
-            entry_payloads = self._load_entry_payloads(
-                connection,
-                cut.session_id,
-                tuple(
-                    str(row["id"])
-                    for row in entries
-                    if row["entry_kind"]
-                    in (
-                        "USER_MESSAGE",
-                        "USER_STEER",
-                        "TERMINAL_OBSERVATION",
-                        "TOOL_RESULT",
-                        "PLAN_CONTINUATION",
-                    )
-                ),
-            )
             block_payloads = self._load_block_payloads(
                 connection,
                 cut.session_id,
@@ -955,36 +964,9 @@ class CanonicalProviderInputReader:
                     result_state=str(result["result_state"]),
                 )
                 late.append(observation)
-                result_row = _with_inline_payload(
-                    result,
-                    entry_payloads[str(result["result_entry_id"])],
-                )
-                typed_result = (
-                    str(result["content_media_type"]) == PROMPT_BODY_MEDIA_TYPE
-                )
-                if typed_result:
-                    result_prompt = hydrate_canonical_prompt_owner(
-                        connection,
-                        row=result_row,
-                        transcript_entry_id=str(result["result_entry_id"]),
-                    )
-                    result_body_text = frozen_tool_result_public_text(
-                        result_prompt.content, tool_name=call.tool_name
-                    )
-                    result_images = tuple(
-                        part
-                        for part in result_prompt.content.parts
-                        if isinstance(part, LLMImagePart)
-                    )
-                else:
-                    result_content = self._read_content(
-                        result_row,
-                        deadline_monotonic=deadline_monotonic,
-                    )
-                    result_body_text = _decode_provider_text(
-                        result_content, str(result["content_codec"])
-                    )
-                    result_images = ()
+                result_row = result
+                result_parts, result_body_text, result_bytes = self._result_projection(connection, result_row)
+                result_images = tuple(part for part in result_parts if isinstance(part, LLMImagePart))
                 if call.tool_name == "annotate_media" and str(result["result_state"]) == "SUCCESS":
                     from pulsara_agent.primitives.tool_result_projection import project_tool_result_storage_body
                     result_body_text = project_tool_result_storage_body(result_body_text,
@@ -998,16 +980,7 @@ class CanonicalProviderInputReader:
                     }
                 )
                 late_content = (LLMTextPart(late_text), *result_images)
-                late_expanded_bytes = (
-                    len(
-                        canonical_prompt_body_bytes(
-                            FrozenPromptContent(late_content)
-                        )
-                    )
-                    + sum(len(image.immutable_bytes) for image in result_images)
-                    if typed_result
-                    else len(late_text.encode("utf-8"))
-                )
+                late_expanded_bytes = len(late_text.encode("utf-8")) + sum(len(image.immutable_bytes) for image in result_images)
                 canonical_bytes += late_expanded_bytes
                 late_items.append(
                     (
@@ -1068,42 +1041,13 @@ class CanonicalProviderInputReader:
                         )
                     continue
                 if kind in ("USER_MESSAGE", "USER_STEER"):
-                    prompt_row = _with_inline_payload(row, entry_payloads[entry_id])
+                    prompt_row = row
                     origin = _canonical_input_origin(row, scope_kind=scope_kind)
-                    if origin in {
-                        CanonicalInputOriginKind.HUMAN_MESSAGE,
-                        CanonicalInputOriginKind.HUMAN_STEER,
-                        CanonicalInputOriginKind.AGENT_INSTRUCTION,
-                        CanonicalInputOriginKind.AGENT_MATERIAL,
-                        CanonicalInputOriginKind.AGENT_MESSAGE,
-                        CanonicalInputOriginKind.SCHEDULED_TASK,
-                    }:
-                        if str(row["content_media_type"]) != PROMPT_BODY_MEDIA_TYPE:
-                            raise ConversationKernelConflict(
-                                "ROOT human prompt is not canonical typed content"
-                            )
-                        prompt = hydrate_canonical_prompt_owner(
-                            connection,
-                            row=prompt_row,
-                            transcript_entry_id=entry_id,
-                        )
-                        canonical_bytes += (
-                            prompt.resource_quote.canonical_expanded_bytes
-                        )
-                        prompt_parts = prompt.content.parts
-                    else:
-                        content = self._read_content(
-                            prompt_row,
-                            deadline_monotonic=deadline_monotonic,
-                        )
-                        canonical_bytes += len(content)
-                        prompt_parts = (
-                            LLMTextPart(
-                                _decode_provider_text(
-                                    content, str(row["content_codec"])
-                                )
-                            ),
-                        )
+                    prompt = hydrate_canonical_prompt_owner(
+                        connection, row=prompt_row, transcript_entry_id=entry_id,
+                    )
+                    canonical_bytes += prompt.resource_quote.canonical_expanded_bytes
+                    prompt_parts = prompt.content.parts
                     items.append(
                         ProviderInputItem(
                             item_kind=ProviderInputItemKind.USER,
@@ -1119,21 +1063,9 @@ class CanonicalProviderInputReader:
                     )
                     continue
                 if kind == "TERMINAL_OBSERVATION":
-                    content = self._read_content(
-                        _with_inline_payload(row, entry_payloads[entry_id]),
-                        deadline_monotonic=deadline_monotonic,
-                    )
+                    text = cell_output_provider_text(self._entry_text(connection, entry_id, cut.session_id))
+                    content = text.encode("utf-8")
                     canonical_bytes += len(content)
-                    text = _decode_provider_text(content, str(row["content_codec"]))
-                    if (
-                        str(row["content_media_type"])
-                        != "application/vnd.pulsara.terminal-observation+json"
-                        or str(row["content_codec"]) != "utf-8"
-                    ):
-                        raise ConversationKernelConflict(
-                            "terminal observation content descriptor is invalid"
-                        )
-                    _validate_terminal_observation_content(content)
                     items.append(
                         ProviderInputItem(
                             item_kind=ProviderInputItemKind.TERMINAL_OBSERVATION,
@@ -1146,13 +1078,7 @@ class CanonicalProviderInputReader:
                     )
                     continue
                 if kind == "PLAN_CONTINUATION":
-                    content = self._read_content(
-                        _with_inline_payload(row, entry_payloads[entry_id]),
-                        deadline_monotonic=deadline_monotonic,
-                    )
-                    storage_text = _decode_provider_text(
-                        content, str(row["content_codec"])
-                    )
+                    storage_text = self._entry_text(connection, entry_id, cut.session_id)
                     provider_text = _project_plan_continuation_storage(
                         row, storage_text
                     )
@@ -1172,11 +1098,6 @@ class CanonicalProviderInputReader:
                     raise ConversationKernelConflict(
                         "provider input entry kind is not closed"
                     )
-                # The assistant parent content is a storage-only block manifest.
-                # Provider continuity, byte admission and semantic lowering are
-                # owned exclusively by the ordered TEXT/DATA/TOOL_CALL blocks.
-                # Reading or charging the manifest here would let a carrier that
-                # is never sent to the model veto an otherwise valid call.
                 blocks = blocks_by_entry.get(entry_id, ())
                 text_parts = tuple(
                     self._block_text(
@@ -1184,7 +1105,7 @@ class CanonicalProviderInputReader:
                         deadline_monotonic=deadline_monotonic,
                     )
                     for item in blocks
-                    if item["block_kind"] in ("TEXT", "DATA")
+                    if item["type"] in ("text", "data")
                 )
                 canonical_bytes += sum(len(part.encode("utf-8")) for part in text_parts)
                 calls = tuple(
@@ -1196,7 +1117,7 @@ class CanonicalProviderInputReader:
                         ),
                     )
                     for item in blocks
-                    if item["block_kind"] == "TOOL_CALL"
+                    if item["type"] == "tool_call"
                 )
                 canonical_bytes += sum(
                     len(canonical_json_bytes(thaw_json(call.arguments)))
@@ -1239,41 +1160,9 @@ class CanonicalProviderInputReader:
                             raise ConversationKernelConflict(
                                 "imported call has both visible result and closure"
                             )
-                        result_row = _with_inline_payload(
-                            result,
-                            entry_payloads[str(result["result_entry_id"])],
-                        )
-                        typed_result = (
-                            str(result["content_media_type"]) == PROMPT_BODY_MEDIA_TYPE
-                        )
-                        if typed_result:
-                            result_prompt = hydrate_canonical_prompt_owner(
-                                connection,
-                                row=result_row,
-                                transcript_entry_id=str(result["result_entry_id"]),
-                            )
-                            canonical_bytes += (
-                                result_prompt.resource_quote.canonical_expanded_bytes
-                            )
-                            result_parts = result_prompt.content.parts
-                            result_body_text = frozen_tool_result_public_text(
-                                result_prompt.content, tool_name=call.tool_name
-                            )
-                        else:
-                            result_content = self._read_content(
-                                result_row,
-                                deadline_monotonic=deadline_monotonic,
-                            )
-                            canonical_bytes += len(result_content)
-                            result_body_text = _decode_provider_text(
-                                result_content, str(result["content_codec"])
-                            )
-                            if call.tool_name == "annotate_media" and str(result["result_state"]) == "SUCCESS":
-                                from pulsara_agent.primitives.tool_result_projection import project_tool_result_storage_body
-                                result_body_text = project_tool_result_storage_body(result_body_text,
-                                    ToolObservationOrigin.BUILTIN, tool_name=call.tool_name,
-                                    result_state=str(result["result_state"]))
-                            result_parts = (LLMTextPart(result_body_text),)
+                        result_row = result
+                        result_parts, result_body_text, result_bytes = self._result_projection(connection, result_row)
+                        canonical_bytes += result_bytes
                         items.append(
                             ProviderInputItem(
                                 item_kind=ProviderInputItemKind.TOOL_RESULT,
@@ -1296,7 +1185,7 @@ class CanonicalProviderInputReader:
                                 ),
                                 tool_call_ordinal=call_ordinal,
                                 tool_call_arguments=call.arguments,
-                                tool_call_name=call.tool_name if typed_result else None,
+                                tool_call_name=call.tool_name if any(isinstance(part, LLMImagePart) for part in result_parts) else None,
                             )
                         )
                         continue
@@ -1671,32 +1560,23 @@ class CanonicalProviderInputReader:
             return ()
         rows = tuple(connection.execute(
             """
-            SELECT b.id, b.assistant_entry_id, b.block_ordinal, b.block_kind,
-                   b.tool_call_id, b.tool_name, b.blob_id, b.content_digest,
-                   b.content_size, b.content_media_type, b.content_codec,
-                   CASE WHEN b.inline_content IS NULL THEN 0
-                        ELSE octet_length(b.inline_content) END AS inline_content_size,
-                   CASE WHEN b.tool_arguments IS NULL THEN 0
-                        ELSE octet_length(b.tool_arguments::text) END AS tool_arguments_size,
-                   result.result_entry_id,
-                   (SELECT count(*) FROM pulsara_v3.assistant_message_blocks AS prior
-                    WHERE prior.session_id = b.session_id
-                      AND prior.assistant_entry_id = b.assistant_entry_id
-                      AND prior.block_kind = 'TOOL_CALL'
-                      AND prior.block_ordinal < b.block_ordinal) AS tool_call_ordinal
+            SELECT b.*, b.entry_id AS assistant_entry_id, result.result_entry_id,
+                   (SELECT count(*) FROM pulsara_v3.content_parts AS prior
+                    WHERE prior.session_id=b.session_id AND prior.entry_id=b.entry_id
+                      AND prior.type='tool_call' AND prior.ordinal<b.ordinal) AS tool_call_ordinal
             FROM pulsara_v3.tool_results AS result
             JOIN pulsara_v3.transcript_entries AS request
               ON request.session_id = result.session_id
              AND request.id = result.tool_call_entry_id
-            JOIN pulsara_v3.assistant_message_blocks AS b
+            JOIN pulsara_v3.content_parts AS b
               ON b.session_id = result.session_id
-             AND b.assistant_entry_id = result.tool_call_entry_id
+             AND b.entry_id = result.tool_call_entry_id
              AND b.tool_call_id = result.tool_call_id
-             AND b.block_kind = 'TOOL_CALL'
+             AND b.type = 'tool_call'
             WHERE result.session_id = %s
               AND result.result_entry_id = ANY(%s)
               AND request.entry_sequence <= %s
-            ORDER BY b.assistant_entry_id, b.block_ordinal
+            ORDER BY b.entry_id, b.ordinal
 
             """,
             (session_id, list(result_entry_ids), source_floor),
@@ -1713,18 +1593,12 @@ class CanonicalProviderInputReader:
         rows = tuple(
             connection.execute(
                 """
-                SELECT id, assistant_entry_id, block_ordinal, block_kind,
-                       tool_call_id, tool_name, blob_id, content_digest,
-                       content_size, content_media_type, content_codec,
-                       CASE WHEN inline_content IS NULL THEN 0
-                            ELSE octet_length(inline_content) END
-                           AS inline_content_size,
-                       CASE WHEN tool_arguments IS NULL THEN 0
-                            ELSE octet_length(tool_arguments::text) END
-                           AS tool_arguments_size
-                FROM pulsara_v3.assistant_message_blocks
-                WHERE session_id = %s AND assistant_entry_id = ANY(%s)
-                ORDER BY assistant_entry_id, block_ordinal
+                SELECT p.* FROM pulsara_v3.content_parts p
+                JOIN pulsara_v3.transcript_entries e ON e.session_id=p.session_id AND e.id=p.entry_id
+                WHERE p.session_id = %s AND p.entry_id = ANY(%s)
+                  AND e.entry_kind IN ('ASSISTANT_MESSAGE','ASSISTANT_TOOL_REQUEST')
+                  AND p.type IN ('text','data','tool_call')
+                ORDER BY p.entry_id, p.ordinal
 
                 """,
                 (session_id, list(entry_ids)),
@@ -1872,9 +1746,9 @@ def _plan_handoff_compile_facts(
       ON w.session_id = e.session_id AND w.id = e.source_plan_workflow_id
     LEFT JOIN pulsara_v3.plan_interactions AS i
       ON i.session_id = e.session_id AND i.id = e.source_plan_interaction_id
-    LEFT JOIN pulsara_v3.assistant_message_blocks AS b
+    LEFT JOIN pulsara_v3.content_parts AS b
       ON b.session_id = i.session_id
-     AND b.assistant_entry_id = i.assistant_entry_id
+     AND b.entry_id = i.assistant_entry_id
      AND b.tool_call_id = i.tool_call_id
     WHERE e.session_id = %s AND e.turn_id = %s
       AND e.entry_owner_kind = 'EXECUTED_TURN'
@@ -2085,27 +1959,27 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
             SELECT
               count(*) FILTER (WHERE a.id IS NULL) AS not_dispatched_count,
               count(*) FILTER (WHERE a.id IS NOT NULL) AS unknown_count
-            FROM pulsara_v3.assistant_message_blocks AS b
+            FROM pulsara_v3.content_parts AS b
             JOIN pulsara_v3.transcript_entries AS ae
               ON ae.entry_owner_kind = 'EXECUTED_TURN' AND ae.session_id = b.session_id
-             AND ae.id = b.assistant_entry_id
+             AND ae.id = b.entry_id
             LEFT JOIN pulsara_v3.tool_execution_attempts AS a
               ON a.session_id = b.session_id
-             AND a.assistant_entry_id = b.assistant_entry_id
+             AND a.assistant_entry_id = b.entry_id
              AND a.tool_call_id = b.tool_call_id
             LEFT JOIN pulsara_v3.tool_results AS r
               ON r.session_id = b.session_id
-             AND r.tool_call_entry_id = b.assistant_entry_id
+             AND r.tool_call_entry_id = b.entry_id
              AND r.tool_call_id = b.tool_call_id
             LEFT JOIN pulsara_v3.transcript_entries AS re
               ON re.entry_owner_kind = 'EXECUTED_TURN' AND re.session_id = r.session_id AND re.id = r.result_entry_id
             LEFT JOIN pulsara_v3.plan_interactions AS pi
               ON pi.session_id = b.session_id
-             AND pi.assistant_entry_id = b.assistant_entry_id
+             AND pi.assistant_entry_id = b.entry_id
              AND pi.tool_call_id = b.tool_call_id
             WHERE b.session_id = %s AND ae.turn_id = %s
               AND ae.entry_sequence <= %s
-              AND b.block_kind = 'TOOL_CALL'
+              AND b.type = 'tool_call'
               AND pi.id IS NULL
               AND (r.id IS NULL OR re.entry_sequence > %s)
             """,
@@ -2119,26 +1993,26 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
         sample_rows = connection.execute(
             """
             SELECT b.tool_name
-            FROM pulsara_v3.assistant_message_blocks AS b
+            FROM pulsara_v3.content_parts AS b
             JOIN pulsara_v3.transcript_entries AS ae
               ON ae.entry_owner_kind = 'EXECUTED_TURN' AND ae.session_id = b.session_id
-             AND ae.id = b.assistant_entry_id
+             AND ae.id = b.entry_id
             LEFT JOIN pulsara_v3.tool_results AS r
               ON r.session_id = b.session_id
-             AND r.tool_call_entry_id = b.assistant_entry_id
+             AND r.tool_call_entry_id = b.entry_id
              AND r.tool_call_id = b.tool_call_id
             LEFT JOIN pulsara_v3.transcript_entries AS re
               ON re.entry_owner_kind = 'EXECUTED_TURN' AND re.session_id = r.session_id AND re.id = r.result_entry_id
             LEFT JOIN pulsara_v3.plan_interactions AS pi
               ON pi.session_id = b.session_id
-             AND pi.assistant_entry_id = b.assistant_entry_id
+             AND pi.assistant_entry_id = b.entry_id
              AND pi.tool_call_id = b.tool_call_id
             WHERE b.session_id = %s AND ae.turn_id = %s
               AND ae.entry_sequence <= %s
-              AND b.block_kind = 'TOOL_CALL'
+              AND b.type = 'tool_call'
               AND pi.id IS NULL
               AND (r.id IS NULL OR re.entry_sequence > %s)
-            ORDER BY ae.entry_sequence, b.block_ordinal
+            ORDER BY ae.entry_sequence, b.ordinal
             LIMIT 3
             """,
             (
@@ -2204,53 +2078,48 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
         rows = tuple(
             connection.execute(
                 """
-                SELECT b.assistant_entry_id, b.tool_call_id, a.id AS attempt_id,
+                SELECT b.entry_id AS assistant_entry_id, b.tool_call_id, a.id AS attempt_id,
                        c.closure_kind AS imported_closure_kind,
                        c.target_provider_input_through_sequence AS imported_closure_cut,
                        i.kind AS plan_interaction_kind,
                        i.status AS plan_interaction_status,
                        r.session_id AS result_session_id, r.id AS result_id,
-                       r.result_state, r.result_entry_id, r.result_facts,
-                       r.output_omitted, r.output_unavailability_reason,
-                       r.output_body_digest,
-                       r.output_source_coverage,
-                       r.output_source_coverage_reason,
+                       r.result_state, r.result_entry_id,
+                       r.public_fields, r.output_unavailability_reason,
                        r.result_origin_kind, r.observed_at,
                        r.observation_duration_microseconds,
                        r.observation_origin_kind,
                        r.tool_reported_duration_microseconds,
                        r.model_visible_memory_fact_ids,
-                       e.entry_sequence, e.session_id, e.workspace_id, e.blob_id,
-                       e.content_digest, e.content_size,
-                       e.content_media_type, e.content_codec,
+                       e.entry_sequence, e.session_id, e.workspace_id,
                        CASE e.entry_owner_kind WHEN 'EXECUTED_TURN' THEN e.turn_id
                             WHEN 'IMPORTED_HISTORY' THEN e.imported_history_group_id END AS result_turn_id
-                FROM pulsara_v3.assistant_message_blocks AS b
+                FROM pulsara_v3.content_parts AS b
                 JOIN pulsara_v3.transcript_entries AS call_entry
-                  ON call_entry.session_id = b.session_id AND call_entry.id = b.assistant_entry_id
+                  ON call_entry.session_id = b.session_id AND call_entry.id = b.entry_id
                 LEFT JOIN pulsara_v3.tool_execution_attempts AS a
                   ON a.session_id = b.session_id
                  AND call_entry.entry_owner_kind = 'EXECUTED_TURN'
-                 AND a.assistant_entry_id = b.assistant_entry_id
+                 AND a.assistant_entry_id = b.entry_id
                  AND a.tool_call_id = b.tool_call_id
                 LEFT JOIN pulsara_v3.tool_results AS r
                   ON r.session_id = b.session_id
-                 AND r.tool_call_entry_id = b.assistant_entry_id
+                 AND r.tool_call_entry_id = b.entry_id
                  AND r.tool_call_id = b.tool_call_id
                 LEFT JOIN pulsara_v3.plan_interactions AS i
                   ON i.session_id = b.session_id
                  AND call_entry.entry_owner_kind = 'EXECUTED_TURN'
-                 AND i.assistant_entry_id = b.assistant_entry_id
+                 AND i.assistant_entry_id = b.entry_id
                  AND i.tool_call_id = b.tool_call_id
                 LEFT JOIN pulsara_v3.imported_tool_call_closures AS c
-                  ON c.session_id = b.session_id AND c.assistant_entry_id = b.assistant_entry_id
+                  ON c.session_id = b.session_id AND c.assistant_entry_id = b.entry_id
                  AND c.tool_call_id = b.tool_call_id AND call_entry.entry_owner_kind = 'IMPORTED_HISTORY'
                 LEFT JOIN pulsara_v3.transcript_entries AS e
                   ON e.session_id = r.session_id AND e.id = r.result_entry_id
                 WHERE b.session_id = %s
-                  AND (b.assistant_entry_id = ANY(%s) OR r.result_entry_id = ANY(%s))
-                  AND b.block_kind = 'TOOL_CALL'
-                ORDER BY b.assistant_entry_id, b.block_ordinal
+                  AND (b.entry_id = ANY(%s) OR r.result_entry_id = ANY(%s))
+                  AND b.type = 'tool_call'
+                ORDER BY b.entry_id, b.ordinal
 
                 """,
                 (session_id, list(entry_ids), list(snapshot_late_result_ids)),
@@ -2277,47 +2146,40 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
             )
         return state
 
-    def _load_entry_payloads(
-        self, connection, session_id: str, entry_ids: Sequence[str]
-    ) -> dict[str, object]:
-        if not entry_ids:
-            return {}
-        rows = tuple(
-            connection.execute(
-                """
-                SELECT id, inline_content
-                FROM pulsara_v3.transcript_entries
-                WHERE session_id = %s AND id = ANY(%s)
-                ORDER BY id
-                LIMIT %s
-                """,
-                (session_id, list(entry_ids), len(entry_ids) + 1),
-            ).fetchall()
-        )
-        if len(rows) != len(entry_ids):
-            raise ConversationKernelConflict("provider input entry payload set drifted")
-        return {str(row["id"]): row["inline_content"] for row in rows}
-
     def _load_block_payloads(
         self, connection, session_id: str, block_ids: Sequence[str]
     ) -> dict[str, Mapping[str, object]]:
         if not block_ids:
             return {}
-        rows = tuple(
-            connection.execute(
-                """
-                SELECT id, inline_content, tool_arguments
-                FROM pulsara_v3.assistant_message_blocks
-                WHERE session_id = %s AND id = ANY(%s)
-                ORDER BY id
-                LIMIT %s
-                """,
-                (session_id, list(block_ids), len(block_ids) + 1),
-            ).fetchall()
-        )
-        if len(rows) != len(block_ids):
-            raise ConversationKernelConflict("provider input block payload set drifted")
-        return {str(row["id"]): row for row in rows}
+        rows = connection.execute(
+            """SELECT * FROM pulsara_v3.content_parts
+               WHERE session_id=%s AND id=ANY(%s) ORDER BY id""",
+            (session_id, list(block_ids)),
+        ).fetchall()
+        if len(rows) != len(set(block_ids)):
+            raise ConversationKernelConflict("provider input content payload set drifted")
+        return {str(row["id"]): {**row, "part": decode_content_part(connection, row)} for row in rows}
+
+    @staticmethod
+    def _result_projection(connection, result):
+        from pulsara_agent.conversation_kernel.tool_outputs import read_accepted_tool_business_value, project_tool_result_export
+        if result["output_unavailability_reason"] is not None:
+            text = "Tool result content could not be accepted: " + str(result["output_unavailability_reason"])
+            return (LLMTextPart(text),), text, len(text.encode("utf-8"))
+        value = read_accepted_tool_business_value(connection, result)
+        text = project_tool_result_export(value).decode("utf-8")
+        from pulsara_agent.conversation_kernel.prompt_storage import read_image_reference_in_connection
+        images = tuple(read_image_reference_in_connection(connection, image_ref=part["value"]["image_ref"])
+                       for part in value["content"] if part["type"] == "image")
+        return (LLMTextPart(text), *images), text, len(text.encode("utf-8")) + sum(len(image.immutable_bytes) for image in images)
+
+    @staticmethod
+    def _entry_text(connection, entry_id, session_id):
+        from pulsara_agent.conversation_kernel.content_parts import read_content_parts
+        parts = read_content_parts(connection, entry_id=entry_id, session_id=session_id)
+        if any(part.type != "text" for part in parts):
+            raise ConversationKernelConflict("control entry must contain text")
+        return "".join(part.value for part in parts)
 
     @staticmethod
     def _load_snapshot_payload(connection, session_id: str, snapshot_id: str) -> object:
@@ -2347,9 +2209,8 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
                     "provider input block payload is absent"
                 )
             joined = dict(row)
-            joined["inline_content"] = payload["inline_content"]
-            joined["tool_arguments"] = payload["tool_arguments"]
-            result.setdefault(str(row["assistant_entry_id"]), []).append(joined)
+            joined["part"] = payload["part"]
+            result.setdefault(str(row["entry_id"]), []).append(joined)
         return {key: tuple(value) for key, value in result.items()}
 
     def _hydrate_snapshot_carrier(self, connection, snapshot) -> CompactionSnapshotCarrier:
@@ -2379,11 +2240,11 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
         image_quote = connection.execute(
             """SELECT COALESCE(sum(b.logical_size), 0) AS logical_size,
                       count(*) AS ref_count, count(b.id) AS blob_count
-               FROM pulsara_v3.canonical_image_refs AS r
+               FROM pulsara_v3.content_parts AS r
                LEFT JOIN pulsara_v3.blobs AS b
-                 ON b.id = r.blob_id AND b.workspace_id = r.workspace_id
+                 ON b.id = r.blob_id
                WHERE r.session_id = %s
-                 AND r.transcript_entry_id = ANY(%s::text[])""",
+                 AND r.entry_id = ANY(%s::text[]) AND r.type='image'""",
             (session_id, list(owner_entry_ids)),
         ).fetchone()
         if image_quote is None or int(image_quote["ref_count"]) != int(
@@ -2458,22 +2319,26 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
         *,
         deadline_monotonic: float,
     ) -> str:
-        return _decode_provider_text(
-            self._read_content(
-                row,
-                deadline_monotonic=deadline_monotonic,
-            ),
-            str(row["content_codec"]),
-        )
+        return assistant_content_part_text(row["part"])
 
 
-
-def _with_inline_payload(
-    row: Mapping[str, object], inline_content: object
-) -> Mapping[str, object]:
-    result = dict(row)
-    result["inline_content"] = inline_content
-    return result
+def assistant_content_part_text(part: ContentPart) -> str:
+    """Project DATA by its declared codec, never by guessing from its bytes."""
+    if part.type == "text":
+        return part.value
+    if part.type != "data":
+        raise ConversationKernelConflict("provider text part has a different type")
+    if part.data_codec != "utf-8":
+        return _canonical_json_text({
+            "kind": "binary_content", "codec": part.data_codec, "size": len(part.value),
+        })
+    try:
+        return part.value.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise CanonicalProviderContinuityError(
+            CanonicalProviderContinuityFailureKind.INVALID_UTF8,
+            content_identity="sha256:" + sha256(part.value).hexdigest(),
+        ) from error
 
 
 def _require_retained_request_row(
@@ -2550,8 +2415,6 @@ def _read_retained_prefix_rows(
                e.source_plan_workflow_id, e.source_plan_interaction_id,
                e.source_plan_handoff_kind, e.imported_source_plan_workflow_id,
                e.imported_source_plan_interaction_id, e.imported_source_plan_handoff_kind,
-               e.blob_id, e.content_digest, e.content_size,
-               e.content_media_type, e.content_codec,
                CASE e.entry_owner_kind WHEN 'EXECUTED_TURN' THEN t.status
                     WHEN 'IMPORTED_HISTORY' THEN g.status END AS owning_turn_status
         FROM pulsara_v3.transcript_entries AS e
@@ -2625,24 +2488,6 @@ def _next_assistant_cuts(
         next_row = assistants[index + 1]
         result[str(row["id"])] = int(next_row["provider_input_through_sequence"])
     return result
-
-
-def _decode_provider_text(content: bytes, codec: str) -> str:
-    if codec != "utf-8":
-        return _canonical_json_text(
-            {
-                "kind": "binary_content",
-                "codec": codec,
-                "size": len(content),
-            }
-        )
-    try:
-        return content.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise CanonicalProviderContinuityError(
-            CanonicalProviderContinuityFailureKind.INVALID_UTF8,
-            content_identity="sha256:" + sha256(content).hexdigest(),
-        ) from exc
 
 
 def _project_plan_continuation_storage(
@@ -2779,18 +2624,6 @@ def _tool_result_metadata(
         result_id=str(row["result_id"]),
         result_entry_id=str(row["result_entry_id"]),
         result_state=str(row["result_state"]),
-        required_facts=freeze_tool_json_object(row["result_facts"]),
-        output_omitted=bool(row["output_omitted"]),
-        output_available=(row["output_body_digest"] is not None
-                          and row["output_unavailability_reason"] is None),
-        source_coverage=ToolOutputSourceCoverage(str(row["output_source_coverage"])),
-        source_coverage_reason=(
-            None
-            if row["output_source_coverage_reason"] is None
-            else ToolOutputSourceCoverageReason(
-                str(row["output_source_coverage_reason"])
-            )
-        ),
         output_unavailability_reason=(
             None
             if row["output_unavailability_reason"] is None
@@ -2805,13 +2638,6 @@ def _tool_result_metadata(
     )
 
 
-def _validate_terminal_observation_content(content: bytes) -> None:
-    try:
-        CellOutputContent.from_bytes(content)
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise ConversationKernelConflict(
-            "Cell output canonical envelope is invalid"
-        ) from exc
 
 
 __all__ = [

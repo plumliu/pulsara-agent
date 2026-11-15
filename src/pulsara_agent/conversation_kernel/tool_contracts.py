@@ -34,7 +34,6 @@ from pulsara_agent.conversation_kernel.compaction.runtime_handoff import (
 from pulsara_agent.conversation_kernel.memory.contracts import (
     FrozenModelCallMemoryContext,
 )
-from pulsara_agent.conversation_kernel.memory.writes import PreparedMemoryMutation
 from pulsara_agent.conversation_kernel.tool_surface import (
     PreparedKernelToolSurface,
     CodeModeToolDirectory,
@@ -58,8 +57,7 @@ from pulsara_agent.conversation_kernel.agent_context import (
     FrozenAgentInvocationSnapshot,
 )
 from pulsara_agent.ports.tool_execution import (
-    ToolOutputSourceCoverage,
-    ToolOutputSourceCoverageReason,
+    ToolBusinessValue,
     ToolOutputSourceFormatHint,
 )
 from .tool_invocations import (
@@ -103,14 +101,14 @@ def valid_tool_remote_identity(identity: str | None, verification: str | None) -
 @dataclass(frozen=True, slots=True)
 class KernelToolResult:
     state: str
-    content: bytes | FrozenPromptContent
-    memory_mutation: PreparedMemoryMutation | None = None
+    content: bytes | FrozenPromptContent | ToolBusinessValue
     remote_identity: str | None = None
     remote_identity_verification: str | None = None
     output_body_candidate: ToolOutputBodyCandidate | None = None
     native_output: bytes | None = None
     page_complete: bool = False
     required_facts: Mapping[str, object] = field(default_factory=dict)
+    result_facts: Mapping[str, object] = field(default_factory=dict)
     process_local_settlement: ProcessLocalEffectSettlementToken | None = None
     physical_timing: str = "ON_TIME"
     caller_cancelled_while_running: bool = False
@@ -126,6 +124,10 @@ class KernelToolResult:
         """Decode only the format explicitly declared by the business owner."""
         import json
 
+        if isinstance(self.content, ToolBusinessValue):
+            from pulsara_agent.conversation_kernel.tool_outputs import assemble_tool_business_value
+            return assemble_tool_business_value(public_fields=self.content.public_fields,
+                content_parts=self.content.content, result_state=self.state)
         if not isinstance(self.content, bytes):
             raise TypeError("image content has no Code Mode business value")
         text = self.content.decode("utf-8")
@@ -140,27 +142,29 @@ class KernelToolResult:
             raise ValueError("invalid remote identity and verification")
         if not isinstance(self.public_format, ToolOutputSourceFormatHint):
             raise TypeError("public tool result format must be explicit TEXT or JSON")
-        if isinstance(self.content, bytes):
+        if isinstance(self.content, ToolBusinessValue):
+            pass
+        elif isinstance(self.content, bytes):
             self.content.decode("utf-8")
         elif isinstance(self.content, FrozenPromptContent):
             images = tuple(
                 part for part in self.content.parts if isinstance(part, LLMImagePart)
             )
             if (
-                self.state != "SUCCESS"
-                or not images
+                not images
                 or not any(isinstance(part, LLMTextPart) for part in self.content.parts)
             ):
                 raise ValueError("typed image content is invalid for this Tool result")
         else:
             raise TypeError(
-                "kernel Tool result content must be bytes or frozen content"
+                "kernel Tool result content must be bytes, frozen content or a declared business value"
             )
         if self.native_output is not None:
             self.native_output.decode("utf-8")
         if not isinstance(self.page_complete, bool):
             raise TypeError("page completeness must be boolean")
         object.__setattr__(self, "required_facts", freeze_tool_json_object(self.required_facts))
+        object.__setattr__(self, "result_facts", freeze_tool_json_object(self.result_facts))
 
 
 class KernelToolPhysicalInvocationError(RuntimeError):
@@ -599,13 +603,6 @@ class AcceptedCanonicalToolResultSettlement:
         if self.canonical_content is not None:
             if not isinstance(self.canonical_content, FrozenPromptContent):
                 raise TypeError("canonical ToolResult content must be frozen")
-            if (
-                frozen_tool_result_public_text(self.canonical_content, tool_name=self.tool_name)
-                != self.public_projection.canonical_body
-            ):
-                raise ValueError(
-                    "ToolResult public projection drifted from canonical content"
-                )
 
 
 def build_accepted_canonical_tool_result_settlement(
@@ -628,11 +625,6 @@ def build_accepted_canonical_tool_result_settlement(
     observation_origin: ToolObservationOrigin,
     observation_duration_microseconds: int | None = None,
     tool_reported_duration_microseconds: int | None = None,
-    output_omitted: bool = False,
-    output_available: bool = False,
-    required_facts: Mapping[str, object] | None = None,
-    source_coverage: ToolOutputSourceCoverage = ToolOutputSourceCoverage.COMPLETE,
-    source_coverage_reason: ToolOutputSourceCoverageReason | None = None,
     output_unavailability_reason: ToolOutputUnavailableReason | None = None,
     model_visible_memory_fact_ids: tuple[str, ...] = (),
     canonical_content: FrozenPromptContent | None = None,
@@ -652,11 +644,6 @@ def build_accepted_canonical_tool_result_settlement(
         result_id=result_id,
         result_entry_id=result_entry_id,
         result_state=result_state,
-        output_omitted=output_omitted,
-        output_available=output_available,
-        required_facts=freeze_tool_json_object(required_facts or {}),
-        source_coverage=source_coverage,
-        source_coverage_reason=source_coverage_reason,
         output_unavailability_reason=output_unavailability_reason,
         model_visible_memory_fact_ids=model_visible_memory_fact_ids,
         timing=timing,

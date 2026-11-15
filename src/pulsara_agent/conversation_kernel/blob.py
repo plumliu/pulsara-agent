@@ -26,12 +26,24 @@ from pulsara_agent.storage.postgres_connection_provider import (
 )
 
 
-MAXIMUM_BLOB_BYTES = STAGE2_LIMITS.canonical_blob_hard_bytes
 MAXIMUM_CONTENT_CHUNK_BYTES = STAGE2_LIMITS.content_chunk_hard_bytes
 
 
-def _blob_id(workspace_id: str, digest: str, media_type: str, codec: str, *, image: bool = False) -> str:
-    return derive_id("image" if image else "blob", "content", workspace_id, media_type, codec, digest)
+def _blob_id(
+    workspace_id: str | None,
+    digest: str,
+    media_type: str,
+    codec: str,
+    *,
+    image: bool = False,
+) -> str:
+    if image:
+        if workspace_id is not None:
+            raise ValueError("image assets do not have a workspace")
+        return derive_id("image", "content", media_type, codec, digest)
+    if not workspace_id:
+        raise ValueError("ordinary blobs require a workspace")
+    return derive_id("blob", "content", workspace_id, media_type, codec, digest)
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,7 +88,7 @@ class PostgresCanonicalBlobStore:
     def publish_in_connection(
         connection: Connection,
         *,
-        workspace_id: str,
+        workspace_id: str | None,
         content: bytes,
         media_type: str,
         codec: str,
@@ -84,17 +96,26 @@ class PostgresCanonicalBlobStore:
     ) -> BlobContent:
         """Publish or exact-reuse a blob on the caller-owned transaction."""
 
-        if not workspace_id or not media_type or not codec:
+        if (
+            not media_type
+            or not codec
+            or (validated_image is None and not workspace_id)
+        ):
             raise ValueError("blob publication identity is incomplete")
+        if validated_image is not None and workspace_id is not None:
+            raise ValueError("image assets do not have a workspace")
         value = bytes(content)
-        if len(value) > MAXIMUM_BLOB_BYTES:
-            raise ValueError("blob exceeds the Stage 2 physical bound")
         digest = "sha256:" + sha256(value).hexdigest()
         if validated_image is not None:
-            if (validated_image.immutable_bytes != value or validated_image.media_type != media_type
-                    or codec != "binary"):
+            if (
+                validated_image.immutable_bytes != value
+                or validated_image.media_type != media_type
+                or codec != "binary"
+            ):
                 raise ValueError("validated image publication differs from content")
-        blob_id = _blob_id(workspace_id, digest, media_type, codec, image=validated_image is not None)
+        blob_id = _blob_id(
+            workspace_id, digest, media_type, codec, image=validated_image is not None
+        )
         if validated_image is not None and validated_image.image_ref != blob_id:
             raise ValueError("image publication was not bound before freezing")
         storage_identity = f"postgres:pulsara_v3.blobs/{blob_id}"
@@ -102,8 +123,8 @@ class PostgresCanonicalBlobStore:
             """
             INSERT INTO pulsara_v3.blobs (
                 id, workspace_id, storage_identity, logical_digest,
-                logical_size, media_type, codec, body
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                logical_size, media_type, codec, body, width, height
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (id) DO NOTHING
             """,
             (
@@ -115,12 +136,14 @@ class PostgresCanonicalBlobStore:
                 media_type,
                 codec,
                 value,
+                validated_image.width if validated_image is not None else None,
+                validated_image.height if validated_image is not None else None,
             ),
         )
         row = connection.execute(
             """
             SELECT workspace_id, storage_identity, logical_digest,
-                   logical_size, media_type, codec, body
+                   logical_size, media_type, codec, body, width, height
             FROM pulsara_v3.blobs WHERE id = %s
             """,
             (blob_id,),
@@ -133,8 +156,14 @@ class PostgresCanonicalBlobStore:
             or row["media_type"] != media_type
             or row["codec"] != codec
             or bytes(row["body"]) != value
+            or row["width"]
+            != (validated_image.width if validated_image is not None else None)
+            or row["height"]
+            != (validated_image.height if validated_image is not None else None)
         ):
-            raise ConversationKernelConflict("IDENTITY_CONFLICT: blob content or owner differs")
+            raise ConversationKernelConflict(
+                "IDENTITY_CONFLICT: blob content or owner differs"
+            )
         return BlobContent(blob_id, digest, len(value), media_type, codec)
 
     def read_exact(
@@ -168,8 +197,12 @@ class PostgresCanonicalBlobStore:
         expected_media_type: str | None = None,
         expected_codec: str | None = None,
     ) -> bytes:
-        if not 0 <= expected_size <= MAXIMUM_BLOB_BYTES:
-            raise ValueError("blob exact-read size is out of bounds")
+        if (
+            isinstance(expected_size, bool)
+            or not isinstance(expected_size, int)
+            or expected_size < 0
+        ):
+            raise ValueError("blob exact-read size is invalid")
         row = connection.execute(
             """
             SELECT workspace_id, logical_digest, logical_size,
@@ -235,7 +268,12 @@ class PostgresCanonicalBlobStore:
     ) -> CanonicalContentChunk:
         if offset < 0 or not 1 <= maximum_bytes <= MAXIMUM_CONTENT_CHUNK_BYTES:
             raise ValueError("blob content range is out of bounds")
-        if not 0 <= expected_size <= MAXIMUM_BLOB_BYTES or offset > expected_size:
+        if (
+            isinstance(expected_size, bool)
+            or not isinstance(expected_size, int)
+            or expected_size < 0
+            or offset > expected_size
+        ):
             raise ValueError("blob descriptor range is out of bounds")
         requested_bytes = min(maximum_bytes, expected_size - offset)
         with self._provider.connection(
@@ -325,20 +363,8 @@ def _delete_orphans_in_connection(
                   WHERE s.blob_id = b.id
               )
               AND NOT EXISTS (
-                  SELECT 1 FROM pulsara_v3.transcript_entries AS e
-                  WHERE e.blob_id = b.id
-              )
-              AND NOT EXISTS (
-                  SELECT 1 FROM pulsara_v3.assistant_message_blocks AS m
-                  WHERE m.blob_id = b.id
-              )
-              AND NOT EXISTS (
-                  SELECT 1 FROM pulsara_v3.prompt_queue_items AS q
-                  WHERE q.blob_id = b.id
-              )
-              AND NOT EXISTS (
-                  SELECT 1 FROM pulsara_v3.canonical_image_refs AS i
-                  WHERE i.blob_id = b.id
+                  SELECT 1 FROM pulsara_v3.content_parts AS p
+                  WHERE p.blob_id = b.id
               )
               AND NOT EXISTS (
                   SELECT 1 FROM pulsara_v3.assistant_visualizations AS v
@@ -347,10 +373,6 @@ def _delete_orphans_in_connection(
               AND NOT EXISTS (
                   SELECT 1 FROM pulsara_v3.tool_execution_attempts AS a
                   WHERE a.code_source_blob_id = b.id
-              )
-              AND NOT EXISTS (
-                  SELECT 1 FROM pulsara_v3.tool_results AS r
-                  WHERE r.output_body_blob_id = b.id
               )
               AND pg_catalog.pg_try_advisory_xact_lock(
                   pg_catalog.hashtextextended(b.id, 0)
@@ -366,6 +388,32 @@ def _delete_orphans_in_connection(
         (grace_seconds, maximum_items),
     ).fetchall()
     return tuple(str(row["id"]) for row in rows)
+
+
+def materialize_content_in_connection(
+    connection: Connection,
+    *,
+    workspace_id: str,
+    content: bytes,
+    media_type: str,
+    codec: str,
+    inline_threshold_bytes: int = 64 << 10,
+) -> CanonicalContent:
+    """The shared inline/blob choice inside a caller-owned transaction."""
+    if not workspace_id or not media_type or not codec:
+        raise ValueError("canonical content identity is incomplete")
+    if not 1 <= inline_threshold_bytes <= 64 << 10:
+        raise ValueError("inline threshold is outside the storage contract")
+    value = bytes(content)
+    if len(value) <= inline_threshold_bytes:
+        return InlineContent.from_bytes(value, media_type=media_type, codec=codec)
+    return PostgresCanonicalBlobStore.publish_in_connection(
+        connection,
+        workspace_id=workspace_id,
+        content=value,
+        media_type=media_type,
+        codec=codec,
+    )
 
 
 class CanonicalContentPublisher:
@@ -417,25 +465,14 @@ class CanonicalContentPublisher:
     ) -> CanonicalContent:
         """Select inline/blob storage inside the caller-owned transaction."""
 
-        value = bytes(content)
-        described = self.describe(
-            workspace_id=workspace_id,
-            content=value,
-            media_type=media_type,
-            codec=codec,
-        )
-        if isinstance(described, InlineContent):
-            return described
-        published = self._store.publish_in_connection(
+        return materialize_content_in_connection(
             connection,
             workspace_id=workspace_id,
-            content=value,
+            content=content,
             media_type=media_type,
             codec=codec,
+            inline_threshold_bytes=self._inline_threshold_bytes,
         )
-        if published != described:
-            raise ConversationKernelConflict("published content descriptor drifted")
-        return published
 
     def describe(
         self,
@@ -452,8 +489,6 @@ class CanonicalContentPublisher:
         value = bytes(content)
         if len(value) <= self._inline_threshold_bytes:
             return InlineContent.from_bytes(value, media_type=media_type, codec=codec)
-        if len(value) > MAXIMUM_BLOB_BYTES:
-            raise ValueError("blob exceeds the Stage 2 physical bound")
         digest = "sha256:" + sha256(value).hexdigest()
         return BlobContent(
             _blob_id(workspace_id, digest, media_type, codec),
@@ -481,7 +516,7 @@ class CanonicalContentPublisher:
 __all__ = [
     "CanonicalContentChunk",
     "CanonicalContentPublisher",
-    "MAXIMUM_BLOB_BYTES",
+    "materialize_content_in_connection",
     "MAXIMUM_CONTENT_CHUNK_BYTES",
     "PostgresCanonicalBlobStore",
 ]

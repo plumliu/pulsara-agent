@@ -5,8 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from pulsara_agent.identity import random_id
-from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
-from pulsara_agent.ports.tool_output import ToolOutputBodyView
+from pulsara_agent.ports.tool_output import ToolResultView
 from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 as wire
 from pulsara_agent.terminal_protocol.v3_gateway import TerminalKernelProtocolServer
 from pulsara_agent.terminal_protocol.canonical_v3 import browser_tool_output_request
@@ -15,15 +14,16 @@ from pulsara_agent.terminal_protocol.canonical_v3 import browser_tool_output_req
 def test_browser_pages_exact_entry_body_without_reexecuting_or_reidentifying(monkeypatch):
     session_id, workspace_id, entry_id = random_id("session"), random_id("workspace"), random_id("entry")
     content = "你好🙂\r\n" + "中文🙂" * 15 + "\nend"
+    value = {"meta": {"status": "SUCCESS"}, "content": [{"type": "text", "value": content}]}
     reads = []
 
     class Port:
         def __init__(self, provider, **scope):
             assert scope == {"session_id": session_id, "workspace_id": workspace_id}
 
-        def read_body(self, target):
+        def read_result(self, target):
             reads.append(target)
-            return ToolOutputBodyView(target, content.encode(), "text/plain", "utf-8", ToolOutputSourceCoverage.COMPLETE)
+            return ToolResultView(target, value)
 
     monkeypatch.setattr("pulsara_agent.terminal_protocol.v3_gateway.PostgresToolOutputReadPort", Port)
     reader = SimpleNamespace(tool_output_workspace=lambda **kwargs: workspace_id)
@@ -45,7 +45,8 @@ def test_browser_pages_exact_entry_body_without_reexecuting_or_reidentifying(mon
                 break
             assert (page.next.line, page.next.char_offset) > (position.line, position.char_offset)
             position = page.next
-        assert "".join(fragments) == content
+        expected = '{\n  "meta": {\n    "status": "SUCCESS"\n  }\n}\n' + content
+        assert "".join(fragments) == expected
 
     asyncio.run(scenario())
     assert reads and all(target == {"kind": "SESSION_ENTRY", "entry_id": entry_id} for target in reads)
@@ -71,7 +72,7 @@ def test_browser_missing_or_inaccessible_source_is_not_an_empty_body(monkeypatch
         def __init__(self, *_args, **_kwargs):
             pass
 
-        def read_body(self, target):
+        def read_result(self, target):
             raise KeyError(target["entry_id"])
 
     monkeypatch.setattr("pulsara_agent.terminal_protocol.v3_gateway.PostgresToolOutputReadPort", Port)

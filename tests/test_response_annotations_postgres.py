@@ -35,10 +35,6 @@ from pulsara_agent.conversation_kernel.prompt_storage import (
 )
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
-from pulsara_agent.model_input.contracts import (
-    FrozenProviderInputItemKind,
-    CanonicalInputOriginKind,
-)
 
 repo = fork_support.repo
 pytestmark = pytest.mark.postgres
@@ -181,7 +177,6 @@ def test_multiblock_source_and_queued_annotation_roundtrip(repo, mode):
         guard,
         cut=cut,
         entry_id=source,
-        parent_content=InlineContent.from_bytes(b"manifest"),
         blocks=tuple(
             AssistantTextBlock(
                 identity("block"), InlineContent.from_bytes(text.encode())

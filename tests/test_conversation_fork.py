@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from tests.support.tool_outputs import prepare_output
+from pulsara_agent.conversation_kernel.content_parts import ResultPart
 from tests.support.images import bound_test_image
 
 from pulsara_agent.identity import random_id
@@ -24,11 +25,8 @@ from pulsara_agent.conversation_kernel.memory.recall import PostgresMemoryQuery
 from pulsara_agent.conversation_kernel.memory.management import (
     MemoryManagementSelection,
 )
-from pulsara_agent.conversation_kernel.prompt_content import (
-    hydrate_canonical_prompt_body,
-)
+from pulsara_agent.conversation_kernel.prompt_storage import hydrate_canonical_prompt_owner
 from pulsara_agent.conversation_kernel.prompt_storage import (
-    CanonicalImageReferenceUnavailable,
     PostgresCanonicalImageReferenceReadPort,
 )
 from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
@@ -39,8 +37,6 @@ from pulsara_agent.llm.input import (
     join_text_content,
 )
 from pulsara_agent.model_input.contracts import (
-    CanonicalInputOriginKind,
-    CompactionSnapshotCarrier,
     FrozenProviderInputItemKind,
     provider_input_item_text,
 )
@@ -131,7 +127,7 @@ def turn(repo, guard, text, *, finish=True, answer="answer", complete=True):
         guard,
         cut=cut,
         entry_id=final_id,
-        parent_content=InlineContent.from_bytes(b"manifest"),
+
         blocks=(
             AssistantTextBlock(
                 identity("block"), InlineContent.from_bytes(answer.encode())
@@ -152,6 +148,12 @@ def rows(repo, query, args=()):
         deadline_monotonic=monotonic() + 30,
     ) as conn:
         return conn.execute(query, args).fetchall()
+
+
+def prompt_content(repo, row):
+    with repo.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row, deadline_monotonic=monotonic()+30) as connection:
+        return hydrate_canonical_prompt_owner(connection, row=row, transcript_entry_id=row["id"]).content
 
 
 def assert_session_aggregate_deleted(repo, guard):
@@ -189,7 +191,7 @@ def final(repo, guard, turn_id, text="final"):
         guard,
         cut=cut,
         entry_id=entry,
-        parent_content=InlineContent.from_bytes(b"manifest"),
+
         blocks=(
             AssistantTextBlock(
                 identity("block"), InlineContent.from_bytes(text.encode())
@@ -281,7 +283,6 @@ def compact(
             snapshot_carrier=carrier,
 
 
-
             occurred_at=datetime.now(timezone.utc),
             actor_id="runtime:test",
         )
@@ -346,7 +347,7 @@ def test_historical_snapshot_ignores_future_idle_compaction_and_retains_exact_re
         and carrier.active_request_entry_id is None
     )
     assert carrier.retained_entry_ids == (copied[0]["id"],)
-    assert hydrate_canonical_prompt_body(body=bytes(copied[0]["inline_content"]), image_payloads=()).content == FrozenPromptContent.text("precise active request")
+    assert prompt_content(repo, copied[0]) == FrozenPromptContent.text("precise active request")
     child_guard = child_lease(repo, child).guard
     _, cut, _ = turn(repo, child_guard, "new child request", finish=False)
     actual = CanonicalProviderInputReader(
@@ -398,7 +399,7 @@ def test_midturn_multiple_compactions_copy_only_last_adopted_base_and_retained_s
     assert parsed.earlier_context_summary == "C2"
     assert len(parsed.retained_entry_ids) == 1
     retained = rows(repo, "SELECT * FROM pulsara_v3.transcript_entries WHERE session_id=%s AND id=%s", (created.child_session_id, parsed.retained_entry_ids[0]))[0]
-    assert hydrate_canonical_prompt_body(body=bytes(retained["inline_content"]), image_payloads=()).content == FrozenPromptContent.text("long horizon objective")
+    assert prompt_content(repo, retained) == FrozenPromptContent.text("long horizon objective")
 
 
 def test_fork_while_later_turn_runs_but_not_from_archived_source(repo):
@@ -453,7 +454,7 @@ def test_repeated_fork_appends_exact_requests_without_overwrite_or_dedup(
     )[0]
     settled = parse_compaction_snapshot_carrier(bytes(snapshot["inline_content"]))
     retained = [rows(repo, "SELECT * FROM pulsara_v3.transcript_entries WHERE session_id=%s AND id=%s", (nested.child_session_id, entry_id))[0] for entry_id in settled.retained_entry_ids]
-    assert [hydrate_canonical_prompt_body(body=bytes(row["inline_content"]), image_payloads=()).content for row in retained] == [FrozenPromptContent.text("first exact request"), FrozenPromptContent.text(second_request)]
+    assert [prompt_content(repo, row) for row in retained] == [FrozenPromptContent.text("first exact request"), FrozenPromptContent.text(second_request)]
     assert [row["input_origin"] for row in retained] == ["HUMAN_MESSAGE", "HUMAN_MESSAGE"]
     assert len(set(settled.retained_entry_ids)) == 2
     assert settled.active_request_entry_id is None
@@ -478,7 +479,6 @@ def test_repeated_fork_appends_exact_requests_without_overwrite_or_dedup(
 
 def test_fork_atomic_rollback_and_sealed_prefix(repo, monkeypatch):
     import pulsara_agent.conversation_kernel._repository.fork as writer
-    import psycopg
 
     lease = new_session(repo)
     _, _, anchor = turn(repo, lease.guard, "original")
@@ -524,7 +524,6 @@ def test_fork_atomic_rollback_and_sealed_prefix(repo, monkeypatch):
 def test_fork_tool_body_and_late_closure_are_history_only(repo, late):
     from tests.support.tool_outputs import _install_tool_call
     from pulsara_agent.conversation_kernel.tool_outputs import (
-        ToolOutputProcessor,
         PostgresToolOutputReadPort,
     )
     from pulsara_agent.conversation_kernel.repository import (
@@ -532,7 +531,6 @@ def test_fork_tool_body_and_late_closure_are_history_only(repo, late):
         ConversationKernelConflict,
     )
     from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
-    from pulsara_agent.ports.tool_execution import ToolOutputSourceFormatHint
     from pulsara_agent.conversation_kernel.blob import PostgresCanonicalBlobStore
 
     workspace = identity("workspace")
@@ -553,17 +551,7 @@ def test_fork_tool_body_and_late_closure_are_history_only(repo, late):
         maximum_entries=256, maximum_control_items=128, deadline_monotonic=monotonic()+30).interruption_notices
     result_id = identity("entry")
     source = "large historical output\n" * 4000
-    projection = prepare_output(ToolOutputProcessor(repo.connection_provider),
-        session_id=lease.guard.session_id,
-        workspace_id=workspace,
-        result_entry_id=result_id,
-        public_output=source,
-        native_output="saved output preview",
-        output_body_candidate=None,
-        output_omitted=True,
-        public_format=ToolOutputSourceFormatHint.TEXT,
-        deadline_monotonic=monotonic() + 30,
-    )
+    projection = prepare_output(content_parts=(ResultPart("text", source),))
     candidate = build_prepared_tool_result_acceptance(
         guard=lease.guard,
         workspace_id=workspace,
@@ -574,13 +562,10 @@ def test_fork_tool_body_and_late_closure_are_history_only(repo, late):
         tool_call_id=call,
         attempt_id=attempt,
         result_state="SUCCESS",
-        canonical_preview_content=projection.canonical_preview,
-        output_body=projection.output_body,
-        source_coverage=projection.source_coverage,
-        output_omitted=projection.output_omitted,
-        source_coverage_reason=projection.source_coverage_reason,
-        output_unavailability_reason=projection.output_unavailability_reason,
-        required_facts={"exit_code": 0, "status": "exited"},
+        public_fields=projection.public_fields, content_parts=projection.content_parts,
+
+
+        result_facts={"exit_code": 0, "status": "exited"},
         actor_id="terminal",
         observed_at=datetime.now(timezone.utc),
         observation_duration_microseconds=None,
@@ -619,7 +604,9 @@ def test_fork_tool_body_and_late_closure_are_history_only(repo, late):
         and imported["attempt_id"] is None
         and imported["permission_snapshot_fingerprint"] is None
     )
-    assert imported["output_body_blob_id"] == projection.output_body.blob_id
+    original_parts = rows(repo, "SELECT ordinal,type,blob_id,inline_value FROM pulsara_v3.content_parts WHERE entry_id=%s ORDER BY ordinal", (result_id,))
+    copied_parts = rows(repo, "SELECT ordinal,type,blob_id,inline_value FROM pulsara_v3.content_parts WHERE entry_id=%s ORDER BY ordinal", (imported["result_entry_id"],))
+    assert copied_parts == original_parts
     assert imported["result_facts"] == {"exit_code": 0, "status": "exited"}
     closure = rows(
         repo,
@@ -677,8 +664,8 @@ def test_fork_tool_body_and_late_closure_are_history_only(repo, late):
     )
     view = PostgresToolOutputReadPort(
         repo.connection_provider, session_id=child, workspace_id=workspace
-    ).read_body({"kind": "SESSION_ENTRY", "entry_id": imported["result_entry_id"]})
-    assert view.content.decode() == source
+    ).read_result({"kind": "SESSION_ENTRY", "entry_id": imported["result_entry_id"]})
+    assert view.value["content"] == ({"type": "text", "value": source},)
     nested = fork(
         repo,
         child,
@@ -695,8 +682,9 @@ def test_fork_tool_body_and_late_closure_are_history_only(repo, late):
 
 
 @pytest.mark.parametrize("wire_api", ["openai_chat_completions", "openai_responses"])
+@pytest.mark.parametrize("external_data", [False, True])
 def test_fork_native_replay_rebinds_local_metadata_preserving_opaque_payload(
-    repo, wire_api
+    repo, wire_api, external_data
 ):
     from pulsara_agent.llm.provider_replay import (
         build_prepared_durable_provider_assistant_replay,
@@ -706,6 +694,10 @@ def test_fork_native_replay_rebinds_local_metadata_preserving_opaque_payload(
     )
     from pulsara_agent.primitives.context import freeze_json
 
+    from pulsara_agent.conversation_kernel.blob import CanonicalContentPublisher
+    from pulsara_agent.conversation_kernel.repository import AssistantDataBlock
+
+    data_text = "structured data\r\n" * 5000 if external_data else ""
     lease = new_session(repo)
     turn_id, cut, _ = turn(repo, lease.guard, "question", finish=False)
     entry = identity("entry")
@@ -718,7 +710,7 @@ def test_fork_native_replay_rebinds_local_metadata_preserving_opaque_payload(
         (
             {
                 "role": "assistant",
-                "content": "answer",
+                "content": data_text + "answer",
                 "reasoning_content": "visible thought",
             },
         )
@@ -736,7 +728,7 @@ def test_fork_native_replay_rebinds_local_metadata_preserving_opaque_payload(
                 "role": "assistant",
                 "status": "completed",
                 "content": [
-                    {"type": "output_text", "text": "answer", "annotations": []}
+                    {"type": "output_text", "text": data_text + "answer", "annotations": []}
                 ],
             },
         )
@@ -749,7 +741,8 @@ def test_fork_native_replay_rebinds_local_metadata_preserving_opaque_payload(
         assistant_entry_id=entry,
         target=target,
         public_projection_fingerprint=provider_assistant_public_projection_fingerprint(
-            text="answer", tool_calls=()
+            text=data_text + "answer", tool_calls=(),
+            ordered_blocks=(("DATA", "application/test", data_text), ("TEXT", "answer")) if external_data else None
         ),
         ordered_items=tuple(freeze_json(item) for item in payload),
     )
@@ -757,8 +750,12 @@ def test_fork_native_replay_rebinds_local_metadata_preserving_opaque_payload(
         lease.guard,
         cut=cut,
         entry_id=entry,
-        parent_content=InlineContent.from_bytes(b"manifest"),
+
         blocks=(
+            *((AssistantDataBlock(identity("block"), CanonicalContentPublisher(repo.connection_provider).materialize(
+                session_id=lease.guard.session_id, content=data_text.encode(),
+                media_type="application/test", codec="utf-8", deadline_monotonic=monotonic()+30,
+            )),) if external_data else ()),
             AssistantTextBlock(identity("block"), InlineContent.from_bytes(b"answer")),
         ),
         complete_turn=True,
@@ -796,21 +793,22 @@ def test_fork_source_row_lock_blocks_concurrent_source_appends(
     lease = new_session(repo)
     for index in range(130):
         _, _, anchor = turn(repo, lease.guard, f"history {index}")
-    original = CanonicalProviderInputReader._read_content
+    from pulsara_agent.conversation_kernel import fork_history
+    original = fork_history.decode_content_part
     from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
     pool = ThreadPoolExecutor(max_workers=1)
     pending = None
 
-    def append_during_read(reader, row, **kwargs):
+    def append_during_read(connection, row):
         nonlocal pending
         if pending is None:
             pending = pool.submit(turn, repo, lease.guard, "CONCURRENT_FUTURE_ONLY")
             with pytest.raises(FutureTimeout):
                 pending.result(timeout=0.1)
-        return original(reader, row, **kwargs)
+        return original(connection, row)
 
     monkeypatch.setattr(
-        CanonicalProviderInputReader, "_read_content", append_during_read
+        fork_history, "decode_content_part", append_during_read
     )
     try:
         created = fork(repo, lease.guard.session_id, anchor)
@@ -821,13 +819,12 @@ def test_fork_source_row_lock_blocks_concurrent_source_appends(
     assert created.created, created.public_code
     copied = rows(
         repo,
-        "SELECT entry_sequence,inline_content FROM pulsara_v3.transcript_entries WHERE session_id=%s ORDER BY entry_sequence",
+        "SELECT id,session_id,entry_sequence FROM pulsara_v3.transcript_entries WHERE session_id=%s ORDER BY entry_sequence",
         (created.child_session_id,),
     )
     assert [row["entry_sequence"] for row in copied] == list(range(1, 261))
-    assert all(
-        b"CONCURRENT_FUTURE_ONLY" not in bytes(row["inline_content"]) for row in copied
-    )
+    copied_inputs = rows(repo, "SELECT * FROM pulsara_v3.transcript_entries WHERE session_id=%s AND entry_kind IN ('USER_MESSAGE','USER_STEER')", (created.child_session_id,))
+    assert all("CONCURRENT_FUTURE_ONLY" not in join_text_content(prompt_content(repo, row).parts) for row in copied_inputs)
 
 
 def test_fork_commit_ack_loss_confirms_preselected_child_without_recopy(repo):
@@ -1003,14 +1000,19 @@ def test_fork_copies_exact_prefix_with_no_execution_and_continues(repo):
     _, _, anchor = turn(repo, lease.guard, "first prompt", answer="first final")
     turn(repo, lease.guard, "future secret", answer="future final")
     memory_before = rows(repo, "SELECT * FROM pulsara_v3.memory_facts ORDER BY id")
+    parent_parts = rows(repo, "SELECT * FROM pulsara_v3.content_parts WHERE session_id=%s ORDER BY entry_id,ordinal", (lease.guard.session_id,))
     created = fork(repo, lease.guard.session_id, anchor)
     assert created.created, created.public_code
+    assert rows(repo, "SELECT * FROM pulsara_v3.content_parts WHERE session_id=%s ORDER BY entry_id,ordinal", (lease.guard.session_id,)) == parent_parts
     child = created.child_session_id
     entries = rows(
         repo,
         "SELECT * FROM pulsara_v3.transcript_entries WHERE session_id=%s ORDER BY entry_sequence",
         (child,),
     )
+    child_parts = rows(repo, "SELECT p.* FROM pulsara_v3.content_parts p JOIN pulsara_v3.transcript_entries e ON e.id=p.entry_id WHERE p.session_id=%s ORDER BY e.entry_sequence,p.ordinal", (child,))
+    assert [bytes(part["inline_value"]).decode("utf-8") for part in child_parts] == ["first prompt", "first final"]
+    assert {part["id"] for part in parent_parts}.isdisjoint(part["id"] for part in child_parts)
     assert [r["entry_kind"] for r in entries] == ["USER_MESSAGE", "ASSISTANT_MESSAGE"]
     assert [r["entry_sequence"] for r in entries] == [1, 2]
     assert all(
@@ -1155,11 +1157,11 @@ def test_fork_reuses_canonical_workspace_and_does_not_reown_shared_memory(
     ) == detail
 
 
-def test_fork_republishes_child_local_image_refs_and_preserves_typed_history(repo):
+def test_fork_copies_image_occurrences_and_preserves_typed_history(repo):
     lease = new_session(repo)
     payload = BytesIO()
     Image.new("RGB", (7, 5), (11, 23, 41)).save(payload, "PNG")
-    image = bound_test_image("image/png", payload.getvalue(), 7, 5, workspace_id=repo.read_session_workspace_id(lease.guard, deadline_monotonic=monotonic()+30))
+    image = bound_test_image("image/png", payload.getvalue(), 7, 5)
     content = FrozenPromptContent(
         (LLMTextPart("before"), image, LLMTextPart("after"), image)
     )
@@ -1191,37 +1193,31 @@ def test_fork_republishes_child_local_image_refs_and_preserves_typed_history(rep
     )[0]["id"]
     source_refs = rows(
         repo,
-        """SELECT ref_ordinal, blob_id FROM pulsara_v3.canonical_image_refs
-           WHERE session_id=%s AND transcript_entry_id IS NOT NULL
-           ORDER BY ref_ordinal""",
+        """SELECT ordinal, blob_id FROM pulsara_v3.content_parts
+           WHERE session_id=%s AND type='image' AND entry_id IS NOT NULL
+           ORDER BY ordinal""",
         (lease.guard.session_id,),
     )
     child_refs = rows(
         repo,
-        """SELECT ref_ordinal, blob_id FROM pulsara_v3.canonical_image_refs
-           WHERE session_id=%s AND transcript_entry_id=%s ORDER BY ref_ordinal""",
+        """SELECT ordinal, blob_id FROM pulsara_v3.content_parts
+           WHERE session_id=%s AND entry_id=%s AND type='image' ORDER BY ordinal""",
         (child, copied_user),
     )
-    assert [(row["ref_ordinal"], row["blob_id"]) for row in child_refs] == [
-        (row["ref_ordinal"], row["blob_id"]) for row in source_refs
+    assert [(row["ordinal"], row["blob_id"]) for row in child_refs] == [
+        (row["ordinal"], row["blob_id"]) for row in source_refs
     ]
-    assert [row["ref_ordinal"] for row in child_refs] == [0, 1]
+    assert [row["ordinal"] for row in child_refs] == [1, 3]
     assert_session_aggregate_deleted(repo, lease.guard)
 
-    workspace_id = str(
-        rows(
-            repo,
-            "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s",
-            (child,),
-        )[0]["workspace_id"]
-    )
+
     assert PostgresCanonicalImageReferenceReadPort(
         repo.connection_provider,
-        session_id=child,
-        workspace_id=workspace_id,
+
+
     ).read_image(
-        session_id=child,
-        workspace_id=workspace_id,
+
+
         image_ref=image.image_ref,
         maximum_encoded_bytes=1 << 20,
         deadline_monotonic=monotonic() + 30,
@@ -1242,7 +1238,7 @@ def test_fork_can_read_known_workspace_image_outside_its_history_cut(repo):
     assert anchor is not None
     payload = BytesIO()
     Image.new("RGB", (7, 5), (11, 23, 41)).save(payload, "PNG")
-    image = bound_test_image("image/png", payload.getvalue(), 7, 5, workspace_id=repo.read_session_workspace_id(lease.guard, deadline_monotonic=monotonic()+30))
+    image = bound_test_image("image/png", payload.getvalue(), 7, 5)
     turn_id = identity("turn")
     start_test_root_turn(
         repo,
@@ -1263,27 +1259,20 @@ def test_fork_can_read_known_workspace_image_outside_its_history_cut(repo):
     created = fork(repo, lease.guard.session_id, anchor)
     assert created.created, created.public_code
     child = created.child_session_id
-    workspace_id = str(
-        rows(
-            repo,
-            "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s",
-            (child,),
-        )[0]["workspace_id"]
-    )
+
     child_reader = PostgresCanonicalImageReferenceReadPort(
         repo.connection_provider,
-        session_id=child,
-        workspace_id=workspace_id,
+
+
     )
     assert child_reader.read_image(
-        session_id=child, workspace_id=workspace_id, image_ref=image.image_ref,
+          image_ref=image.image_ref,
         maximum_encoded_bytes=1 << 20, deadline_monotonic=monotonic() + 30,
     ) == image
-    assert rows(repo, "SELECT * FROM pulsara_v3.canonical_image_refs WHERE session_id=%s AND blob_id=%s", (child, image.image_ref)) == []
+    assert rows(repo, "SELECT * FROM pulsara_v3.content_parts WHERE session_id=%s AND blob_id=%s", (child, image.image_ref)) == []
     assert_session_aggregate_deleted(repo, lease.guard)
-    with pytest.raises(CanonicalImageReferenceUnavailable):
-        child_reader.read_image(session_id=child, workspace_id=workspace_id, image_ref=image.image_ref,
-            maximum_encoded_bytes=1 << 20, deadline_monotonic=monotonic() + 30)
+    assert child_reader.read_image(  image_ref=image.image_ref,
+        maximum_encoded_bytes=1 << 20, deadline_monotonic=monotonic() + 30) == image
 
 
 def test_image_snapshot_adoption_and_fork_keep_child_readable_after_old_owner_delete(
@@ -1293,7 +1282,7 @@ def test_image_snapshot_adoption_and_fork_keep_child_readable_after_old_owner_de
     lease = new_session(repo)
     payload = BytesIO()
     Image.new("RGB", (7, 5), (11, 23, 41)).save(payload, "PNG")
-    image = bound_test_image("image/png", payload.getvalue(), 7, 5, workspace_id=repo.read_session_workspace_id(lease.guard, deadline_monotonic=monotonic()+30))
+    image = bound_test_image("image/png", payload.getvalue(), 7, 5)
     content = FrozenPromptContent((LLMTextPart("before"), image, image))
     turn_id = identity("turn")
     start_test_root_turn(
@@ -1311,17 +1300,9 @@ def test_image_snapshot_adoption_and_fork_keep_child_readable_after_old_owner_de
         model_call_binding=model_binding(model_runtime()),
     )
     carrier = compact(repo, lease.guard, turn_id, 1, "image snapshot")
-    parent_snapshot = rows(
-        repo,
-        """SELECT s.id
-           FROM pulsara_v3.context_snapshots s
-           WHERE s.session_id=%s""",
-        (lease.guard.session_id,),
-    )[0]["id"]
-    assert rows(repo, "SELECT 1 FROM information_schema.columns WHERE table_schema='pulsara_v3' AND table_name='canonical_image_refs' AND column_name='context_snapshot_id'") == []
     assert carrier.retained_entry_ids == (carrier.active_request_entry_id,)
-    parent_refs = rows(repo, "SELECT ref_ordinal,blob_id FROM pulsara_v3.canonical_image_refs WHERE session_id=%s AND transcript_entry_id=%s ORDER BY ref_ordinal", (lease.guard.session_id, carrier.active_request_entry_id))
-    assert [row["ref_ordinal"] for row in parent_refs] == [0, 1]
+    parent_refs = rows(repo, "SELECT ordinal,blob_id FROM pulsara_v3.content_parts WHERE session_id=%s AND entry_id=%s AND type='image' ORDER BY ordinal", (lease.guard.session_id, carrier.active_request_entry_id))
+    assert [row["ordinal"] for row in parent_refs] == [1, 2]
     assert parent_refs[0]["blob_id"] == parent_refs[1]["blob_id"]
     anchor = final(repo, lease.guard, turn_id)
     created = fork(repo, lease.guard.session_id, anchor)
@@ -1329,10 +1310,10 @@ def test_image_snapshot_adoption_and_fork_keep_child_readable_after_old_owner_de
     child = created.child_session_id
     child_carrier = parse_compaction_snapshot_carrier(bytes(rows(repo, "SELECT inline_content FROM pulsara_v3.context_snapshots WHERE session_id=%s", (child,))[0]["inline_content"]))
     assert len(child_carrier.retained_entry_ids) == 1
-    child_refs = rows(repo, "SELECT ref_ordinal,blob_id FROM pulsara_v3.canonical_image_refs WHERE session_id=%s AND transcript_entry_id=%s ORDER BY ref_ordinal", (child, child_carrier.retained_entry_ids[0]))
+    child_refs = rows(repo, "SELECT ordinal,blob_id FROM pulsara_v3.content_parts WHERE session_id=%s AND entry_id=%s AND type='image' ORDER BY ordinal", (child, child_carrier.retained_entry_ids[0]))
     assert child_refs == parent_refs
     assert_session_aggregate_deleted(repo, lease.guard)
-    assert rows(repo, "SELECT ref_ordinal,blob_id FROM pulsara_v3.canonical_image_refs WHERE session_id=%s AND transcript_entry_id=%s ORDER BY ref_ordinal", (child, child_carrier.retained_entry_ids[0])) == child_refs
+    assert rows(repo, "SELECT ordinal,blob_id FROM pulsara_v3.content_parts WHERE session_id=%s AND entry_id=%s AND type='image' ORDER BY ordinal", (child, child_carrier.retained_entry_ids[0])) == child_refs
     guard = child_lease(repo, child).guard
     _, cut, _ = turn(repo, guard, "continue child", finish=False)
     hydrated = CanonicalProviderInputReader(repo.connection_provider).read_frozen_snapshot(cut, deadline_monotonic=monotonic() + 30)
@@ -1618,7 +1599,6 @@ def test_imported_anchor_binding_survives_child_compaction_and_model_selection(r
 
 
 def test_database_rejects_imported_execution_targets(repo):
-    import psycopg
 
     lease = new_session(repo)
     _, _, anchor = turn(repo, lease.guard, "settled")
@@ -1694,8 +1674,8 @@ def test_fork_new_child_activity_does_not_inherit_old_sort_position(repo):
     assert activity[0]["updated_at"] == child["created_at"]
 
 
-@pytest.mark.parametrize("block_kind", ["data", "invalid_utf8", "tool"])
-def test_manifest_data_or_tool_without_final_natural_language_is_not_forkable(
+@pytest.mark.parametrize("block_kind", ["data", "tool"])
+def test_data_or_tool_without_final_dialogue_text_is_not_forkable(
     repo, block_kind
 ):
     from pulsara_agent.conversation_kernel.repository import (
@@ -1711,8 +1691,6 @@ def test_manifest_data_or_tool_without_final_natural_language_is_not_forkable(
         block = AssistantDataBlock(
             identity("block"), InlineContent.from_bytes(b"answer-looking data")
         )
-    elif block_kind == "invalid_utf8":
-        block = AssistantTextBlock(identity("block"), InlineContent.from_bytes(b"\xff"))
     else:
         block = AssistantToolCallBlock(
             identity("block"), identity("call"), "removed_tool", freeze_json({})
@@ -1721,7 +1699,7 @@ def test_manifest_data_or_tool_without_final_natural_language_is_not_forkable(
         lease.guard,
         cut=cut,
         entry_id=entry,
-        parent_content=InlineContent.from_bytes(b"a final-looking manifest"),
+
         blocks=(block,),
         complete_turn=block_kind != "tool",
         occurred_at=datetime.now(timezone.utc),

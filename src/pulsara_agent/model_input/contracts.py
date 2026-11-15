@@ -32,10 +32,6 @@ from pulsara_agent.llm.input import (
     llm_content_identity_value,
 )
 from pulsara_agent.ports.tool_output import ToolOutputUnavailableReason
-from pulsara_agent.ports.tool_execution import (
-    ToolOutputSourceCoverage,
-    ToolOutputSourceCoverageReason,
-)
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
     canonical_json_bytes,
@@ -642,14 +638,9 @@ class ProviderToolResultContextMetadata:
     result_id: str
     result_entry_id: str
     result_state: str
-    output_omitted: bool
-    output_available: bool
-    source_coverage: ToolOutputSourceCoverage
-    source_coverage_reason: ToolOutputSourceCoverageReason | None
     output_unavailability_reason: ToolOutputUnavailableReason | None
     model_visible_memory_fact_ids: tuple[str, ...]
     timing: FrozenToolObservationTimingFact
-    required_facts: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.result_id:
@@ -665,18 +656,8 @@ class ProviderToolResultContextMetadata:
             "CANCELLED_BEFORE_DISPATCH",
         }:
             raise ValueError("tool result state is not closed")
-        from pulsara_agent.ports.tool_execution import freeze_tool_json_object
-        object.__setattr__(self, "required_facts", freeze_tool_json_object(self.required_facts))
         if not self.session_id or not self.result_entry_id:
             raise ValueError("tool result source identity is incomplete")
-        if not isinstance(self.output_omitted, bool) or not isinstance(self.output_available, bool):
-            raise TypeError("tool result body facts must be boolean")
-        if self.output_available and self.output_unavailability_reason is not None:
-            raise ValueError("available tool output cannot have an unavailability reason")
-        if (self.source_coverage is ToolOutputSourceCoverage.COMPLETE) != (
-            self.source_coverage_reason is None
-        ):
-            raise ValueError("tool result source coverage is inconsistent")
         if not isinstance(self.timing, FrozenToolObservationTimingFact):
             raise TypeError("tool result timing must be a frozen canonical fact")
         if (
@@ -1667,15 +1648,6 @@ def provider_input_item_leaf(item: FrozenProviderInputItem) -> Mapping[str, obje
                 "result_state": item.tool_result_context.result_state,
                 "session_id": item.tool_result_context.session_id,
                 "result_entry_id": item.tool_result_context.result_entry_id,
-                "output_omitted": item.tool_result_context.output_omitted,
-                "output_available": item.tool_result_context.output_available,
-                "required_facts": item.tool_result_context.required_facts,
-                "source_coverage": item.tool_result_context.source_coverage.value,
-                "source_coverage_reason": (
-                    None
-                    if item.tool_result_context.source_coverage_reason is None
-                    else item.tool_result_context.source_coverage_reason.value
-                ),
                 "output_unavailability_reason": (
                     None
                     if item.tool_result_context.output_unavailability_reason is None

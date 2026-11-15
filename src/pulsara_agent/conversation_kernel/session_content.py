@@ -11,7 +11,6 @@ import json
 from dataclasses import dataclass
 from time import monotonic
 
-from pulsara_agent.conversation_kernel.prompt_content import PROMPT_BODY_MEDIA_TYPE
 from pulsara_agent.conversation_kernel.prompt_storage import (
     validate_canonical_prompt_owner_metadata,
 )
@@ -19,10 +18,9 @@ from pulsara_agent.conversation_kernel.session_search import (
     search_session_page,
 )
 from pulsara_agent.conversation_kernel.session_text import (
-    decode_saved_text,
     prompt_history_text,
 )
-from pulsara_agent.conversation_kernel.tool_outputs import read_tool_output_content
+from pulsara_agent.conversation_kernel.content_parts import read_content_parts
 from pulsara_agent.ports.session_content import (
     SESSION_QUERY_MAX_ITEMS,
     SESSION_QUERY_TOOL_NAMES,
@@ -31,7 +29,6 @@ from pulsara_agent.ports.session_content import (
     SessionContentRange,
     session_entry_target,
 )
-from pulsara_agent.primitives.context import canonical_json_bytes
 from pulsara_agent.primitives.tool_result_budget import (
     ToolResultPageBoundary,
     ToolResultPageBudget,
@@ -187,42 +184,12 @@ def _resource_error(message=None):
     )
 
 
-_ELIGIBLE = """(e.entry_kind IN ('USER_MESSAGE','USER_STEER') OR
+_ELIGIBLE = """((e.entry_kind IN ('USER_MESSAGE','USER_STEER')
+    AND e.scheduled_input IS NULL
+    AND e.input_origin IN ('HUMAN_MESSAGE','HUMAN_STEER','AGENT_INSTRUCTION')) OR
     (e.entry_kind IN ('ASSISTANT_MESSAGE','ASSISTANT_TOOL_REQUEST') AND EXISTS (
-      SELECT 1 FROM pulsara_v3.assistant_message_blocks a
-      WHERE a.session_id=e.session_id AND a.assistant_entry_id=e.id
-        AND (a.block_kind='TEXT' OR (%s AND a.block_kind='TOOL_CALL'))))
-    OR (%s AND e.entry_kind='TOOL_RESULT' AND NOT EXISTS (SELECT 1 FROM pulsara_v3.tool_results cr JOIN pulsara_v3.tool_invocations ci ON ci.id=cr.invocation_id WHERE cr.session_id=e.session_id AND cr.result_entry_id=e.id AND ci.source_kind='CODE_MODE_CALL')))"""
-
-
-def _assistant_document(blocks):
-    if not any(block["block_kind"] == "TOOL_CALL" for block in blocks):
-        text = "\n".join(decode_saved_text(block) for block in blocks)
-        return text, ((0, text),), ()
-    pieces, segments, bounds = [], [], []
-    offset = 0
-    for block in blocks:
-        if pieces:
-            offset += 1
-        if block["block_kind"] == "TEXT":
-            piece = decode_saved_text(block)
-            segments.append((offset, piece))
-        else:
-            name = block["tool_name"]
-            arguments = canonical_json_bytes(block["tool_arguments"]).decode("utf-8")
-            prefix, separator = "Tool call: ", "\nArguments: "
-            piece = prefix + name + separator + arguments
-            if name not in SESSION_QUERY_TOOL_NAMES:
-                segments.extend(
-                    (
-                        (offset + len(prefix), name),
-                        (offset + len(prefix) + len(name) + len(separator), arguments),
-                    )
-                )
-        bounds.append((offset, offset + len(piece)))
-        offset += len(piece)
-        pieces.append(piece)
-    return "\n".join(pieces), tuple(segments), tuple(bounds)
+      SELECT 1 FROM pulsara_v3.content_parts p
+      WHERE p.session_id=e.session_id AND p.entry_id=e.id AND p.type='text')))"""
 
 
 class SessionContentQuery:
@@ -555,8 +522,6 @@ class SessionContentQuery:
                         anchor_id,
                         end,
                         excluded,
-                        tools,
-                        tools,
                     ),
                 ).fetchone()
                 if anchor is None:
@@ -612,7 +577,7 @@ class SessionContentQuery:
                 + _ELIGIBLE
                 + " ORDER BY e.entry_sequence "
                 + order,
-                (target, end, excluded, position, tools, tools),
+                (target, end, excluded, position),
             )
             if cursor is not None and offset:
                 # An offset must name the exact eligible entry, never a later one.
@@ -660,99 +625,21 @@ class SessionContentQuery:
         }
         if entry["scheduled_input"] is not None:
             item["origin"] = "scheduled"
-        fact = None
-        if role == "tool":
-            # Resolve ownership before loading the saved body. Missing
-            # canonical edges are corruption, not an excuse to hide a result.
-            fact = connection.execute(
-                """SELECT r.*,CASE WHEN r.result_record_kind='IMPORTED_HISTORY'
-                  OR i.source_kind='MODEL_TOOL_CALL' THEN a.tool_name ELSE i.tool_name END AS tool_name
-                FROM pulsara_v3.tool_results r
-                LEFT JOIN pulsara_v3.tool_invocations i ON i.session_id=r.session_id
-                  AND i.id=r.invocation_id
-                LEFT JOIN pulsara_v3.assistant_message_blocks a ON a.session_id=r.session_id
-                  AND a.assistant_entry_id=r.tool_call_entry_id AND a.tool_call_id=r.tool_call_id
-                  AND a.block_kind='TOOL_CALL'
-                WHERE r.session_id=%s AND r.result_entry_id=%s""",
-                (entry["session_id"], entry["id"]),
-            ).fetchone()
-            if fact is None or fact["tool_name"] is None:
-                raise RuntimeError("saved tool result has no canonical edge")
         bounds = ()
         if role == "assistant":
-            blocks = connection.execute(
-                """SELECT COALESCE(a.inline_content,b.body) AS content,
-                a.content_size AS size,a.content_digest AS digest,'assistant' AS kind,
-                a.block_kind,a.tool_name,a.tool_arguments
-                FROM pulsara_v3.assistant_message_blocks a LEFT JOIN pulsara_v3.blobs b
-                  ON b.id=a.blob_id AND b.workspace_id=a.workspace_id
-                WHERE a.session_id=%s AND a.assistant_entry_id=%s
-                  AND (a.block_kind='TEXT' OR (%s AND a.block_kind='TOOL_CALL'))
-                ORDER BY a.block_ordinal""",
-                (entry["session_id"], entry["id"], include_tools),
-            ).fetchall()
-            text, segments, _ = _assistant_document(blocks)
-            bounds = ()
-            from pulsara_agent.conversation_kernel.session_text import (
-                visualization_history_text,
-            )
-
-            for description in visualization_history_text(
-                connection,
-                entry,
-                image_references=entry["workspace_id"] == caller_workspace_id,
-            ):
+            parts = read_content_parts(connection, entry_id=entry["id"], session_id=entry["session_id"])
+            text = "\n".join(part.value for part in parts if part.type == "text")
+            segments = ((0, text),)
+            from pulsara_agent.conversation_kernel.session_text import visualization_history_text
+            for description in visualization_history_text(connection, entry, image_references=True):
                 start = len(text) + (1 if text else 0)
                 text += ("\n" if text else "") + description
                 bounds += ((start, len(text)),)
-        elif entry["content_media_type"] == PROMPT_BODY_MEDIA_TYPE:
+        else:
             decoded = validate_canonical_prompt_owner_metadata(
                 connection, row=entry, transcript_entry_id=entry["id"]
             )
-            text, segments, bounds = prompt_history_text(
-                decoded.parts,
-                image_references=entry["workspace_id"] == caller_workspace_id,
-            )
-        elif role == "tool":
-            if fact["output_unavailability_reason"] is None:
-                text = read_tool_output_content(connection, fact).decode("utf-8")
-                segments = ((0, text),)
-            else:
-                text = "[Saved tool output is unavailable.]"
-                segments = ()
-        else:
-            content = entry["inline_content"]
-            if content is None:
-                blob = connection.execute(
-                    "SELECT body FROM pulsara_v3.blobs WHERE id=%s AND workspace_id=%s",
-                    (entry["blob_id"], entry["workspace_id"]),
-                ).fetchone()
-                content = None if blob is None else blob["body"]
-            text = decode_saved_text(
-                {
-                    "content": content,
-                    "digest": entry["content_digest"],
-                    "size": entry["content_size"],
-                    "kind": role,
-                    "media_type": entry["content_media_type"],
-                }
-            )
-            segments = ((0, text),)
-        if role == "tool":
-            item.update(tool_name=fact["tool_name"], result_state=fact["result_state"])
-            if fact["result_facts"]:
-                item["result_facts"] = fact["result_facts"]
-            if (
-                fact["output_source_coverage"] != "COMPLETE"
-                or fact["output_unavailability_reason"] is not None
-            ):
-                for source, name in (
-                    ("output_source_coverage", "source_coverage"),
-                    ("output_source_coverage_reason", "source_coverage_reason"),
-                    ("output_unavailability_reason", "output_unavailability_reason"),
-                ):
-                    if fact[source] is not None:
-                        item[name] = fact[source]
+            text, segments, bounds = prompt_history_text(decoded.parts, image_references=True)
         notices = self.reader._notices(
             connection, entry["session_id"], event_cut, entry
         )

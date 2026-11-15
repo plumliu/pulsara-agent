@@ -12,7 +12,7 @@ from .capability_management_execution import (
 )
 from pulsara_agent.capability.mcp_management import McpManagementConflict
 from pulsara_agent.primitives.tool_result_budget import ToolResultPageBoundary
-from pulsara_agent.ports.tool_execution import ToolOutputSourceFormatHint
+from pulsara_agent.ports.tool_execution import ToolBusinessValue, ToolOutputSourceFormatHint
 from pulsara_agent.tools.builtins.todo import parse_todo_replacement
 from pulsara_agent.conversation_kernel.io import PhysicalToolInvocationDisposition
 from pulsara_agent.conversation_kernel.execution_watchdogs import KernelWatchdogOwner
@@ -162,28 +162,26 @@ class _ToolManagementOperations:
             try:
                 method = (self._scheduled_tasks.invoke_query if tool_name == "query_schedules"
                           else self._scheduled_tasks.invoke_manage)
-                value = await method(arguments,
+                observation = await method(arguments,
                     default_session_id=self._session_id,
                     memory_domain_id=self._memory_domain_id,
                     permission_mode=invocation_context.effective_permission_mode,
                     page_budget=page_budget)
-                return "SUCCESS", value
+                return "SUCCESS", observation.value, observation.result_facts
             except ToolResultPageBoundary:
                 raise
             except (ScheduledTaskError, KeyError, ValueError) as exc:
-                return "APPLICATION_ERROR", {"error": getattr(exc, "code", "INVALID_REQUEST"), "message": str(exc)}
+                return "APPLICATION_ERROR", {"error": getattr(exc, "code", "INVALID_REQUEST"), "message": str(exc)}, {}
         # Reuse the existing admitted-async-operation settlement: cancellation
         # waits for the management transaction and retains its actual result.
         operation = asyncio.create_task(manage(), name=f"scheduled-management:{tool_call_id}")
         known, cancelled = await _await_mcp_operation(operation)
-        state, value = known
+        state, value, result_facts = known
         return KernelToolResult(state=state,
-            content=json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode(),
+            content=ToolBusinessValue(public_fields=value),
             public_format=ToolOutputSourceFormatHint.JSON,
             page_complete=tool_name == "manage_schedule" or "target" not in arguments,
-            required_facts=(value if tool_name == "manage_schedule" and state == "SUCCESS" else {
-                key: value[key] for key in ("target", "status", "revision") if key in value
-            }),
+            result_facts=result_facts,
             caller_cancelled_while_running=cancelled,
             effect_class="read_only" if tool_name == "query_schedules" else "unknown_effect",
             physical_observation=_freeze_physical_observation(invocation_started, observation_origin))

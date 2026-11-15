@@ -728,7 +728,6 @@ class DirectKernelToolPort(
         return await materialize_visualizations(
             body, self._tools["view_image"]._read_access_path, io=io,
             validator=self._image_validator, image_reader=self._image_reference_read_port,
-            session_id=self._session_id, workspace_id=workspace_id,
             deadline_monotonic=deadline_monotonic,
         )
 
@@ -1691,6 +1690,7 @@ class DirectKernelToolPort(
                 state=result.state,
                 content=result.content,
                 public_format=result.public_format,
+                result_facts=result.result_facts,
                 page_complete=True,
                 effect_class="read_only",
                 physical_observation=_freeze_physical_observation(started, origin),
@@ -2128,8 +2128,6 @@ class DirectKernelToolPort(
             physical = await self._physical_io.run_tool_invocation(
                 _read_canonical_image_reference,
                 self._image_reference_read_port,
-                invocation_context.session_id,
-                invocation_context.workspace_id,
                 source.value,
                 maximum_bytes,
                 deadline_monotonic=deadline,
@@ -2296,7 +2294,7 @@ class DirectKernelToolPort(
             "Current HTML still screenshot; 1200×800 viewport, light theme, visible, reduced motion; capture may crop to content-root bounds. Playback unverified. Publication rereads the file." if html_source else
             "SVG image rendered at its dimensions or viewBox aspect ratio, without cropping. Scripts and external resources disabled." if svg_source else "Image loaded."
         ), image))
-        content = bind_prompt_images(content, workspace_id=invocation_context.workspace_id)
+        content = bind_prompt_images(content)
         accepted_page = allowance.accepts_page(
             source=source,
             content=content,
@@ -2822,8 +2820,7 @@ def _execute_tool_call(
 
 
 def _read_browser_image_candidate(tool: ViewImageTool, call: ToolCall, maximum_bytes: int, *, deadline_monotonic: float) -> LocalHtmlReadCandidate | ToolExecutionResult:
-    # HTML is bounded by MAXIMUM_BLOB_BYTES in the reader; maximum_bytes is
-    # the separate PNG budget and must not constrain source text.
+    # maximum_bytes is the PNG budget and must not constrain source text.
     source = parse_view_image_source(dict(call.arguments))
     try:
         if Path(source.value).suffix.lower() != ".svg":
@@ -2851,16 +2848,12 @@ def _read_local_image_candidate(
 
 def _read_canonical_image_reference(
     port: CanonicalImageReferenceReadPort,
-    session_id: str,
-    workspace_id: str,
     image_ref: str,
     maximum_bytes: int,
     *,
     deadline_monotonic: float,
 ) -> LLMImagePart:
     return port.read_image(
-        session_id=session_id,
-        workspace_id=workspace_id,
         image_ref=image_ref,
         maximum_encoded_bytes=maximum_bytes,
         deadline_monotonic=deadline_monotonic,

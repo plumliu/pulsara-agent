@@ -314,7 +314,7 @@ def test_k2_public_host_validates_image_input_and_reaches_existing_compiler(
         if mixed
         else PromptContent((PromptImagePart(image_bytes, "image/png"),))
     )
-    expected_image = bound_test_image("image/png", image_bytes, 7, 5, workspace_id=derive_id("workspace", "project", tmp_path.resolve().as_posix()))
+    expected_image = bound_test_image("image/png", image_bytes, 7, 5)
     expected_reference = image_reference_part(expected_image)
     expected_content = (
         (
@@ -401,7 +401,7 @@ def test_k2_public_host_validates_image_input_and_reaches_existing_compiler(
         for part in message.content
         if isinstance(part, LLMImagePart)
     )
-    assert images == (bound_test_image("image/png", image_bytes, 7, 5, workspace_id=derive_id("workspace", "project", tmp_path.resolve().as_posix())),)
+    assert images == (bound_test_image("image/png", image_bytes, 7, 5),)
     with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
         ref = connection.execute(
             """SELECT r.ref_ordinal, b.body, b.media_type, b.codec
@@ -563,7 +563,7 @@ def test_k2_root_install_freezes_ordered_image_gap_for_agent_invocation(
     asyncio.run(scenario())
     assert len(invocation_snapshots) == 1
     expected_reference = image_reference_part(
-        bound_test_image("image/png", image_bytes, 7, 5, workspace_id=derive_id("workspace", "project", tmp_path.resolve().as_posix()))
+        bound_test_image("image/png", image_bytes, 7, 5)
     ).text
     assert invocation_snapshots[0].initial_context_units == (
         f"USER: before{expected_reference}"
@@ -581,7 +581,7 @@ def test_k2_public_host_consumes_typed_image_steer_at_provider_safe_point(
     payload = BytesIO()
     Image.new("RGB", (7, 5), (11, 23, 41)).save(payload, "PNG")
     image_bytes = payload.getvalue()
-    expected_image = bound_test_image("image/png", image_bytes, 7, 5, workspace_id=derive_id("workspace", "project", tmp_path.resolve().as_posix()))
+    expected_image = bound_test_image("image/png", image_bytes, 7, 5)
     expected = (
         LLMTextPart("redirect"),
         image_reference_part(expected_image),

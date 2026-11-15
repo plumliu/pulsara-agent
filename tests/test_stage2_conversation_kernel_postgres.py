@@ -23,7 +23,6 @@ from pulsara_agent.conversation_kernel.activation import (
     require_stage2_runtime_privilege_boundary,
 )
 from pulsara_agent.conversation_kernel.blob import (
-    MAXIMUM_BLOB_BYTES,
     MAXIMUM_CONTENT_CHUNK_BYTES,
     PostgresCanonicalBlobStore,
 )
@@ -84,7 +83,6 @@ from pulsara_agent.model_input.continuity import (
     ProviderInputContinuityScope,
 )
 from pulsara_agent.model_input.contracts import (
-    CanonicalInputOriginKind,
     ContextBindingBaseKind,
     FrozenProviderInputItemKind,
     ModelInputScopeKind,
@@ -778,12 +776,12 @@ def test_stage2_blob_chunk_exactly_joins_complete_canonical_descriptor(
         )
 
 
-def test_stage2_maximum_blob_is_read_as_exact_bounded_storage_ranges(
+def test_stage2_large_blob_is_read_as_exact_bounded_storage_ranges(
     stage2_migrated_postgres_database,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     store = PostgresCanonicalBlobStore(provider)
-    content = b"0123456789abcdef" * (MAXIMUM_BLOB_BYTES // 16)
+    content = b"0123456789abcdef" * ((17 * 1024 * 1024) // 16)
     reference = store.publish(
         workspace_id=_name("workspace"),
         content=content,

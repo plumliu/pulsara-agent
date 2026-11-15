@@ -356,15 +356,7 @@ def enqueue_test_prompt(
 
     if not isinstance(content, FrozenPromptContent):
         raise TypeError("test prompt ingress requires FrozenPromptContent")
-    from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
-    with repository.connection_provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=deadline_monotonic,
-    ) as connection:
-        workspace_id = connection.execute(
-            "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s", (guard.session_id,)
-        ).fetchone()[0]
-    canonical_prompt = freeze_canonical_prompt(content, workspace_id=workspace_id)
+    canonical_prompt = freeze_canonical_prompt(content)
 
     if delivery_mode is PromptDeliveryMode.NEW_TURN and model_call_binding is not None:
         repository.update_session_model_call_binding(
@@ -430,15 +422,7 @@ def start_test_root_turn(
 
     if not isinstance(content, FrozenPromptContent):
         raise TypeError("test ROOT ingress requires FrozenPromptContent")
-    from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
-    with repository.connection_provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=deadline_monotonic,
-    ) as connection:
-        workspace_id = connection.execute(
-            "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s", (guard.session_id,)
-        ).fetchone()[0]
-    canonical_prompt = freeze_canonical_prompt(content, workspace_id=workspace_id)
+    canonical_prompt = freeze_canonical_prompt(content)
 
     repository.update_session_model_call_binding(
         guard,

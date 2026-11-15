@@ -227,7 +227,7 @@ def prompt_text_utf8_bytes(parts: tuple[LLMTextPart, ...]) -> int:
     total = 0
     for part in parts:
         if any(
-            character not in "\n\t" and ord(character) < 0x20 for character in part.text
+            character not in "\r\n\t" and ord(character) < 0x20 for character in part.text
         ):
             raise ValueError("prompt contains a forbidden control character")
         total += len(part.text.encode("utf-8"))
@@ -279,6 +279,10 @@ class FrozenPromptContent:
     parts: tuple[FrozenPromptPart, ...] = field(repr=False)
 
     def __post_init__(self) -> None:
+        if not self.parts:
+            if not isinstance(self.parts, tuple):
+                raise TypeError("prompt content parts must be an immutable tuple")
+            return
         _validate_prompt_parts(self.parts, image_type=LLMImagePart)
 
     @classmethod

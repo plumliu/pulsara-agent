@@ -9,8 +9,11 @@ from psycopg.rows import dict_row
 
 from pulsara_agent.identity import random_id, derive_id
 from pulsara_agent.conversation_kernel.blob import CanonicalContentPublisher
-from pulsara_agent.conversation_kernel.repository_errors import ConversationKernelConflict
+from pulsara_agent.conversation_kernel.repository_errors import (
+    ConversationKernelConflict,
+)
 from pulsara_agent.conversation_kernel.contracts import InlineContent
+from pulsara_agent.conversation_kernel.content_parts import read_content_parts
 from pulsara_agent.conversation_kernel.repository import (
     ConversationKernelRepository,
     AssistantTextBlock,
@@ -21,7 +24,7 @@ from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import 
     prepare_batch_refs,
 )
 from pulsara_agent.llm.input import FrozenPromptContent
-from pulsara_agent.primitives.context import freeze_json, canonical_json_bytes
+from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.support.model_config import (
@@ -83,13 +86,14 @@ def source(stage2_migrated_postgres_database):
         lease.guard,
         cut=cut,
         entry_id=entry_id,
-        parent_content=InlineContent.from_bytes(b"delegate"),
         blocks=(
             AssistantToolCallBlock(
                 random_id("block"),
                 call_id,
                 "exec_cell",
-                freeze_json({"code": 'await tools.run_agent([{instruction:"Investigate."}]);'}),
+                freeze_json(
+                    {"code": 'await tools.run_agent([{instruction:"Investigate."}]);'}
+                ),
             ),
         ),
         occurred_at=now(),
@@ -105,34 +109,71 @@ def source(stage2_migrated_postgres_database):
             ).fetchone()
         )
     repository.accept_tool_attempt(
-        lease.guard, attempt_id=attempt_id, assistant_entry_id=entry_id, tool_call_id=call_id,
-        authorization_kind="BYPASS", authorization_reference="test", actor_kind="runtime", actor_id="test",
-        remote_idempotency_key=None, retry_of_attempt_id=None,
-        permission_snapshot_fingerprint=permission.snapshot_fingerprint, occurred_at=now(),
+        lease.guard,
+        attempt_id=attempt_id,
+        assistant_entry_id=entry_id,
+        tool_call_id=call_id,
+        authorization_kind="BYPASS",
+        authorization_reference="test",
+        actor_kind="runtime",
+        actor_id="test",
+        remote_idempotency_key=None,
+        retry_of_attempt_id=None,
+        permission_snapshot_fingerprint=permission.snapshot_fingerprint,
+        occurred_at=now(),
         deadline_monotonic=deadline(),
     )
-    repository.freeze_code_mode_source(lease.guard, attempt_id=attempt_id,
-        content=InlineContent.from_bytes(b'await tools.run_agent([{instruction:"Investigate."}]);',
-            media_type="text/javascript"), deadline_monotonic=deadline())
-    from pulsara_agent.conversation_kernel.tool_invocations import (
-        ToolInvocationSource, ToolInvocationSourceKind, current_tool_invocation,
+    repository.freeze_code_mode_source(
+        lease.guard,
+        attempt_id=attempt_id,
+        content=InlineContent.from_bytes(
+            b'await tools.run_agent([{instruction:"Investigate."}]);',
+            media_type="text/javascript",
+        ),
+        deadline_monotonic=deadline(),
     )
+    from pulsara_agent.conversation_kernel.tool_invocations import (
+        ToolInvocationSource,
+        ToolInvocationSourceKind,
+        current_tool_invocation,
+    )
+
     code_call_id, code_attempt_id = random_id("call"), random_id("attempt")
     refs = prepare_batch_refs([{}])
-    source = ToolInvocationSource(code_call_id, ToolInvocationSourceKind.CODE_MODE_CALL, turn_id,
-        source_exec_attempt_id=attempt_id, call_sequence=1, tool_name="run_agent",
-        original_arguments=freeze_json({"members": [{
-            "agent_id": refs["agents"][0]["agent_id"],
-            "work_id": refs["works"][0]["work_id"],
-            "parameters": {"instruction": "Investigate."},
-        }]}))
+    source = ToolInvocationSource(
+        code_call_id,
+        ToolInvocationSourceKind.CODE_MODE_CALL,
+        turn_id,
+        source_exec_attempt_id=attempt_id,
+        call_sequence=1,
+        tool_name="run_agent",
+        original_arguments=freeze_json(
+            {
+                "members": [
+                    {
+                        "agent_id": refs["agents"][0]["agent_id"],
+                        "work_id": refs["works"][0]["work_id"],
+                        "parameters": {"instruction": "Investigate."},
+                    }
+                ]
+            }
+        ),
+    )
     token = current_tool_invocation.set(source)
     try:
         repository.accept_tool_attempt(
-            lease.guard, attempt_id=code_attempt_id, assistant_entry_id=None, tool_call_id=code_call_id,
-            authorization_kind="BYPASS", authorization_reference="test", actor_kind="runtime", actor_id="test",
-            remote_idempotency_key=None, retry_of_attempt_id=None,
-            permission_snapshot_fingerprint=permission.snapshot_fingerprint, occurred_at=now(),
+            lease.guard,
+            attempt_id=code_attempt_id,
+            assistant_entry_id=None,
+            tool_call_id=code_call_id,
+            authorization_kind="BYPASS",
+            authorization_reference="test",
+            actor_kind="runtime",
+            actor_id="test",
+            remote_idempotency_key=None,
+            retry_of_attempt_id=None,
+            permission_snapshot_fingerprint=permission.snapshot_fingerprint,
+            occurred_at=now(),
             deadline_monotonic=deadline(),
         )
     finally:
@@ -165,16 +206,20 @@ def request(*, agent_id=None, work_id=None, create=True, **kwargs):
 
 
 def test_session_list_counts_subagent_sessions_once_when_work_is_reused(source):
-    from pulsara_agent.conversation_kernel.host import _list_resumable_session_rows_across_workspaces
+    from pulsara_agent.conversation_kernel.host import (
+        _list_resumable_session_rows_across_workspaces,
+    )
 
     repository, root, admit = source
     first, second = request(), request()
     admit(first, second)
     admit(request(agent_id=first.agent_id, create=False))
-    rows = _list_resumable_session_rows_across_workspaces(repository, 'u_local', False, deadline())
-    summary = next(row for row in rows if row['id'] == root.guard.session_id)
-    assert summary['subagent_count'] == 2
-    assert all(row['id'] not in {first.agent_id, second.agent_id} for row in rows)
+    rows = _list_resumable_session_rows_across_workspaces(
+        repository, "u_local", False, deadline()
+    )
+    summary = next(row for row in rows if row["id"] == root.guard.session_id)
+    assert summary["subagent_count"] == 2
+    assert all(row["id"] not in {first.agent_id, second.agent_id} for row in rows)
 
 
 def start(repository, req):
@@ -225,16 +270,6 @@ def finish(repository, lease, candidate, text):
         lease.guard,
         cut=cut,
         entry_id=random_id("entry"),
-        parent_content=InlineContent.from_bytes(
-            canonical_json_bytes(
-                {
-                    "blocks": [
-                        {"digest": content.digest, "kind": "TEXT", "size": content.size}
-                    ],
-                    "draft_identity": random_id("entry"),
-                }
-            )
-        ),
         blocks=(AssistantTextBlock(random_id("block"), content),),
         complete_turn=True,
         occurred_at=now(),
@@ -313,7 +348,9 @@ def test_full_results_are_owned_and_ordered_before_first_model_input(source):
     a = request()
     b = request()
     receiver = request(
-        depends_on=(a.work_id, b.work_id), instruction="Compare both results."
+        depends_on=(a.work_id, b.work_id),
+        instruction="Compare both results.",
+        initial_context=("Selected ROOT history.",),
     )
     admit(a, b, receiver)
     # Complete in the opposite order to the dependency declaration.
@@ -347,17 +384,34 @@ def test_full_results_are_owned_and_ordered_before_first_model_input(source):
         )
         == "DELETED"
     )
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        row_factory=dict_row,
+        deadline_monotonic=deadline(),
+    ) as connection:
+        queued_parts = read_content_parts(connection, queue_item_id=receiver.work_id)
+    assert [part.value for part in queued_parts] == [
+        "Compare both results.",
+        "Selected ROOT history.",
+        large,
+        "second-result",
+    ]
     lr, candidate = start(repository, receiver)
     entries = candidate.ordered_input_entries
     texts = ["".join(p.text for p in e.canonical_prompt.content.parts) for e in entries]
-    assert texts == ["Compare both results.", large, "second-result"]
+    assert texts == [
+        "Compare both results.",
+        "Selected ROOT history.",
+        large,
+        "second-result",
+    ]
     assert entries[0].entry_id == candidate.exact_initial_entry_id
     confirmation = repository.confirm_prepared_prompt_head_consumption(
         candidate=candidate, deadline_monotonic=deadline()
     )
     group = confirmation.accepted.started_input_group
     assert group.ordered_items[0].source_entry_sequence == 1
-    assert group.provider_input_through_sequence == 3
+    assert group.provider_input_through_sequence == 4
     assert group.predecessor_through_sequence == 0
     assert group.initial_source_through_sequence == 0
     with repository.connection_provider.connection(
@@ -373,7 +427,26 @@ def test_full_results_are_owned_and_ordered_before_first_model_input(source):
             "AGENT_INSTRUCTION",
             "AGENT_MATERIAL",
             "AGENT_MATERIAL",
+            "AGENT_MATERIAL",
         ]
+        assert read_content_parts(c, queue_item_id=receiver.work_id) == ()
+        accepted_parts = tuple(
+            part for row in rows for part in read_content_parts(c, entry_id=row["id"])
+        )
+        assert accepted_parts == queued_parts
+        turn = c.execute(
+            "SELECT initial_entry_id FROM pulsara_v3.turns WHERE id=%s",
+            (candidate.exact_turn_id,),
+        ).fetchone()
+        queue = c.execute(
+            "SELECT consumed_entry_id FROM pulsara_v3.prompt_queue_items WHERE id=%s",
+            (receiver.work_id,),
+        ).fetchone()
+        assert (
+            turn["initial_entry_id"]
+            == queue["consumed_entry_id"]
+            == entries[0].entry_id
+        )
     assert (
         repository.query_agent_work(
             root_session_id=root.guard.session_id,
@@ -452,8 +525,12 @@ def test_work_input_identities_are_confirmed_and_graph_does_not_hydrate(
     )
     with pytest.raises(Exception, match="differs from its prepared"):
         repository.confirm_agent_requests(
-            root.guard, requests=(receiver,),
-            **{**confirmation, "source_tool_attempt_id": attempt["source_exec_attempt_id"]},
+            root.guard,
+            requests=(receiver,),
+            **{
+                **confirmation,
+                "source_tool_attempt_id": attempt["source_exec_attempt_id"],
+            },
         )
     with pytest.raises(Exception, match="differs from its prepared"):
         repository.confirm_agent_requests(
@@ -508,7 +585,15 @@ def test_empty_work_material_is_stored_and_projected_once(source, kind, body):
             (receiver.work_id,),
         ).fetchone()["work_inputs"]
     assert inputs == [
-        {"kind": kind, "source_work_id": parent.work_id, "ordinal": 0, "body": body}
+        dict(kind="instruction", ordinal=0, content_start=0, content_count=1),
+        dict(
+            kind=kind,
+            source_work_id=parent.work_id,
+            ordinal=0,
+            ready=True,
+            content_start=1,
+            content_count=0 if body == "" else 1,
+        ),
     ]
     _, candidate = start(repository, receiver)
     assert [
@@ -517,8 +602,7 @@ def test_empty_work_material_is_stored_and_projected_once(source, kind, body):
         for part in entry.canonical_prompt.content.parts
     ] == [
         "Investigate.",
-        "此来源 Work 的结果不含文本内容。" if body == "" else body,
-    ]
+    ] + ([] if body == "" else [body])
     confirmation = repository.confirm_prepared_prompt_head_consumption(
         candidate=candidate, deadline_monotonic=deadline()
     )
@@ -1008,7 +1092,9 @@ def test_explicit_agent_message_survives_sender_deletion_and_confirms_exact_targ
     assert (
         confirmed["id"] == delivered["id"] and confirmed["target_turn_id"] == root_turn
     )
-    with pytest.raises(ConversationKernelConflict, match="message request identity was reused"):
+    with pytest.raises(
+        ConversationKernelConflict, match="message request identity was reused"
+    ):
         repository.enqueue_agent_steer(
             root.guard,
             target_turn_id=random_id("turn"),
@@ -1190,3 +1276,157 @@ def test_automatic_retirement_requires_continuous_idle_but_explicit_delete_does_
         )
         == "DELETED"
     )
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {"kind": "log", "text": "exact\nCell output"},
+        {"kind": "log", "text": "\ud800"},
+        {"kind": "return", "text": ""},
+        {
+            "kind": "error",
+            "error": {"name": "Error", "message": "exact\nerror", "causes": [None, 3]},
+        },
+        {
+            "kind": "tool_result",
+            "sequence": 2,
+            "tool_name": "send_agent_message",
+            "state": "ERROR",
+            "result": {"status": "ERROR", "content": []},
+        },
+    ],
+)
+@pytest.mark.parametrize("delivery", ["steer", "turn"])
+def test_cell_output_is_owned_once_and_ingress_confirmation_reads_consumed_entry(
+    source, record, delivery
+):
+    from pulsara_agent.conversation_kernel.steer import PreparedCellOutputIngress
+    from pulsara_agent.ports.terminal_observation import CellOutputContent
+    from pulsara_agent.conversation_kernel._repository.queue_content import (
+        read_input_owner,
+    )
+
+    repository, root, _ = source
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        row_factory=dict_row,
+        deadline_monotonic=deadline(),
+    ) as connection:
+        origin = connection.execute(
+            """SELECT a.id, i.turn_id, s.workspace_id FROM pulsara_v3.tool_execution_attempts a
+               JOIN pulsara_v3.tool_invocations i ON i.session_id=a.session_id AND i.id=a.invocation_id
+               JOIN pulsara_v3.sessions s ON s.id=i.session_id
+               WHERE i.session_id=%s AND i.source_kind='MODEL_TOOL_CALL'""",
+            (root.guard.session_id,),
+        ).fetchone()
+    if delivery == "turn":
+        assert repository.interrupt_turn(
+            root.guard,
+            turn_id=origin["turn_id"],
+            reason="USER_INTERRUPT",
+            occurred_at=now(),
+            actor_id="test",
+            deadline_monotonic=deadline(),
+        )
+    value = CellOutputContent(
+        random_id("cell"),
+        origin["turn_id"],
+        origin["id"],
+        1,
+        record,
+    )
+    ingress = PreparedCellOutputIngress(
+        root.guard.session_id, origin["workspace_id"], value, now(), "test"
+    )
+    accepted = repository.enqueue_cell_output(
+        root.guard, candidate=ingress, deadline_monotonic=deadline()
+    )
+    assert accepted.queue_item_id == ingress.queue_item_id
+    if record == {"kind": "log", "text": "\ud800"}:
+        alias = replace(value, record={"kind": "log", "text": r"\ud800"})
+        assert alias.body == value.body and alias.storage_text != value.storage_text
+        assert alias != value
+        conflict = repository.confirm_cell_output_ingress(
+            candidate=replace(ingress, content=alias), deadline_monotonic=deadline()
+        )
+        assert conflict.kind.value == "CONFLICT"
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        row_factory=dict_row,
+        deadline_monotonic=deadline(),
+    ) as connection:
+        before = read_content_parts(connection, queue_item_id=ingress.queue_item_id)
+        assert len(before) == 1 and before[0].type == "text"
+        assert before[0].value == value.storage_text
+    if delivery == "steer":
+        facts = repository.read_pending_prompt_steer_facts(
+            session_id=root.guard.session_id,
+            target_turn_id=origin["turn_id"],
+            deadline_monotonic=deadline(),
+        )
+        fact = next(
+            item for item in facts if item.queue_item_id == ingress.queue_item_id
+        )
+        assert (
+            repository.hydrate_pending_prompt_steer(
+                fact=fact, deadline_monotonic=deadline()
+            ).content.parts
+            == value.content.parts
+        )
+        with repository._writer_transaction(
+            root.guard, deadline_monotonic=deadline()
+        ) as connection:
+            repository._consume_plan_terminal_inputs(
+                connection,
+                root.guard,
+                turn_id=origin["turn_id"],
+                workspace_id=origin["workspace_id"],
+            )
+    else:
+        candidate = repository.prepare_prompt_head_consumption(
+            session_id=root.guard.session_id,
+            occurred_at=now(),
+            actor_id="test",
+            deadline_monotonic=deadline(),
+        )
+        assert (
+            candidate is not None
+            and candidate.canonical_prompt.content.parts == value.content.parts
+        )
+        consumed = repository.consume_prepared_prompt_head(
+            root.guard, candidate=candidate, deadline_monotonic=deadline()
+        )
+        assert consumed.kind.value == "FULL"
+        group = consumed.accepted.started_input_group
+        assert group.ordered_items[0].content == value.content.parts
+        assert (
+            repository.confirm_prepared_prompt_head_consumption(
+                candidate=candidate, deadline_monotonic=deadline()
+            ).kind.value
+            == "FULL"
+        )
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        row_factory=dict_row,
+        deadline_monotonic=deadline(),
+    ) as connection:
+        row = connection.execute(
+            "SELECT * FROM pulsara_v3.prompt_queue_items WHERE id=%s",
+            (ingress.queue_item_id,),
+        ).fetchone()
+        assert read_content_parts(connection, queue_item_id=ingress.queue_item_id) == ()
+        assert (
+            read_content_parts(connection, entry_id=row["consumed_entry_id"]) == before
+        )
+        assert (
+            read_input_owner(
+                connection, row=row, queue_item_id=ingress.queue_item_id
+            ).body
+            == value.body
+        )
+    confirmed = repository.confirm_cell_output_ingress(
+        candidate=ingress, deadline_monotonic=deadline()
+    )
+    assert confirmed.kind.value == "FULL_COMPATIBLE"
+    assert confirmed.status == "CONSUMED"

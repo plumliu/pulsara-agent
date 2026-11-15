@@ -1,5 +1,4 @@
 """Fixed-prefix construction, typed failures and shared variant work."""
-from tests.support.tool_outputs import prepare_output
 
 from collections import Counter
 from datetime import datetime, timezone
@@ -45,7 +44,7 @@ def append(repo, guard, owner, text, *, complete=False):
         guard,
         cut=cut,
         entry_id=entry_id,
-        parent_content=InlineContent.from_bytes(b"manifest"),
+
         blocks=(
             AssistantTextBlock(identity("block"), InlineContent.from_bytes(text.encode())),
         ),
@@ -142,14 +141,13 @@ def test_group_shares_source_decode_and_derives_QAQ_without_rescan(repo, monkeyp
 
     monkeypatch.setattr(history_projection, "canonical_history_message", restore)
     decoded = []
-    decode = history_projection.decode_saved_text
+    decode = history_projection.decode_content_part
 
-    def observe_decode(row):
-        if row["kind"] == "assistant":
-            decoded.append(row["assistant_entry_id"])
-        return decode(row)
+    def observe_decode(connection, row):
+        decoded.append(row["entry_id"])
+        return decode(connection, row)
 
-    monkeypatch.setattr(history_projection, "decode_saved_text", observe_decode)
+    monkeypatch.setattr(history_projection, "decode_content_part", observe_decode)
     queries = []
 
     class ObservedConnection:
@@ -182,7 +180,7 @@ def test_group_shares_source_decode_and_derives_QAQ_without_rescan(repo, monkeyp
     assert sum("ORDER BY entry_sequence LIMIT 1" in q for q in queries) == 1
     # Each TEXT is verified/decoded once for all four rendered variants.
     assert Counter(decoded) == Counter({a1: 1, a2: 1})
-    assert sum("FROM pulsara_v3.assistant_message_blocks a" in q for q in queries) == 1
+    assert sum("FROM pulsara_v3.content_parts p" in q for q in queries) == 1
     assert not any("history_search_documents" in q for q in queries)
 
 
@@ -198,16 +196,17 @@ def test_required_failure_is_typed_optional_Q2_preserves_QA(
     _, q2 = question(repo, guard, "optional second question")
     head = rows(repo, "SELECT latest_entry_sequence FROM pulsara_v3.sessions WHERE id=%s", (guard.session_id,))[0]["latest_entry_sequence"]
     with psycopg.connect(stage2_migrated_postgres_database.admin_dsn, row_factory=dict_row) as connection:
+        connection.execute("SET session_replication_role=replica")
         if corrupt == "A":
             connection.execute(
-                "UPDATE pulsara_v3.assistant_message_blocks SET inline_content=%s || substring(inline_content FROM 2) WHERE assistant_entry_id=%s AND block_kind='TEXT'",
-                (b"x", later),
+                "UPDATE pulsara_v3.content_parts SET inline_value=%s || substring(inline_value FROM 2) WHERE entry_id=%s AND type='text'",
+                (b"\xff", later),
             )
             assert build_history_group(connection, guard.session_id, q1, covered_entry_sequence=old_cut) == old
         else:
             connection.execute(
-                "UPDATE pulsara_v3.transcript_entries SET inline_content=%s || substring(inline_content FROM 2) WHERE id=%s",
-                (b"x", q1 if corrupt == "Q1" else q2),
+                "UPDATE pulsara_v3.content_parts SET inline_value=%s || substring(inline_value FROM 2) WHERE entry_id=%s AND type='text'",
+                (b"\xff", q1 if corrupt == "Q1" else q2),
             )
         result = build_history_group(connection, guard.session_id, q1, covered_entry_sequence=head)
         requested = build_history_document(
@@ -239,9 +238,7 @@ def test_sparse_tools_only_and_wrong_session_cannot_supply_Q1(repo):
     q1 = rows(repo, "SELECT id FROM pulsara_v3.transcript_entries WHERE session_id=%s AND entry_kind='USER_MESSAGE'", (lease.guard.session_id,))[0]["id"]
     cut = rows(repo, "SELECT entry_sequence FROM pulsara_v3.transcript_entries WHERE id=%s", (request,))[0]["entry_sequence"]
     result = group(repo, lease.guard.session_id, q1, cut)
-    assert result.expected_variants == frozenset({("QA", True)})
-    assert "toolonlyneedle" in result.documents[("QA", True)]["body"]
-    assert "excludedquerytoolword" not in result.documents[("QA", True)]["body"]
+    assert result.documents == {}
     unrelated = new_session(repo).guard
     empty = group(repo, unrelated.session_id, q1, cut)
     assert isinstance(empty, HistoryBuildSuccess) and empty.documents == {}
@@ -272,63 +269,15 @@ def test_driver_failure_propagates_and_cut_is_required(
         )
 
 
-def test_bad_tool_result_fails_group_but_not_requested_no_tools(
-    repo, stage2_migrated_postgres_database
-):
-    from pulsara_agent.conversation_kernel.repository import build_prepared_tool_result_acceptance
-    from pulsara_agent.conversation_kernel.tool_outputs import ToolOutputProcessor
-    from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
-    from pulsara_agent.ports.tool_execution import ToolOutputSourceFormatHint
-    from tests.support.tool_outputs import _install_tool_call
-
-    workspace = identity("workspace")
-    lease, owner, request, call, attempt = _install_tool_call(repo, workspace)
-    entry_id = identity("entry")
-    projection = prepare_output(ToolOutputProcessor(repo.connection_provider),
-        session_id=lease.guard.session_id, workspace_id=workspace,
-        result_entry_id=entry_id, public_output="tool result 中文🧰",
-        native_output="tool result 中文🧰", output_body_candidate=None,
-        output_omitted=False, public_format=ToolOutputSourceFormatHint.TEXT,
-        deadline_monotonic=monotonic() + 30,
-    )
-    candidate = build_prepared_tool_result_acceptance(
-        guard=lease.guard, workspace_id=workspace,
-        result_id=identity("result"), result_entry_id=entry_id, turn_id=owner,
-        assistant_entry_id=request, tool_call_id=call, attempt_id=attempt,
-        result_state="SUCCESS", canonical_preview_content=projection.canonical_preview,
-        output_body=projection.output_body,
-        source_coverage=projection.source_coverage, output_omitted=projection.output_omitted,
-        source_coverage_reason=projection.source_coverage_reason,
-        output_unavailability_reason=projection.output_unavailability_reason,
-        actor_id="tool:test", observed_at=datetime.now(timezone.utc),
-        observation_duration_microseconds=None,
-        observation_origin_kind=ToolObservationOrigin.TERMINAL_PROCESS,
-        trusted_tool_reported_duration_microseconds=None,
-    )
-    repo.accept_tool_result(
-        lease.guard, candidate=candidate, deadline_monotonic=monotonic() + 30
-    )
-    _, cut = append(repo, lease.guard, owner, "ordinary complete no-tools answer")
+def test_tool_only_rows_never_enter_dialogue_history(repo):
+    lease = new_session(repo)
+    request = saved_calls(repo, lease, (call_block("exec_process", {"command": "tool text"}),))
     q1 = rows(repo, "SELECT id FROM pulsara_v3.transcript_entries WHERE session_id=%s AND entry_kind='USER_MESSAGE'", (lease.guard.session_id,))[0]["id"]
-    expected = group(repo, lease.guard.session_id, q1, cut).documents[("QA", False)]
-    with psycopg.connect(stage2_migrated_postgres_database.admin_dsn, row_factory=dict_row) as connection:
-        connection.execute(
-            "UPDATE pulsara_v3.tool_results SET output_body_inline_content=%s || substring(output_body_inline_content FROM 2) WHERE result_entry_id=%s",
-            (b"x", entry_id),
-        )
-        result = build_history_group(
-            connection, lease.guard.session_id, q1, covered_entry_sequence=cut
-        )
-        assert isinstance(result, HistoryBuildFailure) and result.entry_id == entry_id
-        assert build_history_document(
-            connection, lease.guard.session_id, q1, covered_entry_sequence=cut,
-            variant="QA", include_tools=False,
-        ) == expected
-        assert build_history_document(
-            connection, lease.guard.session_id, q1, covered_entry_sequence=cut,
-            variant="QA", include_tools=True,
-        ) is None
-        connection.rollback()
+    answer, cut = append(repo, lease.guard, rows(repo, "SELECT turn_id FROM pulsara_v3.transcript_entries WHERE id=%s", (request,))[0]["turn_id"], "retained commentary")
+    result = group(repo, lease.guard.session_id, q1, cut)
+    for document in result.documents.values():
+        assert [message["entry_id"] for message in document["messages"]] == [q1, answer]
+        assert "tool text" not in document["body"]
 
 
 @pytest.mark.parametrize("field", ["q1_entry_id", "q2_entry_id"])
@@ -360,3 +309,25 @@ def test_projection_composite_FK_rejects_other_session_question(
                 (foreign_q1, guard.session_id),
             )
     assert rows(repo, "SELECT * FROM pulsara_v3.history_search_documents WHERE session_id=%s ORDER BY id", (guard.session_id,)) == before
+
+
+def test_assistant_commentary_keeps_text_order_and_excludes_calls_and_thought_data(repo):
+    from pulsara_agent.conversation_kernel.repository import AssistantDataBlock
+
+    lease = new_session(repo)
+    request = saved_calls(repo, lease, (
+        AssistantTextBlock(identity("block"), InlineContent.from_bytes(b"head\n```python\nprint(1)\n```")),
+        AssistantDataBlock(identity("block"), InlineContent.from_bytes(b"private reasoning")),
+        call_block("exec_process", {"command": "tool arguments are not dialogue"}),
+        AssistantTextBlock(identity("block"), InlineContent.from_bytes(b'{"answer":42}\n')),
+    ))
+    entry = rows(repo, "SELECT * FROM pulsara_v3.transcript_entries WHERE id=%s", (request,))[0]
+    answer, cut = append(repo, lease.guard, entry["turn_id"], "final answer")
+    q1 = rows(repo, "SELECT id FROM pulsara_v3.transcript_entries WHERE session_id=%s AND entry_kind='USER_MESSAGE'", (lease.guard.session_id,))[0]["id"]
+    built = group(repo, lease.guard.session_id, q1, cut)
+    assert isinstance(built, HistoryBuildSuccess)
+    for document in built.documents.values():
+        assert [message["entry_id"] for message in document["messages"]] == [q1, request, answer]
+        assert document["messages"][1]["text"] == 'head\n```python\nprint(1)\n```\n{"answer":42}\n'
+        assert "private reasoning" not in document["body"]
+        assert "tool arguments are not dialogue" not in document["body"]

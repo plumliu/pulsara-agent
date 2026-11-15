@@ -111,7 +111,6 @@ def _finish(repo, guard, turn_id, text="final"):
         guard,
         cut=cut,
         entry_id=entry_id,
-        parent_content=InlineContent.from_bytes(b"manifest"),
         blocks=(
             AssistantTextBlock(
                 random_id("block"), InlineContent.from_bytes(text.encode())
@@ -241,9 +240,6 @@ def test_fork_retained_prefix_is_local_dense_and_self_contained(repo):
         payload.getvalue(),
         7,
         5,
-        workspace_id=repo.read_session_workspace_id(
-            parent, deadline_monotonic=monotonic() + 30
-        ),
     )
     # Identical content in distinct requests must remain distinct canonical rows.
     content = FrozenPromptContent((LLMTextPart("keep exact"), image, image))

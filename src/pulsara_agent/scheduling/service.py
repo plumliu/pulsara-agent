@@ -1,12 +1,13 @@
 """One process-local scheduler; accepted work belongs to the ordinary ROOT queue."""
 
 from __future__ import annotations
-from pulsara_agent.identity import derive_id, is_valid_id
+from pulsara_agent.identity import derive_id, is_valid_id, require_id
 
 
 import asyncio
 from contextlib import suppress
 from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import datetime, timezone as utc_timezone
 import logging
 
@@ -31,6 +32,7 @@ from pulsara_agent.scheduling.contracts import (
     next_occurrence,
 )
 from pulsara_agent.workspace_identity import WorkspaceUnavailable
+from pulsara_agent.ports.tool_execution import FrozenToolJsonDict, freeze_tool_json_object
 from pulsara_agent.primitives.context import canonical_json_bytes
 from pulsara_agent.primitives.tool_result_budget import ToolResultPageBoundary
 
@@ -75,6 +77,29 @@ def model_management_receipt(action, payload):
 def _require_model_result(page_budget, value):
     if not page_budget.fits(canonical_json_bytes(value).decode("utf-8")):
         raise ToolResultPageBoundary("The minimum schedule result does not fit this call's result allowance")
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduledToolObservation:
+    """One tool value and the revisions read with its actual schedule rows."""
+
+    value: FrozenToolJsonDict
+    result_facts: FrozenToolJsonDict
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "value", freeze_tool_json_object(self.value))
+        object.__setattr__(self, "result_facts", freeze_tool_json_object(self.result_facts))
+
+    @classmethod
+    def from_rows(cls, value, rows):
+        revisions = {}
+        for row in rows:
+            task_id = require_id(row["id"], "schedule")
+            revision = row["revision"]
+            if type(revision) is not int or revision < 1:
+                raise ValueError("schedule observation requires the row's actual revision")
+            revisions[task_id] = revision
+        return cls(value, {"schedule_revisions": revisions} if revisions else {})
 
 
 class ScheduledTaskService:
@@ -263,7 +288,8 @@ class ScheduledTaskService:
     async def _invoke_query(self, arguments, *, default_session_id, permission_mode, page_budget):
         value = dict(validate_query(dict(arguments)))
         if "target" in value:
-            return model_task_payload(await self.get(value["target"]["task_id"]))
+            row = await self.get(value["target"]["task_id"])
+            return ScheduledToolObservation.from_rows(model_task_payload(row), (row,))
         # Model-only scope default; service/HTTP list(None) remains user-level.
         session = value.pop("session", None)
         value["session_id"] = (
@@ -282,7 +308,7 @@ class ScheduledTaskService:
                     **({"status": value["status"]} if "status" in value else {}),
                     "cursor": selected[-1]["id"]}} if more else None}
             if page_budget.fits(canonical_json_bytes(result).decode("utf-8")):
-                return result
+                return ScheduledToolObservation.from_rows(result, selected)
         raise ToolResultPageBoundary("The minimum schedule page does not fit this call's result allowance")
 
     async def invoke_manage(self, arguments, *, default_session_id, permission_mode, page_budget, memory_domain_id=None):
@@ -328,10 +354,13 @@ class ScheduledTaskService:
             result = await self.create(**value, result_check=result_check)
         elif action == "switch":
             result = await self.switch(**value, result_check=result_check)
-            return model_management_receipt(action, result)
+            return ScheduledToolObservation.from_rows(model_management_receipt(action, result),
+                (result["paused"], result["active"]))
         else:
             result = await self.mutate(action=action, **value, result_check=result_check)
-        return model_management_receipt(action, {"id": value["task_id"]} if action == "delete" else result)
+        return ScheduledToolObservation.from_rows(
+            model_management_receipt(action, {"id": value["task_id"]} if action == "delete" else result),
+            () if action == "delete" else (result,))
 
     async def preview(self, *, schedule, timezone):
         rule = validate_rule(schedule, timezone)

@@ -2,7 +2,7 @@
 
 日期：2026-11-12。
 
-状态：优先实施的结构草案，未实施。本轮只修改文档。本文确定单一存储路径、归属及删除边界；完整工具交付合同与[统一工具结果交付与分页草案](PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)共同适用。物理承载及各工具完整业务值到共同结构的存储映射必须在实施中逐项闭合，不能以旧路径兜底宣称完成。
+状态：共同存储基础按[实施计划](PULSARA_HARD_CUT_IMPLEMENTATION_PLAN.zh.md)的 A、B、C 批次接通并验证，逐工具业务值映射、分页交付及完整产品激活仍须后续完成，Pulsara 保持停用。本文确定单一存储路径、归属及删除边界；完整工具交付合同与[统一工具结果交付与分页草案](PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)共同适用。不能以旧路径兜底宣称消费者已经完成。
 
 ## 1. 目标与实施范围
 
@@ -74,9 +74,13 @@ entry 的来源信息仍由 transcript_entries 等现有业务 owner 保存，�
 | inline_value | 可空 bytea；text 为原 UTF-8 字节，target/object/annotation 为当前规范 JSON 编码，data 为原载荷 |
 | blob_id | 可空；图片或外置载荷的真实 blob 外键，不是任意 JSON 中的伪引用 |
 | tool_call_id、tool_name、tool_arguments | 仅 tool_call 行使用；沿用现有调用关联和参数，不同时写入 inline_value |
-| data_media_type | 仅 inline 的内部 data 行记录实际媒体含义；外置时从 blob 取得，不重复记录；不将 DATA 误解为文本或图片 |
+| data_media_type、data_codec | 仅 inline 的内部 data 行记录实际媒体含义和 codec；外置时两列为空，从 blob 取得，不重复记录；不将 DATA 误解为文本或图片 |
 
 公共内容形状仍是 type/value；inline_value 是物理字节，不要求 JS 理解它。按 type 解码，image 的 value 从 blob_id 生成 IMAGE_REF Target。编码不加入 schema_version、固定合同字符串或旧格式探测。
+
+text 采用统一的 UTF-8 surrogatepass 编解码：普通 Unicode 的原 UTF-8 字节不变，JavaScript 字符串中的孤立 UTF-16 surrogate 也能在 bytea 中无损往返。所有 text 使用同一路径，不按内容探测另一种格式，不替换字符或另存 JSON 正文包。该存储表达不声称孤立 surrogate 是有效 Unicode 标量；JSON／provider／文件等实际输出边界仍负责各自的合法编码或明确失败，不能把输出编码失败当作正文已丢失。
+
+DATA 保留接受时的实际 codec；二进制字节即使恰好可用 UTF-8 解码，也不能据此改成文字。inline／blob 的读取与 fork 使用同一载荷语义，复制原物理表达，不把读取时取得的 blob 属性回填成内容行上的并列属性。适用 provider 的文字及二进制描述投影继续沿原 owner。
 
 ### 3.2 类型与载荷
 
@@ -139,7 +143,7 @@ Plan 审阅期间将队列消息明确用作修订反馈时，仍提交 REVISE �
 
 ### 4.2 subagent 的上下文和依赖材料
 
-当前 prompt_queue_items.initial_context 保存文字数组，work_inputs[].body 保存已取得的材料／依赖正文，消费时还会生成独立 AGENT_MATERIAL entry。这两处纳入正文统一，不能仅删除顶层 inline_content/blob_id 后把嵌套正文留作另一份权威。
+排队历史与已取得的材料／依赖正文统一进入 content_parts，消费时按各份材料创建独立 AGENT_MATERIAL entry。队列不保存 initial_context 文字数组或 work_inputs[].body，不把嵌套正文留作另一份权威。
 
 tools.run_agent 的公开参数统一由 materials 数组选择材料，支持 {kind:"CONTEXT_MATERIAL",turns:1|2|3} 和 WORK Target；与 depends_on 同源的 WORK 先按依赖处理，只交付一次，其余独立 WORK 材料须已结束。删除顶层 context 及 mode 字段。没有 CONTEXT_MATERIAL 项就不带 ROOT 历史，新建和复用 Agent 均可在每次分派中显式选择。CONTEXT_MATERIAL 不分配独立材料 ID，也不是新正文实体；ROOT 正文仍沿现有对话分组投影，从本次分派对应的已接纳输入快照选取，并随本次 Work 接受、保存，不等排队工作启动后再读取最新 ROOT 对话。具体参数与返回类型见 [Agent 工具草案第 5 章](native_tools/agents.md#5-toolsrun_agentroot-批量分派工作仅-js)。
 
@@ -161,6 +165,8 @@ ROOT 分配的主指令                  AGENT_INSTRUCTION
 
 材料正文进入共同内容路径，排队期间只保留将主指令和各份材料分别转入 entry 所需的分界与顺序。queue_item_id + ordinal 只能表达内容顺序，建库前须在现有队列材料结构中明确这些必要分界；不把多份材料拼成一条用户正文，不恢复嵌套 JSON 正文，也不新增通用正文实体或注册表。
 
+现有 work_inputs 数组仅承载这些排队元数据：kind 区分 instruction、context、dependency、material，ordinal 保留分组顺序，content_start／content_count 定位该组内容；适用的 Work 项保留 source_work_id 与 ready。空的已就绪材料可以没有内容行；材料内容项的 ordinal 不要求密集连续。该数组不再保存 body，队列不另存 initial_context 正文，消费后不新增逐材料到 entry 的映射。
+
 既有 Work 材料／依赖关系仍由原业务 owner 保存：source_work_id、材料种类和顺序用于依赖调度、取得来源结果、协作查询及前端关系展示。依赖是否满足必须明确；已满足但正文为空可以没有内容行，不能与尚未满足的依赖混同。删除 body/null 正文表达时同步承接这个区别，不因正文统一删除实际调度语义。
 
 消费时各份内容在同一事务内转归实际 entry，之后普通正文读取按 entry 及其来源类别处理。主指令的 consumed_entry_id 仍只指主指令；不为按原材料反查每条已消费 entry 新增永久追溯映射，不将 source_work_id 等 Work 关系复制到每个内容项。排队分界用于正确分配内容，不扩展为永久逐项来源链；现有 Work 关系、提交确认和 entry 正文各自保留职责。
@@ -170,6 +176,10 @@ ROOT 分配的主指令                  AGENT_INSTRUCTION
 ### 4.3 Cell 输出
 
 Cell 显式 console.log/return 沿现有接纳链路形成交给 ROOT 的 steer，使用共同内容。已知 IMAGE_REF 可以直接再交给 view_image，不要求图片先进入会话或队列已经消费。Cell steer 本身不提供 read_file 读取、续读或导出入口，保存为会话 entry 不会把 steer 变成文件或工具结果。不得新增“入队后立即有可读 SESSION_ENTRY”、ACK 或跨重启恢复承诺。JS 中间结果不因保存而自动进入 ROOT 上下文。
+
+Cell 输入的现有来源控制事实归队列的 source_cell_id、source_record_sequence、cell_output_kind，与既有来源 turn／attempt 一起使用，不嵌入另一份正文包。消费后需要这些事实的原消费者沿 consumed_entry_id 读取既有队列关系。普通日志及 return 的文字、诊断和晚到结果的文字投影进入共同内容；进程内输入预备及确认使用同一模型投影和实际计量。原始 JS 码元保留，只有模型投影把孤立 surrogate 显示为明确的反斜杠转义；确认同时核对原值与来源，不仅比较可能相同的显示文字。递归图片生产及整条 Cell 图文交付沿 unified 的相应后续接入要求，不因文本基础已完成就视为已全部接通。
+
+Cell 队列与 entry 的协议正文复用现有图文输入的 JSON 传输投影，由前端共同 decoder 还原原 JS 字符串，包括空串及孤立 surrogate。该投影临时生成，不作为第二份正文保存，不含旧 Cell record 包或来源字段。已保存 canonical 内容的解码只验证结构；人类输入提交时的非空校验仍由原入口负责。
 
 console.log 的每个实际输出参数和显式 return 都递归遍历数组／对象，识别任意层级的 {type:"image",value:<IMAGE_REF>} 节点，包括单独图片项、数组、普通嵌套字段和 object.value；不要求顶层 content 或单参数。数组顺序、普通字段／层级及文字序列化次序保留，图片在原位置形成 image 出现项，其他选定内容形成对应文字；不重复输出完整 JSON 和 content，不扫描未输出的变量或解析字符串中的 JSON，不新增品牌、注册表、正文实体或递归深度 cap。
 
@@ -227,6 +237,8 @@ inline 与 blob 的选择阈值只决定字节放在哪里，不能决定超过�
 
 tool_results 增加 public_fields JSON 对象，仅存各工具已声明的非 content 业务字段。它不包含共同 content、原生页、Pulsara 为展示生成的 next／完整结果 Target 或返回值副本。外部业务本身名为 next 等同名字段保持原义，不按字段名过滤，不把它们当作 Pulsara 续读控制。执行状态、观察时间等已有权威列可确定的值从原列投影，不再重复保存。
 
+public_fields 使用 PostgreSQL json 承载，并以 json_typeof 校验顶层对象，保留合法 JSON 字符串中的 NUL、JavaScript UTF-16 码元及原有类型。接受、确认和 fork 使用同一 JSON 编解码路径，不经 jsonb 转换，不增加转义包装、并列列或格式分支。result_facts 仍按实际内部控制事实使用 jsonb。
+
 字段合同由原生工具修订文档或工具已有明确返回类型约束，不作为任意字段兜底。保留缺失与显式 null、JSON 数值类型、数组顺序、失败业务值、MCP structuredContent 等适用语义。当前返回值不是 meta/content 对象的工具，实施前必须明确无损映射，不能为套表擅自改变返回类型。
 
 write_file 的 tool_result_target 分支从原结果的公开业务字段与有序 content 生成完整确定性文字导出，不读取当前页或内部执行事实，不重新执行来源业务。导出完整写入 UTF-8 投影，不套用 content 输入分支的 NUL 或二进制扩展名拒绝规则；目标授权、原子不覆盖发布及取消结算共用。输入中的来源引用留在调用参数；新结果只保存目标 PATH、状态、成功时实际 bytes_written 和简短说明，不复制原工具结果正文，不新建导出正文实体或映射。来源操作失败与文件导出是否成功分开；原生返回的 tool_result 指向本次写入结果，NEXT 只读该冻结结果，不再次导出。参数与示例见[文件工具草案第 2 章](native_tools/filesystem.md#2-write_file创建文本或导出完整工具结果)。
@@ -271,6 +283,8 @@ annotate_media 的内部文件绑定同样复用 tool_results.result_facts，保
 业务行、有序内容和有效图片引用共同接受。预备的孤立 blob 不构成可读结果，由现有 GC 处理。完整接受后才正常返回 JS 值或原生首屏；效果已经发生时，保存失败不得触发重做业务。
 
 业务失败已有完整值时，仍保存全部文字、图片、结构化字段。保存失败／未确认时说明已知效果及不可用性，不返回假完整 Target，不用零条内容冒充合法空结果。保存成功但当前页交付失败时保留完整值，按统一交付草案给出实际 Target 和未交付位置。
+
+完整 typed 值的接受先于临时展示投影。接受前的真实失败保留已知业务值及状态，不附未确认身份；接受后投影失败保留真实已接受身份和完整值，不伪报保存失败，不撤销已提交的进程内效果，不重复执行业务。精确确认依据 JSON 类型及数值语义比较完整字段和有序内容：布尔与数字不同，JSON number 的表示归一及同一 UTF-16 字符串的合法往返不能误报为另一个结果；不以 Python 宽松相等或序列化文本的表面差异代替该边界。
 
 模型不支持图片时，采用第 8 节明确的文字能力投影，不视为完整结果未保存或整条 Cell 输入不可接纳。原生以 ERROR 说明实际图片未交付；若文字投影成功交付，则据实记录范围并继续后缀，不为同一缺失能力反复返回原地 NEXT。单图读取／解码失败采用原位文字占位，原生 ERROR，steer 其他内容继续；整页或请求仍无法交付时才沿上一段的错误路径处理。
 
@@ -455,7 +469,7 @@ tool 消息：本页文字、object 的 JSON 文字、原图片位置的 IMAGE_R
 
 ## 11. 验收要求
 
-以下为未来实施验收要求，本次未执行这些测试或 provider 实验。
+以下为完整 hardcut 的验收要求。A、B、C 的存储、事务及完整结果基础已按实施计划验证；原生分页、完整 Cell 图文交付、逐工具业务合同和真实 provider 验证仍属后续批次，不能由基础测试代替。
 
 | 场景 | 必须证明的行为 |
 | --- | --- |

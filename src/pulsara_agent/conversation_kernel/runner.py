@@ -18,9 +18,8 @@ from dataclasses import dataclass, field as dataclass_field, replace
 from datetime import datetime, timezone
 from functools import partial
 from hashlib import sha256
-import json
 from time import monotonic
-from typing import Awaitable, Callable, Mapping, Protocol
+from typing import Awaitable, Callable, Protocol
 
 
 from pulsara_agent.conversation_kernel.assembler import (
@@ -161,7 +160,6 @@ from pulsara_agent.conversation_kernel.mcp.contracts import (
     MAXIMUM_MCP_CATALOG_FULL_BYTES,
 )
 from pulsara_agent.conversation_kernel.tool_outputs import (
-    CANONICAL_TOOL_RESULT_PREVIEW_HARD_BYTES,
     ToolOutputProcessor,
 )
 from pulsara_agent.conversation_kernel.tool_contracts import (
@@ -735,24 +733,7 @@ def _ordinary_result_followup_upper(
     logical = provider_neutral_message_logical_bytes(closure) + (
         provider_neutral_message_logical_bytes(late)
     )
-    # Plain-text previews retain raw C0 characters. The reader wraps a late
-    # preview in canonical JSON, where each such byte can expand to six bytes;
-    # unlike the provider logical envelope, the preview is not already JSON.
-    result_body = "\x01" * CANONICAL_TOOL_RESULT_PREVIEW_HARD_BYTES
-    late_storage = canonical_json_bytes(
-        {
-            "tool_call_id": call.tool_call_id,
-            "result_state": _LONGEST_TOOL_RESULT_STATE,
-            "result": result_body,
-        }
-    )
-    closure_storage = _tool_result_closure_storage_text(call.tool_call_id).encode(
-        "utf-8"
-    )
-    canonical = max(
-        CANONICAL_TOOL_RESULT_PREVIEW_HARD_BYTES,
-        len(closure_storage) + len(late_storage),
-    )
+    canonical = len(_tool_result_closure_storage_text(call.tool_call_id).encode("utf-8"))
     return canonical, logical, 2, (closure, late)
 
 
@@ -939,7 +920,7 @@ class ConversationKernelRunner:
         )
         self._tool_output_processor = (
             tool_output_processor
-            or ToolOutputProcessor(repository.connection_provider)
+            or ToolOutputProcessor()
         )
         self._launch_permission_mode = launch_permission_mode
         self._io = io_owner or KernelSessionIO()
@@ -1973,20 +1954,6 @@ class ConversationKernelRunner:
                         )
                     )
                     canonical_blocks = await self._canonical_blocks(completed)
-                    parent_bytes = json.dumps(
-                        {
-                            "draft_identity": completed.draft_identity,
-                            "blocks": [
-                                self._block_manifest(item) for item in canonical_blocks
-                            ],
-                        },
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode("utf-8")
-                    parent_content = await self._content(
-                        parent_bytes, deadline=self._canonical_deadline()
-                    )
                     occurred_at = datetime.now(timezone.utc)
                     complete_turn = not calls
                     stop_continuation = None
@@ -2053,7 +2020,6 @@ class ConversationKernelRunner:
                         guard=self._writer_lease.guard,
                         cut=request.cut,
                         entry_id=entry_id,
-                        parent_content=parent_content,
                         blocks=canonical_blocks,
                         complete_turn=complete_turn,
                         occurred_at=occurred_at,
@@ -3058,29 +3024,6 @@ class ConversationKernelRunner:
                 )
             )
         return tuple(result)
-
-    @staticmethod
-    def _block_manifest(block: AssistantBlock) -> Mapping[str, object]:
-        if isinstance(block, AssistantTextBlock):
-            return {
-                "kind": "TEXT",
-                "digest": block.text.digest,
-                "size": block.text.size,
-            }
-        if isinstance(block, AssistantDataBlock):
-            return {
-                "kind": "DATA",
-                "digest": block.data.digest,
-                "size": block.data.size,
-                "media_type": block.data.media_type,
-            }
-        assert isinstance(block, AssistantToolCallBlock)
-        return {
-            "kind": "TOOL_CALL",
-            "tool_call_id": block.tool_call_id,
-            "tool_name": block.tool_name,
-            "arguments_digest": _json_digest(block.arguments),
-        }
 
     async def _content(
         self,

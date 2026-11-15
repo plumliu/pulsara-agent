@@ -1,542 +1,28 @@
-"""Direct canonical advisory-memory writes and embedding maintenance reads."""
+"""Derived embedding maintenance over the current canonical memory inputs."""
 
 from __future__ import annotations
 
-from pulsara_agent.identity import derive_id
-from pulsara_agent.memory.targets import memory_target
-
-from dataclasses import dataclass
 from datetime import datetime
-import json
-from time import monotonic
+from hashlib import sha256
 from typing import Sequence
 
 from psycopg.rows import dict_row
 
-from pulsara_agent.conversation_kernel.memory.contracts import (
-    MemoryRelationKind,
-    MemorySupersedeMode,
-    memory_basis_context_allowed,
-    memory_relation_id,
-    normalize_memory_text,
-)
-from pulsara_agent.conversation_kernel.memory.writes import (
-    PreparedMemoryMutation,
-    PreparedMemoryRelationWrite,
-    PreparedRememberWrite,
-)
-from pulsara_agent.memory.scope import (
-    CTX_GLOBAL,
-    FrozenMemoryReadContextBinding,
-)
-from pulsara_agent.primitives.context import thaw_json
-from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget, ToolResultPageBoundary
+from pulsara_agent.memory.scope import FrozenMemoryReadContextBinding
 from pulsara_agent.retrieval.embedding.validation import freeze_v1_embedding_vector
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 
-from .contracts import ConversationKernelConflict, PreparedToolResultAcceptance
-from .locking import lock_canonical_identities
 from .memory_management import _MemoryManagementOperations
 
 
-@dataclass(frozen=True, slots=True)
-class DirectMemoryOutcome:
-    result_state: str
-    canonical_body: str
-    visible_memory_fact_ids: tuple[str, ...]
-
-
-class _MemoryInputRejected(ValueError):
-    """Known application rejection before any canonical memory side effect."""
-
-
-def _body(value: dict[str, object]) -> str:
-    body = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    if len(body.encode("utf-8")) > 65_536:
-        raise _MemoryInputRejected("memory ToolResult exceeds inline byte bound")
-    return body
-
-
-def _fact_id(session_id: str, result_id: str) -> str:
-    return derive_id("memory", "remember", session_id, result_id)
-
-
-def _require_memory_receipt_budget(candidate, write, body, visible_ids):
-    # Direct repository callers have no provider reservation; production writes
-    # carry their actual invocation quote from the memory port.
-    budget = write.page_budget or ToolResultPageBudget(tool_call_id=candidate.tool_call_id)
-    if not budget.fits(body, model_visible_memory_fact_ids=visible_ids):
-        raise ToolResultPageBoundary("complete memory write receipt cannot fit the result budget")
+def _embedding_input_digest(body: str) -> str:
+    # This is the cross-asynchronous-call content check for one derived vector,
+    # not a memory identity or deduplication key. search_text already projects
+    # the complete title and statement in their specified field order.
+    return "sha256:" + sha256(body.encode("utf-8")).hexdigest()
 
 
 class _MemoryOperations(_MemoryManagementOperations):
-    def _settle_direct_memory_mutation(
-        self,
-        connection,
-        *,
-        candidate: PreparedToolResultAcceptance,
-        mutation: PreparedMemoryMutation,
-        deadline_monotonic: float,
-    ) -> DirectMemoryOutcome:
-        if candidate.result_state != "SUCCESS" or candidate.attempt_id is None:
-            raise ConversationKernelConflict(
-                "memory mutation needs a successful tool attempt"
-            )
-        owner = connection.execute(
-            "SELECT s.memory_domain_id, s.workspace_id, w.workspace_kind, "
-            "w.workspace_root, w.workspace_label FROM pulsara_v3.sessions AS s "
-            "JOIN pulsara_v3.workspaces AS w "
-            "ON w.memory_domain_id=s.memory_domain_id AND w.id=s.workspace_id "
-            "WHERE s.id=%s",
-            (candidate.session_id,),
-        ).fetchone()
-        if owner is None or (
-            str(owner["memory_domain_id"]) != mutation.memory_domain_id
-            or str(owner["workspace_id"]) != candidate.workspace_id
-        ):
-            raise ConversationKernelConflict("memory mutation owner domain drifted")
-        lock_canonical_identities(
-            connection,
-            namespace="workspace",
-            memory_domain_id=str(owner["memory_domain_id"]),
-            identities=(str(owner["workspace_id"]),),
-        )
-        call = connection.execute(
-            """
-            SELECT b.tool_name, b.tool_arguments, CASE WHEN (SELECT root_session_id FROM pulsara_v3.sessions WHERE id=t.session_id) IS NULL THEN 'ROOT' ELSE 'SUBAGENT' END AS caller_kind
-            FROM pulsara_v3.assistant_message_blocks AS b
-            JOIN pulsara_v3.turns AS t
-              ON t.session_id=b.session_id AND t.id=%s
-            WHERE b.session_id=%s AND b.assistant_entry_id=%s
-              AND b.tool_call_id=%s AND b.block_kind='TOOL_CALL'
-            """,
-            (
-                candidate.turn_id,
-                candidate.session_id,
-                candidate.assistant_entry_id,
-                candidate.tool_call_id,
-            ),
-        ).fetchone()
-        if call is None or str(call["caller_kind"]) != "ROOT":
-            raise ConversationKernelConflict(
-                "memory mutation is not owned by a root tool call"
-            )
-        if candidate.actor_id != call["tool_name"]:
-            raise ConversationKernelConflict(
-                "memory mutation actor differs from its tool call"
-            )
-        arguments = call["tool_arguments"]
-        if not isinstance(arguments, dict):
-            raise ConversationKernelConflict("memory tool arguments are not canonical")
-        if isinstance(mutation, PreparedRememberWrite):
-            raw_statement = arguments.get("statement")
-            expected_target = (
-                "GLOBAL" if mutation.context_id == CTX_GLOBAL else "CURRENT_PROJECT"
-            )
-            if (
-                call["tool_name"] != "remember"
-                or not isinstance(raw_statement, str)
-                or normalize_memory_text(raw_statement) != mutation.statement
-                or arguments.get("kind") != mutation.kind.value
-                or arguments.get("context_target") != expected_target
-                or "kind_hint" in arguments
-                or arguments.get("based_on", [])
-                != [memory_target(ref.target_fact_id) for ref in mutation.basis_refs]
-                or set(arguments)
-                - {"statement", "context_target", "kind", "based_on"}
-            ):
-                raise ConversationKernelConflict(
-                    "remember write does not exact-join its tool call"
-                )
-        elif (
-            call["tool_name"] != "mark_memory_relation"
-            or set(arguments) != {"source", "target", "relation_kind"}
-            or arguments.get("source") != memory_target(mutation.source_memory_id)
-            or arguments.get("target") != memory_target(mutation.target_memory_id)
-            or arguments.get("relation_kind") != mutation.relation_kind.value
-        ):
-            raise ConversationKernelConflict(
-                "relation write does not exact-join its tool call"
-            )
-        try:
-            if isinstance(mutation, PreparedRememberWrite):
-                return self._settle_remember(
-                    connection,
-                    candidate=candidate,
-                    write=mutation,
-                    deadline_monotonic=deadline_monotonic,
-                    owner=owner,
-                )
-            return self._settle_memory_relation(
-                connection, candidate=candidate, write=mutation
-            )
-        except ToolResultPageBoundary:
-            # Receipt quotes are checked only before a new memory write, or
-            # after ON CONFLICT inserted nothing. This is a known no-change
-            # result, not an ambiguous commit that may retry the mutation.
-            return DirectMemoryOutcome(
-                "APPLICATION_ERROR",
-                _body({"error": "RESULT_BUDGET_EXCEEDED", "memory_changed": False, "advisory": True}),
-                (),
-            )
-        except _MemoryInputRejected as exc:
-            return DirectMemoryOutcome(
-                "APPLICATION_ERROR",
-                _body({"error": str(exc), "advisory": True}),
-                (),
-            )
-
-    @staticmethod
-    def _lock_remember_basis(
-        connection, write: PreparedRememberWrite
-    ) -> tuple[dict, ...]:
-        ids = tuple(item.target_fact_id for item in write.basis_refs)
-        if not ids:
-            return ()
-        rows = connection.execute(
-            """
-            SELECT * FROM pulsara_v3.memory_facts
-            WHERE memory_domain_id=%s AND id=ANY(%s::text[])
-            ORDER BY id FOR UPDATE
-            """,
-            (write.memory_domain_id, list(ids)),
-        ).fetchall()
-        by_id = {str(row["id"]): row for row in rows}
-        for ref in write.basis_refs:
-            row = by_id.get(ref.target_fact_id)
-            if (
-                row is None
-                or str(row["context_id"]) != ref.target_context_id
-                or str(row["lifecycle"]) != "ACTIVE"
-                or not memory_basis_context_allowed(
-                    write.context_id, ref.target_context_id
-                )
-            ):
-                raise _MemoryInputRejected(
-                    "based_on memory is no longer active or visible"
-                )
-        return tuple(by_id[ref.target_fact_id] for ref in write.basis_refs)
-
-    def _settle_remember(
-        self,
-        connection,
-        *,
-        candidate: PreparedToolResultAcceptance,
-        write: PreparedRememberWrite,
-        deadline_monotonic: float,
-        owner,
-    ) -> DirectMemoryOutcome:
-        if write.context_id != CTX_GLOBAL and (
-            str(owner["workspace_kind"]) != "project"
-            or write.context_id != str(owner["workspace_id"])
-        ):
-            raise _MemoryInputRejected("remember crosses current project context")
-        basis = self._lock_remember_basis(connection, write)
-        new_id = _fact_id(candidate.session_id, candidate.result_id)
-        accepted_at = candidate.observed_at
-        related_preview = [
-            {
-                "target": memory_target(item.memory_id),
-                "kind": item.kind.value,
-                "context_id": item.context_id,
-                "recorded_at": item.recorded_at,
-                "inspect": {"tool": "get_memory", "arguments": {"target": memory_target(item.memory_id)}},
-            }
-            for item in write.related
-        ][:3]
-        # Reject an oversized final body before the first fact/relationship write.
-        for status in ("SAVED", "ALREADY_PRESENT"):
-            body = _body({
-                "status": status,
-                "target": memory_target(new_id),
-                "related_memories": related_preview,
-                "retrieval_summary": thaw_json(write.retrieval_summary),
-                "advisory": True,
-                "relationship_labels_not_inferred": True,
-            })
-            _require_memory_receipt_budget(
-                candidate, write, body,
-                tuple(dict.fromkeys((new_id, *(item["target"]["memory_id"] for item in related_preview)))),
-            )
-        while monotonic() < deadline_monotonic:
-            inserted = connection.execute(
-                """
-                INSERT INTO pulsara_v3.memory_facts (
-                    id, memory_domain_id, context_id,
-                    lifecycle, fact_kind, statement, fact_semantic_digest,
-                    accepted_at, updated_at
-                ) VALUES (
-                    %s,%s,%s,'ACTIVE',%s,%s,%s,%s,%s
-                )
-                ON CONFLICT (memory_domain_id, context_id, fact_semantic_digest)
-                    WHERE lifecycle='ACTIVE' DO NOTHING
-                RETURNING id
-                """,
-                (
-                    new_id,
-                    write.memory_domain_id,
-                    write.context_id,
-                    write.kind.value,
-                    write.statement,
-                    write.semantic_digest,
-                    accepted_at,
-                    accepted_at,
-                ),
-            ).fetchone()
-            if inserted is not None:
-                memory_id, status = new_id, "SAVED"
-                break
-            winner = connection.execute(
-                """
-                SELECT id, fact_kind, statement
-                FROM pulsara_v3.memory_facts
-                WHERE memory_domain_id=%s AND context_id=%s
-                  AND fact_semantic_digest=%s AND lifecycle='ACTIVE'
-                FOR UPDATE
-                """,
-                (write.memory_domain_id, write.context_id, write.semantic_digest),
-            ).fetchone()
-            if winner is not None:
-                if (
-                    str(winner["fact_kind"]) != write.kind.value
-                    or str(winner["statement"]) != write.statement
-                ):
-                    raise ConversationKernelConflict("active semantic digest collision")
-                memory_id, status = str(winner["id"]), "ALREADY_PRESENT"
-                break
-        else:
-            raise TimeoutError("memory uniqueness arbitration exceeded writer deadline")
-        related = [item for item in related_preview if item["target"]["memory_id"] != memory_id]
-        body = _body({
-            "status": status,
-            "target": memory_target(memory_id),
-            "related_memories": related,
-            "retrieval_summary": thaw_json(write.retrieval_summary),
-            "advisory": True,
-            "relationship_labels_not_inferred": True,
-        })
-        ids = tuple(dict.fromkeys((memory_id, *(item["target"]["memory_id"] for item in related))))
-        if status == "ALREADY_PRESENT":
-            # A conflict inserted no fact. Quote the actual winner identity,
-            # whose token cost need not equal the newly allocated identity.
-            _require_memory_receipt_budget(candidate, write, body, ids)
-        if status == "SAVED":
-            relation_rows = tuple(
-                (
-                    memory_relation_id(
-                        memory_domain_id=write.memory_domain_id,
-                        source_context_id=write.context_id,
-                        source_fact_id=memory_id,
-                        relation_kind=MemoryRelationKind.BASED_ON,
-                        target_context_id=ref.target_context_id,
-                        target_fact_id=ref.target_fact_id,
-                        supersede_mode=None,
-                    ),
-                    ref,
-                    target,
-                )
-                for ref, target in zip(write.basis_refs, basis, strict=True)
-            )
-            lock_canonical_identities(
-                connection,
-                namespace="memory-relation",
-                memory_domain_id=write.memory_domain_id,
-                identities=(row[0] for row in relation_rows),
-            )
-            for relation_id, ref, target in relation_rows:
-                connection.execute(
-                    """
-                    INSERT INTO pulsara_v3.memory_relations (
-                        id, memory_domain_id,
-                        source_context_id, source_fact_id, source_fact_kind,
-                        relation_kind, target_context_id, target_fact_id,
-                        target_fact_kind, supersede_mode, ordinal, accepted_at
-                    ) VALUES (%s,%s,%s,%s,%s,'BASED_ON',%s,%s,%s,NULL,%s,%s)
-                    """,
-                    (
-                        relation_id,
-                        write.memory_domain_id,
-                        write.context_id,
-                        memory_id,
-                        write.kind.value,
-                        ref.target_context_id,
-                        ref.target_fact_id,
-                        str(target["fact_kind"]),
-                        ref.ordinal,
-                        accepted_at,
-                    ),
-                )
-        return DirectMemoryOutcome("SUCCESS", body, ids)
-
-    def _settle_memory_relation(
-        self,
-        connection,
-        *,
-        candidate: PreparedToolResultAcceptance,
-        write: PreparedMemoryRelationWrite,
-    ) -> DirectMemoryOutcome:
-        source_id, target_id, kind = (
-            write.source_memory_id,
-            write.target_memory_id,
-            write.relation_kind,
-        )
-
-        def existing_relation():
-            if kind is MemoryRelationKind.CONTRADICTS:
-                return connection.execute(
-                    """
-                    SELECT * FROM pulsara_v3.memory_relations
-                    WHERE memory_domain_id=%s AND relation_kind='CONTRADICTS'
-                      AND least(source_fact_id,target_fact_id)=least(%s,%s)
-                      AND greatest(source_fact_id,target_fact_id)=greatest(%s,%s)
-                    """,
-                    (
-                        write.memory_domain_id,
-                        source_id,
-                        target_id,
-                        source_id,
-                        target_id,
-                    ),
-                ).fetchone()
-            return connection.execute(
-                """
-                SELECT * FROM pulsara_v3.memory_relations
-                WHERE memory_domain_id=%s AND relation_kind='SUPERSEDES'
-                  AND source_fact_id=%s AND target_fact_id=%s
-                """,
-                (write.memory_domain_id, source_id, target_id),
-            ).fetchone()
-
-        rows = connection.execute(
-            """
-            SELECT * FROM pulsara_v3.memory_facts
-            WHERE memory_domain_id=%s AND id=ANY(%s::text[])
-            ORDER BY id FOR UPDATE
-            """,
-            (write.memory_domain_id, [source_id, target_id]),
-        ).fetchall()
-        by_id = {str(row["id"]): row for row in rows}
-        source, target = by_id.get(source_id), by_id.get(target_id)
-        if source is None or target is None:
-            raise _MemoryInputRejected(
-                "relation memory is absent or outside this domain"
-            )
-        source_context = str(source["context_id"])
-        target_context = str(target["context_id"])
-        if source_context != target_context:
-            raise _MemoryInputRejected("new relation requires same-context memories")
-        if source_context != CTX_GLOBAL and source_context != candidate.workspace_id:
-            raise _MemoryInputRejected("relation crosses current project context")
-        if kind is MemoryRelationKind.CONTRADICTS and (
-            (target_context, target_id) < (source_context, source_id)
-        ):
-            source_id, target_id = target_id, source_id
-            source, target = target, source
-            source_context, target_context = target_context, source_context
-        mode = (
-            None
-            if kind is MemoryRelationKind.CONTRADICTS
-            else (
-                MemorySupersedeMode.SAME_KIND_REPLACEMENT
-                if str(source["fact_kind"]) == str(target["fact_kind"])
-                else MemorySupersedeMode.TAXONOMY_CORRECTION
-            )
-        )
-        relation_id = memory_relation_id(
-            memory_domain_id=write.memory_domain_id,
-            source_context_id=str(source["context_id"]),
-            source_fact_id=source_id,
-            relation_kind=kind,
-            target_context_id=str(target["context_id"]),
-            target_fact_id=target_id,
-            supersede_mode=mode,
-        )
-        lock_canonical_identities(
-            connection,
-            namespace="memory-relation",
-            memory_domain_id=write.memory_domain_id,
-            identities=(relation_id,),
-        )
-        existing = existing_relation()
-        if existing is not None:
-            if kind is MemoryRelationKind.SUPERSEDES and (
-                target is None or str(target["lifecycle"]) != "SUPERSEDED"
-            ):
-                raise ConversationKernelConflict("existing supersede lifecycle drifted")
-            body = _body(
-                    {
-                        "status": "ALREADY_PRESENT",
-                        "relation_id": str(existing["id"]),
-                        "source": memory_target(source_id),
-                        "target": memory_target(target_id),
-                        "relation_kind": kind.value,
-                        "advisory": True,
-                    }
-            )
-            _require_memory_receipt_budget(candidate, write, body, (source_id, target_id))
-            return DirectMemoryOutcome("SUCCESS", body, (source_id, target_id))
-        if str(source["lifecycle"]) != "ACTIVE" or str(target["lifecycle"]) != "ACTIVE":
-            raise _MemoryInputRejected(
-                "new relation requires active same-context memories"
-            )
-        if kind is MemoryRelationKind.CONTRADICTS and (
-            str(source["fact_kind"]) != str(target["fact_kind"])
-        ):
-            raise _MemoryInputRejected("contradiction requires the same memory kind")
-        result_body = _body(
-            {
-                "status": "SAVED",
-                "relation_id": relation_id,
-                "source": memory_target(source_id),
-                "target": memory_target(target_id),
-                "relation_kind": kind.value,
-                "advisory": True,
-            }
-        )
-        for status in ("SAVED", "ALREADY_PRESENT"):
-            candidate_body = json.dumps(
-                {**json.loads(result_body), "status": status},
-                ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-            )
-            _require_memory_receipt_budget(candidate, write, candidate_body, (source_id, target_id))
-        connection.execute(
-            """
-            INSERT INTO pulsara_v3.memory_relations (
-                id, memory_domain_id,
-                source_context_id, source_fact_id, source_fact_kind, relation_kind,
-                target_context_id, target_fact_id, target_fact_kind,
-                supersede_mode, ordinal, accepted_at
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NULL,%s)
-            """,
-            (
-                relation_id,
-                write.memory_domain_id,
-                str(source["context_id"]),
-                source_id,
-                str(source["fact_kind"]),
-                kind.value,
-                str(target["context_id"]),
-                target_id,
-                str(target["fact_kind"]),
-                None if mode is None else mode.value,
-                candidate.observed_at,
-            ),
-        )
-        if kind is MemoryRelationKind.SUPERSEDES:
-            connection.execute(
-                """
-                UPDATE pulsara_v3.memory_facts
-                SET lifecycle='SUPERSEDED', updated_at=%s
-                WHERE memory_domain_id=%s AND id=%s
-                """,
-                (candidate.observed_at, write.memory_domain_id, target_id),
-            )
-        return DirectMemoryOutcome(
-            "SUCCESS",
-            result_body,
-            (source_id, target_id),
-        )
-
     def list_unembedded_memory_facts(
         self,
         *,
@@ -552,14 +38,14 @@ class _MemoryOperations(_MemoryManagementOperations):
         ) as connection:
             rows = connection.execute(
                 """
-                SELECT f.id, f.fact_semantic_digest, f.statement AS body
+                SELECT f.id, f.search_text AS body
                 FROM pulsara_v3.memory_facts AS f
                 LEFT JOIN pulsara_v3.memory_embeddings AS e
                   ON e.memory_domain_id=f.memory_domain_id AND e.fact_id=f.id
-                 AND e.fact_semantic_digest=f.fact_semantic_digest
                  AND e.embedding_contract_id=%s
-                WHERE f.memory_domain_id=%s AND f.lifecycle='ACTIVE'
-                  AND f.context_id=ANY(%s::text[]) AND e.fact_id IS NULL
+                WHERE f.memory_domain_id=%s AND f.context_id=ANY(%s::text[])
+                  AND (e.fact_id IS NULL OR e.fact_semantic_digest <>
+                       'sha256:' || encode(sha256(convert_to(f.search_text,'UTF8')), 'hex'))
                 ORDER BY f.accepted_at, f.id LIMIT %s
                 """,
                 (
@@ -570,7 +56,7 @@ class _MemoryOperations(_MemoryManagementOperations):
                 ),
             ).fetchall()
         return tuple(
-            (str(row["id"]), str(row["fact_semantic_digest"]), str(row["body"]))
+            (str(row["id"]), _embedding_input_digest(row["body"]), row["body"])
             for row in rows
         )
 
@@ -589,39 +75,36 @@ class _MemoryOperations(_MemoryManagementOperations):
         literal = "[" + ",".join(format(value, ".17g") for value in values) + "]"
         with self._provider.connection(
             lane=PostgresConnectionLane.BACKGROUND_WORK,
+            row_factory=dict_row,
             deadline_monotonic=deadline_monotonic,
         ) as connection:
-            row = connection.execute(
+            source = connection.execute(
                 """
-                WITH source AS (
-                    SELECT f.memory_domain_id, f.id, f.fact_semantic_digest
-                    FROM pulsara_v3.memory_facts AS f
-                    WHERE f.memory_domain_id=%s AND f.id=%s
-                      AND f.context_id=ANY(%s::text[])
-                      AND f.lifecycle='ACTIVE' AND f.fact_semantic_digest=%s
-                    FOR UPDATE
-                )
+                SELECT f.id, f.search_text AS body
+                FROM pulsara_v3.memory_facts AS f
+                WHERE f.memory_domain_id=%s AND f.id=%s
+                  AND f.context_id=ANY(%s::text[])
+                FOR UPDATE
+                """,
+                (read_binding.memory_domain_id, fact_id, list(read_binding.readable_context_ids)),
+            ).fetchone()
+            if source is None or _embedding_input_digest(source["body"]) != fact_semantic_digest:
+                return False
+            # The source row stays locked through this write. A late vector
+            # cannot overwrite a changed input, resurrect a deleted memory, or
+            # cross the current read scope while its async calculation finishes.
+            connection.execute(
+                """
                 INSERT INTO pulsara_v3.memory_embeddings (
                     memory_domain_id, fact_id, fact_semantic_digest,
                     embedding_contract_id, embedding, embedded_at
-                )
-                SELECT f.memory_domain_id, f.id, f.fact_semantic_digest,
-                       %s, %s::public.vector, %s
-                FROM source AS f
+                ) VALUES (%s,%s,%s,%s,%s::public.vector,%s)
                 ON CONFLICT (memory_domain_id, fact_id) DO UPDATE
                 SET fact_semantic_digest=EXCLUDED.fact_semantic_digest,
                     embedding_contract_id=EXCLUDED.embedding_contract_id,
                     embedding=EXCLUDED.embedding, embedded_at=EXCLUDED.embedded_at
-                RETURNING fact_id
                 """,
-                (
-                    read_binding.memory_domain_id,
-                    fact_id,
-                    list(read_binding.readable_context_ids),
-                    fact_semantic_digest,
-                    embedding_contract.contract_id,
-                    literal,
-                    embedded_at,
-                ),
-            ).fetchone()
-            return row is not None
+                (read_binding.memory_domain_id, fact_id, fact_semantic_digest,
+                 embedding_contract.contract_id, literal, embedded_at),
+            )
+            return True

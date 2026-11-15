@@ -6,21 +6,26 @@ from pulsara_agent.identity import derive_id
 from pulsara_agent.conversation_kernel.prompt_content import FrozenCanonicalPrompt
 from pulsara_agent.conversation_kernel.prompt_storage import (
     canonical_prompt_owner_is_exact, hydrate_canonical_prompt_owner,
-    insert_canonical_prompt_refs, materialize_canonical_prompt,
 )
 from pulsara_agent.conversation_kernel.annotations import validate_annotation_sources
 
 
 from pulsara_agent.conversation_kernel.interruption import interruption_payload
 
-from .tools import _output_body_values, _output_body_from_row
+from pulsara_agent.conversation_kernel.content_parts import (
+    ResultPart, write_content_parts, read_content_parts, public_result_parts, move_queue_content_parts,
+)
+from pulsara_agent.conversation_kernel.tool_outputs import (
+    assemble_tool_business_value, project_tool_result_export,
+)
+from .queue_content import publish_queue_input
 
 import json
 from datetime import datetime
 from typing import Mapping
 from psycopg import Connection, IsolationLevel
 from psycopg.rows import dict_row
-from psycopg.types.json import Jsonb
+from psycopg.types.json import Json, Jsonb
 from pulsara_agent.conversation_kernel.contracts import (
     CommittedEventDraft,
     CommittedEventSubject,
@@ -70,7 +75,6 @@ from pulsara_agent.conversation_kernel.steer import (
 )
 from pulsara_agent.llm.input import LLMTextPart
 from pulsara_agent.model_input.contracts import (
-    CanonicalInputOriginKind,
     FrozenPlanWorkflowCompileFact,
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
@@ -188,29 +192,11 @@ def _freeze_active_plan_workflow_fact(
 
 
 def _plan_review_permission(
-    *,
-    row: Mapping[str, object],
-    decision: PlanDraftDecision,
-    continuation_turn_id: str,
-    workflow_revision: int,
+    *, row: Mapping[str, object], continuation_turn_id: str
 ) -> FrozenRunPermissionSnapshot:
     requested = PermissionMode(str(row["resume_permission_mode"]))
-    if decision is PlanDraftDecision.REVISE:
-        return build_run_permission_snapshot(
-            snapshot_id=derive_id('permission', 'admission', continuation_turn_id),
-            requested_mode=requested,
-            effective_mode=PermissionMode.READ_ONLY,
-            admission_source=RunPermissionAdmissionSource.RUNTIME_PLAN_CONTINUATION,
-            overlay=RunPermissionOverlay.PLAN_READ_ONLY,
-            plan_context_ordinal_at_admission=int(row["workflow_ordinal"]),
-            plan_workflow_id=str(row["plan_workflow_id"]),
-            plan_workflow_revision_at_admission=workflow_revision,
-            inherited_from_turn_id=str(row["origin_turn_id"]),
-        )
-    if decision is not PlanDraftDecision.APPROVE:
-        raise ValueError("cancelled Plan review has no continuation permission")
     return build_run_permission_snapshot(
-        snapshot_id=derive_id('permission', 'admission', continuation_turn_id),
+        snapshot_id=derive_id("permission", "admission", continuation_turn_id),
         requested_mode=requested,
         effective_mode=requested,
         admission_source=RunPermissionAdmissionSource.RUNTIME_PLAN_CONTINUATION,
@@ -221,41 +207,148 @@ def _plan_review_permission(
 
 
 def _plan_review_body(
-    *,
-    row: Mapping[str, object],
-    decision: PlanDraftDecision,
-    canonical_prompt: FrozenCanonicalPrompt | None,
-    extracted: ExtractedPlanDraft,
+    *, row: Mapping[str, object], extracted: ExtractedPlanDraft
 ) -> InlineContent:
-    handoff_kind = (
-        PlanHandoffKind.APPROVED_PLAN
-        if decision is PlanDraftDecision.APPROVE
-        else PlanHandoffKind.REVISION_REQUESTED
-    )
-    payload: dict[str, object] = {
-        "transition": handoff_kind.value,
-        "workflow_id": str(row["plan_workflow_id"]),
-        "interaction_id": str(row["id"]),
-    }
-    if decision is PlanDraftDecision.APPROVE:
-        payload["approved_plan"] = {
-            "plan_utf8_size": extracted.identity.plan_utf8_size,
-            "plan_utf8_digest": extracted.identity.plan_utf8_digest,
-            "assistant_entry_id": extracted.identity.assistant_entry_id,
-            "tool_call_id": extracted.identity.tool_call_id,
+    return _plan_inline(
+        {
+            "transition": PlanHandoffKind.APPROVED_PLAN.value,
+            "workflow_id": str(row["plan_workflow_id"]),
+            "interaction_id": str(row["id"]),
+            "approved_plan": {
+                "plan_utf8_size": extracted.identity.plan_utf8_size,
+                "plan_utf8_digest": extracted.identity.plan_utf8_digest,
+                "assistant_entry_id": extracted.identity.assistant_entry_id,
+                "tool_call_id": extracted.identity.tool_call_id,
+            },
         }
-    return _plan_inline(payload)
+    )
 
 
-def _plan_public_output(content: InlineContent, origin_kind: str) -> InlineContent:
-    """Freeze the existing public Plan projection as C, leaving control storage intact."""
-    body = project_tool_result_storage_body(content.canonical_bytes.decode("utf-8"),
-        ToolObservationOrigin.PLAN_CONTROL if origin_kind == "PLAN_CONTROL" else ToolObservationOrigin.POLICY)
-    return InlineContent.from_bytes(body.encode("utf-8"), media_type="application/json", codec="utf-8")
+def _plan_result_parts(
+    content: InlineContent, origin_kind: str
+) -> tuple[ResultPart, ...]:
+    """Store the public observation once; execution control remains relational."""
+    body = project_tool_result_storage_body(
+        content.canonical_bytes.decode("utf-8"),
+        ToolObservationOrigin.PLAN_CONTROL
+        if origin_kind == "PLAN_CONTROL"
+        else ToolObservationOrigin.POLICY,
+    )
+    value = json.loads(body)
+    value.pop("status", None)
+    return (ResultPart("object", value),)
 
 
-def _plan_public_facts(content: InlineContent, origin_kind: str) -> Mapping[str, object]:
-    return json.loads(_plan_public_output(content, origin_kind).canonical_bytes)
+def _plan_business_body(content, origin_kind, result_state) -> str:
+    return canonical_json_bytes(
+        assemble_tool_business_value(
+            public_fields={},
+            content_parts=_plan_result_parts(content, origin_kind),
+            result_state=result_state,
+        )
+    ).decode("utf-8")
+
+
+def _plan_result_is_exact(connection, row, content, origin_kind) -> bool:
+    return (
+        row["public_fields"] == {}
+        and row["result_facts"] == {}
+        and row["output_unavailability_reason"] is None
+        and public_result_parts(
+            read_content_parts(
+                connection,
+                session_id=str(row["session_id"]),
+                entry_id=str(row["result_entry_id"]),
+            )
+        )
+        == _plan_result_parts(content, origin_kind)
+    )
+
+
+def _plan_review_result_parts(
+    decision: PlanDraftDecision, resume_mode: str
+) -> tuple[ResultPart, ...]:
+    text = {
+        PlanDraftDecision.APPROVE: f"用户已批准方案；已恢复 {resume_mode} 权限。",
+        PlanDraftDecision.REVISE: "用户要求修订方案。",
+        PlanDraftDecision.CANCEL: "用户取消了本次审批。",
+    }[decision]
+    return (ResultPart("text", text),)
+
+
+def _plan_review_settlement(
+    *, interaction, decision, result_id, result_entry_id, entry_sequence, occurred_at
+):
+    state = "CANCELLED" if decision is PlanDraftDecision.CANCEL else "SUCCESS"
+    arguments = freeze_json(dict(interaction["tool_arguments"]))
+    if not isinstance(arguments, FrozenJsonObjectFact):
+        raise ConversationKernelConflict("Plan review call arguments are invalid")
+    value = assemble_tool_business_value(
+        public_fields={},
+        content_parts=_plan_review_result_parts(
+            decision, str(interaction["resume_permission_mode"])
+        ),
+        result_state=state,
+    )
+    return build_accepted_canonical_tool_result_settlement(
+        session_id=str(interaction["session_id"]),
+        scope_kind=ModelInputScopeKind.ROOT,
+        turn_id=str(interaction["origin_turn_id"]),
+        assistant_entry_id=str(interaction["assistant_entry_id"]),
+        call_ordinal=int(interaction["selected_call_ordinal"]),
+        tool_name="exit_plan",
+        tool_call_id=str(interaction["tool_call_id"]),
+        public_arguments=arguments,
+        result_id=result_id,
+        result_entry_id=result_entry_id,
+        accepted_entry_sequence=entry_sequence,
+        result_state=state,
+        result_origin_kind="PLAN_CONTROL",
+        canonical_body=canonical_json_bytes(value).decode("utf-8"),
+        observed_at=occurred_at,
+        observation_origin=ToolObservationOrigin.PLAN_CONTROL,
+    )
+
+
+def _confirm_plan_review_feedback(
+    connection,
+    *,
+    session_id,
+    interaction_id,
+    command_id,
+    canonical_prompt,
+    source_queue_item_id,
+) -> None:
+    queue_id = derive_id("queue", "plan-review-feedback", interaction_id, command_id)
+    queue = connection.execute(
+        "SELECT * FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND id=%s",
+        (session_id, queue_id),
+    ).fetchone()
+    if queue is None:
+        raise ConversationKernelConflict("Plan revision feedback owner is missing")
+    consumed = queue["status"] == "CONSUMED"
+    if not canonical_prompt_owner_is_exact(
+        connection,
+        row=queue,
+        expected=canonical_prompt,
+        queue_item_id=None if consumed else queue_id,
+        transcript_entry_id=str(queue["consumed_entry_id"]) if consumed else None,
+    ):
+        raise ConversationKernelConflict("Plan revision feedback content differs")
+    if source_queue_item_id is not None:
+        source = connection.execute(
+            "SELECT status,terminal_reason FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND id=%s",
+            (session_id, source_queue_item_id),
+        ).fetchone()
+        if (
+            source is None
+            or source["status"] != "CANCELLED"
+            or source["terminal_reason"] != "USER_REDIRECTED_TO_STEER"
+            or read_content_parts(
+                connection, session_id=session_id, queue_item_id=source_queue_item_id
+            )
+        ):
+            raise ConversationKernelConflict("Plan revision source was not transferred")
 
 
 def _plan_tool_result_settlement(
@@ -284,9 +377,8 @@ def _plan_tool_result_settlement(
         accepted_entry_sequence=accepted_entry_sequence,
         result_state=result_state,
         result_origin_kind=result_origin_kind,
-        canonical_body=canonical_json_bytes(payload).decode("utf-8"),
-        output_available=True, required_facts=_plan_public_facts(_plan_inline(payload), result_origin_kind),
-        observed_at=candidate.occurred_at,
+        canonical_body=_plan_business_body(_plan_inline(payload), result_origin_kind, result_state),
+                observed_at=candidate.occurred_at,
         observation_origin=(
             ToolObservationOrigin.PLAN_CONTROL
             if result_origin_kind == "PLAN_CONTROL"
@@ -370,20 +462,7 @@ def _applied_plan_tool_result_values(
                  "resume_permission_mode": candidate.resume_permission_mode.value},
                 "SUCCESS", "PLAN_CONTROL", candidate.workflow_id, None,
             )
-        if candidate.control_kind is PlanToolControlKind.DRAFT:
-            return (
-                {
-                    "status": "success",
-                    "plan_control": "DRAFT_SUBMITTED_FOR_REVIEW",
-                    "workflow_id": candidate.workflow_id,
-                    "interaction_id": candidate.interaction_id,
-                },
-                "SUCCESS",
-                "PLAN_CONTROL",
-                None,
-                candidate.interaction_id,
-            )
-        raise ValueError("open Plan question has no selected result")
+        raise ValueError("open Plan interaction has no selected result")
     return (
         {
             "status": "cancelled_before_dispatch",
@@ -442,10 +521,10 @@ class _PlanOperations:
             block_rows = connection.execute(
                 """
                 SELECT id, tool_call_id, tool_name, tool_arguments
-                FROM pulsara_v3.assistant_message_blocks
-                WHERE session_id = %s AND assistant_entry_id = %s
-                  AND block_kind = 'TOOL_CALL'
-                ORDER BY block_ordinal, id
+                FROM pulsara_v3.content_parts
+                WHERE session_id = %s AND entry_id = %s
+                  AND type = 'tool_call'
+                ORDER BY ordinal, id
                 """,
                 (guard.session_id, candidate.assistant_entry_id),
             ).fetchall()
@@ -560,8 +639,12 @@ class _PlanOperations:
                     entry_id=call.result_entry_id,
                     entry_sequence=entry_sequence,
                     entry_kind=EntryKind.TOOL_RESULT,
-                    content=_plan_inline(payload),
+                    content=None,
                 )
+                write_content_parts(connection, session_id=guard.session_id,
+                    workspace_id=candidate.workspace_id, entry_id=call.result_entry_id,
+                    parts=_plan_result_parts(_plan_inline(payload), origin_kind),
+                    publisher=self._canonical_content_publisher)
                 connection.execute(
                     """
                     INSERT INTO pulsara_v3.tool_results (
@@ -573,10 +656,9 @@ class _PlanOperations:
                         observed_at, observation_duration_microseconds,
                         observation_origin_kind,
                         tool_reported_duration_microseconds,
-                        output_body_inline_content,output_body_blob_id,output_body_digest,
-                        output_body_size,output_body_media_type,output_body_codec,result_facts
+                        public_fields,result_facts
                     ) VALUES (%s, 'EXECUTED', %s, %s, %s, %s, %s, NULL, %s, %s, %s,
-                              %s, %s, %s, %s, NULL, %s, NULL, %s,%s,%s,%s,%s,%s,%s)
+                              %s, %s, %s, %s, NULL, %s, NULL, %s,%s)
                     """,
                     (
                         self._accept_invocation_source(connection,guard,assistant_entry_id=candidate.assistant_entry_id,tool_call_id=call.tool_call_id,turn_id=candidate.origin_turn_id,require_running=False)[0].invocation_id,
@@ -597,8 +679,7 @@ class _PlanOperations:
                             if origin_kind == "PLAN_CONTROL"
                             else "POLICY"
                         ),
-                        *_output_body_values(_plan_public_output(_plan_inline(payload), origin_kind)),
-                        Jsonb(_plan_public_facts(_plan_inline(payload), origin_kind)),
+                        Json({}), Jsonb({}),
                     ),
                 )
                 event_drafts.append(
@@ -635,9 +716,7 @@ class _PlanOperations:
                     ),
                 )
             continuation_entry_id: str | None = None
-            origin_completed = candidate.control_kind in {
-                PlanToolControlKind.DRAFT,
-            }
+            origin_completed = False
             if (
                 candidate.control_kind in {PlanToolControlKind.ENTER, PlanToolControlKind.EXIT}
                 and not candidate.idempotent_existing
@@ -785,8 +864,12 @@ class _PlanOperations:
                 entry_id=call.result_entry_id,
                 entry_sequence=entry_sequence,
                 entry_kind=EntryKind.TOOL_RESULT,
-                content=_plan_inline(payload),
+                content=None,
             )
+            write_content_parts(connection, session_id=guard.session_id,
+                workspace_id=candidate.workspace_id, entry_id=call.result_entry_id,
+                parts=_plan_result_parts(_plan_inline(payload), "POLICY_NO_ATTEMPT"),
+                publisher=self._canonical_content_publisher)
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.tool_results (
@@ -798,11 +881,10 @@ class _PlanOperations:
                     observed_at, observation_duration_microseconds,
                     observation_origin_kind,
                     tool_reported_duration_microseconds,
-                    output_body_inline_content,output_body_blob_id,output_body_digest,
-                    output_body_size,output_body_media_type,output_body_codec,result_facts
+                    public_fields,result_facts
                 ) VALUES (%s, 'EXECUTED', %s, %s, %s, %s, %s, NULL,
                           'POLICY_NO_ATTEMPT', NULL, NULL, %s, %s, %s,
-                          %s, NULL, 'POLICY', NULL, %s,%s,%s,%s,%s,%s,%s)
+                          %s, NULL, 'POLICY', NULL, %s,%s)
                 """,
                 (
                     self._accept_invocation_source(connection,guard,assistant_entry_id=candidate.assistant_entry_id,tool_call_id=call.tool_call_id,turn_id=candidate.origin_turn_id,require_running=False)[0].invocation_id,
@@ -815,8 +897,7 @@ class _PlanOperations:
                     call.result_entry_id,
                     result_state,
                     candidate.occurred_at,
-                    *_output_body_values(_plan_public_output(_plan_inline(payload), "POLICY_NO_ATTEMPT")),
-                    Jsonb(_plan_public_facts(_plan_inline(payload), "POLICY_NO_ATTEMPT")),
+                    Json({}), Jsonb({}),
                 ),
             )
             event_drafts.append(
@@ -952,19 +1033,19 @@ class _PlanOperations:
                    b.tool_arguments, t.permission_snapshot_fingerprint,
                    (
                      SELECT COUNT(*) - 1
-                     FROM pulsara_v3.assistant_message_blocks AS prior
+                     FROM pulsara_v3.content_parts AS prior
                      WHERE prior.session_id = b.session_id
-                       AND prior.assistant_entry_id = b.assistant_entry_id
-                       AND prior.block_kind = 'TOOL_CALL'
-                       AND (prior.block_ordinal, prior.id)
-                           <= (b.block_ordinal, b.id)
+                       AND prior.entry_id = b.entry_id
+                       AND prior.type = 'tool_call'
+                       AND (prior.ordinal, prior.id)
+                           <= (b.ordinal, b.id)
                    ) AS selected_call_ordinal
             FROM pulsara_v3.plan_interactions AS i
             JOIN pulsara_v3.plan_workflows AS w
               ON w.session_id = i.session_id AND w.id = i.plan_workflow_id
-            JOIN pulsara_v3.assistant_message_blocks AS b
+            JOIN pulsara_v3.content_parts AS b
               ON b.session_id = i.session_id
-             AND b.assistant_entry_id = i.assistant_entry_id
+             AND b.entry_id = i.assistant_entry_id
              AND b.tool_call_id = i.tool_call_id
             JOIN pulsara_v3.turns AS t
               ON t.session_id = i.session_id AND t.id = i.origin_turn_id
@@ -1020,17 +1101,15 @@ class _PlanOperations:
             """,
             (guard.session_id, str(interaction["origin_turn_id"])),
         ).fetchone()
-        if (
-            turn is None
-            or str(turn["workspace_id"]) != str(interaction["workspace_id"])
+        if turn is None or str(turn["workspace_id"]) != str(
+            interaction["workspace_id"]
         ):
             raise ConversationKernelConflict(
                 "Plan question result is not at its exact ROOT boundary"
             )
         permission = self._permission_from_row(turn)
-        if (
-            permission.snapshot_fingerprint
-            != str(interaction["permission_snapshot_fingerprint"])
+        if permission.snapshot_fingerprint != str(
+            interaction["permission_snapshot_fingerprint"]
         ):
             raise ConversationKernelConflict(
                 "Plan question permission snapshot changed"
@@ -1061,12 +1140,20 @@ class _PlanOperations:
             accepted_entry_sequence=latest_sequence + 1,
             result_state="CANCELLED_BEFORE_DISPATCH" if answer is None else "SUCCESS",
             result_origin_kind="PLAN_CONTROL",
-            canonical_body=result_content.canonical_bytes.decode("utf-8"),
-            output_available=True, required_facts=_plan_public_facts(result_content, "PLAN_CONTROL"),
+            canonical_body=_plan_business_body(
+                result_content,
+                "PLAN_CONTROL",
+                "CANCELLED_BEFORE_DISPATCH" if answer is None else "SUCCESS",
+            ),
             observed_at=occurred_at,
             observation_origin=ToolObservationOrigin.PLAN_CONTROL,
         )
-        body = accepted_settlement.public_projection.canonical_body
+        # Prospective input must use the same complete-result projection and
+        # byte quote as the canonical reader after this result is accepted.
+        projected = project_tool_result_export(
+            json.loads(accepted_settlement.public_projection.canonical_body)
+        )
+        body = projected.decode("utf-8")
         revision = int(interaction["workflow_revision"]) + 1
         return PreparedActiveRootInputCandidate(
             workspace_id=str(interaction["workspace_id"]),
@@ -1094,7 +1181,7 @@ class _PlanOperations:
                 ),
             ),
             unpublished_item_canonical_expanded_bytes=(
-                len(result_content.canonical_bytes),
+                len(projected),
             ),
             prospective_plan_workflow_fact=_freeze_active_plan_workflow_fact(
                 row=interaction,
@@ -1142,6 +1229,7 @@ class _PlanOperations:
                 expected_question_answer=answer,
                 expected_result_id=result_id,
                 expected_result_entry_id=result_entry_id,
+                expected_workflow_revision=expected_workflow_revision,
             )
             if winner is not None:
                 return winner
@@ -1156,6 +1244,7 @@ class _PlanOperations:
                 expected_question_answer=answer,
                 expected_result_id=result_id,
                 expected_result_entry_id=result_entry_id,
+                expected_workflow_revision=expected_workflow_revision,
             )
             if winner is not None:
                 return winner
@@ -1198,7 +1287,15 @@ class _PlanOperations:
                 entry_id=result_entry_id,
                 entry_sequence=entry_sequence,
                 entry_kind=EntryKind.TOOL_RESULT,
-                content=result_content,
+                content=None,
+            )
+            write_content_parts(
+                connection,
+                session_id=guard.session_id,
+                workspace_id=str(interaction["workspace_id"]),
+                entry_id=result_entry_id,
+                parts=_plan_result_parts(result_content, "PLAN_CONTROL"),
+                publisher=self._canonical_content_publisher,
             )
             connection.execute(
                 """
@@ -1211,13 +1308,19 @@ class _PlanOperations:
                     observed_at, observation_duration_microseconds,
                     observation_origin_kind,
                     tool_reported_duration_microseconds,
-                    output_body_inline_content,output_body_blob_id,output_body_digest,
-                    output_body_size,output_body_media_type,output_body_codec,result_facts
+                    public_fields,result_facts
                 ) VALUES (%s, 'EXECUTED', %s, %s, %s, %s, %s, NULL, 'PLAN_CONTROL',
-                          %s, %s, %s, %s, %s, NULL, 'PLAN_CONTROL', NULL, %s,%s,%s,%s,%s,%s,%s)
+                          %s, %s, %s, %s, %s, NULL, 'PLAN_CONTROL', NULL, %s,%s)
                 """,
                 (
-                    self._accept_invocation_source(connection,guard,assistant_entry_id=interaction['assistant_entry_id'],tool_call_id=interaction['tool_call_id'],turn_id=interaction['origin_turn_id'],require_running=False)[0].invocation_id,
+                    self._accept_invocation_source(
+                        connection,
+                        guard,
+                        assistant_entry_id=interaction["assistant_entry_id"],
+                        tool_call_id=interaction["tool_call_id"],
+                        turn_id=interaction["origin_turn_id"],
+                        require_running=False,
+                    )[0].invocation_id,
                     result_id,
                     guard.session_id,
                     interaction["workspace_id"],
@@ -1228,8 +1331,8 @@ class _PlanOperations:
                     result_entry_id,
                     "CANCELLED_BEFORE_DISPATCH" if answer is None else "SUCCESS",
                     occurred_at,
-                    *_output_body_values(_plan_public_output(result_content, "PLAN_CONTROL")),
-                    Jsonb(_plan_public_facts(result_content, "PLAN_CONTROL")),
+                    Json({}),
+                    Jsonb({}),
                 ),
             )
             response_digest = canonical_digest(
@@ -1277,7 +1380,15 @@ class _PlanOperations:
             )
             drafts = (
                 CommittedEventDraft(
-                    event_id=derive_id("event", "accepted", guard.session_id, CommittedEventType.PLAN_QUESTION_ANSWERED.name, SubjectSlot.PLAN_INTERACTION.name, interaction_id, command_id),
+                    event_id=derive_id(
+                        "event",
+                        "accepted",
+                        guard.session_id,
+                        CommittedEventType.PLAN_QUESTION_ANSWERED.name,
+                        SubjectSlot.PLAN_INTERACTION.name,
+                        interaction_id,
+                        command_id,
+                    ),
                     event_type=CommittedEventType.PLAN_QUESTION_ANSWERED,
                     subject=CommittedEventSubject(
                         SubjectSlot.PLAN_INTERACTION, interaction_id
@@ -1288,12 +1399,21 @@ class _PlanOperations:
                     projection_profile="DEFAULT",
                     occurred_at=occurred_at,
                     payload={
-                        "selected_option": answer is not None and answer.kind is PlanQuestionAnswerKind.OPTION,
+                        "selected_option": answer is not None
+                        and answer.kind is PlanQuestionAnswerKind.OPTION,
                         "answer_present": True,
                     },
                 ),
                 CommittedEventDraft(
-                    event_id=derive_id("event", "accepted", guard.session_id, CommittedEventType.TOOL_RESULT_ACCEPTED.name, SubjectSlot.ENTRY.name, result_entry_id, command_id),
+                    event_id=derive_id(
+                        "event",
+                        "accepted",
+                        guard.session_id,
+                        CommittedEventType.TOOL_RESULT_ACCEPTED.name,
+                        SubjectSlot.ENTRY.name,
+                        result_entry_id,
+                        command_id,
+                    ),
                     event_type=CommittedEventType.TOOL_RESULT_ACCEPTED,
                     subject=CommittedEventSubject(SubjectSlot.ENTRY, result_entry_id),
                     actor_kind="runtime",
@@ -1303,7 +1423,9 @@ class _PlanOperations:
                     occurred_at=occurred_at,
                     payload={
                         "tool_call_id": str(interaction["tool_call_id"]),
-                        "result_state": "CANCELLED_BEFORE_DISPATCH" if answer is None else "SUCCESS",
+                        "result_state": "CANCELLED_BEFORE_DISPATCH"
+                        if answer is None
+                        else "SUCCESS",
                     },
                 ),
             )
@@ -1325,7 +1447,6 @@ class _PlanOperations:
                 continuation_turn_id=None,
                 continuation_entry_id=None,
                 handoff_created_at_commit=False,
-                question_result_entry_id=result_entry_id,
                 workflow_revision=revision,
                 tool_result_settlement=(
                     build_accepted_canonical_tool_result_settlement(
@@ -1340,10 +1461,17 @@ class _PlanOperations:
                         result_id=result_id,
                         result_entry_id=result_entry_id,
                         accepted_entry_sequence=entry_sequence,
-                        result_state="CANCELLED_BEFORE_DISPATCH" if answer is None else "SUCCESS",
+                        result_state="CANCELLED_BEFORE_DISPATCH"
+                        if answer is None
+                        else "SUCCESS",
                         result_origin_kind="PLAN_CONTROL",
-                        canonical_body=result_content.canonical_bytes.decode("utf-8"),
-                        output_available=True, required_facts=_plan_public_facts(result_content, "PLAN_CONTROL"),
+                        canonical_body=_plan_business_body(
+                            result_content,
+                            "PLAN_CONTROL",
+                            "CANCELLED_BEFORE_DISPATCH"
+                            if answer is None
+                            else "SUCCESS",
+                        ),
                         observed_at=occurred_at,
                         observation_origin=ToolObservationOrigin.PLAN_CONTROL,
                     )
@@ -1387,6 +1515,7 @@ class _PlanOperations:
                 expected_question_answer=answer,
                 expected_result_id=result_id,
                 expected_result_entry_id=result_entry_id,
+                expected_workflow_revision=expected_workflow_revision,
             )
 
     def enter_plan_by_user(
@@ -1832,9 +1961,9 @@ class _PlanOperations:
             )
 
     def read_plan_revision_queue_prompt(
-        self, *, session_id: str, source_queue_item_id: str, deadline_monotonic: float,
+        self, *, session_id: str, source_queue_item_id: str,
+        command_id: str, interaction_id: str, deadline_monotonic: float,
     ) -> FrozenCanonicalPrompt:
-        # Keep the source readable after conversion for idempotent command confirmation.
         with self._provider.connection(lane=PostgresConnectionLane.HOST_CONTROL,
                 row_factory=dict_row, isolation_level=IsolationLevel.REPEATABLE_READ,
                 deadline_monotonic=deadline_monotonic) as connection:
@@ -1842,9 +1971,37 @@ class _PlanOperations:
                 "SELECT * FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND id=%s",
                 (session_id, source_queue_item_id),
             ).fetchone()
-            if row is None or row["delivery_mode"] != "NEW_TURN" or row["input_origin"] != "HUMAN_MESSAGE":
+            if (row is None or row["delivery_mode"] != "NEW_TURN"
+                or row["input_origin"] != "HUMAN_MESSAGE"):
                 raise ConversationKernelConflict("Plan revision source is not a user queued prompt")
-            return hydrate_canonical_prompt_owner(connection, row=row, queue_item_id=source_queue_item_id)
+            if row["status"] == "PENDING":
+                return hydrate_canonical_prompt_owner(
+                    connection, row=row, queue_item_id=source_queue_item_id,
+                )
+            if (row["status"] != "CANCELLED"
+                or row["terminal_reason"] != "USER_REDIRECTED_TO_STEER"):
+                raise ConversationKernelConflict("Plan revision source is not pending or transferred")
+            # A retry reads the accepted feedback owner, never a second body on
+            # the cancelled source. The caller then confirms the whole command
+            # semantic identity, including source_queue_item_id and this content.
+            feedback = connection.execute(
+                """SELECT q.* FROM pulsara_v3.prompt_queue_items q
+                   JOIN pulsara_v3.session_commands c
+                     ON c.session_id=q.session_id AND c.command_id=q.command_id
+                   WHERE q.session_id=%s AND q.id=%s AND c.command_id=%s
+                     AND c.command_kind='RESOLVE_PLAN_INTERACTION'
+                     AND c.target_plan_interaction_id=%s""",
+                (session_id, derive_id("queue", "plan-review-feedback", interaction_id, command_id),
+                 command_id, interaction_id),
+            ).fetchone()
+            if feedback is None:
+                raise ConversationKernelConflict("Plan revision feedback owner is missing")
+            consumed = feedback["status"] == "CONSUMED"
+            return hydrate_canonical_prompt_owner(
+                connection, row=feedback,
+                queue_item_id=None if consumed else str(feedback["id"]),
+                transcript_entry_id=str(feedback["consumed_entry_id"]) if consumed else None,
+            )
 
     @staticmethod
     def _plan_draft_review_source_row(
@@ -1861,13 +2018,16 @@ class _PlanOperations:
                    w.workflow_revision, w.workflow_ordinal,
                    w.resume_permission_mode, w.entered_by,
                    b.tool_arguments, t.permission_snapshot_fingerprint,
+                   (SELECT count(*) - 1 FROM pulsara_v3.content_parts prior
+                    WHERE prior.entry_id=b.entry_id AND prior.type='tool_call'
+                      AND prior.ordinal<=b.ordinal) AS selected_call_ordinal,
                    t.model_call_binding AS origin_model_call_binding
             FROM pulsara_v3.plan_interactions AS i
             JOIN pulsara_v3.plan_workflows AS w
               ON w.session_id = i.session_id AND w.id = i.plan_workflow_id
-            JOIN pulsara_v3.assistant_message_blocks AS b
+            JOIN pulsara_v3.content_parts AS b
               ON b.session_id = i.session_id
-             AND b.assistant_entry_id = i.assistant_entry_id
+             AND b.entry_id = i.assistant_entry_id
              AND b.tool_call_id = i.tool_call_id
             JOIN pulsara_v3.turns AS t
               ON t.session_id = i.session_id AND t.id = i.origin_turn_id
@@ -1897,7 +2057,6 @@ class _PlanOperations:
             != PlanWorkflowStatus.ACTIVE.value
         ):
             raise ConversationKernelConflict("Plan draft review is not open")
-
 
     def resolve_plan_draft_review(
         self,
@@ -1932,24 +2091,7 @@ class _PlanOperations:
                 ),
             )
         )
-        creates_turn = decision in {
-            PlanDraftDecision.APPROVE,
-            PlanDraftDecision.REVISE,
-        }
-        with self._provider.connection(
-            lane=PostgresConnectionLane.HOST_CONTROL,
-            row_factory=dict_row,
-            deadline_monotonic=deadline_monotonic,
-            isolation_level=IsolationLevel.REPEATABLE_READ,
-        ) as connection:
-            winner = self._confirm_plan_resolution_in_transaction(
-                connection,
-                session_id=guard.session_id,
-                command_id=command_id,
-                semantic_digest=semantic_digest,
-            )
-            if winner is not None:
-                return winner
+        creates_turn = decision is PlanDraftDecision.APPROVE
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
@@ -1958,19 +2100,19 @@ class _PlanOperations:
                 session_id=guard.session_id,
                 command_id=command_id,
                 semantic_digest=semantic_digest,
+                expected_workflow_revision=expected_workflow_revision,
             )
             if winner is not None:
+                if decision is PlanDraftDecision.REVISE:
+                    _confirm_plan_review_feedback(
+                        connection,
+                        session_id=guard.session_id,
+                        interaction_id=interaction_id,
+                        command_id=command_id,
+                        canonical_prompt=canonical_prompt,
+                        source_queue_item_id=source_queue_item_id,
+                    )
                 return winner
-            if source_queue_item_id is not None:
-                source = connection.execute(
-                    "SELECT * FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND id=%s FOR UPDATE",
-                    (guard.session_id, source_queue_item_id),
-                ).fetchone()
-                if (source is None or source["status"] != "PENDING"
-                    or source["delivery_mode"] != "NEW_TURN" or source["input_origin"] != "HUMAN_MESSAGE"
-                    or not canonical_prompt_owner_is_exact(connection, row=source,
-                        expected=canonical_prompt, queue_item_id=source_queue_item_id)):
-                    raise ConversationKernelConflict("Plan revision source queue item is no longer pending or exact")
             interaction = self._plan_draft_review_source_row(
                 connection,
                 session_id=guard.session_id,
@@ -1983,221 +2125,364 @@ class _PlanOperations:
                 expected_workflow_revision=expected_workflow_revision,
             )
             assert interaction is not None
-            extracted: ExtractedPlanDraft | None = None
-            if decision is not PlanDraftDecision.CANCEL:
-                raw_arguments = interaction["tool_arguments"]
-                if not isinstance(raw_arguments, Mapping):
-                    raise ConversationKernelConflict(
-                        "Plan draft arguments are unavailable"
-                    )
-                frozen = freeze_json(dict(raw_arguments))
-                if not isinstance(frozen, FrozenJsonObjectFact):
-                    raise ConversationKernelConflict("Plan draft arguments are invalid")
-                extracted = extract_plan_draft(
-                    interaction_id=interaction_id,
-                    assistant_entry_id=str(interaction["assistant_entry_id"]),
-                    tool_call_id=str(interaction["tool_call_id"]),
-                    request_semantic_digest=str(interaction["request_semantic_digest"]),
-                    arguments=frozen,
+            workspace_id = str(interaction["workspace_id"])
+            origin_turn_id = str(interaction["origin_turn_id"])
+            turn = connection.execute(
+                "SELECT * FROM pulsara_v3.turns WHERE session_id=%s AND id=%s FOR UPDATE",
+                (guard.session_id, origin_turn_id),
+            ).fetchone()
+            if turn is None or turn["status"] != "RUNNING":
+                raise ConversationKernelConflict(
+                    "Plan review requires its running read-only origin"
                 )
-            if creates_turn:
-                assert continuation_turn_id is not None
-                assert continuation_entry_id is not None
-                assert continuation_context_binding_revision_id is not None
+            source = None
+            if source_queue_item_id is not None:
+                source = connection.execute(
+                    "SELECT * FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND id=%s FOR UPDATE",
+                    (guard.session_id, source_queue_item_id),
+                ).fetchone()
+                if (
+                    source is None
+                    or source["status"] != "PENDING"
+                    or source["delivery_mode"] != "NEW_TURN"
+                    or source["input_origin"] != "HUMAN_MESSAGE"
+                    or not canonical_prompt_owner_is_exact(
+                        connection,
+                        row=source,
+                        expected=canonical_prompt,
+                        queue_item_id=source_queue_item_id,
+                    )
+                ):
+                    raise ConversationKernelConflict(
+                        "Plan revision source queue is no longer pending or exact"
+                    )
+            frozen = freeze_json(dict(interaction["tool_arguments"]))
+            if not isinstance(frozen, FrozenJsonObjectFact):
+                raise ConversationKernelConflict("Plan draft arguments are unavailable")
+            extracted = extract_plan_draft(
+                interaction_id=interaction_id,
+                assistant_entry_id=str(interaction["assistant_entry_id"]),
+                tool_call_id=str(interaction["tool_call_id"]),
+                request_semantic_digest=str(interaction["request_semantic_digest"]),
+                arguments=frozen,
+            )
+            if canonical_prompt is not None:
+                validate_annotation_sources(
+                    connection,
+                    session_id=guard.session_id,
+                    content=canonical_prompt.content,
+                )
             status = {
                 PlanDraftDecision.APPROVE: "APPROVED",
                 PlanDraftDecision.REVISE: "REVISION_REQUESTED",
                 PlanDraftDecision.CANCEL: "CANCELLED",
             }[decision]
+            workflow_status = "APPROVED" if creates_turn else "ACTIVE"
+            revision = int(interaction["workflow_revision"]) + 1
+            result_id = derive_id(
+                "result", "plan-review-decision", interaction_id, command_id
+            )
+            result_entry_id = derive_id(
+                "entry", "plan-review-decision", interaction_id, command_id
+            )
+            result_state = (
+                "CANCELLED" if decision is PlanDraftDecision.CANCEL else "SUCCESS"
+            )
+            result_parts = _plan_review_result_parts(
+                decision, str(interaction["resume_permission_mode"])
+            )
+            sequence = self._allocate_entry_sequence(connection, guard.session_id)
+            self._insert_entry(
+                connection,
+                session_id=guard.session_id,
+                workspace_id=workspace_id,
+                turn_id=origin_turn_id,
+                entry_id=result_entry_id,
+                entry_sequence=sequence,
+                entry_kind=EntryKind.TOOL_RESULT,
+            )
+            write_content_parts(
+                connection,
+                session_id=guard.session_id,
+                workspace_id=workspace_id,
+                entry_id=result_entry_id,
+                parts=result_parts,
+                publisher=self._canonical_content_publisher,
+            )
+            invocation, _ = self._accept_invocation_source(
+                connection,
+                guard,
+                assistant_entry_id=str(interaction["assistant_entry_id"]),
+                tool_call_id=str(interaction["tool_call_id"]),
+                turn_id=origin_turn_id,
+                require_running=True,
+            )
+            connection.execute(
+                """INSERT INTO pulsara_v3.tool_results
+                   (result_record_kind,id,session_id,workspace_id,tool_call_entry_id,tool_call_id,
+                    invocation_id,result_origin_kind,result_entry_id,result_state,
+                    permission_snapshot_fingerprint,control_plan_interaction_id,public_fields,result_facts,
+                    observed_at,observation_origin_kind)
+                   VALUES ('EXECUTED',%s,%s,%s,%s,%s,%s,'PLAN_CONTROL',%s,%s,%s,%s,%s,%s,%s,'PLAN_CONTROL')""",
+                (
+                    result_id,
+                    guard.session_id,
+                    workspace_id,
+                    interaction["assistant_entry_id"],
+                    interaction["tool_call_id"],
+                    invocation.invocation_id,
+                    result_entry_id,
+                    result_state,
+                    interaction["permission_snapshot_fingerprint"],
+                    interaction_id,
+                    Json({}),
+                    Jsonb({}),
+                    occurred_at,
+                ),
+            )
             response_digest = canonical_digest(
                 "pulsara:plan-draft-review-response:v1",
                 {
                     "decision": decision.value,
-                    "prompt": None if canonical_prompt is None else canonical_prompt.body.decode("utf-8"),
-                    "plan_utf8_digest": (
-                        None
-                        if extracted is None
-                        else extracted.identity.plan_utf8_digest
-                    ),
+                    "prompt": None
+                    if canonical_prompt is None
+                    else canonical_prompt.body.decode("utf-8"),
+                    "plan_utf8_digest": extracted.identity.plan_utf8_digest,
                 },
             )
             connection.execute(
-                """
-                UPDATE pulsara_v3.plan_interactions
-                SET status = %s, resolution_command_id = %s,
-                    response_semantic_digest = %s,
-                    decision_continuation_entry_id = %s,
-                    feedback_present = %s, resolved_at = clock_timestamp()
-                WHERE session_id = %s AND id = %s AND status = 'OPEN'
-                """,
+                """UPDATE pulsara_v3.plan_interactions SET status=%s,resolution_command_id=%s,
+                   response_semantic_digest=%s,decision_continuation_entry_id=%s,
+                   feedback_present=%s,control_tool_result_id=%s,resolved_at=clock_timestamp()
+                   WHERE session_id=%s AND id=%s AND status='OPEN'""",
                 (
                     status,
                     command_id,
                     response_digest,
                     continuation_entry_id,
                     canonical_prompt is not None,
+                    result_id,
                     guard.session_id,
                     interaction_id,
                 ),
             )
-            revision = int(interaction["workflow_revision"]) + 1
-            terminal_status = {
-                PlanDraftDecision.APPROVE: "APPROVED",
-                PlanDraftDecision.REVISE: "ACTIVE",
-                PlanDraftDecision.CANCEL: "CANCELLED",
-            }[decision]
             connection.execute(
-                """
-                UPDATE pulsara_v3.plan_workflows
-                SET status = %s, workflow_revision = %s,
-                    accepted_plan_interaction_id = %s,
-                    terminal_at = CASE WHEN %s = 'ACTIVE' THEN NULL
-                                       ELSE clock_timestamp() END
-                WHERE session_id = %s AND id = %s AND status = 'ACTIVE'
-                """,
+                """UPDATE pulsara_v3.plan_workflows SET status=%s,workflow_revision=%s,
+                   accepted_plan_interaction_id=%s,
+                   terminal_at=CASE WHEN %s='ACTIVE' THEN NULL ELSE clock_timestamp() END
+                   WHERE session_id=%s AND id=%s AND status='ACTIVE'""",
                 (
-                    terminal_status,
+                    workflow_status,
                     revision,
-                    (interaction_id if decision is PlanDraftDecision.APPROVE else None),
-                    terminal_status,
+                    interaction_id if creates_turn else None,
+                    workflow_status,
                     guard.session_id,
-                    interaction["plan_workflow_id"],
+                    workflow_id,
                 ),
             )
-            handoff_kind: PlanHandoffKind | None = None
+            connection.execute(
+                """INSERT INTO pulsara_v3.session_commands
+                   (session_id,command_id,command_kind,semantic_digest,target_kind,target_plan_interaction_id)
+                   VALUES (%s,%s,'RESOLVE_PLAN_INTERACTION',%s,'PLAN_INTERACTION',%s)""",
+                (guard.session_id, command_id, semantic_digest, interaction_id),
+            )
+            drafts = [
+                self._event(
+                    CommittedEventType.TOOL_RESULT_ACCEPTED,
+                    SubjectSlot.ENTRY,
+                    result_entry_id,
+                    session_id=guard.session_id,
+                    occurrence_key=command_id,
+                    occurred_at=occurred_at,
+                    actor_kind="runtime",
+                    actor_id=actor_id,
+                    payload={
+                        "tool_call_id": str(interaction["tool_call_id"]),
+                        "result_state": result_state,
+                    },
+                )
+            ]
+            if decision is PlanDraftDecision.REVISE:
+                feedback_queue_id = derive_id(
+                    "queue", "plan-review-feedback", interaction_id, command_id
+                )
+                queue_sequence = connection.execute(
+                    """UPDATE pulsara_v3.sessions SET latest_prompt_queue_sequence=latest_prompt_queue_sequence+1,
+                       updated_at=clock_timestamp() WHERE id=%s RETURNING latest_prompt_queue_sequence""",
+                    (guard.session_id,),
+                ).fetchone()["latest_prompt_queue_sequence"]
+                connection.execute(
+                    """INSERT INTO pulsara_v3.prompt_queue_items
+                       (id,session_id,workspace_id,queue_sequence,command_id,client_submission_id,
+                        delivery_mode,input_origin,target_turn_id,status)
+                       VALUES (%s,%s,%s,%s,%s,%s,'STEER_ACTIVE_TURN','HUMAN_STEER',%s,'PENDING')""",
+                    (
+                        feedback_queue_id,
+                        guard.session_id,
+                        workspace_id,
+                        queue_sequence,
+                        command_id,
+                        command_id,
+                        origin_turn_id,
+                    ),
+                )
+                if source is not None:
+                    connection.execute(
+                        """UPDATE pulsara_v3.prompt_queue_items SET status='CANCELLED',
+                           terminal_reason='USER_REDIRECTED_TO_STEER',terminal_at=clock_timestamp()
+                           WHERE session_id=%s AND id=%s AND status='PENDING'""",
+                        (guard.session_id, source_queue_item_id),
+                    )
+                    move_queue_content_parts(
+                        connection,
+                        queue_item_id=source_queue_item_id,
+                        replacement_queue_item_id=feedback_queue_id,
+                    )
+                    drafts.append(
+                        self._event(
+                            CommittedEventType.PROMPT_CANCELLED,
+                            SubjectSlot.QUEUE_ITEM,
+                            source_queue_item_id,
+                            session_id=guard.session_id,
+                            occurrence_key="",
+                            occurred_at=occurred_at,
+                            actor_kind="human",
+                            actor_id=actor_id,
+                            payload={"reason": "USER_REDIRECTED_TO_STEER"},
+                        )
+                    )
+                else:
+                    publish_queue_input(
+                        connection,
+                        publisher=self._canonical_content_publisher,
+                        session_id=guard.session_id,
+                        workspace_id=workspace_id,
+                        queue_item_id=feedback_queue_id,
+                        value=canonical_prompt,
+                    )
+                drafts.append(
+                    self._event(
+                        CommittedEventType.PROMPT_QUEUED,
+                        SubjectSlot.QUEUE_ITEM,
+                        feedback_queue_id,
+                        session_id=guard.session_id,
+                        occurrence_key="",
+                        occurred_at=occurred_at,
+                        actor_kind="human",
+                        actor_id=actor_id,
+                        payload={
+                            "queue_sequence": int(queue_sequence),
+                            "delivery_mode": "STEER_ACTIVE_TURN",
+                        },
+                    )
+                )
             if creates_turn:
-                assert continuation_turn_id is not None
-                assert continuation_entry_id is not None
-                assert continuation_context_binding_revision_id is not None
-                handoff_kind = (
-                    PlanHandoffKind.APPROVED_PLAN
-                    if decision is PlanDraftDecision.APPROVE
-                    else PlanHandoffKind.REVISION_REQUESTED
+                self._append_events(
+                    connection, guard, workspace_id=workspace_id, drafts=tuple(drafts)
+                )
+                drafts.clear()
+                self._consume_plan_terminal_inputs(
+                    connection, guard, turn_id=origin_turn_id, workspace_id=workspace_id
+                )
+                connection.execute(
+                    """UPDATE pulsara_v3.turns SET status='COMPLETED',final_entry_id=%s,
+                       terminal_reason='COMPLETED',terminal_at=clock_timestamp()
+                       WHERE session_id=%s AND id=%s AND status='RUNNING'""",
+                    (result_entry_id, guard.session_id, origin_turn_id),
+                )
+                drafts.append(
+                    self._event(
+                        CommittedEventType.TURN_COMPLETED,
+                        SubjectSlot.TURN,
+                        origin_turn_id,
+                        session_id=guard.session_id,
+                        occurrence_key=command_id,
+                        occurred_at=occurred_at,
+                        actor_kind="runtime",
+                        actor_id=actor_id,
+                        payload={"final_entry_id": result_entry_id},
+                    )
                 )
                 permission = _plan_review_permission(
-                    row=interaction,
-                    decision=decision,
-                    continuation_turn_id=continuation_turn_id,
-                    workflow_revision=revision,
+                    row=interaction, continuation_turn_id=continuation_turn_id
                 )
-                entry_sequence = self._allocate_entry_sequence(
-                    connection, guard.session_id
-                )
-                assert extracted is not None
                 self._insert_resolution_plan_continuation(
                     connection,
                     session_id=guard.session_id,
-                    workspace_id=str(interaction["workspace_id"]),
-                    workflow_id=str(interaction["plan_workflow_id"]),
+                    workspace_id=workspace_id,
+                    workflow_id=workflow_id,
                     interaction_id=interaction_id,
-                    origin_turn_id=str(interaction["origin_turn_id"]),
+                    origin_turn_id=origin_turn_id,
                     turn_id=continuation_turn_id,
                     entry_id=continuation_entry_id,
-                    context_binding_revision_id=(
-                        continuation_context_binding_revision_id
+                    context_binding_revision_id=continuation_context_binding_revision_id,
+                    entry_sequence=self._allocate_entry_sequence(
+                        connection, guard.session_id
                     ),
-                    entry_sequence=entry_sequence,
                     permission=permission,
-                    handoff_kind=handoff_kind,
-                    canonical_prompt=canonical_prompt,
-                    body=_plan_review_body(
-                        row=interaction,
-                        decision=decision,
-                        canonical_prompt=canonical_prompt,
-                        extracted=extracted,
-                    ),
+                    handoff_kind=PlanHandoffKind.APPROVED_PLAN,
+                    body=_plan_review_body(row=interaction, extracted=extracted),
                 )
-            connection.execute(
-                """
-                INSERT INTO pulsara_v3.session_commands (
-                session_id, command_id, command_kind, semantic_digest, target_kind,
-                target_plan_interaction_id
-            ) VALUES (
-                %s, %s, 'RESOLVE_PLAN_INTERACTION', %s, 'PLAN_INTERACTION', %s
-            )
-                """,
-                (guard.session_id, command_id, semantic_digest, interaction_id),
-            )
-            if source_queue_item_id is not None:
-                connection.execute(
-                    "UPDATE pulsara_v3.prompt_queue_items SET status='CANCELLED', "
-                    "terminal_reason='USER_REDIRECTED_TO_STEER', terminal_at=clock_timestamp() "
-                    "WHERE session_id=%s AND id=%s AND status='PENDING'",
-                    (guard.session_id, source_queue_item_id),
+                drafts.append(
+                    self._event(
+                        CommittedEventType.PLAN_CONTINUATION_ACCEPTED,
+                        SubjectSlot.ENTRY,
+                        continuation_entry_id,
+                        session_id=guard.session_id,
+                        occurrence_key=command_id,
+                        occurred_at=occurred_at,
+                        actor_kind="runtime",
+                        actor_id=actor_id,
+                        payload={
+                            "handoff_kind": PlanHandoffKind.APPROVED_PLAN.value,
+                            "workflow_id": workflow_id,
+                        },
+                    )
                 )
-            drafts: list[CommittedEventDraft] = [
-                CommittedEventDraft(
-                    event_id=derive_id("event", "accepted", guard.session_id, CommittedEventType.PLAN_DRAFT_DECISION_ACCEPTED.name, SubjectSlot.PLAN_INTERACTION.name, interaction_id, command_id),
-                    event_type=CommittedEventType.PLAN_DRAFT_DECISION_ACCEPTED,
-                    subject=CommittedEventSubject(
-                        SubjectSlot.PLAN_INTERACTION, interaction_id
-                    ),
+                drafts.append(
+                    self._event(
+                        CommittedEventType.PLAN_WORKFLOW_EXITED,
+                        SubjectSlot.PLAN_WORKFLOW,
+                        workflow_id,
+                        session_id=guard.session_id,
+                        occurrence_key=command_id,
+                        occurred_at=occurred_at,
+                        actor_kind="human",
+                        actor_id=actor_id,
+                        payload={"status": "APPROVED"},
+                    )
+                )
+            drafts.append(
+                self._event(
+                    CommittedEventType.PLAN_DRAFT_DECISION_ACCEPTED,
+                    SubjectSlot.PLAN_INTERACTION,
+                    interaction_id,
+                    session_id=guard.session_id,
+                    occurrence_key=command_id,
+                    occurred_at=occurred_at,
                     actor_kind="human",
                     actor_id=actor_id,
-                    sensitivity_class="S1",
-                    projection_profile="DEFAULT",
-                    occurred_at=occurred_at,
                     payload={
                         "decision": decision.value,
                         "feedback_present": canonical_prompt is not None,
                     },
                 )
-            ]
-            if source_queue_item_id is not None:
-                drafts.append(self._event(
-                    CommittedEventType.PROMPT_CANCELLED, SubjectSlot.QUEUE_ITEM,
-                    source_queue_item_id, session_id=guard.session_id, occurrence_key="",
-                    occurred_at=occurred_at, actor_kind="human", actor_id=actor_id,
-                    payload={"reason": "USER_REDIRECTED_TO_STEER"},
-                ))
-            if decision in {PlanDraftDecision.APPROVE, PlanDraftDecision.CANCEL}:
-                drafts.append(
-                    CommittedEventDraft(
-                        event_id=derive_id("event", "accepted", guard.session_id, CommittedEventType.PLAN_WORKFLOW_EXITED.name, SubjectSlot.PLAN_WORKFLOW.name, str(interaction["plan_workflow_id"]), command_id),
-                        event_type=CommittedEventType.PLAN_WORKFLOW_EXITED,
-                        subject=CommittedEventSubject(
-                            SubjectSlot.PLAN_WORKFLOW,
-                            str(interaction["plan_workflow_id"]),
-                        ),
-                        actor_kind="human",
-                        actor_id=actor_id,
-                        sensitivity_class="PUBLIC",
-                        projection_profile="DEFAULT",
-                        occurred_at=occurred_at,
-                        payload={"status": terminal_status},
-                    )
-                )
-            if creates_turn:
-                assert continuation_entry_id is not None
-                assert handoff_kind is not None
-                drafts.append(
-                    CommittedEventDraft(
-                        event_id=derive_id("event", "accepted", guard.session_id, CommittedEventType.PLAN_CONTINUATION_ACCEPTED.name, SubjectSlot.ENTRY.name, continuation_entry_id, command_id),
-                        event_type=CommittedEventType.PLAN_CONTINUATION_ACCEPTED,
-                        subject=CommittedEventSubject(
-                            SubjectSlot.ENTRY, continuation_entry_id
-                        ),
-                        actor_kind="runtime",
-                        actor_id=actor_id,
-                        sensitivity_class="S1",
-                        projection_profile="DEFAULT",
-                        occurred_at=occurred_at,
-                        payload={
-                            "handoff_kind": handoff_kind.value,
-                            "workflow_id": str(interaction["plan_workflow_id"]),
-                        },
-                    )
-                )
+            )
             self._append_events(
-                connection,
-                guard,
-                workspace_id=str(interaction["workspace_id"]),
-                drafts=tuple(drafts),
+                connection, guard, workspace_id=workspace_id, drafts=tuple(drafts)
+            )
+            settlement = _plan_review_settlement(
+                interaction=interaction,
+                decision=decision,
+                result_id=result_id,
+                result_entry_id=result_entry_id,
+                entry_sequence=sequence,
+                occurred_at=occurred_at,
             )
             return AcceptedPlanResolution(
                 command_id=command_id,
-                workflow_id=str(interaction["plan_workflow_id"]),
-                workflow_status=PlanWorkflowStatus(terminal_status),
+                workflow_id=workflow_id,
+                workflow_status=PlanWorkflowStatus(workflow_status),
                 interaction_id=interaction_id,
                 interaction_status=status,
                 resume_permission_mode=PermissionMode(
@@ -2205,9 +2490,10 @@ class _PlanOperations:
                 ),
                 continuation_turn_id=continuation_turn_id,
                 continuation_entry_id=continuation_entry_id,
-                handoff_created_at_commit=(decision is PlanDraftDecision.CANCEL),
+                handoff_created_at_commit=False,
                 workflow_revision=revision,
                 draft_decision=decision,
+                tool_result_settlement=settlement,
             )
 
     def confirm_plan_draft_review_winner(
@@ -2247,12 +2533,23 @@ class _PlanOperations:
             deadline_monotonic=deadline_monotonic,
             isolation_level=IsolationLevel.REPEATABLE_READ,
         ) as connection:
-            return self._confirm_plan_resolution_in_transaction(
+            winner = self._confirm_plan_resolution_in_transaction(
                 connection,
                 session_id=session_id,
                 command_id=command_id,
                 semantic_digest=semantic_digest,
+                expected_workflow_revision=expected_workflow_revision,
             )
+            if winner is not None and decision is PlanDraftDecision.REVISE:
+                _confirm_plan_review_feedback(
+                    connection,
+                    session_id=session_id,
+                    interaction_id=interaction_id,
+                    command_id=command_id,
+                    canonical_prompt=canonical_prompt,
+                    source_queue_item_id=source_queue_item_id,
+                )
+            return winner
 
     def inspect_plan_continuation(
         self,
@@ -2404,9 +2701,9 @@ class _PlanOperations:
             """
             SELECT i.*, b.tool_arguments
             FROM pulsara_v3.plan_interactions AS i
-            JOIN pulsara_v3.assistant_message_blocks AS b
+            JOIN pulsara_v3.content_parts AS b
               ON b.session_id = i.session_id
-             AND b.assistant_entry_id = i.assistant_entry_id
+             AND b.entry_id = i.assistant_entry_id
              AND b.tool_call_id = i.tool_call_id
             WHERE i.session_id = %s AND i.id = %s
             """,
@@ -2570,7 +2867,7 @@ class _PlanOperations:
                 arguments=candidate.selected_arguments,
             )
             kind = PlanInteractionKind.DRAFT_REVIEW
-            control_result_id = selected.result_id
+            control_result_id = None
         connection.execute(
             """
             INSERT INTO pulsara_v3.plan_interactions (
@@ -2739,10 +3036,10 @@ class _PlanOperations:
         ).fetchone()
         block_rows = connection.execute(
             """SELECT id, tool_call_id, tool_name, tool_arguments
-               FROM pulsara_v3.assistant_message_blocks
-               WHERE session_id = %s AND assistant_entry_id = %s
-                 AND block_kind = 'TOOL_CALL'
-               ORDER BY block_ordinal, id""",
+               FROM pulsara_v3.content_parts
+               WHERE session_id = %s AND entry_id = %s
+                 AND type = 'tool_call'
+               ORDER BY ordinal, id""",
             (candidate.session_id, candidate.assistant_entry_id),
         ).fetchall()
         if (
@@ -2878,9 +3175,7 @@ class _PlanOperations:
                     or str(entry["workspace_id"]) != candidate.workspace_id
                     or str(entry["turn_id"]) != candidate.origin_turn_id
                     or str(entry["entry_kind"]) != EntryKind.TOOL_RESULT.value
-                    or self._content_from_row(entry) != _plan_inline(expected_payload)
-                    or _output_body_from_row(row) != _plan_public_output(_plan_inline(expected_payload), str(row["result_origin_kind"]))
-                    or row["result_facts"] != _plan_public_facts(_plan_inline(expected_payload), str(row["result_origin_kind"]))
+                    or not _plan_result_is_exact(connection, row, _plan_inline(expected_payload), str(row["result_origin_kind"]))
                 ):
                     raise ConversationKernelConflict(
                         "rejected Plan batch result content conflicts"
@@ -3004,9 +3299,7 @@ class _PlanOperations:
                 or str(entry["workspace_id"]) != candidate.workspace_id
                 or str(entry["turn_id"]) != candidate.origin_turn_id
                 or str(entry["entry_kind"]) != EntryKind.TOOL_RESULT.value
-                or self._content_from_row(entry) != _plan_inline(expected_payload)
-                    or _output_body_from_row(row) != _plan_public_output(_plan_inline(expected_payload), str(row["result_origin_kind"]))
-                    or row["result_facts"] != _plan_public_facts(_plan_inline(expected_payload), str(row["result_origin_kind"]))
+                or not _plan_result_is_exact(connection, row, _plan_inline(expected_payload), str(row["result_origin_kind"]))
             ):
                 raise ConversationKernelConflict(
                     "Plan batch result content names another winner"
@@ -3104,11 +3397,7 @@ class _PlanOperations:
                 if candidate.control_kind is PlanToolControlKind.QUESTION
                 else PlanInteractionKind.DRAFT_REVIEW
             )
-            expected_control_result_id = (
-                None
-                if expected_interaction_kind is PlanInteractionKind.QUESTION
-                else candidate.calls[candidate.selected_call_ordinal].result_id
-            )
+            expected_control_result_id = None
             if (
                 str(key_row["workspace_id"]) != candidate.workspace_id
                 or str(key_row["plan_workflow_id"]) != candidate.workflow_id
@@ -3164,7 +3453,7 @@ class _PlanOperations:
             "SELECT * FROM pulsara_v3.turns WHERE session_id = %s AND id = %s",
             (candidate.session_id, candidate.origin_turn_id),
         ).fetchone()
-        origin_completed = candidate.control_kind is PlanToolControlKind.DRAFT or (
+        origin_completed = (
             candidate.control_kind in {PlanToolControlKind.ENTER, PlanToolControlKind.EXIT}
             and not candidate.idempotent_existing
         )
@@ -3247,8 +3536,8 @@ class _PlanOperations:
                 or continuation["source_plan_interaction_id"] is not None
                 or str(continuation["source_plan_handoff_kind"])
                 != _automatic_plan_handoff_kind(candidate).value
-                or self._content_from_row(continuation)
-                != _automatic_plan_body(candidate)
+                or self._content_from_row(connection, continuation).canonical_bytes
+                != _automatic_plan_body(candidate).canonical_bytes
                 or str(continuation_turn["initial_entry_id"])
                 != candidate.continuation_entry_id
                 or self._permission_from_row(continuation_turn) != expected_permission
@@ -3314,7 +3603,6 @@ class _PlanOperations:
         permission: FrozenRunPermissionSnapshot,
         handoff_kind: PlanHandoffKind,
         body: InlineContent,
-        canonical_prompt: FrozenCanonicalPrompt | None,
     ) -> None:
         origin = connection.execute(
             "SELECT model_call_binding FROM pulsara_v3.turns "
@@ -3355,13 +3643,6 @@ class _PlanOperations:
             revision_id=context_binding_revision_id,
             initial_entry_sequence=entry_sequence,
         )
-        publication = None
-        if canonical_prompt is not None:
-            validate_annotation_sources(connection, session_id=session_id, content=canonical_prompt.content)
-            publication = materialize_canonical_prompt(
-                connection, publisher=self._canonical_content_publisher,
-                workspace_id=workspace_id, prompt=canonical_prompt,
-            )
         _RepositoryKernel._insert_entry(
             connection,
             session_id=session_id,
@@ -3369,16 +3650,12 @@ class _PlanOperations:
             turn_id=turn_id,
             entry_id=entry_id,
             entry_sequence=entry_sequence,
-            entry_kind=EntryKind.USER_MESSAGE if canonical_prompt is not None else EntryKind.PLAN_CONTINUATION,
-            input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE if canonical_prompt is not None else None,
-            content=body if publication is None else publication.body,
+            entry_kind=EntryKind.PLAN_CONTINUATION,
+            content=body,
             source_plan_workflow_id=workflow_id,
             source_plan_interaction_id=interaction_id,
             source_plan_handoff_kind=handoff_kind,
         )
-        if publication is not None:
-            insert_canonical_prompt_refs(connection, session_id=session_id, workspace_id=workspace_id,
-                                         transcript_entry_id=entry_id, image_blob_ids=publication.image_blob_ids)
         if permission.inherited_from_turn_id != origin_turn_id:
             raise ConversationKernelConflict(
                 "Plan continuation inheritance does not exact-join"
@@ -3459,6 +3736,7 @@ class _PlanOperations:
         session_id: str,
         command_id: str,
         semantic_digest: str,
+        expected_workflow_revision: int,
         expected_question_answer: PlanQuestionAnswer | None = None,
         expected_result_id: str | None = None,
         expected_result_entry_id: str | None = None,
@@ -3471,20 +3749,20 @@ class _PlanOperations:
                    i.control_tool_result_id,
                    i.origin_turn_id, i.workspace_id,
                    i.assistant_entry_id, i.tool_call_id,
-                   i.answer_kind, i.selected_option_ordinal,
+                   i.answer_kind, i.selected_option_ordinal, i.feedback_present,
                    w.status AS workflow_status, w.resume_permission_mode,
-                   w.workflow_revision,
+                   w.workflow_revision, w.workflow_ordinal,
                    e.turn_id AS continuation_turn_id,
                    b.tool_arguments,
                    t.permission_snapshot_fingerprint,
                    (
                      SELECT COUNT(*) - 1
-                     FROM pulsara_v3.assistant_message_blocks AS prior
+                     FROM pulsara_v3.content_parts AS prior
                      WHERE prior.session_id = b.session_id
-                       AND prior.assistant_entry_id = b.assistant_entry_id
-                       AND prior.block_kind = 'TOOL_CALL'
-                       AND (prior.block_ordinal, prior.id)
-                           <= (b.block_ordinal, b.id)
+                       AND prior.entry_id = b.entry_id
+                       AND prior.type = 'tool_call'
+                       AND (prior.ordinal, prior.id)
+                           <= (b.ordinal, b.id)
                    ) AS selected_call_ordinal
             FROM pulsara_v3.session_commands AS c
             JOIN pulsara_v3.plan_interactions AS i
@@ -3492,9 +3770,9 @@ class _PlanOperations:
              AND i.id = c.target_plan_interaction_id
             JOIN pulsara_v3.plan_workflows AS w
               ON w.session_id = i.session_id AND w.id = i.plan_workflow_id
-            JOIN pulsara_v3.assistant_message_blocks AS b
+            JOIN pulsara_v3.content_parts AS b
               ON b.session_id = i.session_id
-             AND b.assistant_entry_id = i.assistant_entry_id
+             AND b.entry_id = i.assistant_entry_id
              AND b.tool_call_id = i.tool_call_id
             JOIN pulsara_v3.turns AS t
               ON t.session_id = i.session_id AND t.id = i.origin_turn_id
@@ -3513,14 +3791,18 @@ class _PlanOperations:
         interaction_status = str(row["interaction_status"])
         question_result = (
             str(row["control_tool_result_id"])
-            if str(row["interaction_kind"]) == "QUESTION" and interaction_status in {"ANSWERED", "CANCELLED"}
+            if str(row["interaction_kind"]) == "QUESTION"
+            and interaction_status in {"ANSWERED", "CANCELLED"}
             else None
         )
         question_settlement: AcceptedCanonicalToolResultSettlement | None = None
         if question_result is not None:
             if (
                 (interaction_status == "ANSWERED" and expected_question_answer is None)
-                or (interaction_status == "CANCELLED" and expected_question_answer is not None)
+                or (
+                    interaction_status == "CANCELLED"
+                    and expected_question_answer is not None
+                )
                 or expected_result_id is None
                 or expected_result_entry_id is None
                 or question_result != expected_result_id
@@ -3542,14 +3824,16 @@ class _PlanOperations:
             ).fetchone()
             frozen_arguments = freeze_json(dict(row["tool_arguments"]))
             if not isinstance(frozen_arguments, FrozenJsonObjectFact):
-                raise ConversationKernelConflict(
-                    "Plan question arguments are invalid"
-                )
+                raise ConversationKernelConflict("Plan question arguments are invalid")
             _, _, expected_content = _plan_question_result_values(
                 interaction={**row, "id": row["target_plan_interaction_id"]},
                 answer=expected_question_answer,
             )
-            result_state = "CANCELLED_BEFORE_DISPATCH" if interaction_status == "CANCELLED" else "SUCCESS"
+            result_state = (
+                "CANCELLED_BEFORE_DISPATCH"
+                if interaction_status == "CANCELLED"
+                else "SUCCESS"
+            )
             if (
                 result is None
                 or result_entry is None
@@ -3558,8 +3842,7 @@ class _PlanOperations:
                 or str(result["result_origin_kind"]) != "PLAN_CONTROL"
                 or str(result["control_plan_interaction_id"])
                 != str(row["target_plan_interaction_id"])
-                or str(result["tool_call_entry_id"])
-                != str(row["assistant_entry_id"])
+                or str(result["tool_call_entry_id"]) != str(row["assistant_entry_id"])
                 or str(result["tool_call_id"]) != str(row["tool_call_id"])
                 or str(result["permission_snapshot_fingerprint"])
                 != str(row["permission_snapshot_fingerprint"])
@@ -3570,9 +3853,9 @@ class _PlanOperations:
                 or str(result_entry["workspace_id"]) != str(row["workspace_id"])
                 or str(result_entry["turn_id"]) != str(row["origin_turn_id"])
                 or str(result_entry["entry_kind"]) != EntryKind.TOOL_RESULT.value
-                or self._content_from_row(result_entry) != expected_content
-                or _output_body_from_row(result) != _plan_public_output(expected_content, "PLAN_CONTROL")
-                or result["result_facts"] != _plan_public_facts(expected_content, "PLAN_CONTROL")
+                or not _plan_result_is_exact(
+                    connection, result, expected_content, "PLAN_CONTROL"
+                )
             ):
                 raise ConversationKernelConflict(
                     "Plan question winner is partially installed"
@@ -3581,14 +3864,30 @@ class _PlanOperations:
                 """SELECT * FROM pulsara_v3.agent_events
                    WHERE event_id = %s""",
                 (
-                    derive_id("event", "accepted", session_id, "PLAN_QUESTION_ANSWERED", "PLAN_INTERACTION", str(row["target_plan_interaction_id"]), command_id),
+                    derive_id(
+                        "event",
+                        "accepted",
+                        session_id,
+                        "PLAN_QUESTION_ANSWERED",
+                        "PLAN_INTERACTION",
+                        str(row["target_plan_interaction_id"]),
+                        command_id,
+                    ),
                 ),
             ).fetchone()
             result_event = connection.execute(
                 """SELECT * FROM pulsara_v3.agent_events
                    WHERE event_id = %s""",
                 (
-                    derive_id("event", "accepted", session_id, "TOOL_RESULT_ACCEPTED", "ENTRY", expected_result_entry_id, command_id),
+                    derive_id(
+                        "event",
+                        "accepted",
+                        session_id,
+                        "TOOL_RESULT_ACCEPTED",
+                        "ENTRY",
+                        expected_result_entry_id,
+                        command_id,
+                    ),
                 ),
             ).fetchone()
             expected_result_payload = {
@@ -3596,13 +3895,21 @@ class _PlanOperations:
                 "result_state": result_state,
             }
             if (
-                (interaction_status == "ANSWERED" and (
-                    question_event is None
-                    or str(question_event["event_type"]) != "PlanQuestionAnswered"
-                    or question_event["subject_plan_interaction_id"] != str(row["target_plan_interaction_id"])
-                    or question_event["occurred_at"] != result["observed_at"]
-                    or (result_event is not None and str(result_event["actor_id"]) != str(question_event["actor_id"]))
-                ))
+                (
+                    interaction_status == "ANSWERED"
+                    and (
+                        question_event is None
+                        or str(question_event["event_type"]) != "PlanQuestionAnswered"
+                        or question_event["subject_plan_interaction_id"]
+                        != str(row["target_plan_interaction_id"])
+                        or question_event["occurred_at"] != result["observed_at"]
+                        or (
+                            result_event is not None
+                            and str(result_event["actor_id"])
+                            != str(question_event["actor_id"])
+                        )
+                    )
+                )
                 or result_event is None
                 or str(result_event["event_type"]) != "ToolResultAccepted"
                 or result_event["subject_entry_id"] != expected_result_entry_id
@@ -3615,7 +3922,6 @@ class _PlanOperations:
                 raise ConversationKernelConflict(
                     "Plan question occurrence is partially installed"
                 )
-            question_result_entry_id = expected_result_entry_id
             question_settlement = build_accepted_canonical_tool_result_settlement(
                 session_id=session_id,
                 scope_kind=ModelInputScopeKind.ROOT,
@@ -3630,28 +3936,181 @@ class _PlanOperations:
                 accepted_entry_sequence=int(result_entry["entry_sequence"]),
                 result_state=result_state,
                 result_origin_kind="PLAN_CONTROL",
-                canonical_body=expected_content.canonical_bytes.decode("utf-8"),
-                output_available=True, required_facts=_plan_public_facts(expected_content, "PLAN_CONTROL"),
+                canonical_body=_plan_business_body(
+                    expected_content, "PLAN_CONTROL", result_state
+                ),
                 observed_at=result["observed_at"],
                 observation_origin=ToolObservationOrigin.PLAN_CONTROL,
             )
-        else:
-            if any(
-                value is not None
-                for value in (
-                    expected_question_answer,
-                    expected_result_id,
-                    expected_result_entry_id,
+        elif str(row["interaction_kind"]) == "DRAFT_REVIEW":
+            decision = {
+                "APPROVED": PlanDraftDecision.APPROVE,
+                "REVISION_REQUESTED": PlanDraftDecision.REVISE,
+                "CANCELLED": PlanDraftDecision.CANCEL,
+            }.get(interaction_status)
+            if decision is None:
+                raise ConversationKernelConflict("Plan review winner is not resolved")
+            result_id = derive_id(
+                "result",
+                "plan-review-decision",
+                str(row["target_plan_interaction_id"]),
+                command_id,
+            )
+            entry_id = derive_id(
+                "entry",
+                "plan-review-decision",
+                str(row["target_plan_interaction_id"]),
+                command_id,
+            )
+            result = connection.execute(
+                "SELECT * FROM pulsara_v3.tool_results WHERE session_id=%s AND id=%s",
+                (session_id, result_id),
+            ).fetchone()
+            entry = connection.execute(
+                "SELECT * FROM pulsara_v3.transcript_entries WHERE session_id=%s AND id=%s",
+                (session_id, entry_id),
+            ).fetchone()
+            state = "CANCELLED" if decision is PlanDraftDecision.CANCEL else "SUCCESS"
+            if (
+                result is None
+                or entry is None
+                or row["control_tool_result_id"] != result_id
+                or result["result_entry_id"] != entry_id
+                or result["attempt_id"] is not None
+                or result["result_origin_kind"] != "PLAN_CONTROL"
+                or result["result_state"] != state
+                or result["workspace_id"] != row["workspace_id"]
+                or result["observation_origin_kind"] != "PLAN_CONTROL"
+                or result["observation_duration_microseconds"] is not None
+                or result["tool_reported_duration_microseconds"] is not None
+                or result["tool_call_entry_id"] != row["assistant_entry_id"]
+                or result["tool_call_id"] != row["tool_call_id"]
+                or result["control_plan_interaction_id"]
+                != row["target_plan_interaction_id"]
+                or result["permission_snapshot_fingerprint"]
+                != row["permission_snapshot_fingerprint"]
+                or result["public_fields"] != {}
+                or result["result_facts"] != {}
+                or result["output_unavailability_reason"] is not None
+                or entry["workspace_id"] != row["workspace_id"]
+                or entry["turn_id"] != row["origin_turn_id"]
+                or entry["entry_kind"] != "TOOL_RESULT"
+                or public_result_parts(
+                    read_content_parts(
+                        connection, session_id=session_id, entry_id=entry_id
+                    )
+                )
+                != _plan_review_result_parts(
+                    decision, str(row["resume_permission_mode"])
+                )
+                or (
+                    (decision is PlanDraftDecision.APPROVE)
+                    != (row["decision_continuation_entry_id"] is not None)
                 )
             ):
                 raise ConversationKernelConflict(
-                    "Plan question winner is absent"
+                    "Plan review winner is partially installed"
                 )
-            question_result_entry_id = None
+            decision_event = connection.execute(
+                "SELECT * FROM pulsara_v3.agent_events WHERE event_id=%s",
+                (
+                    derive_id(
+                        "event",
+                        "accepted",
+                        session_id,
+                        "PLAN_DRAFT_DECISION_ACCEPTED",
+                        "PLAN_INTERACTION",
+                        str(row["target_plan_interaction_id"]),
+                        command_id,
+                    ),
+                ),
+            ).fetchone()
+            if decision_event is None:
+                raise ConversationKernelConflict(
+                    "Plan review decision occurrence is missing"
+                )
+            for event_type, slot, subject_id, actor_kind, payload in (
+                (
+                    CommittedEventType.TOOL_RESULT_ACCEPTED,
+                    SubjectSlot.ENTRY,
+                    entry_id,
+                    "runtime",
+                    {"tool_call_id": str(row["tool_call_id"]), "result_state": state},
+                ),
+                (
+                    CommittedEventType.PLAN_DRAFT_DECISION_ACCEPTED,
+                    SubjectSlot.PLAN_INTERACTION,
+                    str(row["target_plan_interaction_id"]),
+                    "human",
+                    {
+                        "decision": decision.value,
+                        "feedback_present": bool(row["feedback_present"]),
+                    },
+                ),
+            ):
+                self._exact_event_for_confirmation(
+                    connection,
+                    self._event(
+                        event_type,
+                        slot,
+                        subject_id,
+                        session_id=session_id,
+                        occurrence_key=command_id,
+                        occurred_at=result["observed_at"],
+                        actor_kind=actor_kind,
+                        actor_id=str(decision_event["actor_id"]),
+                        payload=payload,
+                    ),
+                    session_id=session_id,
+                    workspace_id=str(row["workspace_id"]),
+                )
+            if decision is PlanDraftDecision.APPROVE:
+                successor = connection.execute(
+                    """SELECT t.*,e.entry_kind,e.source_plan_workflow_id,e.source_plan_interaction_id,
+                              e.source_plan_handoff_kind
+                       FROM pulsara_v3.transcript_entries e
+                       JOIN pulsara_v3.turns t ON t.session_id=e.session_id AND t.id=e.turn_id
+                       WHERE e.session_id=%s AND e.id=%s""",
+                    (session_id, row["decision_continuation_entry_id"]),
+                ).fetchone()
+                if (
+                    successor is None
+                    or successor["initial_entry_id"]
+                    != row["decision_continuation_entry_id"]
+                    or successor["entry_kind"] != "PLAN_CONTINUATION"
+                    or successor["source_plan_workflow_id"] != row["plan_workflow_id"]
+                    or successor["source_plan_interaction_id"]
+                    != row["target_plan_interaction_id"]
+                    or successor["source_plan_handoff_kind"] != "APPROVED_PLAN"
+                    or self._permission_from_row(successor)
+                    != _plan_review_permission(
+                        row=row, continuation_turn_id=str(successor["id"])
+                    )
+                ):
+                    raise ConversationKernelConflict(
+                        "Plan approval successor is partially installed"
+                    )
+            question_settlement = _plan_review_settlement(
+                interaction={**row, "session_id": session_id},
+                decision=decision,
+                result_id=result_id,
+                result_entry_id=entry_id,
+                entry_sequence=int(entry["entry_sequence"]),
+                occurred_at=result["observed_at"],
+            )
+        else:
+            raise ConversationKernelConflict(
+                "Plan resolution has no final interaction result"
+            )
         return AcceptedPlanResolution(
             command_id=command_id,
             workflow_id=str(row["plan_workflow_id"]),
-            workflow_status=PlanWorkflowStatus(str(row["workflow_status"])),
+            workflow_status=(
+                PlanWorkflowStatus.APPROVED
+                if row["interaction_kind"] == "DRAFT_REVIEW"
+                and interaction_status == "APPROVED"
+                else PlanWorkflowStatus.ACTIVE
+            ),
             interaction_id=str(row["target_plan_interaction_id"]),
             interaction_status=interaction_status,
             resume_permission_mode=PermissionMode(str(row["resume_permission_mode"])),
@@ -3665,9 +4124,8 @@ class _PlanOperations:
                 if row["decision_continuation_entry_id"] is None
                 else str(row["decision_continuation_entry_id"])
             ),
-            handoff_created_at_commit=interaction_status == "CANCELLED" and str(row["interaction_kind"]) == "DRAFT_REVIEW",
-            question_result_entry_id=question_result_entry_id,
-            workflow_revision=int(row["workflow_revision"]),
+            handoff_created_at_commit=False,
+            workflow_revision=expected_workflow_revision + 1,
             draft_decision=(
                 {
                     "APPROVED": PlanDraftDecision.APPROVE,

@@ -33,14 +33,13 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     freeze_compaction_canonical_range,
 )
 from pulsara_agent.conversation_kernel.contracts import (
-    AssistantBlockKind,
-    CanonicalContent,
     ConversationScopeKind,
     EntryKind,
     HostWriterGuard,
     TurnStatus,
 )
 from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
+from pulsara_agent.conversation_kernel.content_parts import read_content_parts, ToolCallValue
 from pulsara_agent.conversation_kernel.blob import PostgresCanonicalBlobStore
 from pulsara_agent.conversation_kernel.visualization import (
     FrozenVisualizationOccurrence,
@@ -49,8 +48,6 @@ from pulsara_agent.conversation_kernel.visualization import (
 from pulsara_agent.conversation_kernel.prompt_storage import (
     canonical_prompt_owner_is_exact,
     canonical_snapshot_owner_is_exact,
-    insert_canonical_prompt_refs,
-    materialize_canonical_prompt,
     materialize_compaction_snapshot,
 )
 from pulsara_agent.conversation_kernel.vocabulary import (
@@ -76,7 +73,6 @@ from pulsara_agent.conversation_kernel.steer import (
     StartedTurnInputGroup,
 )
 from pulsara_agent.primitives.context import (
-    FrozenJsonObjectFact,
     freeze_json,
 )
 from pulsara_agent.primitives.permission import PermissionMode
@@ -90,7 +86,6 @@ from .contracts import (
     AcceptedRootTurnAdmission,
     AcceptedEntry,
     AssistantBlock,
-    AssistantDataBlock,
     AssistantTextBlock,
     AssistantToolCallBlock,
     ConversationKernelConflict,
@@ -429,12 +424,6 @@ class _ConversationOperations:
             )
             validate_annotation_sources(connection, session_id=guard.session_id,
                                         content=intent.canonical_prompt.content)
-            publication = materialize_canonical_prompt(
-                connection,
-                publisher=self._canonical_content_publisher,
-                workspace_id=workspace_id,
-                prompt=intent.canonical_prompt,
-            )
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.turns (
@@ -473,7 +462,7 @@ class _ConversationOperations:
                 entry_id=intent.entry_id,
                 entry_sequence=entry_sequence,
                 entry_kind=EntryKind.USER_MESSAGE,
-                content=publication.body,
+                canonical_prompt=intent.canonical_prompt,
                 input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
                 source_plan_workflow_id=(
                     None if handoff is None else handoff.workflow_id
@@ -482,13 +471,6 @@ class _ConversationOperations:
                     None if handoff is None else handoff.interaction_id
                 ),
                 source_plan_handoff_kind=(None if handoff is None else handoff.kind),
-            )
-            insert_canonical_prompt_refs(
-                connection,
-                session_id=guard.session_id,
-                workspace_id=workspace_id,
-                transcript_entry_id=intent.entry_id,
-                image_blob_ids=publication.image_blob_ids,
             )
             connection.execute(
                 """
@@ -834,9 +816,9 @@ class _ConversationOperations:
             ):
                 raise ConversationKernelConflict("pending tool batch closed source changed")
             calls = connection.execute(
-                """SELECT tool_call_id FROM pulsara_v3.assistant_message_blocks
-                   WHERE session_id=%s AND assistant_entry_id=%s
-                     AND block_kind='TOOL_CALL' ORDER BY block_ordinal""",
+                """SELECT tool_call_id FROM pulsara_v3.content_parts
+                   WHERE session_id=%s AND entry_id=%s
+                     AND type='tool_call' ORDER BY ordinal""",
                 (guard.session_id, assistant_entry_id),
             ).fetchall()
             if tuple(str(item["tool_call_id"]) for item in calls) != ordered_tool_call_ids:
@@ -860,16 +842,16 @@ class _ConversationOperations:
                  assistant_entry_id, list(ordered_tool_call_ids)),
             ).fetchone()
             other_open = connection.execute(
-                """SELECT 1 FROM pulsara_v3.assistant_message_blocks AS b
+                """SELECT 1 FROM pulsara_v3.content_parts AS b
                    JOIN pulsara_v3.transcript_entries AS e
-                     ON e.session_id=b.session_id AND e.id=b.assistant_entry_id
+                     ON e.session_id=b.session_id AND e.id=b.entry_id
                    LEFT JOIN pulsara_v3.tool_results AS r
                      ON r.session_id=b.session_id
-                    AND r.tool_call_entry_id=b.assistant_entry_id
+                    AND r.tool_call_entry_id=b.entry_id
                     AND r.tool_call_id=b.tool_call_id
                    WHERE b.session_id=%s AND e.turn_id=%s
-                     AND b.block_kind='TOOL_CALL' AND r.id IS NULL
-                     AND b.assistant_entry_id<>%s LIMIT 1""",
+                     AND b.type='tool_call' AND r.id IS NULL
+                     AND b.entry_id<>%s LIMIT 1""",
                 (guard.session_id, cut.turn_id, assistant_entry_id),
             ).fetchone()
             if unrelated is not None or other_open is not None:
@@ -945,20 +927,20 @@ class _ConversationOperations:
                     "prospective active input is not at its exact ROOT cut"
                 )
             unresolved = {
-                (str(item["assistant_entry_id"]), str(item["tool_call_id"]))
+                (str(item["entry_id"]), str(item["tool_call_id"]))
                 for item in connection.execute(
                     """
-                    SELECT b.assistant_entry_id, b.tool_call_id
-                    FROM pulsara_v3.assistant_message_blocks AS b
+                    SELECT b.entry_id, b.tool_call_id
+                    FROM pulsara_v3.content_parts AS b
                     LEFT JOIN pulsara_v3.tool_results AS r
                       ON r.session_id = b.session_id
-                     AND r.tool_call_entry_id = b.assistant_entry_id
+                     AND r.tool_call_entry_id = b.entry_id
                      AND r.tool_call_id = b.tool_call_id
                     JOIN pulsara_v3.transcript_entries AS e
                       ON e.entry_owner_kind = 'EXECUTED_TURN' AND e.session_id = b.session_id
-                     AND e.id = b.assistant_entry_id
+                     AND e.id = b.entry_id
                     WHERE b.session_id = %s AND e.turn_id = %s
-                      AND b.block_kind = 'TOOL_CALL' AND r.id IS NULL
+                      AND b.type = 'tool_call' AND r.id IS NULL
                     """,
                     (guard.session_id, cut.turn_id),
                 ).fetchall()
@@ -1379,19 +1361,19 @@ class _ConversationOperations:
         split_group = connection.execute(
             """
             SELECT 1
-            FROM pulsara_v3.assistant_message_blocks AS call
+            FROM pulsara_v3.content_parts AS call
             JOIN pulsara_v3.transcript_entries AS request
               ON request.entry_owner_kind = 'EXECUTED_TURN' AND request.session_id = call.session_id
-             AND request.id = call.assistant_entry_id
+             AND request.id = call.entry_id
             JOIN pulsara_v3.tool_results AS result
               ON result.session_id = call.session_id
-             AND result.tool_call_entry_id = call.assistant_entry_id
+             AND result.tool_call_entry_id = call.entry_id
              AND result.tool_call_id = call.tool_call_id
             JOIN pulsara_v3.transcript_entries AS result_entry
               ON result_entry.entry_owner_kind = 'EXECUTED_TURN' AND result_entry.session_id = result.session_id
              AND result_entry.id = result.result_entry_id
             WHERE request.entry_owner_kind = 'EXECUTED_TURN' AND request.session_id = %s
-              AND call.block_kind = 'TOOL_CALL'
+              AND call.type = 'tool_call'
               AND request.entry_sequence > %s
               AND request.entry_sequence <= %s
               AND result_entry.entry_sequence > %s
@@ -1616,7 +1598,6 @@ class _ConversationOperations:
         *,
         cut: PreparedProviderInputCut,
         entry_id: str,
-        parent_content: CanonicalContent,
         blocks: Sequence[AssistantBlock],
         visualizations: Sequence[FrozenVisualizationOccurrence] = (),
         provider_replay: PreparedDurableProviderAssistantReplay | None = None,
@@ -1678,7 +1659,6 @@ class _ConversationOperations:
                 entry_id=entry_id,
                 entry_sequence=entry_sequence,
                 entry_kind=entry_kind,
-                content=parent_content,
                 context_binding_revision_id=cut.context_binding_revision_id,
                 provider_input_through_sequence=cut.provider_input_through_sequence,
             )
@@ -1697,7 +1677,7 @@ class _ConversationOperations:
                     assert item.html is not None or item.image is not None or item.video is not None or item.audio is not None
                     blob_id = PostgresCanonicalBlobStore.publish_in_connection(
                         connection,
-                        workspace_id=str(turn["workspace_id"]),
+                        workspace_id=(None if item.image is not None else str(turn["workspace_id"])),
                         content=item.content,
                         media_type=item.media_type,
                         codec=item.codec,
@@ -1707,15 +1687,13 @@ class _ConversationOperations:
                     """INSERT INTO pulsara_v3.assistant_visualizations (
                            session_id, workspace_id, assistant_entry_id,
                            ordinal, turn_id, source_filename,
-                           state, blob_id, failure_code, failure_detail, width, height
-                       ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                           state, blob_id, failure_code, failure_detail
+                       ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                     (
                         guard.session_id, str(turn["workspace_id"]), entry_id,
                         ordinal, cut.turn_id, item.source_filename,
                         item.state.value, blob_id, item.failure_code,
                         item.failure_detail,
-                        None if item.image is None else item.image.width,
-                        None if item.image is None else item.image.height,
                     ),
                 )
             if provider_replay is not None:
@@ -1829,7 +1807,6 @@ class _ConversationOperations:
         *,
         cut: PreparedProviderInputCut,
         entry_id: str,
-        parent_content: CanonicalContent,
         blocks: Sequence[AssistantBlock],
         visualizations: Sequence[FrozenVisualizationOccurrence] = (),
         provider_replay: PreparedDurableProviderAssistantReplay | None = None,
@@ -1897,7 +1874,6 @@ class _ConversationOperations:
                 != cut.context_binding_revision_id
                 or int(row["provider_input_through_sequence"])
                 != cut.provider_input_through_sequence
-                or self._content_from_row(row) != parent_content
                 or str(row["event_type"]) != expected_event_type.value
                 or str(row["actor_kind"]) != "model"
                 or str(row["actor_id"]) != actor_id
@@ -1945,57 +1921,41 @@ class _ConversationOperations:
                 raise ConversationKernelConflict(
                     "assistant provider replay differs from the stable candidate"
                 )
-            block_rows = connection.execute(
-                """
-                SELECT * FROM pulsara_v3.assistant_message_blocks
-                WHERE session_id = %s AND assistant_entry_id = %s
-                ORDER BY block_ordinal, id
-                """,
-                (guard.session_id, entry_id),
-            ).fetchall()
-            actual_blocks: list[AssistantBlock] = []
-            for block_row in block_rows:
-                kind = str(block_row["block_kind"])
-                if kind == AssistantBlockKind.TOOL_CALL.value:
-                    frozen_arguments = freeze_json(dict(block_row["tool_arguments"]))
-                    if not isinstance(frozen_arguments, FrozenJsonObjectFact):
-                        raise ConversationKernelConflict(
-                            "assistant winner tool arguments are not an object"
-                        )
-                    actual_blocks.append(
-                        AssistantToolCallBlock(
-                            block_id=str(block_row["id"]),
-                            tool_call_id=str(block_row["tool_call_id"]),
-                            tool_name=str(block_row["tool_name"]),
-                            arguments=frozen_arguments,
-                        )
-                    )
-                elif kind == AssistantBlockKind.TEXT.value:
-                    actual_blocks.append(
-                        AssistantTextBlock(
-                            str(block_row["id"]), self._content_from_row(block_row)
-                        )
-                    )
-                elif kind == AssistantBlockKind.DATA.value:
-                    actual_blocks.append(
-                        AssistantDataBlock(
-                            str(block_row["id"]), self._content_from_row(block_row)
-                        )
-                    )
+            actual_parts = read_content_parts(connection, session_id=guard.session_id,
+                                              entry_id=entry_id)
+            if len(actual_parts) != len(blocks):
+                raise ConversationKernelConflict("assistant entry content count differs")
+            for ordinal, (part, block) in enumerate(zip(actual_parts, blocks, strict=True)):
+                if part.id != block.block_id or part.ordinal != ordinal:
+                    raise ConversationKernelConflict("assistant entry content identity differs")
+                if isinstance(block, AssistantToolCallBlock):
+                    expected_arguments = block.arguments
+                    if (part.type != "tool_call" or not isinstance(part.value, ToolCallValue)
+                        or part.value.tool_call_id != block.tool_call_id
+                        or part.value.tool_name != block.tool_name
+                        or freeze_json(part.value.tool_arguments) != expected_arguments):
+                        raise ConversationKernelConflict("assistant tool call differs from stable candidate")
                 else:
-                    raise ConversationKernelConflict(
-                        "assistant winner contains an unknown block kind"
+                    content = block.text if isinstance(block, AssistantTextBlock) else block.data
+                    body = self._canonical_content_bytes(
+                        connection, content, workspace_id=str(row["workspace_id"]),
                     )
-            if tuple(actual_blocks) != tuple(blocks):
-                raise ConversationKernelConflict(
-                    "assistant entry blocks differ from the stable candidate"
-                )
+                    if isinstance(block, AssistantTextBlock):
+                        matches = part.type == "text" and part.value == body.decode("utf-8")
+                    else:
+                        matches = (part.type == "data" and part.value == body
+                                   and part.data_media_type == content.media_type
+                                   and part.data_codec == content.codec)
+                    if not matches:
+                        raise ConversationKernelConflict("assistant content differs from stable candidate")
             visualization_rows = connection.execute(
-                """SELECT ordinal, turn_id, source_filename,
-                          state, blob_id, failure_code, failure_detail, width, height
-                   FROM pulsara_v3.assistant_visualizations
-                   WHERE session_id = %s AND assistant_entry_id = %s
-                   ORDER BY ordinal""",
+                """SELECT v.ordinal, v.turn_id, v.source_filename,
+                          v.state, v.blob_id, v.failure_code, v.failure_detail,
+                          b.width, b.height
+                   FROM pulsara_v3.assistant_visualizations AS v
+                   LEFT JOIN pulsara_v3.blobs AS b ON b.id=v.blob_id
+                   WHERE v.session_id = %s AND v.assistant_entry_id = %s
+                   ORDER BY v.ordinal""",
                 (guard.session_id, entry_id),
             ).fetchall()
             if len(visualization_rows) != len(visualizations):
@@ -2030,7 +1990,7 @@ class _ConversationOperations:
                         blob_id=str(blob_id),
                         expected_digest="sha256:" + sha256(payload).hexdigest(),
                         expected_size=len(payload),
-                        expected_workspace_id=str(row["workspace_id"]),
+                        expected_workspace_id=(None if item.image is not None else str(row["workspace_id"])),
                         expected_media_type=item.media_type,
                         expected_codec=item.codec,
                     ) != payload:
@@ -2224,23 +2184,16 @@ class _ConversationOperations:
             deadline_monotonic=deadline_monotonic,
             isolation_level=IsolationLevel.REPEATABLE_READ,
         ) as connection:
+            rows = connection.execute(
+                """SELECT * FROM pulsara_v3.transcript_entries
+                   WHERE session_id = %s ORDER BY entry_sequence""",
+                (session_id,),
+            ).fetchall()
             return tuple(
-                dict(row)
-                for row in connection.execute(
-                    """
-                    SELECT e.*, b.block_ordinal, b.block_kind, b.tool_call_id,
-                           b.tool_name, b.tool_arguments,
-                           b.inline_content AS block_inline_content,
-                           b.blob_id AS block_blob_id
-                    FROM pulsara_v3.transcript_entries AS e
-                    LEFT JOIN pulsara_v3.assistant_message_blocks AS b
-                      ON b.session_id = e.session_id
-                     AND b.assistant_entry_id = e.id
-                    WHERE e.session_id = %s
-                    ORDER BY e.entry_sequence, b.block_ordinal NULLS FIRST
-                    """,
-                    (session_id,),
-                ).fetchall()
+                {**dict(row), "content_parts": read_content_parts(
+                    connection, session_id=session_id, entry_id=str(row["id"]),
+                )}
+                for row in rows
             )
 
     def query_command(

@@ -21,7 +21,6 @@ from pulsara_agent.conversation_kernel.repository_errors import (
 from markdown_it import MarkdownIt
 from markdown_it.rules_block.fence import make_fence_rule
 from mdit_py_plugins.texmath.index import make_block_func
-from pulsara_agent.conversation_kernel.blob import MAXIMUM_BLOB_BYTES
 
 from pulsara_agent.media_types import AUDIO_TYPES, MEDIA_TYPES
 from pulsara_agent.primitives.context import canonical_json_bytes
@@ -223,7 +222,7 @@ def read_visualization_file(path: Path) -> bytes | None:
 
 
 def read_visualization_text(path: Path, *, kind: str, allow_empty: bool) -> bytes | None:
-    """Bounded UTF-8 sources; None means only a reliable not-found."""
+    """Read a regular UTF-8 source; None means only a reliable not-found."""
     descriptor: int | None = None
     try:
         descriptor = os.open(
@@ -233,19 +232,13 @@ def read_visualization_text(path: Path, *, kind: str, allow_empty: bool) -> byte
         facts = os.fstat(descriptor)
         if not stat.S_ISREG(facts.st_mode):
             raise ValueError(f"{kind}_NOT_REGULAR")
-        if facts.st_size > MAXIMUM_BLOB_BYTES:
-            raise ValueError(f"{kind}_TOO_LARGE")
-        remaining = MAXIMUM_BLOB_BYTES + 1
         chunks: list[bytes] = []
-        while remaining:
-            chunk = os.read(descriptor, min(remaining, 1 << 20))
+        while True:
+            chunk = os.read(descriptor, 1 << 20)
             if not chunk:
                 break
             chunks.append(chunk)
-            remaining -= len(chunk)
         body = b"".join(chunks)
-        if len(body) > MAXIMUM_BLOB_BYTES:
-            raise ValueError(f"{kind}_TOO_LARGE")
         if not body and not allow_empty:
             raise ValueError(f"{kind}_EMPTY")
         try:
@@ -267,8 +260,6 @@ async def materialize_visualizations(
     io,
     validator,
     image_reader,
-    session_id: str,
-    workspace_id: str,
     deadline_monotonic: float,
 ) -> tuple[FrozenVisualizationOccurrence, ...]:
     from pulsara_agent.conversation_kernel.prompt_content import (
@@ -304,8 +295,6 @@ async def materialize_visualizations(
                     raise RuntimeError("visualization image reader is unavailable")
                 image = await io.run(
                     image_reader.read_image,
-                    session_id=session_id,
-                    workspace_id=workspace_id,
                     image_ref=value,
                     maximum_encoded_bytes=MAXIMUM_PROMPT_MULTIPART_BYTES,
                     deadline_monotonic=deadline_monotonic,
@@ -352,8 +341,6 @@ async def materialize_visualizations(
                     item = FrozenVisualizationOccurrence(
                         name, VisualizationOccurrenceState.READY, html=payload, html_path=str(path)
                     )
-                    if len(item.content) > MAXIMUM_BLOB_BYTES:
-                        raise ValueError("HTML_RESOURCES_TOO_LARGE")
                 else:
                     if validator is None:
                         raise RuntimeError(
@@ -363,7 +350,7 @@ async def materialize_visualizations(
                         payload, deadline_monotonic=deadline_monotonic
                     )
                     image = bind_prompt_images(
-                        FrozenPromptContent((image,)), workspace_id=workspace_id
+                        FrozenPromptContent((image,))
                     ).parts[0]
                     item = FrozenVisualizationOccurrence(
                         name, VisualizationOccurrenceState.READY, image=image
@@ -446,6 +433,9 @@ def visualization_metadata(row: Mapping[str, object]) -> dict:
     ):
         raise ConversationKernelConflict("visualization state drifted")
     image = row["media_type"] in {"image/png", "image/jpeg", "image/webp"}
+    expected_workspace_id = None if image else row["workspace_id"]
+    if row["blob_workspace_id"] != expected_workspace_id:
+        raise ConversationKernelConflict("visualization blob ownership drifted")
     if (
         not is_valid_id(row["blob_id"], "image" if image else "blob")
         or (
@@ -471,7 +461,7 @@ def visualization_metadata(row: Mapping[str, object]) -> dict:
     from pulsara_agent.conversation_kernel.blob import _blob_id
 
     if row["blob_id"] != _blob_id(
-        str(row["workspace_id"]),
+        None if image else str(row["workspace_id"]),
         str(row["logical_digest"]),
         str(row["media_type"]),
         str(row["codec"]),
@@ -518,11 +508,12 @@ def load_visualization_rows(
     if not grouped:
         return grouped
     rows = connection.execute(
-        """SELECT v.*, b.logical_digest, b.logical_size, b.media_type, b.codec
+        """SELECT v.*, b.logical_digest, b.logical_size, b.media_type, b.codec,
+                  b.width, b.height, b.workspace_id AS blob_workspace_id
            FROM pulsara_v3.assistant_visualizations v
            JOIN pulsara_v3.transcript_entries e ON e.session_id=v.session_id
              AND e.workspace_id=v.workspace_id AND e.id=v.assistant_entry_id AND e.entry_kind='ASSISTANT_MESSAGE'
-           LEFT JOIN pulsara_v3.blobs b ON b.id=v.blob_id AND b.workspace_id=v.workspace_id
+           LEFT JOIN pulsara_v3.blobs b ON b.id=v.blob_id
            WHERE v.session_id=%s AND v.assistant_entry_id=ANY(%s::text[])
            ORDER BY v.assistant_entry_id,v.ordinal""",
         (session_id, list(grouped)),

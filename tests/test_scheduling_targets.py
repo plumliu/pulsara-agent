@@ -13,6 +13,7 @@ from pulsara_agent.identity import derive_id
 from pulsara_agent.llm.input import LLMTextPart
 from pulsara_agent.model_input.contracts import FrozenProviderInputItemKind
 from pulsara_agent.model_input.lowering import lower_canonical_item
+from pulsara_agent.ports.tool_execution import thaw_tool_json_object
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget, ToolResultPageBoundary
 from pulsara_agent.scheduling.contracts import ScheduledProvenance, ScheduledTaskError, ScheduledTriggerSource
@@ -34,10 +35,11 @@ def row(task_id=SOURCE, **changes):
     return {"id": task_id, "session_id": SESSION, **deepcopy(VALUES), "revision": 7, "status": "PAUSED", **changes}
 
 
-def invoke(service, request, mode=PermissionMode.BYPASS_PERMISSIONS):
+async def invoke(service, request, mode=PermissionMode.BYPASS_PERMISSIONS):
     method = service.invoke_manage if "action" in request else service.invoke_query
-    return method(request, default_session_id=SESSION, permission_mode=mode,
+    observation = await method(request, default_session_id=SESSION, permission_mode=mode,
                   page_budget=ToolResultPageBudget(tool_call_id=derive_id("call", "test", "schedule")))
+    return thaw_tool_json_object(observation.value)
 
 
 def test_list_target_can_be_copied_to_get_update_and_delete_without_id_mirrors():
@@ -90,6 +92,7 @@ def test_model_page_uses_budget_and_complete_resolved_next_without_prompt():
             accepts_provider_body=lambda body, _: len(json.loads(body)["tasks"]) <= 1)
         page = await service.invoke_query({"status": "PAUSED"}, default_session_id=SESSION,
             permission_mode=PermissionMode.BYPASS_PERMISSIONS, page_budget=budget)
+        page = thaw_tool_json_object(page.value)
         assert len(page["tasks"]) == 1
         assert "prompt" not in page["tasks"][0]
         assert page["tasks"][0]["inspect"] == {"tool": "query_schedules", "arguments": {"target": schedule_target(SOURCE)}}

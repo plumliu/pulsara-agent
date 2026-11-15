@@ -1,17 +1,14 @@
-"""Transactional storage join for canonical prompt bodies and image refs."""
+"""Prompt content joins and direct reads of immutable image assets."""
 
 from __future__ import annotations
 
-from pulsara_agent.conversation_kernel.blob import MAXIMUM_BLOB_BYTES
-
-from pulsara_agent.identity import require_id
-
-from dataclasses import dataclass, field
-from typing import Mapping, Protocol
+from typing import Mapping, Protocol, Sequence
 
 from psycopg import Connection, IsolationLevel
 from psycopg.rows import dict_row
 
+from pulsara_agent.identity import require_id
+from pulsara_agent.primitives.context import canonical_json_bytes
 from pulsara_agent.conversation_kernel.blob import (
     CanonicalContentPublisher,
     PostgresCanonicalBlobStore,
@@ -22,12 +19,9 @@ from pulsara_agent.conversation_kernel.prompt_content import (
     CanonicalPromptBody,
     CanonicalPromptImageDescriptor,
     FrozenCanonicalPrompt,
-    PROMPT_BODY_CODEC,
-    PROMPT_BODY_MEDIA_TYPE,
     PROMPT_IMAGE_BLOB_CODEC,
-    canonical_prompt_body_resource_quote,
-    decode_canonical_prompt_body,
-    hydrate_canonical_prompt_body,
+    canonical_prompt_body_value,
+    freeze_canonical_prompt,
 )
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     CONTEXT_SNAPSHOT_CODEC,
@@ -40,17 +34,18 @@ from pulsara_agent.conversation_kernel.compaction.prompt import (
 from pulsara_agent.conversation_kernel.repository_errors import (
     ConversationKernelConflict,
 )
-from pulsara_agent.llm.input import LLMImagePart
+from pulsara_agent.llm.input import (
+    FrozenPromptContent,
+    LLMImagePart,
+    LLMTextPart,
+    PromptAnnotationPart,
+    annotation_from_value,
+    annotation_value,
+)
 from pulsara_agent.storage.postgres_connection_provider import (
     PostgresConnectionLane,
     VerifiedPostgresConnectionProviderProtocol,
 )
-
-
-@dataclass(frozen=True, slots=True)
-class CanonicalPromptPublication:
-    body: CanonicalContent
-    image_blob_ids: tuple[str, ...] = field(repr=False)
 
 
 class CanonicalImageReferenceUnavailable(LookupError):
@@ -65,46 +60,27 @@ class CanonicalImageReferenceReadPort(Protocol):
     def read_image(
         self,
         *,
-        session_id: str,
-        workspace_id: str,
         image_ref: str,
-        maximum_encoded_bytes: int,
+        maximum_encoded_bytes: int | None = None,
         deadline_monotonic: float,
     ) -> LLMImagePart: ...
 
 
 class PostgresCanonicalImageReferenceReadPort:
-    """Exact, workspace-shared image read owner bound to a live caller for one known canonical image ID."""
+    """Read known image identities without caller or source qualification."""
 
     def __init__(
-        self,
-        connection_provider: VerifiedPostgresConnectionProviderProtocol,
-        *,
-        session_id: str,
-        workspace_id: str,
+        self, connection_provider: VerifiedPostgresConnectionProviderProtocol
     ) -> None:
-        if not session_id or not workspace_id:
-            raise ValueError("canonical image reference scope is invalid")
         self._provider = connection_provider
-        self._session_id = session_id
-        self._workspace_id = workspace_id
 
     def read_image(
         self,
         *,
-        session_id: str,
-        workspace_id: str,
         image_ref: str,
-        maximum_encoded_bytes: int,
+        maximum_encoded_bytes: int | None = None,
         deadline_monotonic: float,
     ) -> LLMImagePart:
-        require_id(image_ref, "image")
-        if session_id != self._session_id or workspace_id != self._workspace_id:
-            raise RuntimeError("canonical image reference scope does not exact-join")
-        if maximum_encoded_bytes < 1:
-            raise CanonicalImageReferenceResourceExceeded(
-                "canonical image reference exceeds its encoded-byte allowance"
-            )
         with self._provider.connection(
             lane=PostgresConnectionLane.ARTIFACT,
             row_factory=dict_row,
@@ -112,192 +88,332 @@ class PostgresCanonicalImageReferenceReadPort:
             isolation_level=IsolationLevel.REPEATABLE_READ,
         ) as connection:
             return read_image_reference_in_connection(
-                connection, session_id=session_id, workspace_id=workspace_id,
-                image_ref=image_ref, maximum_encoded_bytes=maximum_encoded_bytes,
+                connection,
+                image_ref=image_ref,
+                maximum_encoded_bytes=maximum_encoded_bytes,
             )
 
 
-def read_image_reference_in_connection(connection, *, session_id: str, workspace_id: str,
-                                       image_ref: str, maximum_encoded_bytes: int) -> LLMImagePart:
-    """One consistent caller/source authorization and exact image read."""
+def read_image_reference_in_connection(
+    connection: Connection,
+    *,
+    image_ref: str,
+    maximum_encoded_bytes: int | None = None,
+) -> LLMImagePart:
+    """Read an existing asset; a known identity is sufficient read authority.
+
+    The optional allowance is a caller's actual I/O boundary, never a stored
+    asset or complete-result size limit. Source message and queue state have
+    no role in this join.
+    """
     require_id(image_ref, "image")
-    caller = connection.execute(
-        "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s", (session_id,)
-    ).fetchone()
-    if caller is None or caller["workspace_id"] != workspace_id:
-        raise CanonicalImageReferenceUnavailable(image_ref)
-    candidate = connection.execute(
-        """
-        WITH candidates AS (
-            SELECT 0 AS owner_kind_rank,
-                   e.id AS owner_id, e.session_id AS source_session_id,
-                   r.ref_ordinal,
-                   e.content_size,
-                   r.blob_id
-            FROM pulsara_v3.canonical_image_refs AS r
-            JOIN pulsara_v3.blobs AS b
-              ON b.id = r.blob_id AND b.workspace_id = r.workspace_id
-            JOIN pulsara_v3.transcript_entries AS e
-              ON e.session_id = r.session_id
-             AND e.workspace_id = r.workspace_id
-             AND e.id = r.transcript_entry_id
-            WHERE r.workspace_id = %s
-              AND b.id = %s
-              AND e.entry_kind IN (
-                  'USER_MESSAGE', 'USER_STEER', 'TOOL_RESULT'
-              )
-            UNION ALL
-            SELECT 1 AS owner_kind_rank, v.assistant_entry_id AS owner_id,
-                   v.session_id AS source_session_id, v.ordinal AS ref_ordinal,
-                   0 AS content_size, v.blob_id
-            FROM pulsara_v3.assistant_visualizations v
-            JOIN pulsara_v3.transcript_entries e ON e.session_id=v.session_id
-              AND e.workspace_id=v.workspace_id AND e.id=v.assistant_entry_id AND e.entry_kind='ASSISTANT_MESSAGE'
-            JOIN pulsara_v3.blobs b ON b.id=v.blob_id AND b.workspace_id=v.workspace_id
-            WHERE v.workspace_id=%s AND v.blob_id=%s AND v.state='READY'
-        )
-        SELECT owner_kind_rank, owner_id, source_session_id, ref_ordinal, content_size, blob_id
-        FROM candidates
-        ORDER BY content_size ASC,
-                 owner_kind_rank ASC,
-                 owner_id COLLATE "C" ASC,
-                         source_session_id COLLATE "C" ASC,
-                 ref_ordinal ASC
-        LIMIT 1
-        """,
-        (
-            workspace_id, image_ref,
-            workspace_id, image_ref,
-        ),
-    ).fetchone()
-    if candidate is None:
-        raise CanonicalImageReferenceUnavailable(image_ref)
-    content_size = int(candidate["content_size"])
-    if not 0 <= content_size <= MAXIMUM_BLOB_BYTES:
-        raise ConversationKernelConflict(
-            "canonical image owner body size is out of bounds"
-        )
-    owner_kind_rank = int(candidate["owner_kind_rank"])
-    owner_id = str(candidate["owner_id"])
-    source_session_id = str(candidate["source_session_id"])
-    ref_ordinal = int(candidate["ref_ordinal"])
-    blob_id = str(candidate["blob_id"])
-    if owner_kind_rank == 0:
-        row = connection.execute(
-            """SELECT session_id, workspace_id, inline_content, blob_id,
-                              content_digest, content_size,
-                              content_media_type, content_codec
-                 FROM pulsara_v3.transcript_entries
-                WHERE session_id = %s AND workspace_id = %s AND id = %s
-                  AND entry_kind IN (
-                      'USER_MESSAGE', 'USER_STEER', 'TOOL_RESULT'
-                  )""",
-            (source_session_id, workspace_id, owner_id),
-        ).fetchone()
-        if row is None:
-            raise ConversationKernelConflict(
-                "canonical image reference owner disappeared"
-            )
-        body, decoded, refs = _read_canonical_prompt_metadata(
-            connection,
-            row=row,
-            queue_item_id=None,
-            transcript_entry_id=owner_id,
-        )
-        descriptors = _image_descriptors(decoded)
-    elif owner_kind_rank == 1:
-        from pulsara_agent.conversation_kernel.visualization import visualization_metadata
-        row = connection.execute(
-            """SELECT v.*, b.logical_digest, b.logical_size, b.media_type, b.codec
-               FROM pulsara_v3.assistant_visualizations v
-               JOIN pulsara_v3.blobs b ON b.id=v.blob_id AND b.workspace_id=v.workspace_id
-               WHERE v.session_id=%s AND v.workspace_id=%s AND v.assistant_entry_id=%s AND v.ordinal=%s""",
-            (source_session_id, workspace_id, owner_id, ref_ordinal),
-        ).fetchone()
-        if row is None:
-            raise ConversationKernelConflict("visualization image owner disappeared")
-        facts = visualization_metadata(row)
-        if facts.get("image_ref") != image_ref:
-            raise ConversationKernelConflict("visualization is not the requested image")
-        descriptor = CanonicalPromptImageDescriptor(image_ref, facts["content_digest"], facts["content_size"], facts["media_type"], facts["width"], facts["height"])
-        body = b""
-        descriptors, refs, ref_ordinal = (descriptor,), ({"blob_id": blob_id},), 0
-    else:  # pragma: no cover - closed SQL union
-        raise ConversationKernelConflict(
-            "canonical image reference owner kind is invalid"
-        )
-    if ref_ordinal < 0 or ref_ordinal >= len(descriptors):
-        raise ConversationKernelConflict(
-            "canonical image reference ordinal is invalid"
-        )
-    descriptor = descriptors[ref_ordinal]
-    reference = refs[ref_ordinal]
-    if (
-        descriptor.image_ref != image_ref
-        or str(reference["blob_id"]) != blob_id
-        or blob_id != _blob_id(
-            workspace_id, descriptor.digest,
-            descriptor.media_type, PROMPT_IMAGE_BLOB_CODEC, image=True,
-        )
+    if maximum_encoded_bytes is not None and (
+        isinstance(maximum_encoded_bytes, bool)
+        or not isinstance(maximum_encoded_bytes, int)
+        or maximum_encoded_bytes < 1
     ):
-        raise ConversationKernelConflict(
-            "canonical image reference does not exact-join its owner"
-        )
-    if (
-        descriptor.encoded_bytes > maximum_encoded_bytes
-        or len(body) + descriptor.encoded_bytes
-        > MAXIMUM_BLOB_BYTES
-    ):
+        raise CanonicalImageReferenceResourceExceeded("image read allowance is invalid")
+    row = connection.execute(
+        """SELECT workspace_id, logical_digest, logical_size, media_type, codec, width, height
+           FROM pulsara_v3.blobs WHERE id = %s""",
+        (image_ref,),
+    ).fetchone()
+    if row is None:
+        raise CanonicalImageReferenceUnavailable(image_ref)
+    if row["workspace_id"] is not None or row["codec"] != PROMPT_IMAGE_BLOB_CODEC:
+        raise ConversationKernelConflict("image asset properties are invalid")
+    size = int(row["logical_size"])
+    if size < 1:
+        raise ConversationKernelConflict("image asset byte size is invalid")
+    if maximum_encoded_bytes is not None and size > maximum_encoded_bytes:
         raise CanonicalImageReferenceResourceExceeded(
-            "canonical image reference exceeds its read allowance"
+            "image exceeds its read allowance"
+        )
+    digest, media_type = str(row["logical_digest"]), str(row["media_type"])
+    if image_ref != _blob_id(
+        None, digest, media_type, PROMPT_IMAGE_BLOB_CODEC, image=True
+    ):
+        raise ConversationKernelConflict(
+            "image asset identity does not match its content"
         )
     payload = PostgresCanonicalBlobStore.read_exact_in_connection(
         connection,
-        blob_id=blob_id,
-        expected_digest=descriptor.digest,
-        expected_size=descriptor.encoded_bytes,
-        expected_workspace_id=workspace_id,
-        expected_media_type=descriptor.media_type,
+        blob_id=image_ref,
+        expected_digest=digest,
+        expected_size=size,
+        expected_media_type=media_type,
         expected_codec=PROMPT_IMAGE_BLOB_CODEC,
     )
-    return LLMImagePart(
-        image_ref=descriptor.image_ref,
-        media_type=descriptor.media_type,
-        immutable_bytes=payload,
-        width=descriptor.width,
-        height=descriptor.height,
+    # Pillow owns image decoding, including format and pixel validation. Reuse
+    # the validation owner so corrupt bytes cannot become provider attachments.
+    from pulsara_agent.conversation_kernel.image_validation import (
+        _validated_image_facts,
     )
 
-def materialize_canonical_prompt(
-    connection: Connection,
-    *,
-    publisher: CanonicalContentPublisher,
-    workspace_id: str,
-    prompt: FrozenCanonicalPrompt,
-) -> CanonicalPromptPublication:
-    """Publish body and every image on one caller-owned transaction."""
+    try:
+        actual_mime, width, height = _validated_image_facts(payload, media_type)
+        if (width, height) != (row["width"], row["height"]):
+            raise ValueError("stored image dimensions differ from decoded bytes")
+        return LLMImagePart(
+            image_ref=image_ref,
+            media_type=actual_mime,
+            immutable_bytes=payload,
+            width=width,
+            height=height,
+        )
+    except Exception as exc:
+        raise ConversationKernelConflict(
+            "image asset decoding or dimensions are invalid"
+        ) from exc
 
+
+def publish_prompt_images(
+    connection: Connection, *, prompt: FrozenCanonicalPrompt
+) -> tuple[str, ...]:
+    """Publish every image on the caller's content acceptance transaction."""
     if not isinstance(prompt, FrozenCanonicalPrompt):
-        raise TypeError("canonical prompt publication requires a frozen prompt")
-    body = publisher.materialize_in_connection(
-        connection,
-        workspace_id=workspace_id,
-        content=prompt.body,
-        media_type=PROMPT_BODY_MEDIA_TYPE,
-        codec=PROMPT_BODY_CODEC,
-    )
-    blob_ids = tuple(
+        raise TypeError("prompt publication requires a frozen prompt")
+    return tuple(
         PostgresCanonicalBlobStore.publish_in_connection(
             connection,
-            workspace_id=workspace_id,
-            content=occurrence.image.immutable_bytes,
-            media_type=occurrence.image.media_type,
+            workspace_id=None,
+            content=item.image.immutable_bytes,
+            media_type=item.image.media_type,
             codec=PROMPT_IMAGE_BLOB_CODEC,
-            validated_image=occurrence.image,
+            validated_image=item.image,
         ).blob_id
-        for occurrence in prompt.image_occurrences
+        for item in prompt.image_occurrences
     )
-    return CanonicalPromptPublication(body=body, image_blob_ids=blob_ids)
+
+
+def prompt_to_content_drafts(prompt: FrozenCanonicalPrompt) -> tuple:
+    """Translate one frozen prompt to ordered content, with no body carrier."""
+    from pulsara_agent.conversation_kernel.content_parts import ContentPartDraft
+
+    if not isinstance(prompt, FrozenCanonicalPrompt):
+        raise TypeError("prompt content requires a frozen prompt")
+    return tuple(
+        ContentPartDraft("text", part.text)
+        if isinstance(part, LLMTextPart)
+        else ContentPartDraft("annotation", annotation_value(part))
+        if isinstance(part, PromptAnnotationPart)
+        else ContentPartDraft(
+            "image", {"kind": "IMAGE_REF", "image_ref": part.image_ref}
+        )
+        for part in prompt.content.parts
+    )
+
+
+def content_parts_to_prompt(
+    connection: Connection, parts: Sequence
+) -> FrozenCanonicalPrompt:
+    """Hydrate prompt parts from their sole relational content authority."""
+    hydrated = []
+    for part in parts:
+        if part.type == "text":
+            hydrated.append(LLMTextPart(part.value))
+        elif part.type == "annotation":
+            hydrated.append(annotation_from_value(part.value))
+        elif part.type == "image":
+            hydrated.append(
+                read_image_reference_in_connection(
+                    connection, image_ref=part.value["image_ref"]
+                )
+            )
+        elif part.type in {"object", "target"}:
+            from pulsara_agent.ports.tool_execution import encode_tool_public_json
+
+            hydrated.append(
+                LLMTextPart(encode_tool_public_json(part.value).decode("utf-8"))
+            )
+        else:
+            raise ConversationKernelConflict(
+                "content type cannot be projected as prompt input"
+            )
+    return freeze_canonical_prompt(FrozenPromptContent(tuple(hydrated)))
+
+
+def _owner_parts(
+    connection: Connection,
+    *,
+    row: Mapping[str, object],
+    queue_item_id=None,
+    transcript_entry_id=None,
+    ordinal_start=None,
+    ordinal_stop=None,
+) -> tuple:
+    from pulsara_agent.conversation_kernel.content_parts import read_content_parts
+
+    if (queue_item_id is None) == (transcript_entry_id is None):
+        raise ValueError("prompt lookup requires exactly one owner")
+    return read_content_parts(
+        connection,
+        entry_id=transcript_entry_id,
+        queue_item_id=queue_item_id,
+        session_id=str(row["session_id"]),
+        ordinal_start=ordinal_start,
+        ordinal_stop=ordinal_stop,
+    )
+
+
+def hydrate_canonical_prompt_owner(
+    connection: Connection,
+    *,
+    row: Mapping[str, object],
+    queue_item_id=None,
+    transcript_entry_id=None,
+    ordinal_start=None,
+    ordinal_stop=None,
+) -> FrozenCanonicalPrompt:
+    return content_parts_to_prompt(
+        connection,
+        _owner_parts(
+            connection,
+            row=row,
+            queue_item_id=queue_item_id,
+            transcript_entry_id=transcript_entry_id,
+            ordinal_start=ordinal_start,
+            ordinal_stop=ordinal_stop,
+        ),
+    )
+
+
+def canonical_prompt_owner_is_exact(
+    connection: Connection,
+    *,
+    row: Mapping[str, object],
+    expected: FrozenCanonicalPrompt,
+    queue_item_id=None,
+    transcript_entry_id=None,
+) -> bool:
+    try:
+        metadata = validate_canonical_prompt_owner_metadata(
+            connection,
+            row=row,
+            queue_item_id=queue_item_id,
+            transcript_entry_id=transcript_entry_id,
+        )
+        return (
+            canonical_json_bytes(canonical_prompt_body_value(metadata)) == expected.body
+        )
+    except (
+        KeyError,
+        TypeError,
+        ValueError,
+        ConversationKernelConflict,
+        CanonicalImageReferenceUnavailable,
+    ):
+        return False
+
+
+def validate_canonical_prompt_owner_metadata(
+    connection: Connection,
+    *,
+    row: Mapping[str, object],
+    queue_item_id=None,
+    transcript_entry_id=None,
+    ordinal_start=None,
+    ordinal_stop=None,
+) -> CanonicalPromptBody:
+    """Quote ordered content and image properties without image payload I/O."""
+    parts = []
+    for part in _owner_parts(
+        connection,
+        row=row,
+        queue_item_id=queue_item_id,
+        transcript_entry_id=transcript_entry_id,
+        ordinal_start=ordinal_start,
+        ordinal_stop=ordinal_stop,
+    ):
+        if part.type == "image":
+            image_ref = require_id(part.value["image_ref"], "image")
+            asset = connection.execute(
+                """SELECT workspace_id,logical_digest,logical_size,media_type,codec,width,height
+                   FROM pulsara_v3.blobs WHERE id=%s""",
+                (image_ref,),
+            ).fetchone()
+            if asset is None:
+                raise CanonicalImageReferenceUnavailable(image_ref)
+            if (
+                asset["workspace_id"] is not None
+                or asset["codec"] != PROMPT_IMAGE_BLOB_CODEC
+                or image_ref
+                != _blob_id(
+                    None,
+                    str(asset["logical_digest"]),
+                    str(asset["media_type"]),
+                    PROMPT_IMAGE_BLOB_CODEC,
+                    image=True,
+                )
+            ):
+                raise ConversationKernelConflict("image asset metadata is invalid")
+            parts.append(
+                CanonicalPromptImageDescriptor(
+                    image_ref,
+                    str(asset["logical_digest"]),
+                    int(asset["logical_size"]),
+                    str(asset["media_type"]),
+                    asset["width"],
+                    asset["height"],
+                )
+            )
+        elif part.type == "text":
+            parts.append(LLMTextPart(part.value))
+        elif part.type == "annotation":
+            parts.append(annotation_from_value(part.value))
+        elif part.type in {"object", "target"}:
+            from pulsara_agent.ports.tool_execution import encode_tool_public_json
+
+            parts.append(
+                LLMTextPart(encode_tool_public_json(part.value).decode("utf-8"))
+            )
+        else:
+            raise ConversationKernelConflict(
+                "content type cannot be projected as prompt input"
+            )
+    return CanonicalPromptBody(tuple(parts))
+
+
+def resolve_canonical_prompt_image_reference(
+    connection: Connection,
+    *,
+    row: Mapping[str, object],
+    ref_ordinal: int,
+    queue_item_id=None,
+    transcript_entry_id=None,
+) -> Mapping[str, object]:
+    if (
+        isinstance(ref_ordinal, bool)
+        or not isinstance(ref_ordinal, int)
+        or ref_ordinal < 0
+    ):
+        raise ValueError("prompt image ordinal is invalid")
+    parts = tuple(
+        p
+        for p in _owner_parts(
+            connection,
+            row=row,
+            queue_item_id=queue_item_id,
+            transcript_entry_id=transcript_entry_id,
+        )
+        if p.type == "image"
+    )
+    if ref_ordinal >= len(parts):
+        raise KeyError(ref_ordinal)
+    image = read_image_reference_in_connection(
+        connection, image_ref=parts[ref_ordinal].value["image_ref"]
+    )
+    return {
+        "inline_content": None,
+        "blob_id": image.image_ref,
+        "content_digest": image.content_digest,
+        "content_size": len(image.immutable_bytes),
+        "content_media_type": image.media_type,
+        "content_codec": PROMPT_IMAGE_BLOB_CODEC,
+        "image_ref": image.image_ref,
+        "width": image.width,
+        "height": image.height,
+    }
 
 
 def materialize_compaction_snapshot(
@@ -307,8 +423,6 @@ def materialize_compaction_snapshot(
     workspace_id: str,
     carrier: CompactionSnapshotCarrier,
 ) -> CanonicalContent:
-    """Publish the summary and canonical entry references in transaction."""
-
     if not isinstance(carrier, CompactionSnapshotCarrier):
         raise TypeError("snapshot publication requires a typed carrier")
     return publisher.materialize_in_connection(
@@ -320,191 +434,6 @@ def materialize_compaction_snapshot(
     )
 
 
-def insert_canonical_prompt_refs(
-    connection: Connection,
-    *,
-    session_id: str,
-    workspace_id: str,
-    image_blob_ids: tuple[str, ...],
-    queue_item_id: str | None = None,
-    transcript_entry_id: str | None = None,
-) -> None:
-    if sum(
-        value is not None
-        for value in (queue_item_id, transcript_entry_id)
-    ) != 1:
-        raise ValueError("canonical image refs require exactly one owner")
-    for ordinal, blob_id in enumerate(image_blob_ids):
-        connection.execute(
-            """
-            INSERT INTO pulsara_v3.canonical_image_refs (
-                session_id, workspace_id, queue_item_id,
-                transcript_entry_id, ref_ordinal, blob_id
-            ) VALUES (%s, %s, %s, %s, %s, %s)
-            """,
-            (
-                session_id,
-                workspace_id,
-                queue_item_id,
-                transcript_entry_id,
-                ordinal,
-                blob_id,
-            ),
-        )
-
-
-def copy_canonical_prompt_refs(
-    connection: Connection,
-    *,
-    session_id: str,
-    workspace_id: str,
-    target_session_id: str | None = None,
-    source_queue_item_id: str | None = None,
-    source_transcript_entry_id: str | None = None,
-    target_queue_item_id: str | None = None,
-    target_transcript_entry_id: str | None = None,
-) -> tuple[str, ...]:
-    source_column, source_id = _owner_column(
-        queue_item_id=source_queue_item_id,
-        transcript_entry_id=source_transcript_entry_id,
-    )
-    rows = connection.execute(
-        f"""SELECT ref_ordinal, blob_id
-            FROM pulsara_v3.canonical_image_refs
-            WHERE session_id = %s AND {source_column} = %s
-            ORDER BY ref_ordinal""",
-        (session_id, source_id),
-    ).fetchall()
-    blob_ids = tuple(str(row["blob_id"]) for row in rows)
-    if tuple(int(row["ref_ordinal"]) for row in rows) != tuple(range(len(rows))):
-        raise ConversationKernelConflict("canonical image ref ordinals are not dense")
-    insert_canonical_prompt_refs(
-        connection,
-        session_id=session_id if target_session_id is None else target_session_id,
-        workspace_id=workspace_id,
-        image_blob_ids=blob_ids,
-        queue_item_id=target_queue_item_id,
-        transcript_entry_id=target_transcript_entry_id,
-    )
-    return blob_ids
-
-
-def canonical_prompt_owner_is_exact(
-    connection: Connection,
-    *,
-    row: Mapping[str, object],
-    expected: FrozenCanonicalPrompt,
-    queue_item_id: str | None = None,
-    transcript_entry_id: str | None = None,
-) -> bool:
-    """Confirm body and ref metadata without reading image blob payloads."""
-
-    try:
-        body, _, _ = _read_canonical_prompt_metadata(
-            connection,
-            row=row,
-            queue_item_id=queue_item_id,
-            transcript_entry_id=transcript_entry_id,
-        )
-        return body == expected.body
-    except (KeyError, TypeError, ValueError, ConversationKernelConflict):
-        return False
-
-
-def validate_canonical_prompt_owner_metadata(
-    connection: Connection,
-    *,
-    row: Mapping[str, object],
-    queue_item_id: str | None = None,
-    transcript_entry_id: str | None = None,
-) -> CanonicalPromptBody:
-    """Validate one stored prompt body and refs without image payload I/O."""
-
-    _, decoded, _ = _read_canonical_prompt_metadata(
-        connection,
-        row=row,
-        queue_item_id=queue_item_id,
-        transcript_entry_id=transcript_entry_id,
-    )
-    return decoded
-
-
-def resolve_canonical_prompt_image_reference(
-    connection: Connection,
-    *,
-    row: Mapping[str, object],
-    ref_ordinal: int,
-    queue_item_id: str | None = None,
-    transcript_entry_id: str | None = None,
-) -> Mapping[str, object]:
-    """Resolve one exact owner-local image occurrence without its payload."""
-
-    if isinstance(ref_ordinal, bool) or not isinstance(ref_ordinal, int) or ref_ordinal < 0:
-        raise ValueError("canonical prompt image ordinal is invalid")
-    _, decoded, refs = _read_canonical_prompt_metadata(
-        connection,
-        row=row,
-        queue_item_id=queue_item_id,
-        transcript_entry_id=transcript_entry_id,
-    )
-    descriptors = _image_descriptors(decoded)
-    if ref_ordinal >= len(descriptors):
-        raise KeyError(ref_ordinal)
-    descriptor = descriptors[ref_ordinal]
-    reference = refs[ref_ordinal]
-    return {
-        "inline_content": None,
-        "blob_id": reference["blob_id"],
-        "content_digest": descriptor.digest,
-        "content_size": descriptor.encoded_bytes,
-        "content_media_type": descriptor.media_type,
-        "content_codec": PROMPT_IMAGE_BLOB_CODEC,
-        "image_ref": descriptor.image_ref, "width": descriptor.width, "height": descriptor.height,
-    }
-
-
-def hydrate_canonical_prompt_owner(
-    connection: Connection,
-    *,
-    row: Mapping[str, object],
-    queue_item_id: str | None = None,
-    transcript_entry_id: str | None = None,
-) -> FrozenCanonicalPrompt:
-    """Read one body and exact-hydrate its ordered image occurrences."""
-
-    workspace_id = str(row["workspace_id"])
-    body, decoded, refs = _read_canonical_prompt_metadata(
-        connection,
-        row=row,
-        queue_item_id=queue_item_id,
-        transcript_entry_id=transcript_entry_id,
-    )
-    descriptors = _image_descriptors(decoded)
-    payload_by_blob: dict[str, bytes] = {}
-    payloads: list[bytes] = []
-    for row_ref, descriptor in zip(refs, descriptors, strict=True):
-        blob_id = str(row_ref["blob_id"])
-        payload = payload_by_blob.get(blob_id)
-        if payload is None:
-            payload = PostgresCanonicalBlobStore.read_exact_in_connection(
-                connection,
-                blob_id=blob_id,
-                expected_digest=descriptor.digest,
-                expected_size=descriptor.encoded_bytes,
-                expected_workspace_id=workspace_id,
-                expected_media_type=descriptor.media_type,
-                expected_codec=PROMPT_IMAGE_BLOB_CODEC,
-            )
-            payload_by_blob[blob_id] = payload
-        payloads.append(payload)
-    try:
-        return hydrate_canonical_prompt_body(body=body, image_payloads=tuple(payloads))
-    except ValueError as exc:
-        raise ConversationKernelConflict(
-            "canonical prompt image payload integrity mismatch"
-        ) from exc
-
-
 def canonical_snapshot_owner_is_exact(
     connection: Connection,
     *,
@@ -512,25 +441,25 @@ def canonical_snapshot_owner_is_exact(
     expected: CompactionSnapshotCarrier,
     context_snapshot_id: str,
 ) -> bool:
-    """Confirm the sole refs carrier, with no duplicated prompt/image content."""
     try:
-        return hydrate_canonical_snapshot_owner(
-            connection, row=row, context_snapshot_id=context_snapshot_id
-        ) == expected
+        return (
+            hydrate_canonical_snapshot_owner(
+                connection,
+                row=row,
+                context_snapshot_id=context_snapshot_id,
+            )
+            == expected
+        )
     except (KeyError, TypeError, ValueError, ConversationKernelConflict):
         return False
 
 
 def hydrate_canonical_snapshot_owner(
-    connection: Connection,
-    *,
-    row: Mapping[str, object],
-    context_snapshot_id: str,
+    connection: Connection, *, row: Mapping[str, object], context_snapshot_id: str
 ) -> CompactionSnapshotCarrier:
-    """Read the S-only carrier; original prompt/image hydration belongs to rows."""
     require_id(context_snapshot_id, "snapshot")
     if str(row["id"]) != context_snapshot_id:
-        raise ConversationKernelConflict("canonical snapshot owner does not exact-join")
+        raise ConversationKernelConflict("snapshot owner does not exact-join")
     body = _read_body(
         connection,
         row=row,
@@ -541,7 +470,7 @@ def hydrate_canonical_snapshot_owner(
     try:
         return parse_compaction_snapshot_carrier(body)
     except (TypeError, ValueError) as exc:
-        raise ConversationKernelConflict("canonical snapshot carrier is invalid") from exc
+        raise ConversationKernelConflict("snapshot carrier is invalid") from exc
 
 
 def _read_body(
@@ -552,25 +481,27 @@ def _read_body(
     expected_media_type: str,
     expected_codec: str,
 ) -> bytes:
+    """Read independently owned blob/inline bodies such as context snapshots."""
     if (
-        str(row["content_media_type"]) != expected_media_type
-        or str(row["content_codec"]) != expected_codec
+        row["content_media_type"] != expected_media_type
+        or row["content_codec"] != expected_codec
     ):
-        raise ConversationKernelConflict("canonical prompt body descriptor is invalid")
-    expected_digest = str(row["content_digest"])
-    expected_size = int(row["content_size"])
-    if not 0 <= expected_size <= MAXIMUM_BLOB_BYTES:
-        raise ConversationKernelConflict("canonical body size is out of bounds")
-    inline = row["inline_content"]
-    blob_id = row["blob_id"]
+        raise ConversationKernelConflict("body descriptor is invalid")
+    expected_digest, expected_size = (
+        str(row["content_digest"]),
+        int(row["content_size"]),
+    )
+    if expected_size < 0:
+        raise ConversationKernelConflict("body size is invalid")
+    inline, blob_id = row["inline_content"], row["blob_id"]
     if (inline is None) == (blob_id is None):
-        raise ConversationKernelConflict("canonical prompt body storage union is invalid")
+        raise ConversationKernelConflict("body storage union is invalid")
     if inline is not None:
         content = InlineContent.from_bytes(
             bytes(inline), media_type=expected_media_type, codec=expected_codec
         )
         if content.digest != expected_digest or content.size != expected_size:
-            raise ConversationKernelConflict("canonical prompt inline body is corrupt")
+            raise ConversationKernelConflict("inline body is corrupt")
         return content.canonical_bytes
     return PostgresCanonicalBlobStore.read_exact_in_connection(
         connection,
@@ -581,136 +512,3 @@ def _read_body(
         expected_media_type=expected_media_type,
         expected_codec=expected_codec,
     )
-
-
-def _read_canonical_prompt_metadata(
-    connection: Connection,
-    *,
-    row: Mapping[str, object],
-    queue_item_id: str | None,
-    transcript_entry_id: str | None,
-) -> tuple[bytes, CanonicalPromptBody, tuple[Mapping[str, object], ...]]:
-    """Read one prompt body and exact refs before optional image hydration."""
-
-    workspace_id = str(row["workspace_id"])
-    body = _read_body(
-        connection,
-        row=row,
-        workspace_id=workspace_id,
-        expected_media_type=PROMPT_BODY_MEDIA_TYPE,
-        expected_codec=PROMPT_BODY_CODEC,
-    )
-    decoded = decode_canonical_prompt_body(body)
-    # This descriptor-derived quote is complete before any image payload read.
-    canonical_prompt_body_resource_quote(decoded)
-    descriptors = _image_descriptors(decoded)
-    refs = _read_ref_metadata(
-        connection,
-        session_id=str(row["session_id"]),
-        expected_count=len(descriptors),
-        queue_item_id=queue_item_id,
-        transcript_entry_id=transcript_entry_id,
-    )
-    if not _refs_match_descriptors(
-        refs, descriptors=descriptors, workspace_id=workspace_id
-    ):
-        raise ConversationKernelConflict("canonical prompt image refs do not exact-join")
-    return body, decoded, refs
-
-
-def _owner_column(
-    *,
-    queue_item_id: str | None,
-    transcript_entry_id: str | None,
-) -> tuple[str, str]:
-    values = (
-        ("queue_item_id", queue_item_id),
-        ("transcript_entry_id", transcript_entry_id),
-    )
-    selected = tuple((column, value) for column, value in values if value is not None)
-    if len(selected) != 1 or not selected[0][1]:
-        raise ValueError("canonical prompt lookup requires exactly one owner")
-    return selected[0][0], str(selected[0][1])
-
-
-def _read_ref_metadata(
-    connection: Connection,
-    *,
-    session_id: str,
-    expected_count: int,
-    queue_item_id: str | None,
-    transcript_entry_id: str | None,
-) -> tuple[Mapping[str, object], ...]:
-    column, owner_id = _owner_column(
-        queue_item_id=queue_item_id,
-        transcript_entry_id=transcript_entry_id,
-    )
-    return tuple(
-        connection.execute(
-            f"""SELECT r.ref_ordinal, r.blob_id, r.workspace_id,
-                       b.logical_digest, b.logical_size, b.media_type, b.codec
-                FROM pulsara_v3.canonical_image_refs AS r
-                LEFT JOIN pulsara_v3.blobs AS b
-                  ON b.id = r.blob_id AND b.workspace_id = r.workspace_id
-                WHERE r.session_id = %s AND r.{column} = %s
-                ORDER BY r.ref_ordinal
-                LIMIT %s""",
-            (session_id, owner_id, expected_count + 1),
-        ).fetchall()
-    )
-
-
-def _image_descriptors(
-    body: CanonicalPromptBody,
-) -> tuple[CanonicalPromptImageDescriptor, ...]:
-    return tuple(
-        part for part in body.parts if isinstance(part, CanonicalPromptImageDescriptor)
-    )
-
-
-def _refs_match_descriptors(
-    refs: tuple[Mapping[str, object], ...],
-    *,
-    descriptors: tuple[CanonicalPromptImageDescriptor, ...],
-    workspace_id: str,
-) -> bool:
-    if len(refs) != len(descriptors):
-        return False
-    for ordinal, (row, descriptor) in enumerate(zip(refs, descriptors, strict=True)):
-        if (
-            row["ref_ordinal"] is None
-            or row["logical_size"] is None
-            or int(row["ref_ordinal"]) != ordinal
-            or str(row["workspace_id"]) != workspace_id
-            or str(row["blob_id"]) != _blob_id(
-                workspace_id, descriptor.digest,
-                descriptor.media_type, PROMPT_IMAGE_BLOB_CODEC, image=True,
-            )
-            or str(row["blob_id"]) != descriptor.image_ref
-            or row["logical_digest"] is None
-            or str(row["logical_digest"]) != descriptor.digest
-            or int(row["logical_size"]) != descriptor.encoded_bytes
-            or str(row["media_type"]) != descriptor.media_type
-            or str(row["codec"]) != PROMPT_IMAGE_BLOB_CODEC
-        ):
-            return False
-    return True
-
-
-__all__ = [
-    "CanonicalImageReferenceReadPort",
-    "CanonicalImageReferenceResourceExceeded",
-    "CanonicalImageReferenceUnavailable",
-    "CanonicalPromptPublication",
-    "PostgresCanonicalImageReferenceReadPort",
-    "canonical_prompt_owner_is_exact",
-    "copy_canonical_prompt_refs",
-    "hydrate_canonical_prompt_owner",
-    "hydrate_canonical_snapshot_owner",
-    "insert_canonical_prompt_refs",
-    "materialize_canonical_prompt",
-    "materialize_compaction_snapshot",
-    "resolve_canonical_prompt_image_reference",
-    "canonical_snapshot_owner_is_exact",
-    "validate_canonical_prompt_owner_metadata",
-]

@@ -4,6 +4,7 @@ Single-entry equality exercises the public batch/single contract, not a frozen
 old implementation. Independent expected fields below pin display/UTF-8 meaning.
 """
 from tests.support.tool_outputs import prepare_output
+from pulsara_agent.conversation_kernel.content_parts import ResultPart
 
 from contextlib import contextmanager
 from copy import deepcopy
@@ -27,7 +28,6 @@ from pulsara_agent.conversation_kernel.repository import (
     AssistantTextBlock,
     build_prepared_tool_result_acceptance,
 )
-from pulsara_agent.conversation_kernel.tool_outputs import ToolOutputProcessor
 from pulsara_agent.conversation_kernel.visualization import (
     FrozenVisualizationOccurrence,
     VisualizationOccurrenceState,
@@ -39,12 +39,6 @@ from pulsara_agent.llm.input import (
     PromptAnnotationPart,
     PromptAnnotationSource,
 )
-from pulsara_agent.ports.tool_execution import (
-    ToolOutputSourceCoverage,
-    ToolOutputSourceCoverageReason,
-    ToolOutputSourceFormatHint,
-)
-from pulsara_agent.ports.tool_output import ToolOutputBodyCandidate
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.test_conversation_fork import (
@@ -56,15 +50,33 @@ from tests.test_conversation_fork import (
     rows,
 )
 from tests.test_history_projection_cut import append, question
-from tests.test_kernel_image_input_k2_postgres import (
-    _bound_session,
-    _direct_intent,
-    _image,
-    _workspace,
-)
+from tests.support.images import bound_test_image
+from tests.support.model_config import start_test_root_turn, test_model_binding as model_binding, test_model_runtime as model_runtime
+from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
+from types import SimpleNamespace
+from io import BytesIO
+from PIL import Image
 from tests.support.tool_outputs import _install_tool_call
 
 pytestmark = pytest.mark.postgres
+
+
+def _direct_intent(repo, lease, runtime, content):
+    turn_id, entry_id = identity("turn"), identity("entry")
+    accepted = start_test_root_turn(
+        repo, lease.guard, command_id=identity("command"), turn_id=turn_id,
+        entry_id=entry_id, context_binding_revision_id=identity("binding"),
+        permission_snapshot_id=identity("permission"), requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        model_call_binding=model_binding(runtime), content=content,
+        occurred_at=datetime.now(timezone.utc), deadline_monotonic=monotonic()+30,
+    )
+    return SimpleNamespace(turn_id=turn_id, entry_id=entry_id), accepted
+
+
+def _image():
+    payload = BytesIO()
+    Image.new("RGB", (7, 5), (11, 23, 41)).save(payload, "PNG")
+    return bound_test_image("image/png", payload.getvalue(), 7, 5)
 
 
 @contextmanager
@@ -103,7 +115,7 @@ def test_concrete_utf8_documents_and_variant_mutation_are_independent(repo):
     _, q2 = question(repo, guard, "下一问 λ")
     cut = head(repo, guard.session_id)
     entries = {row["id"]: row for row in rows(repo, "SELECT * FROM pulsara_v3.transcript_entries WHERE session_id=%s", (guard.session_id,))}
-    blocks = {row["assistant_entry_id"]: row["id"] for row in rows(repo, "SELECT id,assistant_entry_id FROM pulsara_v3.assistant_message_blocks WHERE session_id=%s", (guard.session_id,))}
+    blocks = {row["entry_id"]: row["id"] for row in rows(repo, "SELECT id,entry_id FROM pulsara_v3.content_parts WHERE session_id=%s", (guard.session_id,))}
     expected = [
         _plain_message(entries[q1], "问 Ω😀", region="Q1", label="用户输入"),
         _plain_message(entries[progress], "进展 café", region="A", label="助手进展", block=blocks[progress]),
@@ -141,12 +153,11 @@ def test_concrete_utf8_documents_and_variant_mutation_are_independent(repo):
 
 
 def test_annotation_image_visualization_and_final_labels_match_single_entry_reads(repo):
-    lease, runtime, _ = _bound_session(repo)
-    workspace = _workspace(repo, lease)
+    lease, runtime = new_session(repo), model_runtime()
     source, _ = _direct_intent(repo, lease, runtime, FrozenPromptContent.text("quote source"))
     quote = "引用 Ω😀"
     source_answer = final(repo, lease.guard, source.turn_id, quote)
-    image = _image(workspace_id=workspace)
+    image = _image()
     comment = "批注 café"
     prompt = FrozenPromptContent((
         LLMTextPart("前缀"),
@@ -161,7 +172,7 @@ def test_annotation_image_visualization_and_final_labels_match_single_entry_read
     final_text = "完成 🛰"
     repo.commit_assistant_message(
         lease.guard, cut=cut, entry_id=final_id,
-        parent_content=InlineContent.from_bytes(b"manifest"),
+
         blocks=(AssistantTextBlock(identity("block"), InlineContent.from_bytes(final_text.encode())),),
         visualizations=(
             FrozenVisualizationOccurrence("plot.html", VisualizationOccurrenceState.READY, html=b"<h1>plot</h1>"),
@@ -233,26 +244,16 @@ def _tool_fixture(repo):
     lease, owner, request, call, attempt = _install_tool_call(repo, workspace)
     result_entry = identity("entry")
     body = "body-only Ω🛠"
-    projection = prepare_output(ToolOutputProcessor(repo.connection_provider),
-        session_id=lease.guard.session_id, workspace_id=workspace,
-        result_entry_id=result_entry, public_output=body, native_output="preview café",
-        output_body_candidate=ToolOutputBodyCandidate(text=body,
-            source_format=ToolOutputSourceFormatHint.TEXT,
-            source_coverage=ToolOutputSourceCoverage.RETAINED_SNAPSHOT,
-            source_coverage_reason=ToolOutputSourceCoverageReason.TERMINAL_RETENTION_GAP),
-        output_omitted=True, public_format=ToolOutputSourceFormatHint.TEXT,
-        deadline_monotonic=monotonic() + 30,
-    )
-    assert projection.output_body is not None
+    projection = prepare_output(content_parts=(ResultPart("text", body),))
     acceptance = build_prepared_tool_result_acceptance(
         guard=lease.guard, workspace_id=workspace, result_id=identity("result"),
         result_entry_id=result_entry, turn_id=owner, assistant_entry_id=request,
         tool_call_id=call, attempt_id=attempt, result_state="SUCCESS",
-        canonical_preview_content=projection.canonical_preview,
-        output_body=projection.output_body,
-        source_coverage=projection.source_coverage, output_omitted=projection.output_omitted,
-        source_coverage_reason=projection.source_coverage_reason,
-        output_unavailability_reason=projection.output_unavailability_reason,
+        public_fields=projection.public_fields, content_parts=projection.content_parts,
+
+
+
+
         actor_id="tool:test", observed_at=datetime.now(timezone.utc),
         observation_duration_microseconds=None,
         observation_origin_kind=ToolObservationOrigin.TERMINAL_PROCESS,
@@ -264,53 +265,14 @@ def _tool_fixture(repo):
     return lease, q1, result_entry, answer, cut, body
 
 
-@pytest.mark.parametrize("corrupt", ["body", "TEXT"])
-def test_tool_and_text_failures_do_not_cross_mode_qualification(
-    repo, stage2_migrated_postgres_database, corrupt,
-):
+def test_tool_output_is_excluded_from_every_dialogue_view(repo):
     lease, q1, result_entry, answer, cut, body = _tool_fixture(repo)
     with snapshot(repo) as connection:
-        valid = build_history_group(connection, lease.guard.session_id, q1, covered_entry_sequence=cut)
-    assert isinstance(valid, HistoryBuildSuccess)
-    assert body in valid.documents[("QA", True)]["body"]
-    assert body not in valid.documents[("QA", False)]["body"]
-    assert "preview café" not in valid.documents[("QA", True)]["body"]
-    assert "exec_process\n" in valid.documents[("QA", True)]["body"]
-    with psycopg.connect(stage2_migrated_postgres_database.admin_dsn, row_factory=dict_row) as connection:
-        if corrupt == "body":
-            changed = connection.execute("UPDATE pulsara_v3.tool_results SET output_body_inline_content=%s || substring(output_body_inline_content FROM 2) WHERE result_entry_id=%s", (b"x", result_entry))
-        else:
-            changed = connection.execute("UPDATE pulsara_v3.assistant_message_blocks SET inline_content=%s || substring(inline_content FROM 2) WHERE assistant_entry_id=%s AND block_kind='TEXT'", (b"x", answer))
-        assert changed.rowcount == 1
-        failed = build_history_group(connection, lease.guard.session_id, q1, covered_entry_sequence=cut)
-        assert isinstance(failed, HistoryBuildFailure)
-        assert failed.stage == "A" and failed.entry_id == (answer if corrupt == "TEXT" else result_entry)
-        assert build_history_document(connection, lease.guard.session_id, q1,
-            covered_entry_sequence=cut, variant="QA", include_tools=True) is None
-        without_tools = build_history_document(connection, lease.guard.session_id, q1,
-            covered_entry_sequence=cut, variant="QA", include_tools=False)
-        assert without_tools == (None if corrupt == "TEXT" else valid.documents[("QA", False)])
-        connection.rollback()
-
-
-def test_tool_history_uses_owned_body_independently_of_native_preview(
-    repo, stage2_migrated_postgres_database,
-):
-    lease, q1, result_entry, _, cut, body = _tool_fixture(repo)
-    with snapshot(repo) as connection:
-        expected = build_history_group(connection, lease.guard.session_id, q1,
-                                       covered_entry_sequence=cut)
-    with psycopg.connect(stage2_migrated_postgres_database.admin_dsn, row_factory=dict_row) as connection:
-        changed = connection.execute(
-            "UPDATE pulsara_v3.transcript_entries SET inline_content=%s || substring(inline_content FROM 2) WHERE id=%s",
-            (b"x", result_entry),
-        )
-        assert changed.rowcount == 1
-        actual = build_history_group(connection, lease.guard.session_id, q1,
-                                     covered_entry_sequence=cut)
-        assert actual == expected
-        assert body in actual.documents[("QA", True)]["body"]
-        connection.rollback()
+        built = build_history_group(connection, lease.guard.session_id, q1, covered_entry_sequence=cut)
+    assert isinstance(built, HistoryBuildSuccess)
+    for document in built.documents.values():
+        assert body not in document["body"]
+        assert [message["entry_id"] for message in document["messages"]] == [q1, answer]
 
 
 def test_parse_cache_cannot_cross_two_independent_repeatable_read_snapshots(
@@ -319,14 +281,15 @@ def test_parse_cache_cannot_cross_two_independent_repeatable_read_snapshots(
     guard = new_session(repo).guard
     owner, q1 = question(repo, guard)
     answer, cut = append(repo, guard, owner, "stable decoded answer", complete=True)
-    original = rows(repo, "SELECT id,inline_content FROM pulsara_v3.assistant_message_blocks WHERE assistant_entry_id=%s AND block_kind='TEXT'", (answer,))[0]
+    original = rows(repo, "SELECT id,inline_value FROM pulsara_v3.content_parts WHERE entry_id=%s AND type='text'", (answer,))[0]
     admin_dsn = stage2_migrated_postgres_database.admin_dsn
     try:
         with snapshot(repo) as first:
             before = build_history_group(first, guard.session_id, q1, covered_entry_sequence=cut)
             assert isinstance(before, HistoryBuildSuccess)
             with psycopg.connect(admin_dsn, autocommit=True) as writer:
-                writer.execute("UPDATE pulsara_v3.assistant_message_blocks SET inline_content=%s || substring(inline_content FROM 2) WHERE id=%s", (b"x", original["id"]))
+                writer.execute("SET session_replication_role=replica")
+                writer.execute("UPDATE pulsara_v3.content_parts SET inline_value=%s || substring(inline_value FROM 2) WHERE id=%s", (b"\xff", original["id"]))
             with snapshot(repo) as second:
                 assert second.info.backend_pid != first.info.backend_pid
                 after = build_history_group(second, guard.session_id, q1, covered_entry_sequence=cut)
@@ -339,6 +302,7 @@ def test_parse_cache_cannot_cross_two_independent_repeatable_read_snapshots(
             assert build_history_group(first, guard.session_id, q1, covered_entry_sequence=cut) == before
     finally:
         with psycopg.connect(admin_dsn, autocommit=True) as writer:
-            writer.execute("UPDATE pulsara_v3.assistant_message_blocks SET inline_content=%s WHERE id=%s", (original["inline_content"], original["id"]))
+            writer.execute("SET session_replication_role=replica")
+            writer.execute("UPDATE pulsara_v3.content_parts SET inline_value=%s WHERE id=%s", (original["inline_value"], original["id"]))
     with snapshot(repo) as third:
         assert build_history_group(third, guard.session_id, q1, covered_entry_sequence=cut) == before

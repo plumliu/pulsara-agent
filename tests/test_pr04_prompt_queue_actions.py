@@ -11,7 +11,7 @@ from pulsara_agent.conversation_kernel.contracts import (
     InlineContent,
     PromptDeliveryMode,
 )
-from pulsara_agent.conversation_kernel.prompt_content import freeze_canonical_prompt
+from pulsara_agent.conversation_kernel.content_parts import read_content_parts
 from pulsara_agent.llm.input import FrozenPromptContent
 from pulsara_agent.conversation_kernel.queued_prompt_actions import (
     QueuedPromptAction,
@@ -20,12 +20,53 @@ from pulsara_agent.conversation_kernel.queued_prompt_actions import (
 from pulsara_agent.conversation_kernel.repository import AssistantTextBlock
 from pulsara_agent.model_input.contracts import PreparedProviderInputCut
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
-from tests.test_stage2_conversation_kernel_postgres import (
-    _enqueue_prompt,
-    _name,
-    _repository,
-    _start_root_turn,
+from pulsara_agent.conversation_kernel.repository import ConversationKernelRepository
+from pulsara_agent.identity import random_id as _name
+from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
+from tests.support.model_config import (
+    enqueue_test_prompt,
+    start_test_root_turn,
+    test_model_binding,
+    test_model_runtime,
 )
+from tests.support.postgres import verified_postgres_provider
+
+
+def _repository(database):
+    return ConversationKernelRepository(
+        verified_postgres_provider(database.runtime_dsn)
+    )
+
+
+def _start_root_turn(repository, guard, **kwargs):
+    binding = test_model_binding(test_model_runtime())
+    repository.update_session_model_call_binding(
+        guard, binding=binding, deadline_monotonic=kwargs["deadline_monotonic"]
+    )
+    return start_test_root_turn(
+        repository,
+        guard,
+        permission_snapshot_id=_name("permission"),
+        requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        model_call_binding=binding,
+        **kwargs,
+    )
+
+
+def _enqueue_prompt(repository, guard, **kwargs):
+    new_turn = kwargs["delivery_mode"] is PromptDeliveryMode.NEW_TURN
+    kwargs.setdefault(
+        "permission_snapshot_id", _name("permission") if new_turn else None
+    )
+    kwargs.setdefault(
+        "requested_permission_mode", DEFAULT_PERMISSION_MODE if new_turn else None
+    )
+    kwargs.setdefault(
+        "model_call_binding",
+        test_model_binding(test_model_runtime()) if new_turn else None,
+    )
+    return enqueue_test_prompt(repository, guard, **kwargs)
+
 
 pytestmark = pytest.mark.postgres
 
@@ -49,7 +90,7 @@ def queue_case(stage2_migrated_postgres_database):
         turn_id=turn_id,
         entry_id=_name("entry"),
         context_binding_revision_id=revision_id,
-        content=FrozenPromptContent.text('initial'),
+        content=FrozenPromptContent.text("initial"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )
@@ -62,7 +103,7 @@ def queue_case(stage2_migrated_postgres_database):
         client_submission_id=submission,
         delivery_mode=PromptDeliveryMode.NEW_TURN,
         target_turn_id=None,
-        content=FrozenPromptContent.text('exact queued\ninput'),
+        content=FrozenPromptContent.text("exact queued\ninput"),
         occurred_at=datetime.now(timezone.utc),
         actor_id="user",
         deadline_monotonic=monotonic() + 30,
@@ -104,6 +145,21 @@ def rows(case):
         ).fetchall()
 
 
+def content_parts(case, queue_item_id=None, entry_id=None):
+    repository, guard, *_ = case
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        row_factory=dict_row,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        return read_content_parts(
+            connection,
+            session_id=guard.session_id,
+            queue_item_id=queue_item_id,
+            entry_id=entry_id,
+        )
+
+
 def complete(case):
     repository, guard, turn, revision, *_ = case
     return repository.commit_assistant_message(
@@ -115,7 +171,6 @@ def complete(case):
             provider_input_through_sequence=1,
         ),
         entry_id=_name("entry"),
-        parent_content=InlineContent.from_bytes(b"terminal-looking answer"),
         blocks=(AssistantTextBlock(_name("block"), InlineContent.from_bytes(b"done")),),
         complete_turn=True,
         occurred_at=datetime.now(timezone.utc),
@@ -148,7 +203,7 @@ def test_two_request_cancel_then_steer_can_lose_input(queue_case):
             client_submission_id=_name("command"),
             delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
             target_turn_id=turn,
-            content=FrozenPromptContent.text('exact queued\ninput'),
+            content=FrozenPromptContent.text("exact queued\ninput"),
             occurred_at=datetime.now(timezone.utc),
             actor_id="user",
             deadline_monotonic=monotonic() + 30,
@@ -169,14 +224,16 @@ def test_two_request_steer_then_cancel_can_duplicate_input(queue_case):
         client_submission_id=_name("command"),
         delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
         target_turn_id=turn,
-        content=FrozenPromptContent.text('exact queued\ninput'),
+        content=FrozenPromptContent.text("exact queued\ninput"),
         occurred_at=datetime.now(timezone.utc),
         actor_id="user",
         deadline_monotonic=monotonic() + 30,
     )
     source, replacement = rows(queue_case)
     assert source["status"] == replacement["status"] == "PENDING"
-    assert source["inline_content"] == replacement["inline_content"]
+    assert [p.value for p in content_parts(queue_case, source["id"])] == [
+        p.value for p in content_parts(queue_case, replacement["id"])
+    ]
     assert source["delivery_mode"] == "NEW_TURN"
     assert replacement["delivery_mode"] == "STEER_ACTIVE_TURN"
 
@@ -184,6 +241,7 @@ def test_two_request_steer_then_cancel_can_duplicate_input(queue_case):
 def test_redirect_first_preserves_source_and_holds_same_root_open(queue_case):
     candidate = action(queue_case)
     before = rows(queue_case)[0]
+    original_parts = content_parts(queue_case, before["id"])
     apply(queue_case, candidate)
     source, replacement = rows(queue_case)
     assert source["status"] == "CANCELLED"
@@ -193,15 +251,8 @@ def test_redirect_first_preserves_source_and_holds_same_root_open(queue_case):
     assert replacement["target_turn_id"] == queue_case[2]
     assert replacement["delivery_mode"] == "STEER_ACTIVE_TURN"
     assert replacement["queue_sequence"] > source["queue_sequence"]
-    for key in (
-        "inline_content",
-        "blob_id",
-        "content_digest",
-        "content_size",
-        "content_media_type",
-        "content_codec",
-    ):
-        assert replacement[key] == before[key]
+    assert content_parts(queue_case, source["id"]) == ()
+    assert content_parts(queue_case, replacement["id"]) == original_parts
     for key in before:
         if "permission" in key or "handoff" in key or key == "model_call_binding":
             assert source[key] == before[key]
@@ -279,7 +330,6 @@ def test_redirect_reuses_large_blob_without_materializing_another_copy(queue_cas
     body = ("  原文\n" * 20000).encode("utf-8")
     assert len(body) > 64 << 10
     content = FrozenPromptContent.text(body.decode("utf-8"))
-    canonical_prompt = freeze_canonical_prompt(content)
     source = _name("queue")
     _enqueue_prompt(
         repository,
@@ -294,25 +344,14 @@ def test_redirect_reuses_large_blob_without_materializing_another_copy(queue_cas
         actor_id="user",
         deadline_monotonic=monotonic() + 30,
     )
+    original_parts = content_parts(queue_case, source)
+    assert [p.value for p in original_parts] == [body.decode("utf-8")]
     candidate = action(queue_case, source=source)
     apply(queue_case, candidate)
-    original, replacement = rows(queue_case)[1:]
-    assert original["blob_id"] == replacement["blob_id"]
-    assert original["blob_id"] is not None
-    assert original["inline_content"] is replacement["inline_content"] is None
-    assert repository._content_from_row(replacement) == repository._content_from_row(
-        original
+    assert content_parts(queue_case, source) == ()
+    assert (
+        content_parts(queue_case, candidate.replacement_queue_item_id) == original_parts
     )
-    with repository.connection_provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=monotonic() + 30
-    ) as connection:
-        assert (
-            connection.execute(
-                "SELECT body FROM pulsara_v3.blobs WHERE id=%s",
-                (original["blob_id"],),
-            ).fetchone()[0]
-            == canonical_prompt.body
-        )
 
 
 def test_fifo_consumption_wins_over_both_queue_actions(queue_case):
@@ -329,6 +368,15 @@ def test_fifo_consumption_wins_over_both_queue_actions(queue_case):
         guard,
         candidate=candidate,
         deadline_monotonic=monotonic() + 30,
+    )
+    transferred = content_parts(queue_case, entry_id=candidate.exact_initial_entry_id)
+    assert [p.value for p in transferred] == ["exact queued\ninput"]
+    assert content_parts(queue_case, candidate.queue_item_id) == ()
+    assert (
+        repository.confirm_prepared_prompt_head_consumption(
+            candidate=candidate, deadline_monotonic=monotonic() + 30
+        ).kind.value
+        == "FULL"
     )
     before = rows(queue_case)
     assert before[0]["status"] == "CONSUMED"
@@ -366,7 +414,7 @@ def test_plan_handoff_is_claimed_at_delivery_and_does_not_block_redirect(
         client_submission_id=_name("command"),
         delivery_mode=PromptDeliveryMode.NEW_TURN,
         target_turn_id=None,
-        content=FrozenPromptContent.text('handoff'),
+        content=FrozenPromptContent.text("handoff"),
         requested_permission_mode=PermissionMode.READ_ONLY,
         occurred_at=datetime.now(timezone.utc),
         actor_id="user",
@@ -380,12 +428,13 @@ def test_plan_handoff_is_claimed_at_delivery_and_does_not_block_redirect(
         turn_id=turn,
         entry_id=_name("entry"),
         context_binding_revision_id=revision,
-        content=FrozenPromptContent.text('root'),
+        content=FrozenPromptContent.text("root"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )
     case = (repository, lease.guard, turn, revision, source, "")
     before = rows(case)
+    original_parts = content_parts(case, source)
     assert before[0]["pending_plan_handoff_workflow_id"] is None
     candidate = action(case)
     apply(case, candidate)
@@ -393,7 +442,86 @@ def test_plan_handoff_is_claimed_at_delivery_and_does_not_block_redirect(
     assert [row["status"] for row in redirected] == ["CANCELLED", "PENDING"]
     assert redirected[1]["delivery_mode"] == "STEER_ACTIVE_TURN"
     assert redirected[1]["target_turn_id"] == turn
-    assert redirected[1]["inline_content"] == before[0]["inline_content"]
+    assert content_parts(case, source) == ()
+    assert content_parts(case, redirected[1]["id"]) == original_parts
     assert redirected[1]["pending_plan_handoff_workflow_id"] is None
-    assert repository.query_command(session_id=lease.guard.session_id,
-        command_id=candidate.command_id, deadline_monotonic=monotonic()+30) is not None
+    assert (
+        repository.query_command(
+            session_id=lease.guard.session_id,
+            command_id=candidate.command_id,
+            deadline_monotonic=monotonic() + 30,
+        )
+        is not None
+    )
+
+
+def test_redirect_rolls_back_original_content_ownership(queue_case, monkeypatch):
+    before = rows(queue_case)
+    source = before[0]["id"]
+    original = content_parts(queue_case, source)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("injected event acceptance failure")
+
+    monkeypatch.setattr(queue_case[0], "_append_queue_management_events", fail)
+    with pytest.raises(RuntimeError, match="injected"):
+        apply(queue_case, action(queue_case))
+    assert rows(queue_case) == before
+    assert content_parts(queue_case, source) == original
+
+
+def test_consume_failure_rolls_back_entry_and_content_move(queue_case, monkeypatch):
+    repository, guard, *_ = queue_case
+    assert complete(queue_case).turn_completed
+    candidate = repository.prepare_prompt_head_consumption(
+        session_id=guard.session_id,
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="runtime",
+        deadline_monotonic=monotonic() + 30,
+    )
+    original = content_parts(queue_case, candidate.queue_item_id)
+    before = rows(queue_case)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("injected event acceptance failure")
+
+    monkeypatch.setattr(repository, "_append_events", fail)
+    with pytest.raises(RuntimeError, match="injected"):
+        repository.consume_prepared_prompt_head(
+            guard, candidate=candidate, deadline_monotonic=monotonic() + 30
+        )
+    assert rows(queue_case) == before
+    assert content_parts(queue_case, candidate.queue_item_id) == original
+    assert content_parts(queue_case, entry_id=candidate.exact_initial_entry_id) == ()
+
+
+def test_competing_consumers_accept_one_turn_and_transfer_original_rows(queue_case):
+    repository, guard, *_ = queue_case
+    assert complete(queue_case).turn_completed
+    candidate = repository.prepare_prompt_head_consumption(
+        session_id=guard.session_id,
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="runtime",
+        deadline_monotonic=monotonic() + 30,
+    )
+    original = content_parts(queue_case, candidate.queue_item_id)
+
+    def consume(_):
+        result = repository.consume_prepared_prompt_head(
+            guard, candidate=candidate, deadline_monotonic=monotonic() + 30
+        )
+        return None if result is None else result.kind.value
+
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        outcomes = list(workers.map(consume, range(2)))
+    assert outcomes.count("FULL") == 1 and outcomes.count(None) == 1
+    assert content_parts(queue_case, candidate.queue_item_id) == ()
+    assert (
+        content_parts(queue_case, entry_id=candidate.exact_initial_entry_id) == original
+    )
+    assert (
+        repository.confirm_prepared_prompt_head_consumption(
+            candidate=candidate, deadline_monotonic=monotonic() + 30
+        ).kind.value
+        == "FULL"
+    )

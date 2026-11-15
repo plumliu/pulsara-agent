@@ -2,33 +2,26 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import datetime
 import json
 from psycopg import Connection, IsolationLevel
 from psycopg.rows import dict_row
-from psycopg.types.json import Jsonb
-from pulsara_agent.ports.tool_execution import thaw_tool_json_object
+from psycopg.types.json import Json, Jsonb
+from pulsara_agent.ports.tool_execution import thaw_tool_json_object, tool_json_values_equal
+from pulsara_agent.conversation_kernel.content_parts import (ResultPart, public_result_parts, read_content_parts, write_content_parts)
+from pulsara_agent.conversation_kernel.tool_outputs import read_accepted_tool_business_value
+from pulsara_agent.conversation_kernel.blob import PostgresCanonicalBlobStore
 from pulsara_agent.conversation_kernel.contracts import BlobContent, CanonicalContent, EntryKind, HostWriterGuard, InlineContent, canonical_digest
-from pulsara_agent.conversation_kernel.prompt_storage import (
-    canonical_prompt_owner_is_exact,
-    insert_canonical_prompt_refs,
-    materialize_canonical_prompt,
-)
 from pulsara_agent.conversation_kernel.vocabulary import CommittedEventType, SubjectSlot
-from pulsara_agent.conversation_kernel.memory.writes import PreparedRememberWrite
-from pulsara_agent.memory.targets import memory_target, parse_memory_target
 from pulsara_agent.primitives.context import thaw_json
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 
 from .contracts import (
     AcceptedCapabilityDecision,
     AcceptedEntry,
-    AcceptedMemoryToolResult,
     AcceptedInteractionDecision,
     AcceptedToolAttempt,
     ConversationKernelConflict,
-    PreparedMemoryMutationSideBranch,
     PreparedToolRemoteIdentityPublication,
     PreparedToolResultAcceptance,
     ToolRemoteIdentityConfirmationKind,
@@ -38,59 +31,23 @@ from .matching import (
     _event_row_matches_draft,
 )
 
-def _output_body_values(content):
-    return ((None,) * 6 if content is None else (
-        content.canonical_bytes if isinstance(content, InlineContent) else None,
-        content.blob_id if isinstance(content, BlobContent) else None,
-        content.digest, content.size, content.media_type, content.codec,
-    ))
-
-
-def _output_body_from_row(row):
-    if row["output_body_digest"] is None:
-        return None
-    if row["output_body_inline_content"] is not None:
-        return InlineContent(bytes(row["output_body_inline_content"]), str(row["output_body_digest"]),
-            int(row["output_body_size"]), str(row["output_body_media_type"]), str(row["output_body_codec"]))
-    return BlobContent(str(row["output_body_blob_id"]), str(row["output_body_digest"]),
-        int(row["output_body_size"]), str(row["output_body_media_type"]), str(row["output_body_codec"]))
-
-
 class _ToolOperations:
     def read_accepted_tool_result_observation(self, *, session_id, result_id, deadline_monotonic):
-        """Read the accepted display and original body route for an undelivered call."""
-        from pulsara_agent.ports.tool_output import tool_output_read_call
+        """Read one accepted complete value without exposing internal facts."""
         with self._provider.connection(lane=PostgresConnectionLane.INSPECTOR,
-            row_factory=dict_row, deadline_monotonic=deadline_monotonic) as connection:
+            row_factory=dict_row, deadline_monotonic=deadline_monotonic,
+            isolation_level=IsolationLevel.REPEATABLE_READ) as connection:
             row = connection.execute(
-                """SELECT e.*, r.id AS result_id, r.result_state,
-                          r.output_source_coverage,r.output_source_coverage_reason,
-                          r.output_omitted,r.output_body_digest,r.output_unavailability_reason,
-                          r.model_visible_memory_fact_ids,r.result_facts
-                   FROM pulsara_v3.tool_results r
+                """SELECT r.* FROM pulsara_v3.tool_results r
                    JOIN pulsara_v3.transcript_entries e ON e.session_id=r.session_id
                     AND e.id=r.result_entry_id AND e.entry_owner_kind='EXECUTED_TURN'
                    WHERE r.session_id=%s AND r.id=%s""", (session_id, result_id),
             ).fetchone()
             if row is None:
                 raise LookupError("accepted tool result is unavailable")
-            content = self._content_from_row(row)
-            if not isinstance(content, InlineContent):
-                raise ConversationKernelConflict("accepted Code Mode result preview is not inline")
-            available = row["output_body_digest"] is not None
-            result = {"result_id": row["result_id"], "result_entry_id": row["id"],
-                "state": row["result_state"], "result": content.canonical_bytes.decode("utf-8"),
-                "output_omitted": row["output_omitted"], "output_available": available,
-                "source_coverage": row["output_source_coverage"],
-                "model_visible_memory_fact_ids": list(row["model_visible_memory_fact_ids"]),
-                "required_facts": row["result_facts"]}
-            if available:
-                result["read"] = tool_output_read_call(session_id, str(row["id"]))
-            if row["output_source_coverage_reason"] is not None:
-                result["source_coverage_reason"] = row["output_source_coverage_reason"]
-            if row["output_unavailability_reason"] is not None:
-                result["output_unavailability_reason"] = row["output_unavailability_reason"]
-            return result
+            return {"result_id": row["id"], "result_entry_id": row["result_entry_id"],
+                    "state": row["result_state"],
+                    "value": read_accepted_tool_business_value(connection, row)}
 
     def freeze_code_mode_source(self, guard, *, attempt_id, content, deadline_monotonic):
         """Freeze the actual post-Hook source once on its real exec_cell attempt."""
@@ -99,8 +56,8 @@ class _ToolOperations:
             row = connection.execute(
                 """SELECT a.*, b.tool_name FROM pulsara_v3.tool_execution_attempts a
                    JOIN pulsara_v3.tool_invocations i ON i.session_id=a.session_id AND i.id=a.invocation_id
-                   JOIN pulsara_v3.assistant_message_blocks b ON b.session_id=i.session_id
-                    AND b.assistant_entry_id=i.assistant_entry_id AND b.tool_call_id=i.tool_call_id
+                   JOIN pulsara_v3.content_parts b ON b.session_id=i.session_id
+                    AND b.entry_id=i.assistant_entry_id AND b.tool_call_id=i.tool_call_id
                    WHERE a.session_id=%s AND a.id=%s AND i.source_kind='MODEL_TOOL_CALL'
                    FOR UPDATE OF a""", (guard.session_id, attempt_id),
             ).fetchone()
@@ -137,16 +94,19 @@ class _ToolOperations:
                           a.code_source_content_codec AS content_codec, s.workspace_id
                    FROM pulsara_v3.tool_execution_attempts a
                    JOIN pulsara_v3.tool_invocations i ON i.session_id=a.session_id AND i.id=a.invocation_id
-                   JOIN pulsara_v3.assistant_message_blocks b ON b.session_id=i.session_id
-                    AND b.assistant_entry_id=i.assistant_entry_id AND b.tool_call_id=i.tool_call_id
+                   JOIN pulsara_v3.content_parts b ON b.session_id=i.session_id
+                    AND b.entry_id=i.assistant_entry_id AND b.tool_call_id=i.tool_call_id
                    JOIN pulsara_v3.sessions s ON s.id=a.session_id
                    WHERE a.session_id=%s AND a.id=%s AND i.source_kind='MODEL_TOOL_CALL'
-                    AND b.tool_name='exec_cell' AND b.block_kind='TOOL_CALL'""",
+                    AND b.tool_name='exec_cell' AND b.type='tool_call'""",
                 (session_id, attempt_id),
             ).fetchone()
             if row is None or row["content_digest"] is None:
                 return None
-            content = self._content_from_row(row)
+            content = (InlineContent(bytes(row["inline_content"]), row["content_digest"],
+                row["content_size"], row["content_media_type"], row["content_codec"])
+                if row["inline_content"] is not None else BlobContent(row["blob_id"],
+                    row["content_digest"], row["content_size"], row["content_media_type"], row["content_codec"]))
             return CanonicalProviderInputReader(self._provider).read_code_mode_source(
                 content, workspace_id=str(row["workspace_id"]), connection=connection,
                 deadline_monotonic=deadline_monotonic)
@@ -168,9 +128,9 @@ class _ToolOperations:
                    FROM pulsara_v3.tool_execution_attempts a
                    JOIN pulsara_v3.tool_invocations i
                      ON i.session_id=a.session_id AND i.id=a.invocation_id
-                   JOIN pulsara_v3.assistant_message_blocks b
-                     ON b.session_id=i.session_id AND b.assistant_entry_id=i.assistant_entry_id
-                    AND b.tool_call_id=i.tool_call_id AND b.block_kind='TOOL_CALL'
+                   JOIN pulsara_v3.content_parts b
+                     ON b.session_id=i.session_id AND b.entry_id=i.assistant_entry_id
+                    AND b.tool_call_id=i.tool_call_id AND b.type='tool_call'
                    JOIN pulsara_v3.turns t ON t.session_id=i.session_id AND t.id=i.turn_id
                    WHERE a.session_id=%s AND a.id=%s AND i.source_kind='MODEL_TOOL_CALL'
                      AND b.tool_name='exec_cell' AND t.id=%s
@@ -181,13 +141,13 @@ class _ToolOperations:
             subject = connection.execute(
                 """SELECT t.id AS turn_id, t.workspace_id,
                           t.permission_snapshot_fingerprint
-                   FROM pulsara_v3.assistant_message_blocks b
+                   FROM pulsara_v3.content_parts b
                    JOIN pulsara_v3.transcript_entries e
                      ON e.entry_owner_kind='EXECUTED_TURN' AND e.session_id=b.session_id
-                    AND e.id=b.assistant_entry_id
+                    AND e.id=b.entry_id
                    JOIN pulsara_v3.turns t ON t.session_id=e.session_id AND t.id=e.turn_id
-                   WHERE b.session_id=%s AND b.assistant_entry_id=%s
-                     AND b.tool_call_id=%s AND b.block_kind='TOOL_CALL'
+                   WHERE b.session_id=%s AND b.entry_id=%s
+                     AND b.tool_call_id=%s AND b.type='tool_call'
                      AND (%s=false OR t.status='RUNNING')
                    FOR UPDATE OF t""",
                 (guard.session_id, assistant_entry_id, tool_call_id, require_running),
@@ -373,8 +333,16 @@ class _ToolOperations:
                     entry_sequence=result_entry_sequence,
                     entry_kind=EntryKind.TOOL_RESULT,
 
-                    content=denial_content,
                 )
+                denial_text = (denial_content.canonical_bytes if isinstance(denial_content, InlineContent)
+                    else PostgresCanonicalBlobStore.read_exact_in_connection(connection,
+                        blob_id=denial_content.blob_id, expected_digest=denial_content.digest,
+                        expected_size=denial_content.size, expected_workspace_id=str(subject["workspace_id"]),
+                        expected_media_type=denial_content.media_type, expected_codec=denial_content.codec))
+                write_content_parts(connection, session_id=guard.session_id,
+                    workspace_id=str(subject["workspace_id"]), entry_id=result_entry_id,
+                    parts=(ResultPart("text", denial_text.decode("utf-8")),),
+                    publisher=self._canonical_content_publisher)
                 connection.execute(
                     """
                     INSERT INTO pulsara_v3.tool_results (
@@ -386,11 +354,10 @@ class _ToolOperations:
                         observed_at, observation_duration_microseconds,
                         observation_origin_kind,
                         tool_reported_duration_microseconds,
-                        output_body_inline_content,output_body_blob_id,output_body_digest,
-                        output_body_size,output_body_media_type,output_body_codec
+                        public_fields
                     ) VALUES ('EXECUTED', %s, %s, %s, %s, %s, %s, NULL,
                               'POLICY_NO_ATTEMPT', %s, %s,
-                              'PERMISSION_DENIED', %s, NULL, 'POLICY', NULL, %s,%s,%s,%s,%s,%s)
+                              'PERMISSION_DENIED', %s, NULL, 'POLICY', NULL, %s)
                     """,
                     (
                         result_id,
@@ -402,7 +369,7 @@ class _ToolOperations:
                         permission_snapshot_fingerprint,
                         result_entry_id,
                         occurred_at,
-                        *_output_body_values(denial_content),
+                        Json({}),
                     ),
                 )
                 drafts.append(
@@ -643,7 +610,7 @@ class _ToolOperations:
         *,
         candidate: PreparedToolResultAcceptance,
         deadline_monotonic: float,
-    ) -> AcceptedEntry | AcceptedMemoryToolResult:
+    ) -> AcceptedEntry:
         if candidate.session_id != guard.session_id:
             raise ValueError("prepared tool result belongs to another session")
         with self._writer_transaction(
@@ -666,50 +633,6 @@ class _ToolOperations:
                 tool_call_id=candidate.tool_call_id, turn_id=candidate.turn_id,
                 source=candidate.invocation_source, require_running=False,
             )
-            if isinstance(candidate.output_body, BlobContent):
-                self._require_exact_tool_output_blob(
-                    connection,
-                    workspace_id=candidate.workspace_id,
-                    expected=candidate.output_body,
-                )
-            memory_outcome = (
-                self._settle_direct_memory_mutation(
-                    connection,
-                    candidate=candidate,
-                    mutation=candidate.side_branch.mutation,
-                    deadline_monotonic=deadline_monotonic,
-                )
-                if isinstance(candidate.side_branch, PreparedMemoryMutationSideBranch)
-                else None
-            )
-            canonical_entry_content = (
-                InlineContent.from_bytes(
-                    memory_outcome.canonical_body.encode("utf-8"),
-                    media_type="text/plain",
-                    codec="utf-8",
-                )
-                if memory_outcome is not None
-                else candidate.canonical_preview_content
-            )
-            canonical_image_blob_ids: tuple[str, ...] = ()
-            if candidate.canonical_prompt is not None:
-                publication = materialize_canonical_prompt(
-                    connection,
-                    publisher=self._canonical_content_publisher,
-                    workspace_id=candidate.workspace_id,
-                    prompt=candidate.canonical_prompt,
-                )
-                if not isinstance(publication.body, InlineContent):
-                    raise ValueError("ToolResult canonical prompt body must be inline")
-                canonical_entry_content = publication.body
-                canonical_image_blob_ids = publication.image_blob_ids
-            output_body = (
-                self._canonical_content_publisher.materialize_in_connection(
-                    connection, workspace_id=candidate.workspace_id,
-                    content=memory_outcome.canonical_body.encode("utf-8"),
-                    media_type="application/json", codec="utf-8",
-                ) if memory_outcome is not None else candidate.output_body
-            )
             entry_sequence = self._allocate_entry_sequence(connection, guard.session_id)
             self._insert_entry(
                 connection,
@@ -719,53 +642,33 @@ class _ToolOperations:
                 entry_id=candidate.result_entry_id,
                 entry_sequence=entry_sequence,
                 entry_kind=EntryKind.TOOL_RESULT,
-                content=canonical_entry_content,
             )
+            write_content_parts(connection, session_id=guard.session_id,
+                workspace_id=candidate.workspace_id, entry_id=candidate.result_entry_id,
+                parts=candidate.content_parts, publisher=self._canonical_content_publisher)
             columns = (
                 "result_record_kind,id,session_id,workspace_id,tool_call_entry_id,tool_call_id,"
                 "invocation_id,attempt_id,result_origin_kind,result_entry_id,result_state,"
-                "permission_snapshot_fingerprint,output_body_inline_content,output_body_blob_id,"
-                "output_body_digest,output_body_size,output_body_media_type,output_body_codec,"
-                "output_unavailability_reason,output_source_coverage,output_source_coverage_reason,"
-                "output_omitted,result_facts,model_visible_memory_fact_ids,observed_at,"
+                "permission_snapshot_fingerprint,public_fields,result_facts,"
+                "output_unavailability_reason,model_visible_memory_fact_ids,observed_at,"
                 "observation_duration_microseconds,observation_origin_kind,tool_reported_duration_microseconds"
             )
             values = (
                 "EXECUTED",candidate.result_id,guard.session_id,candidate.workspace_id,
                 candidate.assistant_entry_id,candidate.tool_call_id,invocation_source.invocation_id,
                 candidate.attempt_id,"PHYSICAL_ATTEMPT" if candidate.attempt_id is not None else "POLICY_NO_ATTEMPT",
-                candidate.result_entry_id,memory_outcome.result_state if memory_outcome is not None else candidate.result_state,
-                str(turn["permission_snapshot_fingerprint"]),*_output_body_values(output_body),
+                candidate.result_entry_id,candidate.result_state,
+                str(turn["permission_snapshot_fingerprint"]),
+                Json(thaw_tool_json_object(candidate.public_fields)),
+                Jsonb(thaw_tool_json_object(candidate.result_facts)),
                 None if candidate.output_unavailability_reason is None else candidate.output_unavailability_reason.value,
-                candidate.source_coverage.value,
-                None if candidate.source_coverage_reason is None else candidate.source_coverage_reason.value,
-                candidate.output_omitted,
-                Jsonb(json.loads(memory_outcome.canonical_body) if memory_outcome is not None else thaw_tool_json_object(candidate.required_facts)),
-                list(memory_outcome.visible_memory_fact_ids if memory_outcome is not None else candidate.model_visible_memory_fact_ids),
-                candidate.observed_at,candidate.observation_duration_microseconds,
-                candidate.observation_origin_kind.value,candidate.trusted_tool_reported_duration_microseconds,
+                list(candidate.model_visible_memory_fact_ids),candidate.observed_at,
+                candidate.observation_duration_microseconds,candidate.observation_origin_kind.value,
+                candidate.trusted_tool_reported_duration_microseconds,
             )
             connection.execute("INSERT INTO pulsara_v3.tool_results (" + columns + ") VALUES ("
                                + ",".join("%s" for _ in values) + ")", values)
-            if candidate.canonical_prompt is not None:
-                insert_canonical_prompt_refs(
-                    connection,
-                    session_id=guard.session_id,
-                    workspace_id=candidate.workspace_id,
-                    image_blob_ids=canonical_image_blob_ids,
-                    transcript_entry_id=candidate.result_entry_id,
-                )
-            event_drafts = [
-                replace(
-                    candidate.tool_result_occurrence,
-                    payload={
-                        "tool_call_id": candidate.tool_call_id,
-                        "result_state": memory_outcome.result_state,
-                    },
-                )
-                if memory_outcome is not None
-                else candidate.tool_result_occurrence
-            ]
+            event_drafts = [candidate.tool_result_occurrence]
             event = self._append_events(
                 connection,
                 guard,
@@ -778,13 +681,6 @@ class _ToolOperations:
                 entry_sequence=entry_sequence,
                 event_sequence=event.event_sequence,
             )
-            if memory_outcome is not None:
-                return AcceptedMemoryToolResult(
-                    **accepted_fields,
-                    canonical_body=memory_outcome.canonical_body,
-                    result_state=memory_outcome.result_state,
-                    model_visible_memory_fact_ids=memory_outcome.visible_memory_fact_ids,
-                )
             return AcceptedEntry(**accepted_fields)
 
     def confirm_tool_result_winner(
@@ -793,7 +689,7 @@ class _ToolOperations:
         *,
         candidate: PreparedToolResultAcceptance,
         deadline_monotonic: float,
-    ) -> AcceptedEntry | AcceptedMemoryToolResult | None:
+    ) -> AcceptedEntry | None:
         """Stateless exact confirmation after an ambiguous canonical ACK."""
 
         if candidate.session_id != guard.session_id:
@@ -833,36 +729,17 @@ class _ToolOperations:
                 raise ConversationKernelConflict(
                     "tool result winner is only partially installed"
                 )
-            body = candidate.output_body
-            dynamic_memory = isinstance(
-                candidate.side_branch, PreparedMemoryMutationSideBranch
-            )
-            observed_content = self._content_from_row(entry)
-            if dynamic_memory:
-                if (
-                    not isinstance(observed_content, InlineContent)
-                    or observed_content.media_type != "text/plain"
-                    or observed_content.codec != "utf-8"
-                ):
-                    raise ConversationKernelConflict(
-                        "direct memory ToolResult body is not inline text"
-                    )
-                observed_body = observed_content.canonical_bytes.decode("utf-8")
-                observed_state = str(result["result_state"])
-                visible_ids = tuple(result["model_visible_memory_fact_ids"])
-                self._confirm_direct_memory_result_shape(
-                    candidate,
-                    body=observed_body,
-                    result_state=observed_state,
-                    visible_ids=visible_ids,
-                )
+            stored_parts = read_content_parts(connection,
+                entry_id=candidate.result_entry_id, session_id=candidate.session_id)
+            observed_parts = public_result_parts(stored_parts)
             if (
                 str(entry["workspace_id"]) != candidate.workspace_id
                 or str(entry["turn_id"]) != candidate.turn_id
                 or str(entry["entry_kind"]) != EntryKind.TOOL_RESULT.value
-                or (
-                    not dynamic_memory
-                    and observed_content != candidate.canonical_preview_content
+                or len(observed_parts) != len(stored_parts)
+                or not tool_json_values_equal(
+                    [{"type": part.type, "value": part.value} for part in observed_parts],
+                    [{"type": part.type, "value": part.value} for part in candidate.content_parts],
                 )
                 or str(result["workspace_id"]) != candidate.workspace_id
                 or (candidate.invocation_source is not None and result["invocation_id"] != candidate.invocation_source.invocation_id)
@@ -870,185 +747,32 @@ class _ToolOperations:
                 or str(result["tool_call_id"]) != candidate.tool_call_id
                 or result["attempt_id"] != candidate.attempt_id
                 or str(result["result_entry_id"]) != candidate.result_entry_id
-                or (
-                    not dynamic_memory
-                    and str(result["result_state"]) != candidate.result_state
-                )
-                or str(result["permission_snapshot_fingerprint"])
-                != str(turn["permission_snapshot_fingerprint"])
-                or (not dynamic_memory and _output_body_from_row(result) != candidate.output_body)
-                or (dynamic_memory and _output_body_from_row(result) != self._canonical_content_publisher.describe(
-                    workspace_id=candidate.workspace_id, content=observed_body.encode("utf-8"),
-                    media_type="application/json", codec="utf-8"))
+                or str(result["result_state"]) != candidate.result_state
+                or str(result["permission_snapshot_fingerprint"]) != str(turn["permission_snapshot_fingerprint"])
+                or not tool_json_values_equal(result["public_fields"], candidate.public_fields)
+                or not tool_json_values_equal(result["result_facts"], candidate.result_facts)
                 or result["output_unavailability_reason"] != (
                     None if candidate.output_unavailability_reason is None else candidate.output_unavailability_reason.value)
-                or str(result["output_source_coverage"]) != candidate.source_coverage.value
-                or result["output_source_coverage_reason"] != (
-                    None if candidate.source_coverage_reason is None else candidate.source_coverage_reason.value)
-                or bool(result["output_omitted"]) != candidate.output_omitted
-                or result["result_facts"] != (json.loads(observed_body) if dynamic_memory else thaw_tool_json_object(candidate.required_facts))
-                or (
-                    not dynamic_memory
-                    and tuple(result["model_visible_memory_fact_ids"])
-                    != candidate.model_visible_memory_fact_ids
-                )
+                or tuple(result["model_visible_memory_fact_ids"]) != candidate.model_visible_memory_fact_ids
                 or result["observed_at"] != candidate.observed_at
-                or result["observation_duration_microseconds"]
-                != candidate.observation_duration_microseconds
-                or str(result["observation_origin_kind"])
-                != candidate.observation_origin_kind.value
-                or result["tool_reported_duration_microseconds"]
-                != candidate.trusted_tool_reported_duration_microseconds
+                or result["observation_duration_microseconds"] != candidate.observation_duration_microseconds
+                or str(result["observation_origin_kind"]) != candidate.observation_origin_kind.value
+                or result["tool_reported_duration_microseconds"] != candidate.trusted_tool_reported_duration_microseconds
             ):
-                raise ConversationKernelConflict(
-                    "tool result identity names a different winner"
-                )
-            if candidate.canonical_prompt is not None and not canonical_prompt_owner_is_exact(
-                connection,
-                row=entry,
-                expected=candidate.canonical_prompt,
-                transcript_entry_id=candidate.result_entry_id,
-            ):
-                raise ConversationKernelConflict(
-                    "tool result image body or refs name a different winner"
-                )
-            expected_event = (
-                replace(
-                    candidate.tool_result_occurrence,
-                    payload={
-                        "tool_call_id": candidate.tool_call_id,
-                        "result_state": observed_state,
-                    },
-                )
-                if dynamic_memory
-                else candidate.tool_result_occurrence
-            )
+                raise ConversationKernelConflict("tool result identity names a different winner")
+            expected_event = candidate.tool_result_occurrence
             result_event = self._exact_event_for_confirmation(
                 connection,
                 expected_event,
                 session_id=candidate.session_id,
                 workspace_id=candidate.workspace_id,
             )
-            if isinstance(body, BlobContent):
-                self._require_exact_tool_output_blob(
-                    connection,
-                    workspace_id=candidate.workspace_id,
-                    expected=body,
-                )
-            if dynamic_memory:
-                return AcceptedMemoryToolResult(
-                    entry_id=candidate.result_entry_id,
-                    turn_id=candidate.turn_id,
-                    entry_sequence=int(entry["entry_sequence"]),
-                    event_sequence=int(result_event["event_sequence"]),
-                    canonical_body=observed_body,
-                    result_state=observed_state,
-                    model_visible_memory_fact_ids=visible_ids,
-                )
             return AcceptedEntry(
                 entry_id=candidate.result_entry_id,
                 turn_id=candidate.turn_id,
                 entry_sequence=int(entry["entry_sequence"]),
                 event_sequence=int(result_event["event_sequence"]),
             )
-
-    @staticmethod
-    def _require_exact_tool_output_blob(
-        connection: Connection,
-        *,
-        workspace_id: str,
-        expected: BlobContent,
-    ) -> None:
-        row = connection.execute(
-            """
-            SELECT id, logical_digest, logical_size, media_type, codec
-            FROM pulsara_v3.blobs
-            WHERE id = %s AND workspace_id = %s
-            """,
-            (expected.blob_id, workspace_id),
-        ).fetchone()
-        if (
-            row is None
-            or BlobContent(
-                blob_id=str(row["id"]),
-                digest=str(row["logical_digest"]),
-                size=int(row["logical_size"]),
-                media_type=str(row["media_type"]),
-                codec=str(row["codec"]),
-            )
-            != expected
-        ):
-            raise ConversationKernelConflict(
-                "prepared tool output descriptor names a different blob"
-            )
-
-    @staticmethod
-    def _confirm_direct_memory_result_shape(
-        candidate: PreparedToolResultAcceptance,
-        *,
-        body: str,
-        result_state: str,
-        visible_ids: tuple[str, ...],
-    ) -> None:
-        """Confirm a committed result without requiring its fact to still exist."""
-
-        if result_state not in {"SUCCESS", "APPLICATION_ERROR"}:
-            raise ConversationKernelConflict("direct memory result state is invalid")
-        try:
-            payload = json.loads(body)
-        except (TypeError, ValueError) as exc:
-            raise ConversationKernelConflict("direct memory result body is invalid") from exc
-        if not isinstance(payload, dict):
-            raise ConversationKernelConflict("direct memory result body is not an object")
-        if result_state == "APPLICATION_ERROR":
-            if not isinstance(payload.get("error"), str) or visible_ids:
-                raise ConversationKernelConflict("direct memory rejection body drifted")
-            return
-        status = payload.get("status")
-        if status not in {"SAVED", "ALREADY_PRESENT"}:
-            raise ConversationKernelConflict("direct memory success status drifted")
-        mutation = candidate.side_branch.mutation
-        if isinstance(mutation, PreparedRememberWrite):
-            related = payload.get("related_memories")
-            if (
-                not isinstance(related, list)
-                or len(related) > 3
-                or any(not isinstance(item, dict) for item in related)
-            ):
-                raise ConversationKernelConflict("remember result shape drifted")
-            try:
-                memory_id = parse_memory_target(payload.get("target"))
-                related_ids = tuple(parse_memory_target(item.get("target")) for item in related)
-            except ValueError as exc:
-                raise ConversationKernelConflict("remember result shape drifted") from exc
-            expected_ids = tuple(dict.fromkeys(
-                (memory_id, *related_ids)
-            ))
-            if visible_ids != expected_ids:
-                raise ConversationKernelConflict("remember exposure drifted")
-            if status == "SAVED":
-                from .memory import _fact_id
-                if memory_id != _fact_id(candidate.session_id, candidate.result_id):
-                    raise ConversationKernelConflict("remember fact identity drifted")
-            if payload.get("retrieval_summary") != thaw_json(mutation.retrieval_summary):
-                raise ConversationKernelConflict("remember retrieval cut drifted")
-        else:
-            expected_relation_endpoints = (
-                tuple(sorted((
-                    mutation.source_memory_id,
-                    mutation.target_memory_id,
-                )))
-                if mutation.relation_kind.value == "CONTRADICTS"
-                else (mutation.source_memory_id, mutation.target_memory_id)
-            )
-            if (
-                payload.get("source") != memory_target(expected_relation_endpoints[0])
-                or payload.get("target") != memory_target(expected_relation_endpoints[1])
-                or payload.get("relation_kind") != mutation.relation_kind.value
-                or not isinstance(payload.get("relation_id"), str)
-                or visible_ids != expected_relation_endpoints
-            ):
-                raise ConversationKernelConflict("relation result shape drifted")
 
     def accept_tool_interaction_decision(
         self,
@@ -1256,8 +980,16 @@ class _ToolOperations:
                     entry_sequence=result_entry_sequence,
                     entry_kind=EntryKind.TOOL_RESULT,
 
-                    content=denial_content,
                 )
+                denial_text = (denial_content.canonical_bytes if isinstance(denial_content, InlineContent)
+                    else PostgresCanonicalBlobStore.read_exact_in_connection(connection,
+                        blob_id=denial_content.blob_id, expected_digest=denial_content.digest,
+                        expected_size=denial_content.size, expected_workspace_id=str(subject["workspace_id"]),
+                        expected_media_type=denial_content.media_type, expected_codec=denial_content.codec))
+                write_content_parts(connection, session_id=guard.session_id,
+                    workspace_id=str(subject["workspace_id"]), entry_id=result_entry_id,
+                    parts=(ResultPart("text", denial_text.decode("utf-8")),),
+                    publisher=self._canonical_content_publisher)
                 connection.execute(
                     """
                     INSERT INTO pulsara_v3.tool_results (
@@ -1269,11 +1001,10 @@ class _ToolOperations:
                         observed_at, observation_duration_microseconds,
                         observation_origin_kind,
                         tool_reported_duration_microseconds,
-                        output_body_inline_content,output_body_blob_id,output_body_digest,
-                        output_body_size,output_body_media_type,output_body_codec
+                        public_fields
                     ) VALUES ('EXECUTED', %s, %s, %s, %s, %s, %s, NULL,
                               'POLICY_NO_ATTEMPT', %s, %s,
-                              'PERMISSION_DENIED', %s, NULL, 'POLICY', NULL, %s,%s,%s,%s,%s,%s)
+                              'PERMISSION_DENIED', %s, NULL, 'POLICY', NULL, %s)
                     """,
                     (
                         result_id,
@@ -1285,7 +1016,7 @@ class _ToolOperations:
                         permission_snapshot_fingerprint,
                         result_entry_id,
                         occurred_at,
-                        *_output_body_values(denial_content),
+                        Json({}),
                     ),
                 )
                 drafts.append(
@@ -1459,8 +1190,13 @@ class _ToolOperations:
                 or result["result_state"] != "PERMISSION_DENIED"
                 or result["permission_snapshot_fingerprint"] != permission_snapshot_fingerprint
                 or entry["entry_kind"] != EntryKind.TOOL_RESULT.value
-                or self._content_from_row(entry) != denial_content
-                or _output_body_from_row(result) != denial_content):
+                or public_result_parts(read_content_parts(connection, entry_id=result_entry_id, session_id=guard.session_id))
+                   != (ResultPart("text", (denial_content.canonical_bytes if isinstance(denial_content, InlineContent)
+                       else PostgresCanonicalBlobStore.read_exact_in_connection(connection,
+                           blob_id=denial_content.blob_id, expected_digest=denial_content.digest,
+                           expected_size=denial_content.size, expected_workspace_id=str(entry["workspace_id"]),
+                           expected_media_type=denial_content.media_type,
+                           expected_codec=denial_content.codec)).decode("utf-8")),)):
                 raise ConversationKernelConflict("interaction DENY result is incomplete or conflicting")
         else:
             raise ConversationKernelConflict("interaction decision union is invalid")

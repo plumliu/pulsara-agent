@@ -40,7 +40,7 @@ def _content(body=None):
     if body is None:
         body = canonical_json_bytes({"video_frames": True, "frames": [{"n": 1}], "next": None}).decode()
     return FrozenPromptContent((LLMTextPart(body), bound_test_image(
-        "image/png", b"validated image", 2, 2, workspace_id=WORKSPACE,
+        "image/png", b"validated image", 2, 2,
     )))
 
 

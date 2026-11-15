@@ -99,16 +99,21 @@ CREATE INDEX idx_pulsara_v3_agent_known_sessions_known
 
 CREATE TABLE pulsara_v3.blobs (
     id text CHECK (id ~ '^(blob|image):[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
-    workspace_id text NOT NULL,
+    workspace_id text,
     storage_identity text NOT NULL UNIQUE,
     logical_digest text NOT NULL CHECK (logical_digest ~ '^sha256:[0-9a-f]{64}$'),
     logical_size bigint NOT NULL CHECK (logical_size >= 0),
     media_type text NOT NULL,
     codec text NOT NULL,
     body bytea NOT NULL,
+    width integer,
+    height integer,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     UNIQUE (id, workspace_id),
-    CHECK (octet_length(body) = logical_size)
+    CHECK (octet_length(body) = logical_size),
+    CHECK ((id LIKE 'image:%' AND workspace_id IS NULL AND media_type LIKE 'image/%'
+            AND width IS NOT NULL AND height IS NOT NULL AND width > 0 AND height > 0)
+        OR (id LIKE 'blob:%' AND workspace_id IS NOT NULL AND width IS NULL AND height IS NULL))
 );
 
 CREATE TABLE pulsara_v3.context_snapshots (
@@ -376,23 +381,18 @@ CREATE TABLE pulsara_v3.transcript_entries (
     source_plan_workflow_id text,
     source_plan_interaction_id text,
     source_plan_handoff_kind text CHECK (source_plan_handoff_kind IN (
-        'ENTERED_PLAN', 'EXITED_PLAN', 'REVISION_REQUESTED', 'APPROVED_PLAN',
+        'ENTERED_PLAN', 'EXITED_PLAN', 'APPROVED_PLAN',
         'CANCELLED_PLAN', 'FORCE_EXITED_PLAN'
     )),
     imported_source_plan_workflow_id text,
     imported_source_plan_interaction_id text,
     imported_source_plan_handoff_kind text CHECK (imported_source_plan_handoff_kind IN (
-        'ENTERED_PLAN', 'EXITED_PLAN', 'REVISION_REQUESTED', 'APPROVED_PLAN',
+        'ENTERED_PLAN', 'EXITED_PLAN', 'APPROVED_PLAN',
         'CANCELLED_PLAN', 'FORCE_EXITED_PLAN'
     )),
-    inline_content bytea,
-    blob_id text,
-    content_digest text NOT NULL CHECK (content_digest ~ '^sha256:[0-9a-f]{64}$'),
-    content_size bigint NOT NULL CHECK (content_size >= 0),
-    content_media_type text NOT NULL,
-    content_codec text NOT NULL,
     accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     UNIQUE (session_id, id),
+    UNIQUE (session_id, workspace_id, id),
     UNIQUE (session_id, id, entry_kind),
     UNIQUE (session_id, id, turn_id),
     UNIQUE (session_id, id, imported_history_group_id),
@@ -405,8 +405,6 @@ CREATE TABLE pulsara_v3.transcript_entries (
         REFERENCES pulsara_v3.imported_history_groups (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, context_binding_revision_id)
         REFERENCES pulsara_v3.turn_context_binding_revisions (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
-    FOREIGN KEY (blob_id, workspace_id)
-        REFERENCES pulsara_v3.blobs (id, workspace_id) ON DELETE RESTRICT,
     CONSTRAINT ck_entry_owner_exact CHECK (
         (entry_owner_kind = 'EXECUTED_TURN' AND turn_id IS NOT NULL
             AND imported_history_group_id IS NULL
@@ -417,12 +415,6 @@ CREATE TABLE pulsara_v3.transcript_entries (
             AND imported_history_group_id IS NOT NULL
             AND num_nonnulls(source_plan_workflow_id, source_plan_interaction_id, source_plan_handoff_kind) = 0)
     ),
-    CHECK ((inline_content IS NULL) <> (blob_id IS NULL)),
-    CONSTRAINT transcript_entries_tool_result_inline_ck CHECK (
-        entry_kind <> 'TOOL_RESULT'
-        OR (inline_content IS NOT NULL AND blob_id IS NULL)
-    ),
-    CHECK (inline_content IS NULL OR octet_length(inline_content) = content_size),
     CHECK (
         (entry_kind IN ('ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST')
             AND ((entry_owner_kind = 'EXECUTED_TURN' AND context_binding_revision_id IS NOT NULL)
@@ -444,14 +436,14 @@ CREATE TABLE pulsara_v3.transcript_entries (
 ) OR
         (entry_kind = 'USER_MESSAGE'
             AND source_plan_workflow_id IS NOT NULL
-            AND source_plan_handoff_kind IN ('CANCELLED_PLAN', 'FORCE_EXITED_PLAN', 'REVISION_REQUESTED')
+            AND source_plan_handoff_kind IN ('CANCELLED_PLAN', 'FORCE_EXITED_PLAN')
 ) OR
         (source_plan_workflow_id IS NULL
             AND source_plan_interaction_id IS NULL
             AND source_plan_handoff_kind IS NULL)
     ),
     CHECK (
-        source_plan_handoff_kind NOT IN ('REVISION_REQUESTED', 'APPROVED_PLAN')
+        source_plan_handoff_kind NOT IN ('APPROVED_PLAN')
         OR source_plan_interaction_id IS NOT NULL
     ),
     CHECK (
@@ -464,11 +456,11 @@ CREATE TABLE pulsara_v3.transcript_entries (
                 (entry_kind = 'PLAN_CONTINUATION' AND imported_source_plan_workflow_id IS NOT NULL
                     AND imported_source_plan_handoff_kind IN ('ENTERED_PLAN', 'EXITED_PLAN', 'APPROVED_PLAN'))
                 OR (entry_kind = 'USER_MESSAGE' AND imported_source_plan_workflow_id IS NOT NULL
-                    AND imported_source_plan_handoff_kind IN ('CANCELLED_PLAN', 'FORCE_EXITED_PLAN', 'REVISION_REQUESTED'))
+                    AND imported_source_plan_handoff_kind IN ('CANCELLED_PLAN', 'FORCE_EXITED_PLAN'))
                 OR (entry_kind NOT IN ('PLAN_CONTINUATION') AND imported_source_plan_workflow_id IS NULL
                     AND imported_source_plan_handoff_kind IS NULL AND imported_source_plan_interaction_id IS NULL)
             )
-            AND (imported_source_plan_handoff_kind IS NULL OR imported_source_plan_handoff_kind NOT IN ('REVISION_REQUESTED', 'APPROVED_PLAN')
+            AND (imported_source_plan_handoff_kind IS NULL OR imported_source_plan_handoff_kind NOT IN ('APPROVED_PLAN')
                 OR imported_source_plan_interaction_id IS NOT NULL)
             AND (imported_source_plan_handoff_kind IS NULL OR imported_source_plan_handoff_kind NOT IN ('ENTERED_PLAN', 'EXITED_PLAN') OR imported_source_plan_interaction_id IS NULL)
         ) IS TRUE)
@@ -529,39 +521,41 @@ CREATE TABLE pulsara_v3.session_context_genesis (
         AND jsonb_typeof(model_call_binding->'connection_id') = 'string')
 );
 
-CREATE TABLE pulsara_v3.assistant_message_blocks (
+CREATE TABLE pulsara_v3.content_parts (
     id text CHECK (id ~ '^block:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
     session_id text NOT NULL,
     workspace_id text NOT NULL,
-    assistant_entry_id text NOT NULL,
-    block_ordinal integer NOT NULL CHECK (block_ordinal >= 0),
-    block_kind text NOT NULL CHECK (block_kind IN ('TEXT', 'DATA', 'TOOL_CALL')),
+    entry_id text,
+    queue_item_id text,
+    ordinal integer NOT NULL CHECK (ordinal >= 0),
+    type text NOT NULL CHECK (type IN ('text','image','target','object','annotation','tool_call','data')),
+    inline_value bytea,
+    blob_id text REFERENCES pulsara_v3.blobs(id) ON DELETE RESTRICT,
     tool_call_id text,
     tool_name text,
     tool_arguments jsonb,
-    inline_content bytea,
-    blob_id text,
-    content_digest text,
-    content_size bigint,
-    content_media_type text,
-    content_codec text,
+    data_media_type text,
+    data_codec text,
     UNIQUE (session_id, id),
-    UNIQUE (assistant_entry_id, block_ordinal),
-    UNIQUE (session_id, assistant_entry_id, tool_call_id),
+    UNIQUE (entry_id, ordinal),
+    UNIQUE (queue_item_id, ordinal),
+    UNIQUE (session_id, entry_id, tool_call_id),
     FOREIGN KEY (session_id, workspace_id)
-        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE CASCADE,
-    FOREIGN KEY (session_id, assistant_entry_id)
-        REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
-    FOREIGN KEY (blob_id, workspace_id)
-        REFERENCES pulsara_v3.blobs (id, workspace_id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.sessions(id,workspace_id) ON DELETE CASCADE,
+    FOREIGN KEY (session_id, workspace_id, entry_id)
+        REFERENCES pulsara_v3.transcript_entries(session_id,workspace_id,id) ON DELETE CASCADE,
+    CHECK (num_nonnulls(entry_id,queue_item_id)=1),
     CHECK (
-        (block_kind = 'TOOL_CALL' AND tool_call_id IS NOT NULL AND tool_name IS NOT NULL
-            AND tool_arguments IS NOT NULL AND inline_content IS NULL AND blob_id IS NULL)
-        OR
-        (block_kind IN ('TEXT', 'DATA') AND tool_call_id IS NULL AND tool_name IS NULL
-            AND tool_arguments IS NULL AND ((inline_content IS NULL) <> (blob_id IS NULL))
-            AND content_digest IS NOT NULL AND content_size IS NOT NULL
-            AND content_media_type IS NOT NULL AND content_codec IS NOT NULL)
+        (type='tool_call' AND entry_id IS NOT NULL
+            AND tool_call_id IS NOT NULL AND tool_name IS NOT NULL
+            AND tool_arguments IS NOT NULL AND jsonb_typeof(tool_arguments)='object'
+            AND inline_value IS NULL AND blob_id IS NULL AND data_media_type IS NULL AND data_codec IS NULL)
+        OR (type<>'tool_call' AND tool_call_id IS NULL AND tool_name IS NULL AND tool_arguments IS NULL
+            AND ((type='image' AND inline_value IS NULL AND blob_id IS NOT NULL)
+                OR (type<>'image' AND num_nonnulls(inline_value,blob_id)=1))
+            AND ((type='data' AND inline_value IS NOT NULL AND data_media_type IS NOT NULL
+                    AND data_codec IS NOT NULL AND data_codec<>'')
+                OR ((type<>'data' OR inline_value IS NULL) AND data_media_type IS NULL AND data_codec IS NULL)))
     )
 );
 
@@ -627,7 +621,7 @@ CREATE TABLE pulsara_v3.tool_invocations (
     UNIQUE (session_id,source_exec_attempt_id,call_sequence),
     FOREIGN KEY (session_id,turn_id) REFERENCES pulsara_v3.turns(session_id,id) ON DELETE CASCADE,
     FOREIGN KEY (session_id,assistant_entry_id,tool_call_id)
-        REFERENCES pulsara_v3.assistant_message_blocks(session_id,assistant_entry_id,tool_call_id) ON DELETE CASCADE,
+        REFERENCES pulsara_v3.content_parts(session_id,entry_id,tool_call_id) ON DELETE CASCADE,
     CHECK (
         (source_kind='MODEL_TOOL_CALL' AND assistant_entry_id IS NOT NULL AND tool_call_id IS NOT NULL
             AND source_exec_attempt_id IS NULL AND call_sequence IS NULL AND tool_name IS NULL AND original_arguments IS NULL)
@@ -675,7 +669,7 @@ CREATE TABLE pulsara_v3.tool_execution_attempts (
     UNIQUE (session_id, assistant_entry_id, tool_call_id),
     UNIQUE (session_id, id, assistant_entry_id, tool_call_id),
     FOREIGN KEY (session_id, assistant_entry_id, tool_call_id)
-        REFERENCES pulsara_v3.assistant_message_blocks (session_id, assistant_entry_id, tool_call_id) ON DELETE CASCADE,
+        REFERENCES pulsara_v3.content_parts (session_id, entry_id, tool_call_id) ON DELETE CASCADE,
     FOREIGN KEY (session_id, retry_of_attempt_id)
         REFERENCES pulsara_v3.tool_execution_attempts (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     CHECK ((remote_identity IS NULL) = (remote_identity_published_at IS NULL)),
@@ -718,21 +712,10 @@ CREATE TABLE pulsara_v3.tool_results (
         'POLICY', 'PLAN_CONTROL', 'CUSTOM_OR_UNKNOWN'
     )),
     tool_reported_duration_microseconds bigint,
-    output_body_inline_content bytea,
-    output_body_blob_id text,
-    output_body_digest text CHECK (output_body_digest ~ '^sha256:[0-9a-f]{64}$'),
-    output_body_size bigint CHECK (output_body_size >= 0 AND output_body_size <= 16777216),
-    output_body_media_type text,
-    output_body_codec text CHECK (output_body_codec = 'utf-8'),
     output_unavailability_reason text CHECK (output_unavailability_reason IN (
-        'BODY_TOO_LARGE','BODY_PUBLICATION_FAILED','BODY_PUBLICATION_UNCONFIRMED'
+        'BODY_PUBLICATION_FAILED','BODY_PUBLICATION_UNCONFIRMED'
     )),
-    output_source_coverage text NOT NULL DEFAULT 'COMPLETE'
-        CHECK (output_source_coverage IN ('COMPLETE','RETAINED_SNAPSHOT')),
-    output_source_coverage_reason text CHECK (output_source_coverage_reason IN (
-        'TERMINAL_RETENTION_GAP','TERMINAL_SANITIZER_UNAVAILABLE'
-    )),
-    output_omitted boolean NOT NULL DEFAULT false,
+    public_fields json NOT NULL DEFAULT '{}'::json CHECK (json_typeof(public_fields)='object'),
     result_facts jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(result_facts)='object'),
     model_visible_memory_fact_ids text[] NOT NULL DEFAULT '{}'::text[] CHECK (
         cardinality(model_visible_memory_fact_ids) <= 50
@@ -748,15 +731,13 @@ CREATE TABLE pulsara_v3.tool_results (
     FOREIGN KEY (session_id, workspace_id)
         REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE CASCADE,
     FOREIGN KEY (session_id, tool_call_entry_id, tool_call_id)
-        REFERENCES pulsara_v3.assistant_message_blocks (session_id, assistant_entry_id, tool_call_id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
+        REFERENCES pulsara_v3.content_parts (session_id, entry_id, tool_call_id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, attempt_id, tool_call_entry_id, tool_call_id)
         REFERENCES pulsara_v3.tool_execution_attempts (
             session_id, id, assistant_entry_id, tool_call_id
         ) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, result_entry_id)
         REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
-    FOREIGN KEY (output_body_blob_id, workspace_id)
-        REFERENCES pulsara_v3.blobs (id, workspace_id) ON DELETE RESTRICT,
     CHECK (
         (result_record_kind = 'IMPORTED_HISTORY'
             AND permission_snapshot_fingerprint IS NULL
@@ -765,7 +746,7 @@ CREATE TABLE pulsara_v3.tool_results (
             AND (
                 (result_origin_kind = 'PHYSICAL_ATTEMPT' AND result_state IN ('SUCCESS', 'INVALID_ARGUMENTS', 'APPLICATION_ERROR', 'SYSTEM_ERROR', 'CANCELLED', 'CANCELLED_BEFORE_DISPATCH'))
                 OR (result_origin_kind = 'POLICY_NO_ATTEMPT' AND result_state IN ('INVALID_ARGUMENTS', 'PERMISSION_DENIED', 'TOOL_UNAVAILABLE', 'CANCELLED_BEFORE_DISPATCH'))
-                OR (result_origin_kind = 'PLAN_CONTROL' AND result_state IN ('SUCCESS', 'APPLICATION_ERROR', 'CANCELLED_BEFORE_DISPATCH'))
+                OR (result_origin_kind = 'PLAN_CONTROL' AND result_state IN ('SUCCESS', 'APPLICATION_ERROR', 'CANCELLED', 'CANCELLED_BEFORE_DISPATCH'))
             )) OR
         (result_record_kind = 'EXECUTED' AND permission_snapshot_fingerprint IS NOT NULL AND (
         (result_origin_kind = 'POLICY_NO_ATTEMPT'
@@ -786,7 +767,7 @@ CREATE TABLE pulsara_v3.tool_results (
         (result_origin_kind = 'PLAN_CONTROL'
             AND attempt_id IS NULL
             AND num_nonnulls(control_plan_workflow_id, control_plan_interaction_id) = 1
-            AND result_state IN ('SUCCESS', 'APPLICATION_ERROR', 'CANCELLED_BEFORE_DISPATCH')
+            AND result_state IN ('SUCCESS', 'APPLICATION_ERROR', 'CANCELLED', 'CANCELLED_BEFORE_DISPATCH')
         )
         ))
     ),
@@ -820,28 +801,6 @@ CREATE TABLE pulsara_v3.tool_results (
                 'BUILTIN', 'TERMINAL_PROCESS', 'MCP_REMOTE',
                 'CUSTOM_OR_UNKNOWN'
             ))
-    ),
-    CHECK (
-        (output_source_coverage = 'COMPLETE'
-            AND output_source_coverage_reason IS NULL) OR
-        (output_source_coverage = 'RETAINED_SNAPSHOT'
-            AND output_source_coverage_reason IS NOT NULL
-            AND output_source_coverage_reason IN (
-                'TERMINAL_RETENTION_GAP', 'TERMINAL_SANITIZER_UNAVAILABLE'
-            ))
-    ),
-    CHECK (
-        (output_body_digest IS NULL AND output_body_inline_content IS NULL
-            AND output_body_blob_id IS NULL AND output_body_size IS NULL
-            AND output_body_media_type IS NULL AND output_body_codec IS NULL)
-        OR
-        (output_body_digest IS NOT NULL AND output_body_size IS NOT NULL
-            AND output_body_media_type IS NOT NULL AND output_body_codec IS NOT NULL
-            AND output_unavailability_reason IS NULL
-            AND ((output_body_inline_content IS NOT NULL AND output_body_blob_id IS NULL
-                    AND octet_length(output_body_inline_content)=output_body_size
-                    AND output_body_size <= 65536)
-                OR (output_body_inline_content IS NULL AND output_body_blob_id IS NOT NULL)))
     )
 );
 
@@ -855,7 +814,7 @@ CREATE TABLE pulsara_v3.imported_tool_call_closures (
     )),
     PRIMARY KEY (session_id, assistant_entry_id, tool_call_id),
     FOREIGN KEY (session_id, assistant_entry_id, tool_call_id)
-        REFERENCES pulsara_v3.assistant_message_blocks (session_id, assistant_entry_id, tool_call_id) ON DELETE CASCADE
+        REFERENCES pulsara_v3.content_parts (session_id, entry_id, tool_call_id) ON DELETE CASCADE
 );
 
 CREATE TABLE pulsara_v3.prompt_queue_items (
@@ -871,7 +830,13 @@ CREATE TABLE pulsara_v3.prompt_queue_items (
     source_work_id text,
     source_turn_id text,
     source_tool_attempt_id text,
-    initial_context jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(initial_context)='array'),
+    source_cell_id text CHECK (source_cell_id ~ '^cell:[a-z2-7]{25}[aeimquy4]$'),
+    source_record_sequence bigint CHECK (source_record_sequence >= 1),
+    cell_output_kind text CHECK (cell_output_kind IN ('log','return','diagnostic','tool_result')),
+    CHECK ((input_origin='CELL_OUTPUT' AND source_cell_id IS NOT NULL
+            AND source_record_sequence IS NOT NULL AND cell_output_kind IS NOT NULL)
+        OR (input_origin<>'CELL_OUTPUT' AND source_cell_id IS NULL
+            AND source_record_sequence IS NULL AND cell_output_kind IS NULL)),
     work_inputs jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(work_inputs)='array'),
     work_title text CHECK (work_title IS NULL OR (input_origin = 'AGENT_INSTRUCTION'
         AND btrim(work_title) <> '' AND octet_length(work_title) <= 256)),
@@ -916,17 +881,12 @@ CREATE TABLE pulsara_v3.prompt_queue_items (
         'CANCELLED_PLAN', 'FORCE_EXITED_PLAN'
     )),
     status text NOT NULL CHECK (status IN ('PENDING', 'CONSUMED', 'CANCELLED', 'REJECTED')),
-    inline_content bytea,
-    blob_id text,
-    content_digest text NOT NULL CHECK (content_digest ~ '^sha256:[0-9a-f]{64}$'),
-    content_size bigint NOT NULL CHECK (content_size >= 0),
-    content_media_type text NOT NULL,
-    content_codec text NOT NULL,
     consumed_entry_id text,
     terminal_reason text,
     accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     terminal_at timestamptz,
     UNIQUE (session_id, id),
+    UNIQUE (session_id, workspace_id, id),
     UNIQUE (session_id, queue_sequence),
     FOREIGN KEY (session_id, workspace_id)
         REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE CASCADE,
@@ -936,10 +896,7 @@ CREATE TABLE pulsara_v3.prompt_queue_items (
         REFERENCES pulsara_v3.turns (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, consumed_entry_id)
         REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
-    FOREIGN KEY (blob_id, workspace_id)
-        REFERENCES pulsara_v3.blobs (id, workspace_id) ON DELETE RESTRICT,
     CHECK ((delivery_mode = 'NEW_TURN') = (target_turn_id IS NULL)),
-    CHECK ((inline_content IS NULL) <> (blob_id IS NULL)),
     CHECK ((status = 'PENDING') = (terminal_at IS NULL)),
     CHECK ((status = 'CONSUMED') = (consumed_entry_id IS NOT NULL)),
     CHECK ((delivery_mode = 'NEW_TURN') = (model_call_binding IS NOT NULL)),
@@ -1007,6 +964,10 @@ CREATE UNIQUE INDEX uq_pulsara_v3_queue_plan_handoff_claim
         session_id, pending_plan_handoff_workflow_id
     ) WHERE pending_plan_handoff_workflow_id IS NOT NULL;
 
+ALTER TABLE pulsara_v3.content_parts ADD CONSTRAINT content_parts_queue_owner_fk
+    FOREIGN KEY (session_id, workspace_id, queue_item_id)
+    REFERENCES pulsara_v3.prompt_queue_items(session_id,workspace_id,id) ON DELETE CASCADE;
+
 CREATE TABLE pulsara_v3.scheduled_tasks (
     id text CHECK (id ~ '^schedule:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
     session_id text NOT NULL REFERENCES pulsara_v3.sessions(id) ON DELETE CASCADE,
@@ -1029,40 +990,6 @@ CREATE INDEX scheduled_tasks_due ON pulsara_v3.scheduled_tasks(next_run_at, id) 
 CREATE INDEX prompt_queue_scheduled_status ON pulsara_v3.prompt_queue_items(session_id, scheduled_task_id, status);
 CREATE INDEX prompt_queue_agent_source_attempt ON pulsara_v3.prompt_queue_items(source_session_id, source_tool_attempt_id, id) WHERE input_origin = 'AGENT_INSTRUCTION';
 
-CREATE TABLE pulsara_v3.canonical_image_refs (
-    session_id text NOT NULL,
-    workspace_id text NOT NULL,
-    queue_item_id text,
-    transcript_entry_id text,
-    ref_ordinal integer NOT NULL CHECK (ref_ordinal >= 0),
-    blob_id text CHECK (blob_id ~ '^image:[a-z2-7]{25}[aeimquy4]$') NOT NULL,
-    FOREIGN KEY (session_id, workspace_id)
-        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE CASCADE,
-    FOREIGN KEY (session_id, queue_item_id)
-        REFERENCES pulsara_v3.prompt_queue_items (session_id, id) ON DELETE CASCADE,
-    FOREIGN KEY (session_id, transcript_entry_id)
-        REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE CASCADE,
-    FOREIGN KEY (blob_id, workspace_id)
-        REFERENCES pulsara_v3.blobs (id, workspace_id) ON DELETE RESTRICT,
-    CHECK (num_nonnulls(
-        queue_item_id, transcript_entry_id
-    ) = 1)
-);
-CREATE UNIQUE INDEX uq_pulsara_v3_image_ref_queue_ordinal
-    ON pulsara_v3.canonical_image_refs (
-        session_id, queue_item_id, ref_ordinal
-    ) WHERE queue_item_id IS NOT NULL;
-CREATE UNIQUE INDEX uq_pulsara_v3_image_ref_entry_ordinal
-    ON pulsara_v3.canonical_image_refs (
-        session_id, transcript_entry_id, ref_ordinal
-    ) WHERE transcript_entry_id IS NOT NULL;
-CREATE INDEX ix_pulsara_v3_image_ref_blob
-    ON pulsara_v3.canonical_image_refs (blob_id, workspace_id);
-CREATE INDEX ix_pulsara_v3_image_ref_session
-    ON pulsara_v3.canonical_image_refs (session_id, workspace_id);
-
--- One immutable user-visible HTML/failed-placeholder result owned by an
--- assistant message.  This is not a subscription log or execution receipt.
 CREATE TABLE pulsara_v3.assistant_visualizations (
     session_id text NOT NULL,
     workspace_id text NOT NULL,
@@ -1075,9 +1002,6 @@ CREATE TABLE pulsara_v3.assistant_visualizations (
     source_filename text NOT NULL,
     state text NOT NULL CHECK (state IN ('READY', 'FAILED')),
     blob_id text,
-    width integer,
-    height integer,
-    CHECK ((width IS NULL AND height IS NULL) OR (width > 0 AND height > 0 AND width IS NOT NULL AND height IS NOT NULL)),
     failure_code text,
     failure_detail text,
     PRIMARY KEY (session_id, assistant_entry_id, ordinal),
@@ -1093,8 +1017,8 @@ CREATE TABLE pulsara_v3.assistant_visualizations (
         REFERENCES pulsara_v3.transcript_entries (
             session_id, id, imported_history_group_id
         ) ON DELETE CASCADE,
-    FOREIGN KEY (blob_id, workspace_id)
-        REFERENCES pulsara_v3.blobs (id, workspace_id) ON DELETE RESTRICT,
+    FOREIGN KEY (blob_id)
+        REFERENCES pulsara_v3.blobs (id) ON DELETE RESTRICT,
     CHECK (
         (turn_id IS NOT NULL AND imported_history_group_id IS NULL)
         OR
@@ -1104,7 +1028,7 @@ CREATE TABLE pulsara_v3.assistant_visualizations (
         (state = 'READY' AND blob_id IS NOT NULL
             AND failure_code IS NULL AND failure_detail IS NULL)
         OR
-        (state = 'FAILED' AND blob_id IS NULL AND width IS NULL AND height IS NULL
+        (state = 'FAILED' AND blob_id IS NULL
             AND failure_code IS NOT NULL AND failure_detail IS NOT NULL)
     )
 );
@@ -1138,8 +1062,8 @@ CREATE TABLE pulsara_v3.interaction_decisions (
     FOREIGN KEY (session_id, command_id)
         REFERENCES pulsara_v3.session_commands (session_id, command_id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, subject_tool_call_entry_id, subject_tool_call_id)
-        REFERENCES pulsara_v3.assistant_message_blocks (
-            session_id, assistant_entry_id, tool_call_id
+        REFERENCES pulsara_v3.content_parts (
+            session_id, entry_id, tool_call_id
         ) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, subject_turn_id)
         REFERENCES pulsara_v3.turns (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
@@ -1196,8 +1120,8 @@ CREATE TABLE pulsara_v3.plan_workflows (
     FOREIGN KEY (session_id, entry_turn_id)
         REFERENCES pulsara_v3.turns (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, entry_assistant_entry_id, entry_tool_call_id)
-        REFERENCES pulsara_v3.assistant_message_blocks (
-            session_id, assistant_entry_id, tool_call_id
+        REFERENCES pulsara_v3.content_parts (
+            session_id, entry_id, tool_call_id
         ) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     CHECK ((status = 'ACTIVE') = (terminal_at IS NULL)),
     CHECK ((status = 'APPROVED') = (accepted_plan_interaction_id IS NOT NULL)),
@@ -1252,8 +1176,8 @@ CREATE TABLE pulsara_v3.plan_interactions (
     FOREIGN KEY (session_id, origin_turn_id)
         REFERENCES pulsara_v3.turns (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, assistant_entry_id, tool_call_id)
-        REFERENCES pulsara_v3.assistant_message_blocks (
-            session_id, assistant_entry_id, tool_call_id
+        REFERENCES pulsara_v3.content_parts (
+            session_id, entry_id, tool_call_id
         ) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, control_tool_result_id)
         REFERENCES pulsara_v3.tool_results (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
@@ -1289,13 +1213,14 @@ CREATE TABLE pulsara_v3.plan_interactions (
         (kind = 'QUESTION' AND status IN ('OPEN', 'ABORTED')
             AND control_tool_result_id IS NULL AND answer_kind IS NULL
             AND selected_option_ordinal IS NULL) OR
-        (kind = 'DRAFT_REVIEW' AND control_tool_result_id IS NOT NULL
-            AND answer_kind IS NULL AND selected_option_ordinal IS NULL)
+        (kind = 'DRAFT_REVIEW' AND answer_kind IS NULL AND selected_option_ordinal IS NULL
+            AND ((status IN ('OPEN','ABORTED') AND control_tool_result_id IS NULL)
+                OR (status NOT IN ('OPEN','ABORTED') AND control_tool_result_id IS NOT NULL)))
     ),
     CHECK (
-        (status IN ('APPROVED', 'REVISION_REQUESTED')
+        (status = 'APPROVED'
             AND decision_continuation_entry_id IS NOT NULL) OR
-        (status NOT IN ('APPROVED', 'REVISION_REQUESTED')
+        (status <> 'APPROVED'
             AND decision_continuation_entry_id IS NULL)
     ),
     CHECK (kind = 'DRAFT_REVIEW' OR feedback_present = false),
@@ -1350,104 +1275,33 @@ CREATE TABLE pulsara_v3.memory_facts (
     project_workspace_id text GENERATED ALWAYS AS (
         CASE WHEN context_id = 'ctx:global' THEN NULL ELSE context_id END
     ) STORED,
-    lifecycle text NOT NULL CHECK (lifecycle IN ('ACTIVE', 'SUPERSEDED')),
     fact_kind text NOT NULL CHECK (fact_kind IN (
-        'USER_PROFILE', 'RESPONSE_PREFERENCE', 'FACT', 'DECISION'
+        'USER_PROFILE', 'RESPONSE_PREFERENCE', 'FACT'
     )),
-    statement text NOT NULL CHECK (octet_length(statement) BETWEEN 1 AND 8192),
-    fact_semantic_digest text NOT NULL CHECK (
-        fact_semantic_digest ~ '^sha256:[0-9a-f]{64}$'
-    ),
+    -- A single-line title excludes the line boundaries recognized by str.splitlines().
+    title text NOT NULL CHECK (char_length(title) BETWEEN 1 AND 128
+        AND title !~ U&'[\000a\000b\000c\000d\001c\001d\001e\0085\2028\2029]'),
+    statement text NOT NULL,
+    CHECK ((fact_kind='RESPONSE_PREFERENCE' AND statement='') OR
+        (fact_kind<>'RESPONSE_PREFERENCE' AND char_length(statement) BETWEEN 1 AND 8000)),
     accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    user_edited_at timestamptz,
-    statement_en text GENERATED ALWAYS AS (statement) STORED,
-    statement_tech text GENERATED ALWAYS AS (statement) STORED,
+    search_text text GENERATED ALWAYS AS ('title: ' || title || E'\nstatement: ' || statement) STORED,
+    statement_en text GENERATED ALWAYS AS ('title: ' || title || E'\nstatement: ' || statement) STORED,
+    statement_tech text GENERATED ALWAYS AS ('title: ' || title || E'\nstatement: ' || statement) STORED,
     UNIQUE (memory_domain_id, id),
     UNIQUE (memory_domain_id, context_id, id),
     FOREIGN KEY (memory_domain_id, project_workspace_id)
         REFERENCES pulsara_v3.workspaces (memory_domain_id, id)
-        ON DELETE RESTRICT,
-    CHECK (fact_kind <> 'RESPONSE_PREFERENCE' OR octet_length(statement) <= 2048)
+        ON DELETE RESTRICT
 );
 CREATE INDEX idx_pulsara_v3_memory_fact_project_workspace_fk
     ON pulsara_v3.memory_facts (memory_domain_id, project_workspace_id)
     WHERE project_workspace_id IS NOT NULL;
-CREATE UNIQUE INDEX uq_pulsara_v3_memory_active_semantic
-    ON pulsara_v3.memory_facts (
-        memory_domain_id, context_id, fact_semantic_digest
-    ) WHERE lifecycle = 'ACTIVE';
 CREATE INDEX idx_pulsara_v3_memory_bm25 ON pulsara_v3.memory_facts USING bm25
-    (id,statement,statement_en,statement_tech)
-    WITH (key_field='id',text_fields='{"statement":{"tokenizer":{"type":"jieba","search_mode":true,"stopwords":["!","\"","#","$","%","&","''","(",")","*","+",",","-",".","/",":",";","<","=",">","?","@","[","\\","]","^","_","`","{","|","}","~"," ","\t","\n","\r","，","。","！","？","；","：","、","（","）","【","】","《","》","“","”","‘","’","—","…"]}},"statement_en":{"tokenizer":{"type":"default","stemmer":"English"}},"statement_tech":{"tokenizer":{"type":"regex","pattern":"[./:@+-]*[A-Za-z0-9_][A-Za-z0-9_./:@+-]*"}}}');
+    (id,search_text,statement_en,statement_tech)
+    WITH (key_field='id',text_fields='{"search_text":{"tokenizer":{"type":"jieba","search_mode":true,"stopwords":["!","\"","#","$","%","&","''","(",")","*","+",",","-",".","/",":",";","<","=",">","?","@","[","\\","]","^","_","`","{","|","}","~"," ","\t","\n","\r","，","。","！","？","；","：","、","（","）","【","】","《","》","“","”","‘","’","—","…"]}},"statement_en":{"tokenizer":{"type":"default","stemmer":"English"}},"statement_tech":{"tokenizer":{"type":"regex","pattern":"[./:@+-]*[A-Za-z0-9_][A-Za-z0-9_./:@+-]*"}}}');
 
-CREATE TABLE pulsara_v3.memory_relations (
-    id text CHECK (id ~ '^relation:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
-    memory_domain_id text NOT NULL,
-    source_context_id text NOT NULL,
-    source_fact_id text NOT NULL,
-    source_fact_kind text NOT NULL CHECK (source_fact_kind IN (
-        'USER_PROFILE', 'RESPONSE_PREFERENCE', 'FACT', 'DECISION'
-    )),
-    relation_kind text NOT NULL CHECK (relation_kind IN (
-        'BASED_ON', 'SUPERSEDES', 'CONTRADICTS'
-    )),
-    target_context_id text NOT NULL,
-    target_fact_id text NOT NULL,
-    target_fact_kind text NOT NULL CHECK (target_fact_kind IN (
-        'USER_PROFILE', 'RESPONSE_PREFERENCE', 'FACT', 'DECISION'
-    )),
-    supersede_mode text CHECK (supersede_mode IN (
-        'SAME_KIND_REPLACEMENT', 'TAXONOMY_CORRECTION'
-    )),
-    ordinal integer,
-    accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    UNIQUE (
-        memory_domain_id, source_context_id, source_fact_id,
-        relation_kind, target_context_id, target_fact_id
-    ),
-    FOREIGN KEY (memory_domain_id, source_context_id, source_fact_id)
-        REFERENCES pulsara_v3.memory_facts (
-            memory_domain_id, context_id, id
-        ) ON DELETE RESTRICT,
-    FOREIGN KEY (memory_domain_id, target_context_id, target_fact_id)
-        REFERENCES pulsara_v3.memory_facts (
-            memory_domain_id, context_id, id
-        ) ON DELETE RESTRICT,
-    CHECK (source_fact_id <> target_fact_id),
-    CHECK (
-        (relation_kind = 'BASED_ON' AND supersede_mode IS NULL
-            AND ordinal BETWEEN 0 AND 7
-            AND ((source_context_id = 'ctx:global'
-                    AND target_context_id = 'ctx:global')
-                OR (source_context_id ~ '^workspace:[a-z2-7]{25}[aeimquy4]$'
-                    AND (target_context_id = 'ctx:global'
-                        OR source_context_id = target_context_id))))
-        OR
-        (relation_kind = 'SUPERSEDES' AND ordinal IS NULL
-            AND supersede_mode IS NOT NULL
-            AND source_context_id = target_context_id
-            AND ((supersede_mode = 'SAME_KIND_REPLACEMENT'
-                    AND source_fact_kind = target_fact_kind)
-                OR (supersede_mode = 'TAXONOMY_CORRECTION'
-                    AND source_fact_kind <> target_fact_kind)))
-        OR
-        (relation_kind = 'CONTRADICTS' AND supersede_mode IS NULL
-            AND ordinal IS NULL AND source_context_id = target_context_id
-            AND source_fact_kind = target_fact_kind)
-    )
-);
-CREATE INDEX idx_pulsara_v3_memory_relation_incoming
-    ON pulsara_v3.memory_relations (
-        memory_domain_id, target_context_id,
-        target_fact_id, relation_kind
-    );
-CREATE UNIQUE INDEX uq_pulsara_v3_memory_contradiction_unordered
-    ON pulsara_v3.memory_relations (
-        memory_domain_id, source_context_id,
-        least(source_fact_id, target_fact_id),
-        greatest(source_fact_id, target_fact_id)
-    ) WHERE relation_kind = 'CONTRADICTS';
 CREATE TABLE pulsara_v3.memory_embeddings (
     memory_domain_id text NOT NULL,
     fact_id text NOT NULL,
@@ -1465,79 +1319,40 @@ CREATE INDEX idx_pulsara_v3_memory_embeddings_hnsw
     ON pulsara_v3.memory_embeddings USING hnsw (embedding public.vector_cosine_ops);
 
 CREATE FUNCTION pulsara_v3.seal_memory_fact()
-RETURNS trigger
-LANGUAGE plpgsql
-SET search_path = pg_catalog, pg_temp
-AS $$
-BEGIN
-    IF TG_OP = 'UPDATE' AND (
-        OLD.memory_domain_id IS DISTINCT FROM NEW.memory_domain_id OR
-        OLD.context_id IS DISTINCT FROM NEW.context_id OR
-        OLD.fact_kind IS DISTINCT FROM NEW.fact_kind OR
-        (OLD.statement IS DISTINCT FROM NEW.statement AND (
-            NEW.user_edited_at IS NULL OR
-            NEW.user_edited_at IS DISTINCT FROM NEW.updated_at OR
-            NEW.updated_at <= OLD.updated_at OR
-            OLD.fact_semantic_digest IS NOT DISTINCT FROM NEW.fact_semantic_digest
-        )) OR
-        (OLD.statement IS NOT DISTINCT FROM NEW.statement AND (
-            OLD.fact_semantic_digest IS DISTINCT FROM NEW.fact_semantic_digest OR
-            OLD.user_edited_at IS DISTINCT FROM NEW.user_edited_at
-        ))
-    ) THEN
-        RAISE EXCEPTION 'memory fact immutable fields changed' USING ERRCODE = '23514';
-    END IF;
-    RETURN NEW;
-END;
-$$;
-CREATE TRIGGER trg_pulsara_v3_memory_fact
-BEFORE INSERT OR UPDATE ON pulsara_v3.memory_facts
-FOR EACH ROW EXECUTE FUNCTION pulsara_v3.seal_memory_fact();
-
-CREATE FUNCTION pulsara_v3.seal_memory_relation()
-RETURNS trigger
-LANGUAGE plpgsql
-SET search_path = pg_catalog, pg_temp
-AS $$
-BEGIN
-    RAISE EXCEPTION 'memory relation immutable fields changed' USING ERRCODE = '23514';
-END;
-$$;
-CREATE TRIGGER trg_pulsara_v3_memory_relation_seal
-BEFORE UPDATE ON pulsara_v3.memory_relations
-FOR EACH ROW EXECUTE FUNCTION pulsara_v3.seal_memory_relation();
-
--- Relations own their endpoints independently of any conversation history.
-CREATE FUNCTION pulsara_v3.enforce_memory_relation_endpoints()
-RETURNS trigger
-LANGUAGE plpgsql
-SET search_path = pg_catalog, pg_temp
-AS $$
+RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
-    source_fact pulsara_v3.memory_facts%ROWTYPE;
-    target_fact pulsara_v3.memory_facts%ROWTYPE;
+    -- Match normalize_memory_text's Python str.strip(), including C0 information
+    -- separators. POSIX [:space:] depends on locale and misses Unicode spaces
+    -- in a C-locale database; btrim's explicit character set does not.
+    trim_characters constant text := U&'\0009\000a\000b\000c\000d\001c\001d\001e\001f\0020\0085\00a0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200a\2028\2029\202f\205f\3000';
 BEGIN
-    SELECT * INTO source_fact FROM pulsara_v3.memory_facts
-    WHERE memory_domain_id=NEW.memory_domain_id AND id=NEW.source_fact_id;
-    SELECT * INTO target_fact FROM pulsara_v3.memory_facts
-    WHERE memory_domain_id=NEW.memory_domain_id AND id=NEW.target_fact_id;
-    IF source_fact.id IS NULL OR target_fact.id IS NULL
-       OR source_fact.context_id IS DISTINCT FROM NEW.source_context_id
-       OR source_fact.fact_kind IS DISTINCT FROM NEW.source_fact_kind
-       OR target_fact.context_id IS DISTINCT FROM NEW.target_context_id
-       OR target_fact.fact_kind IS DISTINCT FROM NEW.target_fact_kind THEN
-        RAISE EXCEPTION 'memory relation endpoint identity drifted' USING ERRCODE = '23514';
+    -- Normalize before text limits, immutable-title comparison and no-op
+    -- detection. Discard preference bodies before ordinary body validation.
+    IF NEW.fact_kind='RESPONSE_PREFERENCE' THEN
+        NEW.statement := '';
+    ELSE
+        NEW.statement := btrim(normalize(replace(replace(NEW.statement, E'\r\n', E'\n'), E'\r', E'\n'), NFC), trim_characters);
+    END IF;
+    NEW.title := btrim(normalize(replace(replace(NEW.title, E'\r\n', E'\n'), E'\r', E'\n'), NFC), trim_characters);
+    IF TG_OP='UPDATE' THEN
+        IF ROW(NEW.id,NEW.memory_domain_id,NEW.fact_kind,NEW.title,NEW.accepted_at)
+            IS DISTINCT FROM ROW(OLD.id,OLD.memory_domain_id,OLD.fact_kind,OLD.title,OLD.accepted_at) THEN
+            RAISE EXCEPTION 'memory identity, title and kind are immutable' USING ERRCODE='23514';
+        END IF;
+        IF ROW(NEW.statement,NEW.context_id) IS DISTINCT FROM ROW(OLD.statement,OLD.context_id) THEN
+            NEW.updated_at := GREATEST(clock_timestamp(), OLD.updated_at + interval '1 microsecond');
+        ELSE
+            NEW.updated_at := OLD.updated_at;
+        END IF;
+    ELSE
+        NEW.updated_at := NEW.accepted_at;
     END IF;
     RETURN NEW;
 END;
 $$;
+CREATE TRIGGER trg_pulsara_v3_memory_fact BEFORE INSERT OR UPDATE ON pulsara_v3.memory_facts
+FOR EACH ROW EXECUTE FUNCTION pulsara_v3.seal_memory_fact();
 REVOKE ALL ON FUNCTION pulsara_v3.seal_memory_fact() FROM PUBLIC;
-REVOKE ALL ON FUNCTION pulsara_v3.seal_memory_relation() FROM PUBLIC;
-REVOKE ALL ON FUNCTION pulsara_v3.enforce_memory_relation_endpoints() FROM PUBLIC;
-CREATE CONSTRAINT TRIGGER trg_pulsara_v3_memory_relation_endpoints
-AFTER INSERT ON pulsara_v3.memory_relations
-DEFERRABLE INITIALLY DEFERRED
-FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_memory_relation_endpoints();
 CREATE TABLE pulsara_v3.agent_events (
     event_id text CHECK (event_id ~ '^event:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
     workspace_id text NOT NULL,
@@ -1661,10 +1476,10 @@ DECLARE
 BEGIN
     IF TG_TABLE_NAME = 'tool_invocations' THEN
         IF NEW.source_kind='MODEL_TOOL_CALL' AND NOT EXISTS (
-            SELECT 1 FROM pulsara_v3.assistant_message_blocks b JOIN pulsara_v3.transcript_entries e
-              ON e.session_id=b.session_id AND e.id=b.assistant_entry_id
-            WHERE b.session_id=NEW.session_id AND b.assistant_entry_id=NEW.assistant_entry_id
-              AND b.tool_call_id=NEW.tool_call_id AND b.block_kind='TOOL_CALL'
+            SELECT 1 FROM pulsara_v3.content_parts b JOIN pulsara_v3.transcript_entries e
+              ON e.session_id=b.session_id AND e.id=b.entry_id
+            WHERE b.session_id=NEW.session_id AND b.entry_id=NEW.assistant_entry_id
+              AND b.tool_call_id=NEW.tool_call_id AND b.type='tool_call'
               AND e.entry_owner_kind='EXECUTED_TURN' AND e.turn_id=NEW.turn_id
         ) THEN
             RAISE EXCEPTION 'model invocation requires its exact executed tool call' USING ERRCODE='23514';
@@ -1672,8 +1487,8 @@ BEGIN
         IF NEW.source_kind='CODE_MODE_CALL' AND NOT EXISTS (
             SELECT 1 FROM pulsara_v3.tool_execution_attempts a
             JOIN pulsara_v3.tool_invocations source ON source.session_id=a.session_id AND source.id=a.invocation_id
-            JOIN pulsara_v3.assistant_message_blocks b ON b.session_id=source.session_id
-              AND b.assistant_entry_id=source.assistant_entry_id AND b.tool_call_id=source.tool_call_id
+            JOIN pulsara_v3.content_parts b ON b.session_id=source.session_id
+              AND b.entry_id=source.assistant_entry_id AND b.tool_call_id=source.tool_call_id
             WHERE a.session_id=NEW.session_id AND a.id=NEW.source_exec_attempt_id
               AND source.source_kind='MODEL_TOOL_CALL' AND source.turn_id=NEW.turn_id AND b.tool_name='exec_cell'
         ) THEN
@@ -1683,6 +1498,12 @@ BEGIN
     END IF;
 
     IF TG_TABLE_NAME = 'turns' THEN
+        IF NEW.status<>'RUNNING' AND EXISTS (
+            SELECT 1 FROM pulsara_v3.plan_interactions
+            WHERE session_id=NEW.session_id AND origin_turn_id=NEW.id AND status='OPEN'
+        ) THEN
+            RAISE EXCEPTION 'an open Plan interaction keeps its origin turn running' USING ERRCODE='23514';
+        END IF;
         IF TG_OP = 'UPDATE' AND (
             OLD.permission_snapshot_id IS DISTINCT FROM NEW.permission_snapshot_id OR
             OLD.requested_permission_mode IS DISTINCT FROM NEW.requested_permission_mode OR
@@ -1785,11 +1606,6 @@ BEGIN
                AND observed_status IS DISTINCT FROM 'EXITED' THEN
                 RAISE EXCEPTION 'Plan exit handoff requires EXITED workflow'
                     USING ERRCODE = '23514';
-            ELSIF NEW.source_plan_handoff_kind = 'REVISION_REQUESTED'
-               AND (observed_status IS DISTINCT FROM 'ACTIVE'
-                    OR observed_kind IS DISTINCT FROM 'REVISION_REQUESTED') THEN
-                RAISE EXCEPTION 'Plan revision handoff does not exact-join decision'
-                    USING ERRCODE = '23514';
             ELSIF NEW.source_plan_handoff_kind = 'APPROVED_PLAN'
                AND (observed_status IS DISTINCT FROM 'APPROVED'
                     OR observed_kind IS DISTINCT FROM 'APPROVED') THEN
@@ -1850,12 +1666,12 @@ BEGIN
         IF NEW.entered_by = 'AGENT' THEN
             SELECT e.turn_id, CASE WHEN (SELECT root_session_id FROM pulsara_v3.sessions WHERE id=e.session_id) IS NULL THEN 'ROOT' ELSE 'SUBAGENT' END, b.tool_name
               INTO observed_turn_id, observed_scope, observed_tool_name
-            FROM pulsara_v3.assistant_message_blocks AS b
+            FROM pulsara_v3.content_parts AS b
             JOIN pulsara_v3.transcript_entries AS e
               ON e.session_id = b.session_id
-             AND e.id = b.assistant_entry_id
+             AND e.id = b.entry_id
             WHERE b.session_id = NEW.session_id
-              AND b.assistant_entry_id = NEW.entry_assistant_entry_id
+              AND b.entry_id = NEW.entry_assistant_entry_id
               AND b.tool_call_id = NEW.entry_tool_call_id;
             IF observed_turn_id IS DISTINCT FROM NEW.entry_turn_id
                OR observed_scope IS DISTINCT FROM 'ROOT'
@@ -1905,9 +1721,8 @@ BEGIN
             OLD.request_semantic_digest IS DISTINCT FROM NEW.request_semantic_digest OR
             (OLD.control_tool_result_id IS DISTINCT FROM NEW.control_tool_result_id
                 AND NOT (
-                    OLD.kind = 'QUESTION'
-                    AND OLD.status = 'OPEN'
-                    AND NEW.status IN ('ANSWERED', 'CANCELLED')
+                    OLD.status = 'OPEN'
+                    AND NEW.status IN ('ANSWERED','APPROVED','REVISION_REQUESTED','CANCELLED')
                     AND OLD.control_tool_result_id IS NULL
                     AND NEW.control_tool_result_id IS NOT NULL
                 )) OR
@@ -1918,13 +1733,13 @@ BEGIN
         END IF;
         SELECT e.turn_id, CASE WHEN (SELECT root_session_id FROM pulsara_v3.sessions WHERE id=e.session_id) IS NULL THEN 'ROOT' ELSE 'SUBAGENT' END, b.tool_name, t.status
           INTO observed_turn_id, observed_scope, observed_tool_name, observed_status
-        FROM pulsara_v3.assistant_message_blocks AS b
+        FROM pulsara_v3.content_parts AS b
         JOIN pulsara_v3.transcript_entries AS e
-          ON e.session_id = b.session_id AND e.id = b.assistant_entry_id
+          ON e.session_id = b.session_id AND e.id = b.entry_id
         JOIN pulsara_v3.turns AS t
           ON t.session_id = e.session_id AND t.id = e.turn_id
         WHERE b.session_id = NEW.session_id
-          AND b.assistant_entry_id = NEW.assistant_entry_id
+          AND b.entry_id = NEW.assistant_entry_id
           AND b.tool_call_id = NEW.tool_call_id;
         IF observed_turn_id IS DISTINCT FROM NEW.origin_turn_id
            OR observed_scope IS DISTINCT FROM 'ROOT'
@@ -1936,7 +1751,8 @@ BEGIN
            )
            OR (NEW.kind = 'QUESTION' AND NEW.status IN ('OPEN', 'ANSWERED', 'CANCELLED')
                AND observed_status IS DISTINCT FROM 'RUNNING')
-           OR (NEW.kind = 'DRAFT_REVIEW' AND observed_status IS DISTINCT FROM 'COMPLETED') THEN
+           OR (NEW.kind = 'DRAFT_REVIEW' AND NEW.status IN ('OPEN','REVISION_REQUESTED','CANCELLED')
+               AND observed_status IS DISTINCT FROM 'RUNNING') THEN
             RAISE EXCEPTION 'Plan interaction origin is not its exact ROOT tool call'
                 USING ERRCODE = '23514';
         END IF;
@@ -1973,21 +1789,6 @@ BEGIN
         RETURN NEW;
     END IF;
 
-    IF TG_TABLE_NAME = 'assistant_message_blocks' THEN
-        SELECT entry_kind INTO observed_kind
-        FROM pulsara_v3.transcript_entries
-        WHERE session_id = NEW.session_id AND id = NEW.assistant_entry_id;
-        IF observed_kind NOT IN ('ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST') THEN
-            RAISE EXCEPTION 'assistant block parent has invalid entry kind'
-                USING ERRCODE = '23514';
-        END IF;
-        IF NEW.block_kind = 'TOOL_CALL' AND observed_kind <> 'ASSISTANT_TOOL_REQUEST' THEN
-            RAISE EXCEPTION 'tool-call block requires ASSISTANT_TOOL_REQUEST parent'
-                USING ERRCODE = '23514';
-        END IF;
-        RETURN NEW;
-    END IF;
-
     IF TG_TABLE_NAME = 'tool_results' THEN
         IF NEW.result_record_kind = 'IMPORTED_HISTORY' THEN
             PERFORM 1 FROM pulsara_v3.transcript_entries AS call_entry
@@ -2001,8 +1802,7 @@ BEGIN
               AND call_entry.entry_owner_kind = 'IMPORTED_HISTORY'
               AND result_entry.entry_owner_kind = 'IMPORTED_HISTORY'
               AND call_entry.entry_kind = 'ASSISTANT_TOOL_REQUEST'
-              AND result_entry.entry_kind = 'TOOL_RESULT'
-              AND result_entry.inline_content IS NOT NULL AND result_entry.blob_id IS NULL;
+              AND result_entry.entry_kind = 'TOOL_RESULT';
             IF NOT FOUND THEN
                 RAISE EXCEPTION 'imported tool result must exact-join its imported call and group' USING ERRCODE = '23514';
             END IF;
@@ -2012,10 +1812,9 @@ BEGIN
         FROM pulsara_v3.transcript_entries
         WHERE session_id = NEW.session_id AND workspace_id = NEW.workspace_id
           AND id = NEW.result_entry_id
-          AND entry_owner_kind = 'EXECUTED_TURN'
-          AND inline_content IS NOT NULL AND blob_id IS NULL;
+          AND entry_owner_kind = 'EXECUTED_TURN';
         IF observed_kind IS DISTINCT FROM 'TOOL_RESULT' THEN
-            RAISE EXCEPTION 'tool result relation requires inline TOOL_RESULT entry'
+            RAISE EXCEPTION 'tool result relation requires TOOL_RESULT entry'
                 USING ERRCODE = '23514';
         END IF;
         PERFORM 1
@@ -2037,9 +1836,9 @@ BEGIN
         IF NEW.result_origin_kind = 'PLAN_CONTROL' THEN
             SELECT b.tool_name
               INTO observed_tool_name
-            FROM pulsara_v3.assistant_message_blocks AS b
+            FROM pulsara_v3.content_parts AS b
             WHERE b.session_id = NEW.session_id
-              AND b.assistant_entry_id = NEW.tool_call_entry_id
+              AND b.entry_id = NEW.tool_call_entry_id
               AND b.tool_call_id = NEW.tool_call_id;
             IF (NEW.control_plan_workflow_id IS NOT NULL
                     AND observed_tool_name NOT IN ('enter_plan', 'exit_plan'))
@@ -2256,8 +2055,8 @@ BEGIN
             RAISE EXCEPTION 'frozen code source is immutable' USING ERRCODE='23514';
         END IF;
         IF NEW.code_source_content_digest IS NOT NULL AND NOT EXISTS (
-            SELECT 1 FROM pulsara_v3.tool_invocations i JOIN pulsara_v3.assistant_message_blocks b
-              ON b.session_id=i.session_id AND b.assistant_entry_id=i.assistant_entry_id AND b.tool_call_id=i.tool_call_id
+            SELECT 1 FROM pulsara_v3.tool_invocations i JOIN pulsara_v3.content_parts b
+              ON b.session_id=i.session_id AND b.entry_id=i.assistant_entry_id AND b.tool_call_id=i.tool_call_id
             WHERE i.session_id=NEW.session_id AND i.id=NEW.invocation_id AND i.source_kind='MODEL_TOOL_CALL' AND b.tool_name='exec_cell'
         ) THEN
             RAISE EXCEPTION 'frozen code source belongs to an exec_cell attempt' USING ERRCODE='23514';
@@ -2305,11 +2104,6 @@ FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_conversation_kernel_invariants(
 
 CREATE CONSTRAINT TRIGGER trg_pulsara_v3_turn_initial_entry_integrity
 AFTER INSERT OR UPDATE ON pulsara_v3.turns
-DEFERRABLE INITIALLY DEFERRED
-FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_conversation_kernel_invariants();
-
-CREATE CONSTRAINT TRIGGER trg_pulsara_v3_assistant_block_integrity
-AFTER INSERT ON pulsara_v3.assistant_message_blocks
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_conversation_kernel_invariants();
 
@@ -2403,3 +2197,159 @@ CREATE TABLE pulsara_v3.asr_cache (
 CREATE INDEX idx_asr_cache_interval ON pulsara_v3.asr_cache USING gist
     (box(point(from_seconds, 0), point(to_seconds, 0)));
 REVOKE ALL ON pulsara_v3.asr_cache FROM PUBLIC;
+
+-- Content identity and payload are immutable; only the two owner columns are mutable.
+CREATE FUNCTION pulsara_v3.enforce_content_part_invariants()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    parent_kind text;
+    parent_origin text;
+    asset_workspace text;
+    asset_width integer;
+    asset_height integer;
+    asset_media text;
+BEGIN
+    IF TG_OP='UPDATE' THEN
+        IF ROW(NEW.id,NEW.session_id,NEW.workspace_id,NEW.ordinal,NEW.type,NEW.inline_value,
+                NEW.blob_id,NEW.tool_call_id,NEW.tool_name,NEW.tool_arguments,NEW.data_media_type,NEW.data_codec)
+            IS DISTINCT FROM ROW(OLD.id,OLD.session_id,OLD.workspace_id,OLD.ordinal,OLD.type,OLD.inline_value,
+                OLD.blob_id,OLD.tool_call_id,OLD.tool_name,OLD.tool_arguments,OLD.data_media_type,OLD.data_codec)
+            OR OLD.entry_id IS NOT NULL OR OLD.queue_item_id IS NULL
+            OR ROW(OLD.entry_id,OLD.queue_item_id) IS NOT DISTINCT FROM ROW(NEW.entry_id,NEW.queue_item_id) THEN
+            RAISE EXCEPTION 'content payload is immutable; only queued ownership may transfer' USING ERRCODE='23514';
+        END IF;
+        IF TG_WHEN='AFTER' THEN
+            IF NEW.entry_id IS NOT NULL THEN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pulsara_v3.prompt_queue_items q
+                    JOIN pulsara_v3.transcript_entries main ON main.session_id=q.session_id AND main.id=q.consumed_entry_id
+                    JOIN pulsara_v3.transcript_entries target ON target.session_id=main.session_id
+                        AND target.id=NEW.entry_id AND target.turn_id=main.turn_id
+                    WHERE q.id=OLD.queue_item_id AND q.session_id=NEW.session_id AND q.status='CONSUMED'
+                        AND (
+                            (q.work_inputs='[]'::jsonb AND target.id=main.id)
+                            OR EXISTS (
+                                SELECT 1 FROM jsonb_array_elements(q.work_inputs) WITH ORDINALITY AS parts(segment,position)
+                                WHERE NEW.ordinal >= (segment->>'content_start')::integer
+                                    AND NEW.ordinal < (segment->>'content_start')::integer + (segment->>'content_count')::integer
+                                    AND target.entry_sequence = main.entry_sequence + parts.position - 1
+                                    AND ((segment->>'kind'='instruction' AND target.id=main.id)
+                                        OR (segment->>'kind'<>'instruction' AND target.input_origin='AGENT_MATERIAL'))
+                            )
+                        )
+                ) THEN
+                    RAISE EXCEPTION 'content transfer must join its consumed queue input group' USING ERRCODE='23514';
+                END IF;
+            ELSIF NOT EXISTS (
+                SELECT 1 FROM pulsara_v3.prompt_queue_items source
+                JOIN pulsara_v3.prompt_queue_items target ON target.session_id=source.session_id
+                JOIN pulsara_v3.session_commands command ON command.session_id=target.session_id
+                    AND command.command_id=target.command_id
+                    AND ((command.command_kind='STEER_QUEUED_PROMPT' AND command.target_queue_item_id=target.id)
+                        OR (command.command_kind='RESOLVE_PLAN_INTERACTION' AND EXISTS (
+                            SELECT 1 FROM pulsara_v3.plan_interactions interaction
+                            WHERE interaction.session_id=target.session_id
+                                AND interaction.id=command.target_plan_interaction_id
+                                AND interaction.status='REVISION_REQUESTED'
+                                AND interaction.origin_turn_id=target.target_turn_id
+                        )))
+                WHERE source.id=OLD.queue_item_id AND target.id=NEW.queue_item_id
+                    AND source.status='CANCELLED' AND source.terminal_reason='USER_REDIRECTED_TO_STEER'
+                    AND target.delivery_mode='STEER_ACTIVE_TURN'
+            ) THEN
+                RAISE EXCEPTION 'queue content transfer requires the actual steer redirect' USING ERRCODE='23514';
+            END IF;
+        END IF;
+    END IF;
+    IF NEW.entry_id IS NOT NULL THEN
+        SELECT entry_kind,input_origin INTO parent_kind,parent_origin FROM pulsara_v3.transcript_entries
+            WHERE id=NEW.entry_id AND session_id=NEW.session_id AND workspace_id=NEW.workspace_id;
+    ELSE
+        SELECT 'QUEUE',input_origin INTO parent_kind,parent_origin FROM pulsara_v3.prompt_queue_items
+            WHERE id=NEW.queue_item_id AND session_id=NEW.session_id AND workspace_id=NEW.workspace_id;
+    END IF;
+    IF parent_kind IS NULL THEN
+        RAISE EXCEPTION 'content owner does not exist in its exact scope' USING ERRCODE='23514';
+    END IF;
+    IF (NEW.type='tool_call' AND parent_kind<>'ASSISTANT_TOOL_REQUEST')
+        OR (NEW.type='data' AND parent_kind NOT IN ('ASSISTANT_MESSAGE','ASSISTANT_TOOL_REQUEST'))
+        OR (NEW.type='annotation' AND parent_kind NOT IN ('USER_MESSAGE','USER_STEER','QUEUE'))
+        OR (NEW.type IN ('image','target','object') AND parent_kind NOT IN ('USER_MESSAGE','USER_STEER','TOOL_RESULT','QUEUE')) THEN
+        RAISE EXCEPTION 'content type is not admitted by its source owner' USING ERRCODE='23514';
+    END IF;
+    IF NEW.blob_id IS NOT NULL THEN
+        SELECT workspace_id,width,height,media_type INTO asset_workspace,asset_width,asset_height,asset_media
+            FROM pulsara_v3.blobs WHERE id=NEW.blob_id;
+        IF NEW.type='image' THEN
+            IF NEW.blob_id NOT LIKE 'image:%' OR asset_workspace IS NOT NULL
+                OR asset_width IS NULL OR asset_height IS NULL OR asset_media NOT LIKE 'image/%' THEN
+                RAISE EXCEPTION 'image content requires a validated independent image asset' USING ERRCODE='23514';
+            END IF;
+        ELSIF NEW.blob_id NOT LIKE 'blob:%' OR asset_workspace IS DISTINCT FROM NEW.workspace_id THEN
+            RAISE EXCEPTION 'ordinary content blob must belong to its workspace' USING ERRCODE='23514';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER trg_pulsara_v3_content_part_seal BEFORE INSERT OR UPDATE ON pulsara_v3.content_parts
+FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_content_part_invariants();
+CREATE CONSTRAINT TRIGGER trg_pulsara_v3_content_part_transfer AFTER UPDATE ON pulsara_v3.content_parts
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_content_part_invariants();
+REVOKE ALL ON FUNCTION pulsara_v3.enforce_content_part_invariants() FROM PUBLIC;
+
+-- Work inputs retain only the boundaries and dependency facts required by queue consumption.
+CREATE FUNCTION pulsara_v3.enforce_queue_material_metadata()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    segment jsonb;
+    position bigint;
+    next_content bigint := 0;
+    previous_kind text;
+    previous_ordinal bigint := -1;
+    current_rank integer;
+    previous_rank integer := 0;
+BEGIN
+    IF NEW.work_inputs<>'[]'::jsonb AND NEW.input_origin<>'AGENT_INSTRUCTION' THEN
+        RAISE EXCEPTION 'only agent instructions carry material boundaries' USING ERRCODE='23514';
+    END IF;
+    FOR segment,position IN SELECT value,ordinality-1 FROM jsonb_array_elements(NEW.work_inputs) WITH ORDINALITY LOOP
+        IF jsonb_typeof(segment)<>'object'
+            OR NOT (segment ?& ARRAY['kind','ordinal','content_start','content_count'])
+            OR segment - ARRAY['kind','ordinal','content_start','content_count','source_work_id','ready'] <> '{}'::jsonb
+            OR segment->>'kind' NOT IN ('instruction','context','dependency','material')
+            OR jsonb_typeof(segment->'ordinal')<>'number' OR (segment->>'ordinal') !~ '^[0-9]+$'
+            OR jsonb_typeof(segment->'content_start')<>'number' OR (segment->>'content_start') !~ '^[0-9]+$'
+            OR jsonb_typeof(segment->'content_count')<>'number' OR (segment->>'content_count') !~ '^[0-9]+$' THEN
+            RAISE EXCEPTION 'invalid queue material metadata' USING ERRCODE='23514';
+        END IF;
+        current_rank := CASE segment->>'kind' WHEN 'instruction' THEN 0 WHEN 'context' THEN 1 WHEN 'dependency' THEN 2 ELSE 3 END;
+        IF previous_kind IS DISTINCT FROM segment->>'kind' THEN previous_ordinal := -1; END IF;
+        IF (segment->>'ordinal')::bigint<=previous_ordinal OR current_rank<previous_rank
+            OR (position=0 AND (segment->>'ordinal')::bigint<>0)
+            OR (segment->>'content_start')::bigint<next_content
+            OR ((position=0) IS DISTINCT FROM (segment->>'kind'='instruction')) THEN
+            RAISE EXCEPTION 'queue material boundaries must preserve input order' USING ERRCODE='23514';
+        END IF;
+        IF segment->>'kind' IN ('dependency','material') THEN
+            IF NOT (segment ?& ARRAY['source_work_id','ready'])
+                OR jsonb_typeof(segment->'ready')<>'boolean'
+                OR jsonb_typeof(segment->'source_work_id')<>'string'
+                OR (segment->>'source_work_id') !~ '^queue:[a-z2-7]{25}[aeimquy4]$'
+                OR (segment->>'ready'='false' AND (segment->>'content_count')::bigint<>0) THEN
+                RAISE EXCEPTION 'work material requires its source and readiness' USING ERRCODE='23514';
+            END IF;
+        ELSIF segment ?| ARRAY['source_work_id','ready'] THEN
+            RAISE EXCEPTION 'instruction and context have no work dependency facts' USING ERRCODE='23514';
+        END IF;
+        next_content := (segment->>'content_start')::bigint + (segment->>'content_count')::bigint;
+        previous_ordinal := (segment->>'ordinal')::bigint;
+        previous_kind := segment->>'kind';
+        previous_rank := current_rank;
+    END LOOP;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER trg_pulsara_v3_queue_material_metadata BEFORE INSERT OR UPDATE ON pulsara_v3.prompt_queue_items
+FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_queue_material_metadata();
+REVOKE ALL ON FUNCTION pulsara_v3.enforce_queue_material_metadata() FROM PUBLIC;

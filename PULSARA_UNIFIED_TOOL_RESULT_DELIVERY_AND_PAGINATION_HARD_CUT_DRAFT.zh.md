@@ -2,7 +2,7 @@
 
 日期：2026-11-12。
 
-状态：讨论草案，未实施。本文件记录已确定的产品方向及实施前需要闭合的边界；不授权修改生产代码，不替代当前已实施规格。采用后应一次 hard cut，同步代码、模型接口、clean-v0、协议、测试、Skills 与相关规格。
+状态：已定交付合同，完整结果的接受、保存及读取基础按[实施计划](PULSARA_HARD_CUT_IMPLEMENTATION_PLAN.zh.md)实施；原生分页、NEXT、JS 交付和逐工具消费者仍须后续接通及验收。Pulsara 保持停用。实施采用单一 hardcut 路径，同步代码、模型接口、clean-v0、协议、测试、Skills 与相关规格。
 
 数据库层优先按[有序内容统一存储 hardcut 草案](PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md)明确并实现存储基础；允许停用 Pulsara 后先重建新库，按已定工具合同逐步接通消费者，验收后恢复使用。本文件负责完整结果、分页与模型投影合同，不要求建库时全部交付链路已经可用。各工具及 read_file 原生 NEXT 分支的具体合同见工具分篇文档，资源阈值实验单列。
 

@@ -55,7 +55,7 @@ def test_plan_terminal_drains_all_pages_and_image_before_successor(stage2_migrat
         queues.append(queue)
     out = BytesIO()
     Image.new('RGB', (2, 2), (20, 30, 40)).save(out, format='PNG')
-    image = bound_test_image('image/png', out.getvalue(), 2, 2, workspace_id=workspace)
+    image = bound_test_image('image/png', out.getvalue(), 2, 2)
     queues.append(_enqueue(repo, lease, turn, FrozenPromptContent((image,))))
     # Commit first, then lose the acknowledgement; confirmation must recover
     # the original atomic Plan winner rather than replay any queue entry.
@@ -81,7 +81,7 @@ def test_plan_terminal_drains_all_pages_and_image_before_successor(stage2_migrat
         assert [r['id'] for r in rows] == queues
         assert all(r['status']=='CONSUMED' and r['turn_id']==turn for r in rows)
         assert [r['input_origin'] for r in rows] == ['AGENT_MESSAGE'] * 129 + ['HUMAN_STEER']
-        assert c.execute('SELECT count(*) AS n FROM pulsara_v3.canonical_image_refs WHERE transcript_entry_id=%s',
+        assert c.execute("SELECT count(*) AS n FROM pulsara_v3.content_parts WHERE entry_id=%s AND type='image'",
             (rows[-1]['consumed_entry_id'],)).fetchone()['n'] == 1
         successor_seq = c.execute('SELECT entry_sequence FROM pulsara_v3.transcript_entries WHERE id=%s',
             (accepted.continuation_entry_id,)).fetchone()['entry_sequence']

@@ -108,7 +108,7 @@ def _admit_terminal_effect(call: ToolCall, result: TerminalResult, *, action: st
                     ).value,
                 )
             body = json.dumps(facts, ensure_ascii=False, separators=(",", ":"))
-            if not budget.fits(body, include_read=not control_only and budget.read is not None):
+            if not budget.fits(body):
                 raise TerminalEffectAdmissionRejected(
                     "Terminal minimum receipt cannot fit before the process action"
                 )
@@ -164,7 +164,7 @@ def _terminal_execution_result(
                     **preview_facts,
                     "output_preview": result.output[-take:] if take else "",
                 })
-                if budget.fits(preview, include_read=budget.read is not None):
+                if budget.fits(preview):
                     winner = preview
                     low = take + 1
                 else:

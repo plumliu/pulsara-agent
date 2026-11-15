@@ -13,7 +13,6 @@ from psycopg import Connection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pulsara_agent.conversation_kernel.contracts import (
-    AssistantBlockKind,
     CanonicalContent,
     CommittedEventDraft,
     CommittedEventSubject,
@@ -23,7 +22,13 @@ from pulsara_agent.conversation_kernel.contracts import (
     StoredCommittedEvent,
 )
 from pulsara_agent.conversation_kernel.blob import CanonicalContentPublisher, PostgresCanonicalBlobStore
-from pulsara_agent.conversation_kernel.prompt_storage import canonical_prompt_owner_is_exact, hydrate_canonical_prompt_owner
+from pulsara_agent.conversation_kernel.prompt_storage import (
+    canonical_prompt_owner_is_exact, hydrate_canonical_prompt_owner,
+    prompt_to_content_drafts, publish_prompt_images,
+)
+from pulsara_agent.conversation_kernel.content_parts import (
+    ContentPartDraft, ToolCallValue, write_content_parts, read_content_parts,
+)
 from pulsara_agent.conversation_kernel.prompt_content import FrozenCanonicalPrompt
 from pulsara_agent.conversation_kernel.steer import StartedTurnInputGroup
 from pulsara_agent.model_input.contracts import (
@@ -59,7 +64,6 @@ from .contracts import (
     AssistantToolCallBlock,
     ConversationKernelConflict,
     StaleHostWriter,
-    _content_columns,
     _utcnow,
 )
 from .locking import lock_session_admission
@@ -505,18 +509,18 @@ class _RepositoryKernel:
             WHERE t.session_id = %s AND t.id = %s AND t.status = 'RUNNING'
               AND NOT EXISTS (
                 SELECT 1
-                FROM pulsara_v3.assistant_message_blocks AS b
+                FROM pulsara_v3.content_parts AS b
                 LEFT JOIN pulsara_v3.tool_results AS r
                   ON r.session_id = b.session_id
-                 AND r.tool_call_entry_id = b.assistant_entry_id
+                 AND r.tool_call_entry_id = b.entry_id
                  AND r.tool_call_id = b.tool_call_id
                 WHERE b.session_id = t.session_id
-                  AND b.block_kind = 'TOOL_CALL'
+                  AND b.type = 'tool_call'
                   AND r.id IS NULL
                   AND EXISTS (
                     SELECT 1 FROM pulsara_v3.transcript_entries AS e
                     WHERE e.entry_owner_kind = 'EXECUTED_TURN' AND e.session_id = b.session_id
-                      AND e.id = b.assistant_entry_id
+                      AND e.id = b.entry_id
                       AND e.turn_id = t.id
                   )
               )
@@ -771,26 +775,56 @@ class _RepositoryKernel:
         )
 
     @staticmethod
+    def _canonical_content_bytes(connection: Connection, content: CanonicalContent,
+                                 *, workspace_id: str) -> bytes:
+        if isinstance(content, InlineContent):
+            return content.canonical_bytes
+        return PostgresCanonicalBlobStore.read_exact_in_connection(
+            connection, blob_id=content.blob_id,
+            expected_digest=content.digest, expected_size=content.size,
+            expected_workspace_id=workspace_id,
+            expected_media_type=content.media_type, expected_codec=content.codec,
+        )
+
+    @staticmethod
     def _insert_entry(connection: Connection, *, session_id: str, workspace_id: str,
                       turn_id: str, entry_id: str, entry_sequence: int, entry_kind: EntryKind,
-                      content: CanonicalContent, context_binding_revision_id: str | None = None,
+                      content: CanonicalContent | None = None,
+                      canonical_prompt: FrozenCanonicalPrompt | None = None,
+                      publish_content: bool = True,
+                      context_binding_revision_id: str | None = None,
                       provider_input_through_sequence: int | None = None,
                       source_plan_workflow_id: str | None = None,
                       source_plan_interaction_id: str | None = None,
                       source_plan_handoff_kind: PlanHandoffKind | None = None,
                       scheduled_input=None, input_origin=None) -> None:
+        if canonical_prompt is not None and content is not None:
+            raise ValueError("entry content must have one typed producer")
         connection.execute(
             """INSERT INTO pulsara_v3.transcript_entries
                 (entry_owner_kind,id,origin_entry_id,session_id,workspace_id,turn_id,entry_sequence,entry_kind,
                  context_binding_revision_id,provider_input_through_sequence,source_plan_workflow_id,
-                 source_plan_interaction_id,source_plan_handoff_kind,scheduled_input,input_origin,
-                 inline_content,blob_id,content_digest,content_size,content_media_type,content_codec)
-                VALUES ('EXECUTED_TURN',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                 source_plan_interaction_id,source_plan_handoff_kind,scheduled_input,input_origin)
+                VALUES ('EXECUTED_TURN',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (entry_id,entry_id,session_id,workspace_id,turn_id,entry_sequence,entry_kind.value,
              context_binding_revision_id,provider_input_through_sequence,source_plan_workflow_id,
              source_plan_interaction_id,None if source_plan_handoff_kind is None else source_plan_handoff_kind.value,
              None if scheduled_input is None else Jsonb(scheduled_input.to_dict()),
-             None if input_origin is None else getattr(input_origin,'value',input_origin), *_content_columns(content)))
+             None if input_origin is None else getattr(input_origin,'value',input_origin)))
+        if not publish_content:
+            return
+        if canonical_prompt is not None:
+            publish_prompt_images(connection, prompt=canonical_prompt)
+            parts = prompt_to_content_drafts(canonical_prompt)
+        elif content is not None:
+            body = _RepositoryKernel._canonical_content_bytes(
+                connection, content, workspace_id=workspace_id,
+            )
+            parts = (ContentPartDraft(type="text", value=body.decode("utf-8")),)
+        else:
+            parts = ()
+        write_content_parts(connection, session_id=session_id, workspace_id=workspace_id,
+                            entry_id=entry_id, parts=parts)
 
     @staticmethod
     def _insert_assistant_block(
@@ -806,50 +840,21 @@ class _RepositoryKernel:
             tool_arguments = thaw_json(block.arguments)
             if not isinstance(tool_arguments, dict):
                 raise TypeError("assistant tool-call arguments must thaw as an object")
-            connection.execute(
-                """
-                INSERT INTO pulsara_v3.assistant_message_blocks (
-                    id, session_id, workspace_id, assistant_entry_id, block_ordinal,
-                    block_kind, tool_call_id, tool_name, tool_arguments
-                ) VALUES (%s, %s, %s, %s, %s, 'TOOL_CALL', %s, %s, %s)
-                """,
-                (
-                    block.block_id,
-                    session_id,
-                    workspace_id,
-                    entry_id,
-                    ordinal,
-                    block.tool_call_id,
-                    block.tool_name,
-                    Jsonb(tool_arguments),
-                ),
+            part = ContentPartDraft(
+                type="tool_call", id=block.block_id,
+                value=ToolCallValue(block.tool_call_id, block.tool_name, tool_arguments),
             )
-            return
-        kind = (
-            AssistantBlockKind.TEXT
-            if isinstance(block, AssistantTextBlock)
-            else AssistantBlockKind.DATA
-        )
-        content = block.text if isinstance(block, AssistantTextBlock) else block.data
-        connection.execute(
-            """
-            INSERT INTO pulsara_v3.assistant_message_blocks (
-                id, session_id, workspace_id, assistant_entry_id,
-                block_ordinal, block_kind,
-                inline_content, blob_id, content_digest, content_size,
-                content_media_type, content_codec
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
-            (
-                block.block_id,
-                session_id,
-                workspace_id,
-                entry_id,
-                ordinal,
-                kind.value,
-                *_content_columns(content),
-            ),
-        )
+        else:
+            content = block.text if isinstance(block, AssistantTextBlock) else block.data
+            body = _RepositoryKernel._canonical_content_bytes(
+                connection, content, workspace_id=workspace_id,
+            )
+            part = (ContentPartDraft(type="text", id=block.block_id, value=body.decode("utf-8"))
+                    if isinstance(block, AssistantTextBlock)
+                    else ContentPartDraft(type="data", id=block.block_id, value=body,
+                                          data_media_type=content.media_type, data_codec=content.codec))
+        write_content_parts(connection, session_id=session_id, workspace_id=workspace_id,
+                            entry_id=entry_id, parts=(part,), start_ordinal=ordinal)
 
     @staticmethod
     def _initial_context_binding_values(
@@ -1011,24 +1016,21 @@ class _RepositoryKernel:
             if kind != "USER_MESSAGE":
                 if kind not in {"PLAN_CONTINUATION", "TERMINAL_OBSERVATION"}:
                     raise ConversationKernelConflict("started request initial entry kind differs")
-                content = cls._content_from_row(row)
-                body = (content.canonical_bytes if isinstance(content, InlineContent)
-                        else PostgresCanonicalBlobStore.read_exact_in_connection(
-                            connection, blob_id=content.blob_id,
-                            expected_digest=content.digest, expected_size=content.size,
-                            expected_workspace_id=str(row["workspace_id"]),
-                            expected_media_type=content.media_type, expected_codec=content.codec,
-                        ))
+                parts = read_content_parts(connection, session_id=session_id,
+                                           entry_id=str(row["id"]))
+                if any(part.type != "text" for part in parts):
+                    raise ConversationKernelConflict("runtime entry requires text content")
+                text = "".join(part.value for part in parts)
                 from pulsara_agent.conversation_kernel.reader import (
-                    _project_plan_continuation_storage, _validate_terminal_observation_content,
+                    _project_plan_continuation_storage,
                 )
-                text = body.decode("utf-8")
                 if kind == "PLAN_CONTINUATION":
                     text = _project_plan_continuation_storage(row, text)
                     origin = CanonicalInputOriginKind.PLAN_CONTINUATION
                     item_kind = FrozenProviderInputItemKind.PLAN_CONTINUATION
                 else:
-                    _validate_terminal_observation_content(body)
+                    from pulsara_agent.ports.terminal_observation import cell_output_provider_text
+                    text = cell_output_provider_text(text)
                     origin = CanonicalInputOriginKind.CELL_OUTPUT
                     item_kind = FrozenProviderInputItemKind.TERMINAL_OBSERVATION
                 items.append(FrozenProviderInputItem(

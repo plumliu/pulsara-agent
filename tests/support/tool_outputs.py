@@ -5,10 +5,10 @@ from datetime import datetime, timezone
 from time import monotonic
 from pulsara_agent.identity import random_id
 from pulsara_agent.llm.input import FrozenPromptContent
-from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.blob import CanonicalContentPublisher
 from pulsara_agent.conversation_kernel.repository import ConversationKernelRepository, AssistantToolCallBlock
 from pulsara_agent.conversation_kernel.tool_outputs import ToolOutputProcessor
+from pulsara_agent.ports.tool_execution import ToolBusinessValue
 from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from pulsara_agent.primitives.run_permission import RunPermissionAdmissionSource, build_run_permission_snapshot
@@ -24,22 +24,23 @@ class RecordingOutputPublisher:
     failure: Exception | None = None
     calls: list[bytes] = field(default_factory=list)
 
-    def materialize(self, *, session_id, content, media_type, codec, deadline_monotonic):
+    def materialize_in_connection(self, connection, *, workspace_id, content, media_type, codec):
         self.calls.append(bytes(content))
         if self.failure is not None:
             raise self.failure
-        return CanonicalContentPublisher(object()).describe(
-            workspace_id="workspace:" + "a" * 26, content=bytes(content), media_type=media_type, codec=codec)
+        return CanonicalContentPublisher(object()).materialize_in_connection(
+            connection, workspace_id=workspace_id, content=bytes(content),
+            media_type=media_type, codec=codec)
 
 
-def output_processor(publisher=None):
-    return ToolOutputProcessor(object(), publisher=publisher or RecordingOutputPublisher())
+def output_processor():
+    return ToolOutputProcessor()
 
 
-def prepare_output(processor, *, native_output, output_omitted, **body_arguments):
-    body = processor.materialize_body(**body_arguments)
-    return processor.prepare(
-        body=body, native_output=native_output, output_omitted=output_omitted
+def prepare_output(*, public_fields=None, content_parts=(), result_facts=None):
+    return ToolOutputProcessor.prepare(
+        business_value=ToolBusinessValue({} if public_fields is None else public_fields, tuple(content_parts)),
+        result_facts=result_facts,
     )
 
 
@@ -89,7 +90,6 @@ def _install_tool_call(
         lease.guard,
         cut=cut,
         entry_id=assistant_entry_id,
-        parent_content=InlineContent.from_bytes(b""),
         blocks=(
             AssistantToolCallBlock(
                 _name("block"),

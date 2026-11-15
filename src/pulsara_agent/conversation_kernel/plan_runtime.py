@@ -1,7 +1,7 @@
-"""Process-local Plan QUESTION waiter and Host continuation ownership.
+"""Process-local Plan interaction waiter and Host continuation ownership.
 
 The canonical repository owns every accepted Plan fact.  This module only
-bridges a same-Host running coroutine to a canonical QUESTION resolution and
+bridges a same-Host running coroutine to a canonical interaction resolution and
 keeps automatic continuation tasks alive when an origin request detaches.
 """
 
@@ -11,7 +11,7 @@ from __future__ import annotations
 from pulsara_agent.identity import derive_id
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import StrEnum
 from hashlib import sha256
@@ -56,6 +56,7 @@ from pulsara_agent.model_input.lowering import project_tool_result_public_value
 from pulsara_agent.primitives.context import canonical_json_bytes, thaw_json
 from pulsara_agent.primitives.plan_workflow import (
     PlanQuestionContent,
+    ExtractedPlanDraft,
     parse_plan_exit_arguments,
     extract_plan_entry_reason,
     parse_plan_question_arguments,
@@ -78,58 +79,69 @@ from pulsara_agent.hooks.matcher import event_matcher_subject, tool_matcher_subj
 
 
 @dataclass(frozen=True, slots=True)
-class PlanQuestionWaiter:
+class PlanInteractionWaiter:
     interaction_id: str
     origin_turn_id: str
     waiter_generation: int
+    owner_task: asyncio.Task
     _future: asyncio.Future[AcceptedPlanResolution]
 
 
 @dataclass(frozen=True, slots=True)
-class OpenPlanQuestion:
+class OpenPlanInteraction:
     interaction_id: str
     origin_turn_id: str
-    question: PlanQuestionContent
+    question: PlanQuestionContent | None
+    draft: ExtractedPlanDraft | None
     waiter_generation: int
 
 
 class KernelPlanInteractionCoordinator:
-    """One dormant-before-write QUESTION waiter per active Plan workflow."""
+    """One dormant-before-write waiter per active Plan workflow."""
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
-        self._waiter: PlanQuestionWaiter | None = None
-        self._open: OpenPlanQuestion | None = None
+        self._waiter: PlanInteractionWaiter | None = None
+        self._open: OpenPlanInteraction | None = None
         self._generation = 0
         self._closed = False
 
-    async def prepare_question(
+    async def prepare_interaction(
         self, *, interaction_id: str, origin_turn_id: str
-    ) -> PlanQuestionWaiter:
+    ) -> PlanInteractionWaiter:
         async with self._lock:
             if self._closed:
                 raise RuntimeError("Plan interaction coordinator is closed")
             if self._waiter is not None:
-                raise RuntimeError("another Plan question waiter is active")
+                raise RuntimeError("another Plan interaction waiter is active")
+            owner_task = asyncio.current_task()
+            if owner_task is None:
+                raise RuntimeError("Plan interaction requires its running task")
             self._generation += 1
-            waiter = PlanQuestionWaiter(
+            waiter = PlanInteractionWaiter(
                 interaction_id=interaction_id,
                 origin_turn_id=origin_turn_id,
                 waiter_generation=self._generation,
+                owner_task=owner_task,
                 _future=asyncio.get_running_loop().create_future(),
             )
             self._waiter = waiter
             return waiter
 
     async def publish_open(
-        self, waiter: PlanQuestionWaiter, question: PlanQuestionContent
-    ) -> OpenPlanQuestion:
+        self, waiter: PlanInteractionWaiter, *,
+        question: PlanQuestionContent | None = None,
+        draft: ExtractedPlanDraft | None = None,
+    ) -> OpenPlanInteraction:
+        if (question is None) == (draft is None):
+            raise ValueError("Plan interaction requires exactly one typed payload")
         async with self._lock:
             self._require_waiter(waiter)
-            opened = OpenPlanQuestion(
+            opened = OpenPlanInteraction(
                 waiter.interaction_id,
                 waiter.origin_turn_id,
                 question,
+                draft,
                 waiter.waiter_generation,
             )
             # Resolution may commit after OPEN FULL but before the runner
@@ -138,9 +150,18 @@ class KernelPlanInteractionCoordinator:
             self._open = None if waiter._future.done() else opened
             return opened
 
-    async def current_open(self) -> OpenPlanQuestion | None:
+    async def current_open(self) -> OpenPlanInteraction | None:
         async with self._lock:
             return self._open
+
+    async def current_waiter(self, interaction_id: str) -> PlanInteractionWaiter | None:
+        async with self._lock:
+            waiter = self._waiter
+            return waiter if (
+                waiter is not None
+                and waiter.interaction_id == interaction_id
+                and not waiter._future.done()
+            ) else None
 
     async def settle(
         self, *, interaction_id: str, resolution: AcceptedPlanResolution
@@ -154,7 +175,7 @@ class KernelPlanInteractionCoordinator:
             self._open = None
             return True
 
-    async def wait(self, waiter: PlanQuestionWaiter) -> AcceptedPlanResolution:
+    async def wait(self, waiter: PlanInteractionWaiter) -> AcceptedPlanResolution:
         # Deliberately no operation timeout: waiting for a human is not a
         # physical provider/tool operation deadline.
         try:
@@ -165,7 +186,7 @@ class KernelPlanInteractionCoordinator:
                     self._waiter = None
                     self._open = None
 
-    async def abandon(self, waiter: PlanQuestionWaiter, error: BaseException) -> None:
+    async def abandon(self, waiter: PlanInteractionWaiter, error: BaseException) -> None:
         async with self._lock:
             if self._waiter is not waiter:
                 return
@@ -198,12 +219,12 @@ class KernelPlanInteractionCoordinator:
             self._open = None
             if waiter is not None and not waiter._future.done():
                 waiter._future.set_exception(
-                    RuntimeError("Host closed while a Plan question was open")
+                    RuntimeError("Host closed while a Plan interaction was open")
                 )
 
-    def _require_waiter(self, waiter: PlanQuestionWaiter) -> None:
+    def _require_waiter(self, waiter: PlanInteractionWaiter) -> None:
         if self._waiter is not waiter:
-            raise RuntimeError("Plan question waiter authority changed")
+            raise RuntimeError("Plan interaction waiter authority changed")
 
 
 class ContinuationAdmissionPhase(StrEnum):
@@ -618,7 +639,7 @@ class PlanToolBatchCoordinator:
             if kind is not PlanToolControlKind.ENTER and workflow_fact is None:
                 disposition = PlanToolBatchDisposition.TOOL_UNAVAILABLE
             elif (
-                kind is PlanToolControlKind.QUESTION and self._plan_interactions is None
+                kind in {PlanToolControlKind.QUESTION, PlanToolControlKind.DRAFT} and self._plan_interactions is None
             ):
                 disposition = PlanToolBatchDisposition.TOOL_UNAVAILABLE
             elif (
@@ -680,10 +701,10 @@ class PlanToolBatchCoordinator:
         )
         prepared_calls: list[PreparedPlanBatchCall] = []
         for index, call in enumerate(calls):
-            selected_question = (
+            selected_waiting_interaction = (
                 apply_control
                 and index == selected_call_index
-                and kind is PlanToolControlKind.QUESTION
+                and kind in {PlanToolControlKind.QUESTION, PlanToolControlKind.DRAFT}
             )
             prepared_calls.append(
                 PreparedPlanBatchCall(
@@ -693,12 +714,12 @@ class PlanToolBatchCoordinator:
                     arguments=call.arguments,
                     result_id=(
                         None
-                        if selected_question
+                        if selected_waiting_interaction
                         else derive_id('result', 'plan-control', self._writer_lease.guard.session_id, assistant_entry_id, call.tool_call_id)
                     ),
                     result_entry_id=(
                         None
-                        if selected_question
+                        if selected_waiting_interaction
                         else derive_id('entry', 'tool-result', derive_id('result', 'plan-control', self._writer_lease.guard.session_id, assistant_entry_id, call.tool_call_id))
                     ),
                 )
@@ -730,11 +751,11 @@ class PlanToolBatchCoordinator:
             resume_permission_mode=(workflow_fact.resume_permission_mode
                 if apply_control and kind is PlanToolControlKind.EXIT and workflow_fact is not None else None),
         )
-        waiter: PlanQuestionWaiter | None = None
-        if apply_control and kind is PlanToolControlKind.QUESTION:
+        waiter: PlanInteractionWaiter | None = None
+        if apply_control and kind in {PlanToolControlKind.QUESTION, PlanToolControlKind.DRAFT}:
             assert self._plan_interactions is not None
             assert interaction_id is not None
-            waiter = await self._plan_interactions.prepare_question(
+            waiter = await self._plan_interactions.prepare_interaction(
                 interaction_id=interaction_id,
                 origin_turn_id=candidate.origin_turn_id,
             )
@@ -786,13 +807,13 @@ class PlanToolBatchCoordinator:
                             continuity_epoch_nonce=continuity_epoch_nonce,
                             context_allowed=context_allowed,
                         )
-                if outcome.question is None:
-                    raise RuntimeError("accepted Plan question lacks typed content")
-                await self._plan_interactions.publish_open(waiter, outcome.question)
+                await self._plan_interactions.publish_open(
+                    waiter, question=outcome.question, draft=outcome.draft,
+                )
                 resolution = await self._plan_interactions.wait(waiter)
                 if resolution.tool_result_settlement is None:
                     raise RuntimeError(
-                        "answered Plan question lost its ToolResult settlement"
+                        "resolved Plan interaction lost its ToolResult settlement"
                     )
                 await self._dispatch_post(
                     settlement=resolution.tool_result_settlement,
@@ -800,8 +821,20 @@ class PlanToolBatchCoordinator:
                     cwd=hook_cwd,
                     canonical_facts=canonical_facts,
                     continuity_epoch_nonce=continuity_epoch_nonce,
-                    context_allowed=True,
+                    context_allowed=resolution.continuation_turn_id is None,
                 )
+                if kind is PlanToolControlKind.DRAFT:
+                    outcome = replace(
+                        outcome,
+                        selected_result_entry_id=resolution.tool_result_settlement.result_entry_id,
+                        continuation_turn_id=resolution.continuation_turn_id,
+                        continuation_entry_id=resolution.continuation_entry_id,
+                        origin_turn_completed=resolution.continuation_turn_id is not None,
+                        tool_result_settlements=tuple(sorted(
+                            (*outcome.tool_result_settlements, resolution.tool_result_settlement),
+                            key=lambda settlement: settlement.call_ordinal,
+                        )),
+                    )
             else:
                 context_allowed = not outcome.origin_turn_completed
                 if pre_context_reservation is not None:
@@ -837,6 +870,6 @@ __all__ = [
     "ContinuationAdmissionOwner",
     "ContinuationAdmissionPhase",
     "KernelPlanInteractionCoordinator",
-    "OpenPlanQuestion",
-    "PlanQuestionWaiter",
+    "OpenPlanInteraction",
+    "PlanInteractionWaiter",
 ]

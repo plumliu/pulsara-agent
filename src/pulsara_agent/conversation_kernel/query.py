@@ -10,6 +10,7 @@ from typing import Any, Mapping
 from psycopg import IsolationLevel
 from psycopg.rows import dict_row
 
+from pulsara_agent.conversation_kernel.content_parts import read_content_parts
 from pulsara_agent.conversation_kernel.limits import (
     STAGE2_LIMITS,
     STAGE2_STRUCTURAL_BUDGETS,
@@ -243,30 +244,11 @@ class CanonicalConversationQuery:
                        CASE WHEN s.root_session_id IS NULL THEN 'ROOT' ELSE 'SUBAGENT' END AS conversation_scope_kind,
                        e.context_binding_revision_id,
                        e.provider_input_through_sequence,
-                       e.content_digest, e.content_size, e.content_media_type,
-                       e.content_codec, e.accepted_at,
-                       COALESCE(
-                         jsonb_agg(
-                           jsonb_build_object(
-                             'id', b.id,
-                             'ordinal', b.block_ordinal,
-                             'kind', b.block_kind,
-                             'tool_call_id', b.tool_call_id,
-                             'tool_name', b.tool_name,
-                             'tool_arguments', b.tool_arguments,
-                             'content_digest', b.content_digest,
-                             'content_size', b.content_size
-                           ) ORDER BY b.block_ordinal
-                         ) FILTER (WHERE b.id IS NOT NULL),
-                         '[]'::jsonb
-                       ) AS blocks
+                       e.accepted_at
                 FROM pulsara_v3.transcript_entries AS e
                 JOIN pulsara_v3.sessions AS s ON s.id=e.session_id
-                LEFT JOIN pulsara_v3.assistant_message_blocks AS b
-                  ON b.session_id = e.session_id AND b.assistant_entry_id = e.id
                 WHERE e.session_id = %s
                   AND e.entry_sequence > %s AND e.entry_sequence <= %s
-                GROUP BY e.id,s.root_session_id
                 ORDER BY e.entry_sequence
                 LIMIT %s
                 """,
@@ -281,7 +263,12 @@ class CanonicalConversationQuery:
             through_entry_sequence=through,
             through_event_sequence=int(session["latest_event_sequence"]),
             after_entry_sequence=after_entry_sequence,
-            entries=tuple(dict(row) for row in rows[:maximum_entries]),
+            entries=tuple(
+                {**dict(row), "content_parts": tuple(asdict(part) for part in read_content_parts(
+                    connection, session_id=session_id, entry_id=str(row["id"]),
+                ))}
+                for row in rows[:maximum_entries]
+            ),
             has_more=has_more,
         )
 
@@ -330,6 +317,15 @@ class CanonicalConversationQuery:
             queue = rows(
                 """SELECT * FROM pulsara_v3.prompt_queue_items
                    WHERE session_id = %s ORDER BY queue_sequence, id"""
+            )
+            queue = tuple(
+                {**row, "content_parts": tuple(asdict(part) for part in read_content_parts(
+                    connection, session_id=session_id,
+                    **({"entry_id": str(row["consumed_entry_id"])}
+                       if row["status"] == "CONSUMED"
+                       else {"queue_item_id": str(row["id"])}),
+                ))}
+                for row in queue
             )
             events = tuple(
                 dict(item)

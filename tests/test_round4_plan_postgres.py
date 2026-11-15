@@ -69,7 +69,6 @@ from pulsara_agent.ports.live_agent_event import (
     live_digest,
 )
 from pulsara_agent.model_input.contracts import (
-    CanonicalInputOriginKind,
     FrozenProviderInputItemKind,
     ModelInputScopeKind,
     ProviderToolResultClosureKind,
@@ -228,7 +227,6 @@ def _commit_plan_batch(
         lease.guard,
         cut=cut,
         entry_id=assistant_entry_id,
-        parent_content=InlineContent.from_bytes(b""),
         blocks=tuple(blocks),
         occurred_at=_now(),
         actor_id="model:round4",

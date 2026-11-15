@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from decimal import Decimal
 from enum import StrEnum
 import json
 from typing import TYPE_CHECKING, Protocol, Callable
@@ -18,17 +19,43 @@ from pulsara_agent.primitives.context import (
 from pulsara_agent.primitives.tool_observation import TrustedToolObservationSupplement
 
 if TYPE_CHECKING:
+    from pulsara_agent.conversation_kernel.content_parts import ResultPart
     from pulsara_agent.ports.tool_output import ToolOutputBodyCandidate
     from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 
 
-def encode_tool_public_json(value: object) -> bytes:
+def encode_tool_public_json(value: object, *, indent: int | None = None, sort_keys: bool = False) -> bytes:
     """Preserve ECMAScript string code units in a UTF-8 JSON carrier."""
-    text = json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    text = json.dumps(value, ensure_ascii=False, separators=(",", ":") if indent is None else None,
+                      indent=indent, sort_keys=sort_keys, allow_nan=False)
     try:
         return text.encode("utf-8")
     except UnicodeEncodeError:
-        return json.dumps(value, ensure_ascii=True, separators=(",", ":"), allow_nan=False).encode("ascii")
+        return json.dumps(value, ensure_ascii=True, separators=(",", ":") if indent is None else None,
+                          indent=indent, sort_keys=sort_keys, allow_nan=False).encode("ascii")
+
+
+def tool_json_values_equal(left: object, right: object) -> bool:
+    """Compare JSON kinds, exact JSON numbers and UTF-16 strings.
+
+    JSON decoding normalizes paired code units in strings and keys. Decimal
+    decoding retains the JSON number's value across jsonb's numeric spelling
+    changes; Python float equality would lose that property for e.g. 1e30.
+    """
+    def decoded(value: object) -> object:
+        return json.loads(json.dumps(value, ensure_ascii=True, allow_nan=False),
+                          parse_int=Decimal, parse_float=Decimal)
+
+    def same(a: object, b: object) -> bool:
+        if type(a) is not type(b):
+            return False
+        if isinstance(a, dict):
+            return a.keys() == b.keys() and all(same(value, b[key]) for key, value in a.items())
+        if isinstance(a, list):
+            return len(a) == len(b) and all(same(x, y) for x, y in zip(a, b))
+        return a == b
+
+    return same(decoded(left), decoded(right))
 
 
 class FrozenToolJsonDict(dict[str, object]):
@@ -120,6 +147,37 @@ class ToolOutputSourceFormatHint(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class ToolBusinessValue:
+    """A producer-declared value, separated from authoritative execution facts.
+
+    Producers own their field schemas. This carrier does not parse serialized
+    output or infer fields from a display projection.
+    """
+
+    public_fields: FrozenToolJsonDict = field(default_factory=FrozenToolJsonDict)
+    content: tuple[ResultPart, ...] = ()
+
+    def __post_init__(self) -> None:
+        from pulsara_agent.conversation_kernel.content_parts import ResultPart
+
+        fields = freeze_tool_json_object(self.public_fields)
+        if "content" in fields:
+            raise ValueError("public_fields cannot duplicate ordered content")
+        if "observed_at_utc" in fields or "observation_duration_microseconds" in fields:
+            raise ValueError("observation facts belong to the execution owner")
+        meta = fields.get("meta", {})
+        if not isinstance(meta, Mapping):
+            raise TypeError("public meta must be an object")
+        if "status" in meta:
+            raise ValueError("result status belongs to the execution owner")
+        parts = tuple(self.content)
+        if any(not isinstance(part, ResultPart) for part in parts):
+            raise TypeError("business content requires explicit ResultPart values")
+        object.__setattr__(self, "public_fields", fields)
+        object.__setattr__(self, "content", parts)
+
+
+@dataclass(frozen=True, slots=True)
 class ToolExecutionResult:
     call_id: str
     tool_name: str
@@ -194,11 +252,13 @@ __all__ = [
     "Tool",
     "ToolCall",
     "ToolExecutionResult",
+    "ToolBusinessValue",
     "ToolInvocationOwnerKind",
     "ToolOutputSourceCoverage",
     "ToolOutputSourceCoverageReason",
     "ToolOutputSourceFormatHint",
     "freeze_tool_json_object",
     "encode_tool_public_json",
+    "tool_json_values_equal",
     "thaw_tool_json_object",
 ]
