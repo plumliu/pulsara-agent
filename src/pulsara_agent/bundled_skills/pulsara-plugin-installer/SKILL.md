@@ -38,6 +38,9 @@ The user completes the component and connection review. Plugin enablement and
 Hook trust are separate: a Hook runs when its Plugin and source are enabled and
 the source is trusted. Use `TRUST_HOOK_SOURCE` for the Hook review.
 
+After refresh, enabled and trusted Hooks apply to future events in existing
+sessions; enabling or trusting does not replay `SessionStart`.
+
 ## Inspect and customize
 
 List Plugins with `query_capabilities({kind:"PLUGIN"})`. An exact PLUGIN query
