@@ -1,56 +1,44 @@
-# Codex-Compatible Package Conversion
+# Codex Plugin declarations
 
-Select Codex explicitly when importing `.codex-plugin/plugin.json`. Marker
-presence is evidence to inspect, not proof that conversion will succeed; the
-official importer creates the native candidate without model rewriting.
+Use `source_format:"codex"` for a distribution with `.codex-plugin/plugin.json`.
+For a native Agent Plugins package, root `plugin.json` supplies its identity,
+`skills/` its Skills and `mcp.json` its MCP services. OpenAI Hook settings may be
+under `extensions.com.openai` in that root manifest.
 
-Absent declarations use only the selected format's defaults. Explicit empty
-MCP/hooks declarations must not load neighboring host files. Skill resources
-remain complete. Private inputs are configured on the disabled installed instance,
-not copied into the native candidate. An import never grants enablement acceptance.
+## Hook source selection
 
-## Inspect
+For a native package:
 
-Read the exact Codex manifest to select the distribution. The official importer
-observes its declarations, format defaults and complete admitted resources.
-Inspect a referenced declaration, Skill or script when a concrete import
-diagnostic or user question needs it; routine installation does not require
-repeating the importer's complete source audit. Its supported field set decides
-which components are presentation metadata and which require active behavior.
+1. `dev.pulsara/hooks/hooks.json`, when present, supplies Pulsara Hooks.
+2. Otherwise an object at `extensions.com.openai` supplies OpenAI settings.
+3. When that object is absent, `.codex-plugin/plugin.json` can supply those settings.
 
-Do not infer semantics from the examples in this reference when the source says
-something different.
+An omitted `hooks` in the selected settings uses `hooks/hooks.json` when present.
+Explicit empty declarations stay empty. With no selected extension or overlay,
+a plain `hooks/` directory remains a resource. A rejected selected Pulsara
+source is represented by an empty installed configuration so its selection stays
+in place.
 
-## Conservative Mappings
+A selected `hooks` can be a path, path array, inline object or object array.
+Native OpenAI settings use their actual manifest `config_path` as the HOOK_SOURCE
+Target. Read the manifest and referenced files for details. External Codex import
+writes the selected definitions into the single Pulsara Hook source.
 
-- Map exact portable identity fields such as name, version, description, author,
-  homepage, repository, license, and keywords into root `plugin.json` when they
-  satisfy Agent Plugins 1.0.
-- Copy valid Skill directories into the fixed root `skills/` placement without
-  changing instructional bodies. Custom Skill paths may be relocated only when
-  membership and names remain unambiguous and collision-free.
-- Translate `.mcp.json` servers only when transport and every behavior-bearing
-  field have exact Agent Plugins/Pulsara representations. Preserve command, args,
-  cwd, environment data, endpoint, and public headers. Package-root path syntax may
-  change only when it resolves to the same managed package location.
-- Translate command Hooks only when their lifecycle event, matcher, handler, input,
-  output, and control semantics exactly match
-  `pulsara-hook-extension.md`. Use importer diagnostics; inspect that reference for a concrete compatibility question.
-- Keep interface and branding fields as inert source resources unless Agent
-  Plugins 1.0 has an exact portable metadata destination. They grant no capability.
+## Runtime behavior
 
-## Unsupported host behavior
+Only Pulsara's documented eleven events and command handlers are active.
+Configuration accepts `matcher:null` as omitted and `command_windows` as an alias
+for `commandWindows`. Other events and handler types are listed as inactive.
 
-Codex-private Apps, desktop bridges, injected tools and UI behavior are reported
-and not activated. Unsupported Hook events and handler types are skipped with
-diagnostics. Valid supported command Hooks receive Pulsara native inputs; aliases
-for matching do not translate script inputs or implement the original harness.
-Invalid supported Skill/MCP/command Hook declarations still reject installation.
+Scripts receive Pulsara's native tool names and parameters. Matcher aliases only
+select operations; a script using Codex-specific tool arguments may need a source
+change when the task is to port that behavior. `transcript_path` is null.
+PreToolUse can inspect and block a call; permission decisions and continuation
+follow the [Hook configuration](pulsara-hook-extension.md).
 
-Plugin Hooks receive PLUGIN_ROOT / CLAUDE_PLUGIN_ROOT for the same managed package
-and PLUGIN_DATA / CLAUDE_PLUGIN_DATA for the same persistent data directory. Braced
-references in commands are resolved by the execution shell; scripts also receive
-all four environment variables. MCP does not gain Claude-prefixed aliases.
+Plugin commands receive `PLUGIN_ROOT` and `CLAUDE_PLUGIN_ROOT` for the package,
+and `PLUGIN_DATA` and `CLAUDE_PLUGIN_DATA` for persistent Plugin data. Use the
+command shell's variable syntax. Original scripts and resource layout are retained.
 
-Report any unsupported behavior relevant to the user's request. Successful
-installation does not imply a Codex desktop bridge or other private behavior works.
+Apps and other OpenAI-specific UI features are described as inactive. Installation
+remains separate from Plugin enablement and Hook trust.

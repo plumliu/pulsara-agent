@@ -8,6 +8,7 @@ from time import monotonic
 
 from PIL import Image
 from jsonschema import Draft202012Validator
+import pytest
 
 from pulsara_agent.capability.source_query import call_mcp_tool_output_schema, read_mcp_resource_output_schema
 from pulsara_agent.conversation_kernel.image_validation import HostPromptImageValidator
@@ -110,3 +111,24 @@ def test_bm25_service_match_does_not_match_unrelated_tools_from_that_service():
     assert [(kind, item) for kind, item, _ in search_mcp('weather', tools=[unrelated], servers=[server])] == [('service', server)]
     # Actual tool-name/description hits remain eligible even alongside a service hit.
     assert [(kind, item) for kind, item, _ in search_mcp('weather', tools=[unrelated, matching], servers=[server])] == [('tool', matching), ('service', server)]
+
+
+@pytest.mark.parametrize('description', ['', 'Download a page from its address.', '读取指定文档并返回标题。'])
+def test_bm25_name_only_hit_keeps_short_description_when_available(description):
+    tool = N(server_id='docs', remote_tool_name='quasar', description=description)
+
+    [(kind, found, excerpt)] = search_mcp('quasar', tools=[tool], servers=[])
+
+    assert kind == 'tool' and found is tool
+    assert excerpt == (description or None)
+
+
+def test_bm25_name_only_hit_excerpts_the_start_of_a_long_description():
+    description = 'Download a page from its address. ' * 40
+    tool = N(server_id='docs', remote_tool_name='quasar', description=description)
+
+    [(_, _, excerpt)] = search_mcp('quasar', tools=[tool], servers=[])
+
+    assert excerpt.endswith('…')
+    assert description.startswith(excerpt[:-1])
+    assert 0 < len(excerpt) < len(description)

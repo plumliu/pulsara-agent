@@ -1,4 +1,4 @@
-"""Strict Agent Plugins 1.0 parsing over one held no-follow observation."""
+"""Agent Plugins parsing over one held, contained source observation."""
 
 from __future__ import annotations
 
@@ -130,6 +130,8 @@ class FrozenPackageEntry:
     mtime_ns: int
     ctime_ns: int
     executable: bool
+    resolved_relative_path: PurePosixPath | None = None
+    link_target: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,7 +162,6 @@ class HeldPluginPackageObservation:
     skill_invalid_diagnostics: tuple[SkillDiagnostic, ...]
     mcp_component: ParsedPluginMcpComponent | None
     hook_config: ParsedHookConfig | None
-    enforce_managed_admission: bool = True
     _closed: bool = False
     source_import: PluginSourceImport | None = None
 
@@ -225,9 +226,13 @@ class PluginSourceObserver:
         hook_declaration_environment: tuple[tuple[str, str], ...] = (),
         scan_active_api_key: bool = True,
         secret_scan_source_path: Path | None = None,
-        enforce_managed_admission: bool = True,
     ) -> HeldPluginPackageObservation:
-        source = prepare_local_source_path(source_path)
+        try:
+            source = prepare_local_source_path(source_path).resolve()
+        except (OSError, RuntimeError) as exc:
+            raise PluginPackageInvalid((
+                _diagnostic(PluginDiagnosticCode.SOURCE_ESCAPE, source_path),
+            )) from exc
         probe = cancellation or NeverCancelPluginOperation()
         scrub = scrub_set or ProcessCredentialScrubSet()
         _check_abort(deadline_monotonic, probe)
@@ -237,9 +242,9 @@ class PluginSourceObserver:
                 root = os.fstat(descriptor)
                 entries = _observe_membership(
                     descriptor,
+                    source_path=source,
                     deadline_monotonic=deadline_monotonic,
                     cancellation=probe,
-                    enforce_managed_admission=enforce_managed_admission,
                 )
             except (PluginPackageCancelled, PluginPackageTimedOut):
                 raise
@@ -262,7 +267,9 @@ class PluginSourceObserver:
                 raise PluginPackageInvalid(
                     (
                         _diagnostic(
-                            PluginDiagnosticCode.MANIFEST_MISSING,
+                            PluginDiagnosticCode.SOURCE_ESCAPE
+                            if manifest_entry is not None and manifest_entry.kind is PackageEntryKind.SYMLINK
+                            else PluginDiagnosticCode.MANIFEST_MISSING,
                             source / "plugin.json",
                         ),
                     )
@@ -345,7 +352,6 @@ class PluginSourceObserver:
                 expected_entries=entries,
                 deadline_monotonic=deadline_monotonic,
                 cancellation=probe,
-                enforce_managed_admission=enforce_managed_admission,
             )
             summary = PluginValidationSummary(
                 manifest=manifest,
@@ -355,6 +361,11 @@ class PluginSourceObserver:
             )
             diagnostics: tuple[object, ...] = (
                 *manifest_diagnostics,
+                *(_diagnostic(
+                    PluginDiagnosticCode.SOURCE_ESCAPE if entry.kind is PackageEntryKind.SYMLINK
+                    else PluginDiagnosticCode.SOURCE_SPECIAL_FILE,
+                    source / entry.relative_path,
+                ) for entry in entries if entry.kind in {PackageEntryKind.SYMLINK, PackageEntryKind.SPECIAL}),
                 *skills_summary.diagnostics,
                 *mcp_summary.diagnostics,
                 *hooks_summary.diagnostics,
@@ -371,7 +382,6 @@ class PluginSourceObserver:
                 skill_invalid,
                 mcp_component,
                 hook_config,
-                enforce_managed_admission,
             )
         except BaseException:
             os.close(descriptor)
@@ -413,80 +423,100 @@ def _component_unavailable(path: Path) -> PluginComponentSummary:
 def _observe_membership(
     root_fd: int,
     *,
+    source_path: Path,
     deadline_monotonic: float,
     cancellation: PluginCancellationPort,
-    enforce_managed_admission: bool = True,
 ) -> tuple[FrozenPackageEntry, ...]:
+    """Observe logical package paths and their contained link relationships.
+
+    pathlib owns filesystem link resolution. Reads still use the held root and
+    no-follow opens of the resolved relative path, then check the observed inode.
+    Unusable resources remain observations for race checks, not install blockers.
+    """
     result: list[FrozenPackageEntry] = []
-    stack: list[tuple[int, PurePosixPath]] = [(os.dup(root_fd), PurePosixPath())]
+    root_metadata = os.fstat(root_fd)
+    root_identity = (root_metadata.st_dev, root_metadata.st_ino)
+    stack = [(os.dup(root_fd), PurePosixPath(), PurePosixPath(), (root_identity,))]
     try:
         while stack:
-            directory_fd, prefix = stack.pop()
+            directory_fd, prefix, physical_prefix, ancestors = stack.pop()
+            children = []
             try:
                 _check_abort(deadline_monotonic, cancellation)
                 try:
                     names = tuple(sorted(os.listdir(directory_fd)))
                 except OSError as exc:
-                    raise PluginPackageUnavailable(
-                        PluginDiagnosticCode.SOURCE_UNAVAILABLE
-                    ) from exc
-                children: list[tuple[int, PurePosixPath]] = []
+                    raise PluginPackageUnavailable(PluginDiagnosticCode.SOURCE_UNAVAILABLE) from exc
                 for name in names:
                     _check_abort(deadline_monotonic, cancellation)
                     if name in {"", ".", ".."} or "/" in name or "\x00" in name:
-                        raise PluginPackageInvalid(
-                            (_diagnostic(PluginDiagnosticCode.SOURCE_ESCAPE),)
-                        )
-                    relative = prefix / name if prefix.parts else PurePosixPath(name)
+                        raise PluginPackageInvalid((_diagnostic(PluginDiagnosticCode.SOURCE_ESCAPE),))
+                    relative = prefix / name
+                    physical = physical_prefix / name
                     try:
-                        metadata = os.stat(
-                            name, dir_fd=directory_fd, follow_symlinks=False
-                        )
+                        metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
                     except FileNotFoundError as exc:
                         raise PluginPackageRaced from exc
                     except OSError as exc:
-                        raise PluginPackageUnavailable(
-                            PluginDiagnosticCode.SOURCE_UNAVAILABLE
-                        ) from exc
+                        raise PluginPackageUnavailable(PluginDiagnosticCode.SOURCE_UNAVAILABLE) from exc
+                    original = metadata
+                    link_target = None
                     if stat.S_ISLNK(metadata.st_mode):
-                        if enforce_managed_admission:
-                            raise PluginPackageInvalid(
-                                (_diagnostic(PluginDiagnosticCode.SOURCE_TREE_SYMLINK),)
-                            )
-                        kind = PackageEntryKind.SYMLINK
-                    elif stat.S_ISDIR(metadata.st_mode):
+                        try:
+                            target = (source_path / physical).resolve(strict=True)
+                            physical = PurePosixPath(target.relative_to(source_path).as_posix())
+                            link_target = os.path.relpath(physical.as_posix(), relative.parent.as_posix())
+                            parent, target_name = _open_relative_parent(root_fd, physical)
+                            try:
+                                metadata = os.stat(target_name, dir_fd=parent, follow_symlinks=False)
+                            finally:
+                                os.close(parent)
+                        except (OSError, RuntimeError, ValueError):
+                            result.append(_freeze_entry(relative, PackageEntryKind.SYMLINK, original))
+                            continue
+                    if stat.S_ISDIR(metadata.st_mode):
+                        identity = (metadata.st_dev, metadata.st_ino)
+                        if identity in ancestors:
+                            result.append(_freeze_entry(relative, PackageEntryKind.SYMLINK, original))
+                            continue
                         kind = PackageEntryKind.DIRECTORY
                     elif stat.S_ISREG(metadata.st_mode):
                         kind = PackageEntryKind.REGULAR_FILE
+                    elif stat.S_ISLNK(metadata.st_mode):
+                        # A target changed while resolving: no target bytes are read.
+                        raise PluginPackageRaced
                     else:
-                        if enforce_managed_admission:
-                            raise PluginPackageInvalid(
-                                (_diagnostic(PluginDiagnosticCode.SOURCE_SPECIAL_FILE),)
-                            )
                         kind = PackageEntryKind.SPECIAL
-                    entry = _freeze_entry(relative, kind, metadata)
+                    entry = replace(
+                        _freeze_entry(relative, kind, metadata),
+                        resolved_relative_path=physical if physical != relative else None,
+                        link_target=link_target,
+                    )
                     result.append(entry)
                     if kind is PackageEntryKind.DIRECTORY:
                         try:
-                            child = os.open(
-                                name, DIRECTORY_NOFOLLOW_FLAGS, dir_fd=directory_fd
-                            )
+                            parent, target_name = _open_relative_parent(root_fd, physical)
+                            try:
+                                child = os.open(target_name, DIRECTORY_NOFOLLOW_FLAGS, dir_fd=parent)
+                            finally:
+                                os.close(parent)
                             opened = os.fstat(child)
                         except FileNotFoundError as exc:
                             raise PluginPackageRaced from exc
                         except OSError as exc:
-                            raise PluginPackageUnavailable(
-                                PluginDiagnosticCode.SOURCE_UNAVAILABLE
-                            ) from exc
+                            raise PluginPackageUnavailable(PluginDiagnosticCode.SOURCE_UNAVAILABLE) from exc
                         if not _entry_matches(entry, opened):
                             os.close(child)
                             raise PluginPackageRaced
-                        children.append((child, relative))
+                        children.append((child, relative, physical, (*ancestors, identity)))
                 stack.extend(reversed(children))
+                children.clear()
             finally:
+                for descriptor, *_ in children:
+                    os.close(descriptor)
                 os.close(directory_fd)
     except BaseException:
-        for descriptor, _prefix in stack:
+        for descriptor, *_ in stack:
             os.close(descriptor)
         raise
     return tuple(sorted(result, key=lambda item: item.relative_path.as_posix()))
@@ -580,7 +610,9 @@ def _read_bounded_entry(
 def _open_regular_entry(root_fd: int, entry: FrozenPackageEntry) -> int:
     if entry.kind is not PackageEntryKind.REGULAR_FILE:
         raise ValueError("regular package entry required")
-    parent, name = _open_relative_parent(root_fd, entry.relative_path)
+    parent, name = _open_relative_parent(
+        root_fd, entry.resolved_relative_path or entry.relative_path
+    )
     try:
         try:
             descriptor = os.open(name, _FILE_FLAGS, dir_fd=parent)
@@ -663,10 +695,11 @@ def _parse_manifest(
         normative.pop(key)
     extension_names: tuple[str, ...] = ()
     extensions = normative.get("extensions")
-    if extensions is not None:
-        diagnostics.append(
-            _diagnostic(PluginDiagnosticCode.EXTENSIONS_FIELD_IGNORED, path)
-        )
+    if "extensions" in normative:
+        if not isinstance(extensions, dict) or set(extensions) - {"com.openai"}:
+            diagnostics.append(
+                _diagnostic(PluginDiagnosticCode.EXTENSIONS_FIELD_IGNORED, path)
+            )
         if isinstance(extensions, dict):
             extension_names = tuple(sorted(extensions))
             normative["extensions"] = {}
@@ -746,6 +779,13 @@ def _parse_skills(
     for child in direct_children:
         _check_abort(deadline_monotonic, cancellation)
         if child.kind is not PackageEntryKind.DIRECTORY:
+            if child.kind is PackageEntryKind.SYMLINK:
+                invalid.append(SkillDiagnostic(
+                    SkillDiagnosticSeverity.WARNING,
+                    SkillDiagnosticCode.FILE_ESCAPE,
+                    "Skill directory does not resolve within its package",
+                    source / child.relative_path,
+                ))
             continue
         document_relative = child.relative_path / "SKILL.md"
         document_entry = by_path.get(document_relative)
@@ -773,6 +813,7 @@ def _parse_skills(
                 )
             )
             continue
+        document_path = source / (document_entry.resolved_relative_path or document_relative)
         try:
             raw = _read_bounded_entry(
                 root_fd,
@@ -816,8 +857,21 @@ def _parse_skills(
             PluginSkillSummary(parsed.name, parsed.description, str(document_path))
         )
     ordered_candidates = tuple(sorted(candidates, key=lambda item: item.parsed.name))
+    # A normalized discovery alias can share its document with an original
+    # resource directory. Report placement failures only for documents that
+    # have no valid Skill entry, rather than calling an installed Skill invalid.
+    valid_documents = {item.document_path for item in ordered_candidates}
     ordered_invalid = tuple(
-        sorted(invalid, key=lambda item: (str(item.path or ""), item.code.value))
+        sorted(
+            (
+                item for item in invalid
+                if not (
+                    item.code is SkillDiagnosticCode.DIRECTORY_NAME_MISMATCH
+                    and item.path in valid_documents
+                )
+            ),
+            key=lambda item: (str(item.path or ""), item.code.value),
+        )
     )
     summary = PluginComponentSummary(
         PluginComponentObservationDisposition.COMPLETE,
@@ -1003,7 +1057,7 @@ def _normalize_portable_server(
             )
         cwd = raw.get("cwd")
         if cwd is not None and (
-            not isinstance(cwd, str) or not _valid_portable_cwd(cwd)
+            not isinstance(cwd, str) or not _valid_portable_cwd(cwd, source=source)
         ):
             return _diagnostic(
                 PluginDiagnosticCode.MCP_SERVER_INVALID,
@@ -1054,13 +1108,23 @@ def _valid_stdio_command(command: str, entries: tuple[FrozenPackageEntry, ...]) 
     )
 
 
-def _valid_portable_cwd(value: str) -> bool:
-    prefixes = ("./", "${PLUGIN_ROOT}", "${PLUGIN_DATA}")
-    prefix = next((item for item in prefixes if value.startswith(item)), None)
-    if prefix is None:
+def _valid_portable_cwd(value: str, *, source: Path) -> bool:
+    if value.startswith("./"):
+        suffix = value[2:]
+    else:
+        prefix = next((item for item in ("${PLUGIN_ROOT}", "${PLUGIN_DATA}")
+                       if value == item or value.startswith(item + "/")), None)
+        if prefix is None:
+            return False
+        suffix = value[len(prefix):].lstrip("/")
+        if prefix == "${PLUGIN_DATA}":
+            return all(item not in {"", ".", ".."} for item in PurePosixPath(suffix).parts)
+    if any(item in {"", ".", ".."} for item in PurePosixPath(suffix).parts):
         return False
-    suffix = value[len(prefix) :].lstrip("/")
-    return all(item not in {"", ".", ".."} for item in PurePosixPath(suffix).parts)
+    try:
+        return (source / suffix).resolve().is_relative_to(source)
+    except (OSError, RuntimeError):
+        return False
 
 
 def _valid_http_endpoint(value: str) -> bool:
@@ -1126,39 +1190,91 @@ def _parse_hooks(
     deadline_monotonic: float,
     cancellation: PluginCancellationPort,
 ) -> tuple[PluginComponentSummary, ParsedHookConfig | None]:
+    from .hook_import import merge_hook_sources
+
+    by_path = {entry.relative_path: entry for entry in entries}
+    notices: list[HookDiagnostic] = []
+
+    def report(path: str | None, message: str) -> None:
+        notices.append(HookDiagnostic(
+            "HOOK_IMPORT_COMPONENT_SKIPPED", message,
+            source_label=str(source / path) if path else f"PLUGIN:{manifest.name}",
+        ))
+
+    def read_json(value: str) -> object:
+        relative_path = PurePosixPath(value)
+        if (not value.startswith("./") or "\\" in value
+                or relative_path.is_absolute() or ".." in relative_path.parts):
+            raise ValueError("Hook file must be a contained ./ package path")
+        entry = by_path.get(relative_path)
+        if entry is None or entry.kind is not PackageEntryKind.REGULAR_FILE:
+            raise ValueError("Hook file is missing, outside the package or not a regular file")
+        return bounded_json_loads(
+            _read_bounded_entry(root_fd, entry, maximum=MAXIMUM_HOOK_CONFIG_BYTES,
+                deadline_monotonic=deadline_monotonic, cancellation=cancellation),
+            maximum_bytes=MAXIMUM_HOOK_CONFIG_BYTES, maximum_nodes=MAXIMUM_PLUGIN_JSON_NODES,
+            maximum_depth=MAXIMUM_PLUGIN_JSON_DEPTH,
+            maximum_string_utf8_bytes=MAXIMUM_PLUGIN_JSON_SCALAR_BYTES,
+            reject_duplicate_keys=True,
+        )
+
     relative = PurePosixPath("dev.pulsara/hooks/hooks.json")
-    entry = next((item for item in entries if item.relative_path == relative), None)
-    if entry is None:
+    blocked_parent = any(
+        parent in by_path and by_path[parent].kind is not PackageEntryKind.DIRECTORY
+        for parent in relative.parents if parent.parts
+    )
+    if relative in by_path or blocked_parent:
+        value: object = "./" + relative.as_posix()
+    else:
+        root_manifest = read_json("./plugin.json")
+        assert isinstance(root_manifest, dict)
+        extensions = root_manifest.get("extensions")
+        openai = extensions.get("com.openai") if isinstance(extensions, dict) else None
+        if isinstance(extensions, dict) and "com.openai" in extensions and not isinstance(openai, dict):
+            report("plugin.json", "OpenAI 插件扩展需要对象，未采用该扩展。")
+        if isinstance(openai, dict):
+            relative = PurePosixPath("plugin.json")
+            selected = openai
+            for field in {"apps", "onboardingSkill"} & openai.keys():
+                report(relative.as_posix(), f"OpenAI 插件功能 {field} 不受支持，未启用。")
+        elif PurePosixPath(".codex-plugin/plugin.json") in by_path:
+            relative = PurePosixPath(".codex-plugin/plugin.json")
+            try:
+                selected = read_json("./" + relative.as_posix())
+            except (ValueError, UnicodeError) as exc:
+                report(relative.as_posix(), f"Codex Hook 声明未导入：{exc}")
+                selected = {"hooks": []}
+            if not isinstance(selected, dict):
+                report(relative.as_posix(), "Codex Hook 声明必须是对象，未导入。")
+                selected = {"hooks": []}
+        else:
+            return PluginComponentSummary(
+                PluginComponentObservationDisposition.MISSING, diagnostics=tuple(notices),
+            ), None
+        if "hooks" not in selected and PurePosixPath("hooks/hooks.json") not in by_path:
+            return PluginComponentSummary(
+                PluginComponentObservationDisposition.MISSING, diagnostics=tuple(notices),
+                source_relative_path=relative.as_posix(),
+            ), None
+        value = selected.get("hooks", "./hooks/hooks.json")
+    merged = merge_hook_sources(value, read_json=read_json, report=report)
+    selected_entry = by_path.get(relative)
+    if relative == PurePosixPath("dev.pulsara/hooks/hooks.json") and (
+        selected_entry is None or selected_entry.kind is not PackageEntryKind.REGULAR_FILE
+    ):
         return PluginComponentSummary(
-            PluginComponentObservationDisposition.MISSING
+            PluginComponentObservationDisposition.INVALID, diagnostics=tuple(notices),
+            source_relative_path=relative.as_posix(),
         ), None
-    if entry.kind is not PackageEntryKind.REGULAR_FILE:
-        diagnostic = _diagnostic(
-            PluginDiagnosticCode.COMPONENT_KIND_INVALID,
-            source.joinpath(*relative.parts),
-        )
-        return (
-            PluginComponentSummary(
-                PluginComponentObservationDisposition.INVALID,
-                diagnostics=(diagnostic,),
-            ),
-            None,
-        )
     try:
-        raw = _read_bounded_entry(
-            root_fd,
-            entry,
-            maximum=MAXIMUM_HOOK_CONFIG_BYTES,
-            deadline_monotonic=deadline_monotonic,
-            cancellation=cancellation,
-        )
+        raw = json.dumps(merged, ensure_ascii=False).encode("utf-8")
         if package_install_id is None:
             parsed = parse_hook_declarations(raw)
             bound_config = None
         else:
             identity = PluginHookSourceIdentity(
                 visibility, manifest.name, package_install_id, relative.as_posix(),
-                source.joinpath(*relative.parts), workspace_state_key, lifetime_anchor,
+                (source / relative).resolve(), workspace_state_key, lifetime_anchor,
             )
             subject = PluginHookTrustSubject(visibility, manifest.name, workspace_state_key)
             provenance = FrozenHookSourceProvenance(
@@ -1166,41 +1282,24 @@ def _parse_hooks(
                 declaration_environment, lifetime_anchor,
             )
             parsed = parse_hook_config(raw, provenance=provenance)
-            bound_config = parsed
-
+            bound_config = replace(parsed, diagnostics=(*notices, *parsed.diagnostics))
     except (HookConfigParseError, JsonBoundExceeded):
         diagnostic = HookDiagnostic(
-            "HOOK_SOURCE_PARSE_FAILED",
-            "Plugin Hook source failed deterministic parsing",
+            "HOOK_SOURCE_PARSE_FAILED", "Plugin Hook source failed deterministic parsing",
             source_label=f"PLUGIN:{manifest.name}",
         )
-        return (
-            PluginComponentSummary(
-                PluginComponentObservationDisposition.INVALID,
-                diagnostics=(diagnostic,),
-            ),
-            None,
-        )
-    summaries = tuple(
-        PluginHookDefinitionSummary(
-            item.event_type.external_name,
-            item.matcher.pattern,
-            item.command,
-            item.command_windows,
-            item.timeout_seconds,
-            item.asynchronous,
-            item.status_message,
-        )
-        for item in parsed.definitions
-    )
-    return (
-        PluginComponentSummary(
-            PluginComponentObservationDisposition.COMPLETE,
-            hook_definitions=summaries,
-            diagnostics=parsed.diagnostics,
-        ),
-        bound_config,
-    )
+        return PluginComponentSummary(
+            PluginComponentObservationDisposition.INVALID,
+            diagnostics=(*notices, diagnostic), source_relative_path=relative.as_posix(),
+        ), None
+    summaries = tuple(PluginHookDefinitionSummary(
+        item.event_type.external_name, item.matcher.pattern, item.command,
+        item.command_windows, item.timeout_seconds, item.asynchronous, item.status_message,
+    ) for item in parsed.definitions)
+    return PluginComponentSummary(
+        PluginComponentObservationDisposition.COMPLETE, hook_definitions=summaries,
+        diagnostics=(*notices, *parsed.diagnostics), source_relative_path=relative.as_posix(),
+    ), bound_config
 
 
 def _stable_secret_scan(
@@ -1316,7 +1415,6 @@ def revalidate_observation(
         expected_entries=observation.entries,
         deadline_monotonic=deadline_monotonic,
         cancellation=cancellation,
-        enforce_managed_admission=observation.enforce_managed_admission,
     )
 
 
@@ -1328,7 +1426,6 @@ def _revalidate_source(
     expected_entries: tuple[FrozenPackageEntry, ...],
     deadline_monotonic: float,
     cancellation: PluginCancellationPort,
-    enforce_managed_admission: bool,
 ) -> None:
     _check_abort(deadline_monotonic, cancellation)
     try:
@@ -1349,9 +1446,9 @@ def _revalidate_source(
         os.close(rebound)
     actual = _observe_membership(
         root_fd,
+        source_path=source,
         deadline_monotonic=deadline_monotonic,
         cancellation=cancellation,
-        enforce_managed_admission=enforce_managed_admission,
     )
     if actual != expected_entries:
         raise PluginPackageRaced

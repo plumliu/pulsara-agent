@@ -34,6 +34,7 @@ _HANDLER_FIELDS = frozenset(
         "type",
         "command",
         "commandWindows",
+        "command_windows",
         "timeout",
         "statusMessage",
         "additionalContextLimit",
@@ -221,8 +222,10 @@ def parse_hook_declarations(raw: bytes) -> ParsedHookDeclarations:
                 )
                 continue
             unknown_group = group.keys() - _GROUP_FIELDS
-            matcher = group.get("matcher", "")
-            handlers = group.get("hooks")
+            matcher = group.get("matcher")
+            if matcher is None:
+                matcher = ""
+            handlers = group.get("hooks", [])
             if unknown_group or not isinstance(matcher, str) or not isinstance(
                 handlers, list
             ):
@@ -319,13 +322,26 @@ def _parse_handler(
             _diag("HOOK_CONFIG_UNSUPPORTED_HANDLER", label, event_type)
         )
         return None
+    if (
+        "commandWindows" in value
+        and "command_windows" in value
+        and value["commandWindows"] != value["command_windows"]
+    ):
+        diagnostics.append(
+            _diag(
+                "HOOK_CONFIG_CONFLICTING_COMMAND_WINDOWS",
+                f"{label} declares conflicting Windows commands",
+                event_type,
+            )
+        )
+        return None
     command = value.get("command")
-    command_windows = value.get("commandWindows")
+    command_windows = value.get("commandWindows", value.get("command_windows"))
     timeout = value.get("timeout")
     status = value.get("statusMessage")
-    context_limit = value.get(
-        "additionalContextLimit", DEFAULT_ADDITIONAL_CONTEXT_LIMIT
-    )
+    context_limit = value.get("additionalContextLimit")
+    if context_limit is None:
+        context_limit = DEFAULT_ADDITIONAL_CONTEXT_LIMIT
     asynchronous = value.get("async", False)
     try:
         default_scope = (

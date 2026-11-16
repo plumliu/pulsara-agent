@@ -54,8 +54,9 @@ def resolve_capability_target(service, target: Mapping[str, object]) -> dict[str
     if state is None:
         raise ValueError("Plugin is no longer installed")
     package = store.layout(identity).plugin_package_parent / state.current_package_install_id
-    expected = package / ("mcp.json" if kind == "MCP_CONNECTION" else "dev.pulsara/hooks/hooks.json")
-    if path != expected:
+    # Hook consumers compare the actual declaration path against their frozen
+    # inspection. Resolving its owner must not rescan the package on the event loop.
+    if kind == "MCP_CONNECTION" and path != (package / "mcp.json").resolve(strict=False):
         raise ValueError("Target is not the Plugin's declared configuration")
     result = {"scope": identity.scope.value, "source_kind": "PLUGIN", "plugin_id": identity.plugin_id}
     if kind == "MCP_CONNECTION":
@@ -65,6 +66,14 @@ def resolve_capability_target(service, target: Mapping[str, object]) -> dict[str
 
 def plugin_target_from_inspection(item) -> dict[str, str]:
     return {"kind": "PLUGIN", "plugin_path": str(item.package_root.parent)}
+
+
+def plugin_hook_config_path(item) -> Path | None:
+    relative = item.summary.hooks.source_relative_path
+    if relative is None:
+        return None
+    path = (item.package_root / relative).resolve(strict=False)
+    return path if path.is_relative_to(item.package_root.resolve(strict=False)) else None
 
 
 def mcp_connection_target(*, server_id: str, runtime_source, workspace_root: Path, pulsara_home: Path, user_config_path: Path):
@@ -89,8 +98,8 @@ def mcp_connection_target(*, server_id: str, runtime_source, workspace_root: Pat
             PluginScopeKind.WORKSPACE, runtime_source.package_owner_key, scope_key.removeprefix("workspace:"))
         path = (PluginStoreLayout(pulsara_home, identity).plugin_package_parent
                 / runtime_source.package_install_id / "mcp.json")
-        return {"kind": "MCP_CONNECTION", "config_path": str(path), "server_id": server_id[len(prefix):]}
+        return {"kind": "MCP_CONNECTION", "config_path": str(path.resolve(strict=False)), "server_id": server_id[len(prefix):]}
     raise TypeError("MCP source union is open")
 
 
-__all__ = ["exact_target_path", "resolve_capability_target", "plugin_target_from_inspection", "mcp_connection_target"]
+__all__ = ["exact_target_path", "resolve_capability_target", "plugin_target_from_inspection", "plugin_hook_config_path", "mcp_connection_target"]

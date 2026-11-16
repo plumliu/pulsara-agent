@@ -81,6 +81,7 @@ from pulsara_agent.plugins.mcp_connection import (
     PluginMcpConnectionOverlay,
 )
 from pulsara_agent.process_credential_boundary import ProcessCredentialScrubSet
+from pulsara_agent.conversation_kernel.capability_targets import plugin_hook_config_path
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
     freeze_json,
@@ -609,7 +610,10 @@ class CapabilityManagementPreparation:
                         plugin_id is not None and plugin.identity.plugin_id != plugin_id
                     ):
                         continue
-                    if plugin.summary.hooks.disposition.value != "MISSING":
+                    if (
+                        plugin.summary.hooks.disposition.value != "MISSING"
+                        and plugin_hook_config_path(plugin) is not None
+                    ):
                         snapshots.append((self._plugin_hook_snapshot(plugin), plugin))
             finally:
                 observed.close()
@@ -634,12 +638,15 @@ class CapabilityManagementPreparation:
                 trust,
             )
         visibility = HookVisibilityScope(plugin.identity.scope.value)
+        config_path = plugin_hook_config_path(plugin)
+        if config_path is None:
+            raise ValueError("Plugin Hook declaration is unavailable")
         identity = PluginHookSourceIdentity(
             visibility,
             plugin.identity.plugin_id,
             plugin.package_install_id,
-            "dev.pulsara/hooks/hooks.json",
-            plugin.package_root / "dev.pulsara/hooks/hooks.json",
+            plugin.summary.hooks.source_relative_path,
+            config_path,
             plugin.identity.workspace_state_key,
         )
         provenance = FrozenHookSourceProvenance(
@@ -680,6 +687,8 @@ class CapabilityManagementPreparation:
         if len(snapshots) != 1:
             raise McpManagementConflict("Hook source is absent or ambiguous")
         snapshot, plugin = snapshots[0]
+        if Path(thaw_json(intent.target)["config_path"]) != snapshot.provenance.identity.canonical_path:
+            raise ValueError("Target is not the Hook source's declared configuration")
         if intent.action is Action.TRUST_HOOK_SOURCE and (
             snapshot.disposition is not HookSourceSnapshotDisposition.COMPLETE
             or snapshot.trust.disposition is HookTrustDisposition.UNAVAILABLE

@@ -1,64 +1,60 @@
 ---
 name: pulsara-skill-creator
-description: Create, review or edit portable Agent Skills, including customizing an installed loose Skill in place or turning a repeated workflow into a Skill.
+description: Create, review or edit Agent Skills, including customizing an installed loose Skill or turning a repeated workflow into reusable instructions.
 ---
 
 # Pulsara Skill Creator
 
-## Choose the working directory
+## Choose the directory
 
-For an installed Skill, use `query_capabilities` with `kind:"SKILL"` and inspect
-its exact Target. The object record's target.skill_path identifies SKILL.md;
-its parent is the resource directory. Do not infer it from terminal cwd.
+Use the Skill's current SKILL Target; `skill_path` identifies its `SKILL.md`.
+ROOT can find installed copies with `query_capabilities({kind:"SKILL"})` or
+inspect one with `kind` and its Target. Scripts, references and assets are
+relative to the directory containing the document.
 
-Edit an installed **loose Skill** directly in that directory. Prefer
-`read_file` / `edit_file` with a `PATH` target whose `path` is the file path;
-`write_file` and terminal are also available for new
-resources or other file operations, subject to ordinary permissions. Content
-edits need no removal or reinstallation. Preserve its name, location and
-enablement unless the user requests those changes. Later capability snapshots
-observe the edited files without rewriting earlier context; no routine reload
-is needed.
+Edit a loose Skill in place with file tools. Content changes need no reinstall
+or routine reload. Keep its name and location when the task is a content edit.
+For a new Skill, prepare a local source directory and follow
+`pulsara-skill-installer` when installation is requested.
 
-Plugin Skills belong to the whole Plugin: follow `pulsara-plugin-installer` to
-edit its source and replace the package. Pulsara bundled Skills are read-only.
-For a new Skill, create a source directory and use `pulsara-skill-installer` when
-installation is requested. Editing a separate source does not update an installed
-copy.
+Plugin Skills are updated by editing the Plugin source and replacing its package;
+follow `pulsara-plugin-installer`. To customize a bundled Skill, create and install
+a loose copy with the same name. The loose copy takes precedence over the bundled
+definition.
 
-## Author
+## Write the instructions
 
-The directory name must match the lowercase, digit-and-hyphen `name` in
-`SKILL.md` frontmatter:
+Use a directory matching the Skill name and start `SKILL.md` with:
 
 ```yaml
 ---
 name: example-skill
-description: A concise sentence that explains what the skill does and when to use it.
+description: Explain what the skill does and when to use it.
 ---
 ```
 
-Optional portable fields are `license`, `compatibility`, and bounded
-string-to-string `metadata`. Preserve valid fields and resources that still have
-consumers. Keep workflow guidance in the body, with `references/`, `scripts/` or
-`assets/` only where needed; link deeper guidance instead of inlining it all.
+Names use lowercase letters, digits and single hyphens, up to 64 characters.
+The description should identify the task and its trigger clearly. Optional
+portable fields are `license`, `compatibility` and string-to-string `metadata`.
 
-A Skill is untrusted guidance, not tool or execution authority. Keep MCP, Hooks,
-credentials and permissions outside loose Skills; do not add tool schemas,
-`agents/openai.yaml`, Pulsara metadata, dependency fields or a `.system` root.
+Keep the main workflow in `SKILL.md`. Put longer guidance in linked `references/`,
+reusable helpers in `scripts/`, and templates or other resources in `assets/`.
+Write concrete steps, useful defaults and examples. Include only the details
+needed for the model to complete the task; link specialized cases where they
+become relevant. Preserve useful existing instructions and resources when editing.
 
-## Validate
+A Skill provides instructions and resources. Use a Plugin when the distribution
+also needs MCP connections or Hooks.
 
-Validate the edited directory with the installed Pulsara launcher:
+## Validate and install
+
+The installed launcher can validate a source directory:
 
 ```bash
 pulsara skills validate <skill-directory>
 ```
 
-This checks files only; it does not install, enable or adopt them.
-Report the real result. If `pulsara` is not on `PATH`, report standalone validation
-as unavailable; do not use a repository `.venv`, `uv run`, or a private validator.
-For an already authorized installation, use the running Host's
-`INSTALL_LOOSE_SKILL`, which performs native validation; a separate preliminary
-CLI validation is unnecessary. Follow `pulsara-skill-installer` for that flow;
-do not describe authoring or a passed validation as installation.
+For a requested installation, `INSTALL_LOOSE_SKILL` already validates the source;
+a separate validation call is optional. If the launcher is unavailable, continue
+with the file review and use the management tool for installation. Report authoring,
+validation and installation as their actual separate outcomes.

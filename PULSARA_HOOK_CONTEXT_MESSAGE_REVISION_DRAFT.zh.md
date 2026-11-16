@@ -85,6 +85,8 @@ PreToolUse 可以检查即将执行的参数、阻止调用并说明原因，不
 
 成功进入／退出规划并完成原 turn 时，同步 PreToolUse 正文按现有路径退役，PostToolUse 附加正文不自动转发到后继 turn；runtime 控制的结束、新 turn 和恢复权限均保持原语义，不因统一展示外壳扩大跨 turn 转发。
 
+插件导入沿[INSTALL_PLUGIN 合同](native_tools/manage_capability.md#13-install_plugin安装或替换-plugin)逐组件尽力适配。多文件／内联数组声明按选定来源形成一个逻辑 Hook 源：外部格式导入写固定托管配置，原生 OpenAI 声明使用实际 manifest config_path，不改原文件、不伪造固定路径；仍共用原 parser／executor。显式空声明或被排除的已选 Pulsara 声明均保留为空托管配置，不回退激活邻近宿主定义。无效或不支持的文件、组、handler 只影响各自独立单元，保留其他有效组件并报告具体原因。范围仍是现有 11 事件和 command handler；matcher:null、command_windows 等配置写法适配不改变 matcher 执行含义、原生工具输入或输出控制，不恢复改参。安装与启用保持分离，未支持内容不执行。
+
 同时保留现有来源解析、启用设置、信任、作用域、凭据秘密清理、执行超时与副作用结算。修改展示外壳不重新授予信任、不删除管理能力，也不改变已接纳操作的结果。阻止原因已经由工具或输入结果表达时，不为了新消息格式额外复制一条控制通知。
 
 ## 5. 与 observation、压缩和 Plan 的关系

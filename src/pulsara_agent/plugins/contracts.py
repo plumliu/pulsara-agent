@@ -373,6 +373,7 @@ class PluginComponentSummary:
     mcp_servers: tuple[PluginMcpServerSummary, ...] = ()
     hook_definitions: tuple[PluginHookDefinitionSummary, ...] = ()
     diagnostics: tuple[object, ...] = field(default=(), repr=False)
+    source_relative_path: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

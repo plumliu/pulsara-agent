@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 from pulsara_agent.capability.local_skill_publisher import LocalSkillInstallScope
 from pulsara_agent.capability.source_query import CapabilityQueryError, parse_query
-from pulsara_agent.conversation_kernel.capability_targets import (plugin_target_from_inspection, resolve_capability_target)
+from pulsara_agent.conversation_kernel.capability_targets import (plugin_hook_config_path, plugin_target_from_inspection, resolve_capability_target)
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.plugins.contracts import (InspectLocalPluginsRequest, PluginInspectionAbort,
     PluginInspectionDisposition, PluginScopeKind)
@@ -197,6 +197,8 @@ class CapabilitySourceQuery:
                 continue
             if plugin.summary.hooks.disposition.value != "COMPLETE":
                 self._failure(f"插件 {plugin.summary.manifest.name} 的 Hook 定义未能完整读取。")
+            if plugin_hook_config_path(plugin) is None:
+                continue
             records.append(self._hook_record(self.service._plugin_hook_snapshot(plugin)))
         if target is not None:
             records = [item for item in records if item["target"] == target]
@@ -238,9 +240,9 @@ class CapabilitySourceQuery:
             self.content.append(_text(f"{manifest.name}：{manifest.description or ''}\n{status}"))
             groups = [
                 ("SKILL", [{"kind": "SKILL", "skill_path": item.skill_path} for item in plugin.summary.skills.skills]),
-                ("HOOK", [{"kind": "HOOK_SOURCE", "config_path": str(plugin.package_root / "dev.pulsara/hooks/hooks.json")}]
-                    if plugin.summary.hooks.hook_definitions else []),
-                ("MCP", [{"kind": "MCP_CONNECTION", "config_path": str(plugin.package_root / "mcp.json"),
+                ("HOOK", [{"kind": "HOOK_SOURCE", "config_path": str(plugin_hook_config_path(plugin))}]
+                    if plugin.summary.hooks.hook_definitions and plugin_hook_config_path(plugin) is not None else []),
+                ("MCP", [{"kind": "MCP_CONNECTION", "config_path": str((plugin.package_root / "mcp.json").resolve(strict=False)),
                     "server_id": item.local_server_id} for item in plugin.summary.mcp.mcp_servers]),
             ]
             for label, targets in groups:
@@ -363,7 +365,7 @@ class CapabilitySourceQuery:
                     and policies.get(item.local_server_id, McpScopePolicy.ROOT_AND_SUBAGENTS)
                     is not McpScopePolicy.ROOT_AND_SUBAGENTS):
                     continue
-                target = {"kind": "MCP_CONNECTION", "config_path": str(plugin.package_root / "mcp.json"), "server_id": item.local_server_id}
+                target = {"kind": "MCP_CONNECTION", "config_path": str((plugin.package_root / "mcp.json").resolve(strict=False)), "server_id": item.local_server_id}
                 append(target, framed_plugin_mcp_server_id(plugin.identity.plugin_id, item.local_server_id),
                     f"{plugin.summary.manifest.name}:{item.local_server_id}", plugin.enabled, None)
         servers = [item for item in servers if canonical_json_bytes(item.connection_target) in declared]

@@ -1,29 +1,19 @@
-# Pulsara Hook Extension Target
+# Hook configuration and command interface
 
-Read this file when a Hook conversion diagnostic, uncommon event or output-control
-question needs the detailed contract. For ordinary local source authoring and
-management, use `hook-source-management.md`. The official importer/parser owns
-admission; these details do not require a second model-run conformance audit.
+For local source paths, trust and enablement, see
+[Hook workflows](hook-source-management.md). This reference covers command
+configuration and the input/output shapes needed to write or adapt a Hook.
 
-Agent Plugins 1.0 has no portable Hook component. Pulsara Hooks are a client
-extension stored at exactly:
+Plugin definitions use `dev.pulsara/hooks/hooks.json` or a selected native OpenAI
+manifest, as described in [Codex declarations](codex-compatible.md). External
+import combines its selected declarations into one Pulsara Hook source.
 
-```text
-dev.pulsara/hooks/hooks.json
-```
+## Configuration
 
-The installed Plugin must still have a valid root `plugin.json`. Plugin enablement
-makes this definition source eligible, but command execution also requires the
-ordinary Pulsara Hook trust decision. Never execute a Hook while converting it.
-
-## Configuration Shape
-
-The target is strict UTF-8 JSON with no duplicate keys, comments, aliases,
-`NaN`, or `Infinity`:
+The configuration is a JSON object:
 
 ```json
 {
-  "description": "Optional source description",
   "hooks": {
     "PreToolUse": [
       {
@@ -45,111 +35,60 @@ The target is strict UTF-8 JSON with no duplicate keys, comments, aliases,
 }
 ```
 
-Emit only the root fields `description` and `hooks`, only the group fields
-`matcher` and `hooks`, and only these command-handler fields:
+Root `description` is optional. Each event has an array of matcher groups, each
+containing a `hooks` array of handlers.
 
-- `type`: must be exact `command`;
-- `command`: nonempty shell command, at most 8 KiB UTF-8;
-- `commandWindows`: optional nonempty Windows command, at most 8 KiB UTF-8;
-- `timeout`: optional integer seconds; default 600 and range 1..600, except
-  `SessionEnd`, whose default is 1 and range is 1..3;
-- `statusMessage`: optional diagnostic label, at most 4 KiB UTF-8;
-- `additionalContextLimit`: optional nonnegative integer, default 2500; use it
-  only for events that accept context. A positive value omits the whole context
-  contribution when its provider-specific estimate exceeds the threshold; zero
-  disables this per-handler threshold but not capture or compiler bounds;
-- `scope_policy`: `ROOT`, `SUBAGENT`, or `BOTH`. The default is `BOTH` for
-  `SessionStart`, `SUBAGENT` for `SubagentStart`/`SubagentStop`, and `ROOT` for other events;
-- `async`: optional boolean, default false. `SessionEnd` is always synchronous.
+| Handler field | Meaning |
+| --- | --- |
+| `type` | `command` |
+| `command` | Shell command, up to 8 KiB UTF-8 |
+| `commandWindows` | Optional Windows command; `command_windows` is also accepted |
+| `timeout` | Seconds, 1–600; default 600. SessionEnd uses 1–3, default 1 |
+| `statusMessage` | Optional progress label |
+| `additionalContextLimit` | Context threshold, default 2500 tokens; 0 removes this per-handler threshold |
+| `scope_policy` | ROOT, SUBAGENT or BOTH |
+| `async` | Background execution, default false; SessionEnd runs synchronously |
 
-The whole config is bounded to 1 MiB, 16,384 JSON nodes, depth 64, ordinary
-scalars 64 KiB, and matchers 1 KiB. These are per-carrier parser bounds, not a
-Plugin lifetime or total-Hook cap. Do not split one behavior across files to evade
-them: one Plugin has exactly one Hook config source.
+Missing or null optional matcher/context-limit values use their defaults. A null
+Windows command uses `command`. Scope defaults to BOTH for SessionStart,
+SUBAGENT for SubagentStart/SubagentStop, and ROOT for the other events.
 
-Known unsupported `prompt`, `agent`, `http`, and `mcp_tool` handlers and unsupported events
-are reported and not activated. Unknown handler types or fields on supported command
-handlers remain invalid. Import does not promise whole-harness behavior.
+The active handler type is `command`. Other types and unsupported events are
+reported as inactive; invalid groups or handlers leave independent entries usable.
 
-## Events and Matchers
+## Events and matching
 
-The only event names are:
+| Event | Matcher subject | Runs when |
+| --- | --- | --- |
+| SessionStart | startup, resume or compact | A session starts or resumes, or adopted compaction continues |
+| SubagentStart | startup, resume or compact | The delegated session's start event follows SessionStart |
+| SessionEnd | other | The session closes |
+| UserPromptSubmit | All submissions | Input is submitted |
+| PreToolUse | Tool name and aliases | Before a tool call |
+| PermissionRequest | Tool name and aliases | The permission workflow requests a decision |
+| PostToolUse | Tool name and aliases | After a tool result |
+| PreCompact | manual or auto | Before compaction |
+| PostCompact | manual or auto | After compaction is adopted |
+| Stop | All final-reply attempts | ROOT or delegated Work attempts its final reply |
+| SubagentStop | All final-reply attempts | The delegated Work's Stop processing is followed by SubagentStop |
 
-```text
-SessionStart
-SubagentStart
-SessionEnd
-UserPromptSubmit
-PreToolUse
-PermissionRequest
-PostToolUse
-PreCompact
-PostCompact
-Stop
-SubagentStop
-```
+Child session start runs SessionStart then SubagentStart, including compact
+starts. A later Work in an already running session uses that session. Stop and
+SubagentStop share the current turn's single continuation allowance.
 
-A delegated session dispatches `SessionStart` followed by `SubagentStart` at its
-existing `startup`, `resume`, or adopted `compact` boundary. ROOT dispatches only
-`SessionStart`. Both registered handlers execute, even if their commands are
-identical, and both context contributions are kept. Explicit scope restrictions
-still apply. A blocked or cancelled `SessionStart` prevents the second dispatch.
-A later Work in the same running session does not create another start boundary.
-`SubagentStart` uses the same source matcher and child session identity; there is
-no agent-profile matcher or task identity. At each delegated Work's final assistant-message attempt, applicable `Stop`
-handlers run followed by `SubagentStop` handlers. ROOT never emits
-`SubagentStop`. A subsequent Work in the same session gets its own final check;
-waiting, cancellation, failure, and session close do not independently emit it.
-A `continue: false` from either event takes precedence over continuation requests.
-Both share the existing one-continuation-per-turn guard and the same Work/turn.
-This is distinct from closing the reusable child session.
+Missing, null, empty or exact `*` matches all. Other patterns use case-sensitive
+RE2 search; use `^` and `$` for exact matching. UserPromptSubmit, Stop and
+SubagentStop run for all occurrences regardless of matcher text.
 
-Missing, empty, or exact `*` matches all. Other matchers use case-sensitive RE2
-search semantics, not Python backtracking regular expressions. Lookaround,
-backreferences, recursion, and other non-RE2 constructs have no target. Use `^`
-and `$` when exact matching is required.
+Useful aliases are Bash for `exec_process`, apply_patch/Edit for `edit_file`,
+apply_patch/Write for `write_file`, Read for `read_file`, Grep for
+`search_file_content`, and Glob for `find_files`. MCP uses its qualified remote
+tool name. Aliases select operations; stdin still uses the native Pulsara tool
+name and arguments.
 
-Matcher subjects are fixed:
+## Command input
 
-| Event | Subject |
-|---|---|
-| `SessionStart`, `SubagentStart` | `startup`, `resume`, or `compact`; Pulsara has no `clear` producer |
-| `SessionEnd` | exact `other` reason |
-| `UserPromptSubmit` | matcher ignored; always selected |
-| tool lifecycle events | frozen tool identity and closed aliases below |
-| `PreCompact`, `PostCompact` | `manual` or `auto` |
-| `Stop`, `SubagentStop` | matcher ignored; always selected |
-
-Important tool aliases and public names are:
-
-| Pulsara tool | Matcher candidates | Public `tool_name` |
-|---|---|---|
-| `exec_process` | `exec_process`, `Bash` | `exec_process` |
-| `query_processes` | `query_processes` | `query_processes` |
-| `manage_process` | `manage_process` | `manage_process` |
-| `edit_file` | `edit_file`, `apply_patch`, `Edit` | `edit_file` |
-| `write_file` | `write_file`, `apply_patch`, `Write` | `write_file` |
-| `read_file` | `read_file`, `Read` | `read_file` |
-| `search_content` | `search_content`, `Grep` | `search_content` |
-| `find_files` | `find_files`, `Glob` | `find_files` |
-| MCP tool | exact provider-qualified remote identity | same identity |
-
-Other builtins use their exact Pulsara descriptor name. `edit_file` and
-`write_file` keep their real Pulsara input schemas; they do not acquire a fake
-Codex `command` argument. `manage_process` is an independent
-tool calls, not transparent `write_stdin` continuations of `Bash`. A Hook that
-depends on those vendor transport semantics is not convertible.
-
-For the filesystem hard cut, an `edit_file` Hook receives the native closed
-`path + base_revision + operations` object verbatim. A `write_file` Hook receives
-only the native create-only `path + content` object. The `apply_patch`, `Edit`, and
-`Write` aliases affect matcher selection only: Hook
-dispatch never translates unified diffs, text-search replacements, or vendor
-patch bodies into Pulsara operations.
-
-## Command Input
-
-Each command receives one JSON object on stdin. Common fields are:
+Commands receive one JSON object on stdin. Common fields are:
 
 ```text
 session_id: string
@@ -161,108 +100,71 @@ hook_event_name: exact event name
 model: string
 ```
 
-For every event, `cwd` and the hook command's working directory are the current
-workspace root. A prior terminal command's `cd` does not change either value.
-For terminal tool events, inspect `tool_input.workdir` for that command's explicit
-working directory; its omission also means the workspace root. For `manage_process`
-object actions, the selected object is in
-`tool_input.target`: `PROCESS` carries `process_id`. Collection queries omit target; exact queries carry only target. Hooks receive these public objects
-unchanged.
-
+The command's working directory and `cwd` are the current workspace root.
 Event-specific fields are:
 
-| Event | Additional required input |
-|---|---|
-| `SessionStart`, `SubagentStart` | `source`, `permission_mode` |
-| `SessionEnd` | `reason: "other"` |
-| `UserPromptSubmit` | `turn_id`, `prompt`, `permission_mode` |
-| `PreToolUse` | `turn_id`, `tool_name`, `tool_use_id`, `tool_input`, `permission_mode` |
-| `PermissionRequest` | `turn_id`, `tool_name`, `tool_input`, `permission_mode` |
-| `PostToolUse` | `turn_id`, `tool_name`, `tool_use_id`, `tool_input`, public `tool_response`, `permission_mode` |
-| `PreCompact`, `PostCompact` | `turn_id`, `trigger` |
-| `Stop`, `SubagentStop` | `turn_id`, `stop_hook_active`, `last_assistant_message`, `permission_mode` |
+| Event | Additional input |
+| --- | --- |
+| SessionStart, SubagentStart | source, permission_mode |
+| SessionEnd | reason: "other" |
+| UserPromptSubmit | turn_id, prompt, permission_mode |
+| PreToolUse | turn_id, tool_name, tool_use_id, tool_input, permission_mode |
+| PermissionRequest | turn_id, tool_name, tool_input, permission_mode |
+| PostToolUse | turn_id, tool_name, tool_use_id, tool_input, tool_response, permission_mode |
+| PreCompact, PostCompact | turn_id, trigger |
+| Stop, SubagentStop | turn_id, stop_hook_active, last_assistant_message, permission_mode |
 
-`permission_mode` is one of `default`, `acceptEdits`, `plan`, `dontAsk`, or
-`bypassPermissions`. Scripts receive Pulsara tool names and parameters; aliases never translate stdin or script-internal comparisons. File operations identify their file in `tool_input.target.path`; terminal process actions use `tool_input.target` for the selected PROCESS. The `exec_process` startup command and workdir remain top-level parameters. There is no pulsara_tool_name field. Configuration conversion does not prove arbitrary vendor scripts work.
+Permission modes are default, acceptEdits, plan, dontAsk and bypassPermissions.
+For file tools, the file path is `tool_input.target.path`. For process tools,
+startup command/workdir are top-level fields, while existing process actions use
+`tool_input.target`. Use the relevant tool's native input when adapting a script.
 
-`transcript_path` is deliberately null. Hook stdin
-does not contain Plugin identity, install paths, private replay, raw artifacts, or
-any model or retrieval credential. A vendor Hook that requires a transcript file, Plugin
-provenance in stdin, hidden reasoning, or a different tool-input schema has no
-exact mapping.
+Plugin commands receive PLUGIN_ROOT and CLAUDE_PLUGIN_ROOT for their package,
+and PLUGIN_DATA and CLAUDE_PLUGIN_DATA for their persistent data directory.
+PULSARA_HOOK_SOURCE_DIR identifies the source directory; PULSARA_PROJECT_DIR is
+present for project-scoped execution. Shell variable syntax applies. Windows
+execution adapts braced Plugin variable references to cmd syntax.
 
-## Environment and Commands
+## Command output
 
-Plugin Hook commands receive these public declaration values:
+Plain stdout adds model context for SessionStart, SubagentStart and
+UserPromptSubmit. JSON can supply event-specific context, for example:
 
-```text
-PLUGIN_ROOT=<exact immutable managed package root>
-PLUGIN_DATA=<exact persistent Plugin data root>
-CLAUDE_PLUGIN_ROOT=<same package root as PLUGIN_ROOT>
-CLAUDE_PLUGIN_DATA=<same data root as PLUGIN_DATA>
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "additionalContext": "Run the project's tests after changing this file."
+  }
+}
 ```
 
-Pulsara does not interpolate either placeholder into the reviewed command.
-Reference them using the command shell's own syntax and preserve the resulting
-behavior exactly. The generic executor also supplies `PULSARA_HOOK_SOURCE_DIR`
-and, when applicable, `PULSARA_PROJECT_DIR`. It inherits the ordinary sanitized
-host environment; inherited variables containing a caller-bound credential are
-omitted at the process boundary.
+`hookEventName` matches the current event. The supported controls are:
 
-Do not rewrite a reviewed command, guess a PATH executable, install a dependency,
-or add a launcher merely to make conversion pass. If relocation into the managed
-package changes command, `cwd`, quoting, executable, or dependency behavior in a
-way the candidate cannot express exactly, stop.
+| Event | Output effect |
+| --- | --- |
+| SessionStart | Plain or additional context; continue:false blocks |
+| SubagentStart | Plain or additional context; boolean continue is diagnostic |
+| SessionEnd | Diagnostic systemMessage |
+| UserPromptSubmit | Plain/additional context; exit 2, continue:false or legacy block rejects input |
+| PreToolUse | Additional context; exit 2, legacy block or permissionDecision:"deny" blocks the call |
+| PermissionRequest | hookSpecificOutput.decision with behavior:"allow" or "deny" and optional message |
+| PostToolUse | Additional context for subsequent work |
+| PreCompact, PostCompact | continue:false blocks continuation; other stdout is diagnostic |
+| Stop, SubagentStop | Exit 2 or legacy block requests continuation; continue:false ends the turn |
 
-## Output and Control
+Legacy block uses top-level `decision:"block"` and a nonempty `reason`.
+A stopping decision takes precedence over a continuation request. PreToolUse
+keeps the original tool arguments; explicit permission approval uses
+PermissionRequest. PostToolUse preserves the tool's settled result.
 
-Transport, spawn, timeout, malformed output, and unsupported-control failures are
-diagnostic and fail open. Only a successfully parsed explicit control changes the
-owner operation. `stderr` and `systemMessage` are diagnostics, not model context.
+Use synchronous handlers for control decisions and asynchronous handlers for
+informational output. Background output is delivered at a later normal safe
+point. Stderr and systemMessage are diagnostics. Malformed output, command
+failure and timeout are reported and leave the underlying operation to continue.
 
-The supported behavior is:
-
-| Event | Exact accepted behavior |
-|---|---|
-| `SessionStart` | plain stdout or `hookSpecificOutput.additionalContext` adds advisory context; `continue:false` blocks |
-| `SubagentStart` | plain stdout or hook-specific additional context; synchronous boolean `continue` is diagnosed and ignored |
-| `SessionEnd` | observe only; JSON may contain only `systemMessage` |
-| `UserPromptSubmit` | plain/additional context; exit 2, `continue:false`, or legacy `decision:"block"` blocks |
-| `PreToolUse` | exit 2, legacy block, or hook-specific `permissionDecision:"deny"` blocks; hook-specific context is allowed |
-| `PermissionRequest` | hook-specific decision object with `behavior:"allow"|"deny"` and optional message |
-| `PostToolUse` | hook-specific additional context only; result rewrite or suppression is forbidden |
-| `PreCompact`, `PostCompact` | `continue:false` blocks; other stdout is diagnostic |
-| `Stop`, `SubagentStop` | exit 2 or legacy block requests at most one continuation; `continue:false` terminalizes |
-
-JSON `hookSpecificOutput.hookEventName` must equal the current event. PreTool does
-not support `allow` or `ask`; only `PermissionRequest` can explicitly allow.
-Argument rewrite, ToolResult rewrite, updated permissions, interrupt/rewrite
-fields, and output suppression have no target. `suppressOutput:true` is invalid.
-PostTool exit 2 does not replace or hide its already-settled result.
-
-An asynchronous handler cannot emit any control-vocabulary field. Plain async
-stdout is context only for `SessionStart`, `SubagentStart`, and `UserPromptSubmit`; otherwise it is diagnostic. Do not convert a vendor background
-Hook whose correctness depends on blocking, permission, continuation, ordering,
-or durable completion.
-
-Context is untrusted, one-shot, advisory user-role input. It never rewrites
-SYSTEM or tools. `additionalContextLimit` omits a whole oversized contribution;
-it does not truncate it. A Hook that requires developer/system authority or
-guaranteed context delivery is not equivalent.
-
-## Conversion Decision
-
-The official importer determines supported event, matcher, stdin, environment,
-execution, output and control mappings while preserving command and script bytes.
-Use its diagnostics to explain a blocked conversion. When a user asks for a
-compatibility analysis, explain the specific mismatch; do not manufacture a
-mapping or proof artifact to override failed admission. A renamed event is valid
-only when the owner timing and control effect are the same, not merely because
-the names sound similar.
-
-Unsupported events and handler types are reported and not activated by the importer.
-Supported command Hooks must have valid native configuration. Scripts still receive
-Pulsara inputs and output/control limits; an imported script depending on another
-host's schemas, transcript, permissions or execution authority may fail at runtime.
-Report that limitation without claiming whole-harness equivalence. Directory aliases
-are finite environment adaptation, not automatic dependency setup or input translation.
+Context is delivered through `pulsara_hook_context`. A positive
+additionalContextLimit omits a contribution that exceeds the threshold; it keeps
+the contribution whole when accepted. Import preserves scripts and configuration
+it can represent; a script's dependence on another host's inputs or transcript
+can still require porting when the task calls for it.

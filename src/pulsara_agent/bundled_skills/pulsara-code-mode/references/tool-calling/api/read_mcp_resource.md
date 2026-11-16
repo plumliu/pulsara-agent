@@ -1,6 +1,9 @@
 # `tools.read_mcp_resource(args)`
 
-Discover or read MCP resources. target:MCP_CONNECTION lists that service's resources and URI templates; no uri is accepted. target:MCP_RESOURCE reads its exact URI; supply values for template variables in the URI before reading. Resource listings are metadata, not resource content. Omit unused fields; use the returned content in its given order.
+Use an MCP_CONNECTION Target to list a service's resources and URI templates.
+Use a returned MCP_RESOURCE Target to read its URI. For a template, fill its URI
+variables and construct an MCP_RESOURCE Target with the returned server_id and
+concrete uri. Listing returns metadata; reading returns ordered content items.
 
 See the [API rules](index.md) for successful resolution, actual `err.result` and explicit output. Array constraints are retained in type annotations.
 

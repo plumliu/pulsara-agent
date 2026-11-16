@@ -1,83 +1,63 @@
-# Conservative Plugin Conversion Contract
+# Plugin formats and imports
 
-These rules govern format conversion by the official importer before native
-validation and installation. User-requested content customization happens in the
-source beforehand; the model does not perform the importer's conversion.
+## Select the distribution
 
-## Selected Import Format
+| Format | Manifest |
+| --- | --- |
+| native | `plugin.json` at the Plugin root |
+| claude | `.claude-plugin/plugin.json` |
+| codex | `.codex-plugin/plugin.json` |
+| cursor | `.cursor-plugin/plugin.json` |
 
-Select native, Claude, Codex or Cursor explicitly. The importer holds a safe
-source observation, follows that distribution's declarations and creates a
-temporary native candidate. Native packages go directly to the sole validator.
-Do not first fail native validation to discover an already-selected format.
+Use the format matching the prepared distribution. The importer follows that
+manifest and its defaults. Explicit empty component declarations remain empty;
+neighboring host distributions remain resources.
 
-Do not convert a source that failed because of:
+Native packages follow Agent Plugins 1.0.0, with root `plugin.json`, optional
+`skills/` and `mcp.json`. Their required manifest fields use the published schema.
+External formats are converted by the installer; representable optional metadata
+is retained and other metadata is explained in the result.
 
-- a final or internal symlink;
-- a socket, device, FIFO, path escape, or other special-file condition;
-- the exact active API key appearing anywhere in the admitted source domain;
-- unreadable, changing, replaced, or incompletely observed membership;
-- cancellation or deadline settlement;
-- ambiguous identity, license, or required behavior that the source itself does
-  not resolve.
+## Understand the available subset
 
-The model cannot repair or override these admission outcomes.
+A bad or unsupported Skill, MCP service, Hook file/group/handler or host feature
+is reported separately while independent valid components install. A valid
+package with no currently usable components can still install disabled.
 
-## Candidate Construction
+External Skills use their valid frontmatter `name` for the standard discovery
+entry. Original directories, bodies and resources are preserved; a package-relative
+alias connects the entry to them when needed. Preview shows the accepted names.
+Invalid documents and name conflicts are reported by their source paths.
 
-The importer owns the attempt-local candidate and leaves the source unchanged.
-It copies ordinary resources and the complete selected Skill directories. Vendor
-control manifests are not activated or unioned; the importer writes the native
-root `plugin.json`, root `mcp.json`, fixed `skills/`, and supported fixed
-`dev.pulsara/` extension paths. Do not construct a second candidate with shell
-commands or model-generated edits.
+An external MCP service needing public input or field classification can be
+configured through the import wizard. A service still missing those choices
+is left out of this installation; other components remain available. Private
+values are supplied in the installed connection editor. Descriptive `note` text
+is ignored with a notice; an unsupported authorization setting such as
+`oauth_resource` leaves the affected service inactive.
 
-Use the Published Agent Plugins 1.0 schema identifier in the new root manifest.
-Map identity and metadata only from exact source facts. Preserve the authored
-name and version; missing required native metadata is an import error, not a
-reason to invent identity.
+Hooks accept a single file path, paths array, inline object or objects array.
+Selected declarations are processed in order. Supported events and command
+handlers use the existing [Hook format](pulsara-hook-extension.md).
 
-Scripts, binaries, assets and selected Skill files are copied byte-for-byte. Do
-not modify an executable or rewrite Skill instructions to make a Plugin portable.
-The GUI preview shows selected components, ordinary connection parameters and
-import notices; there is no separate conversion-report artifact or registry.
+## Resources and updates
 
-## Declaration Conversion
+The importer keeps scripts, assets and vendor manifests as resources. Contained
+links preserve relative resource relationships. A path or resource problem is
+reported at the affected component; core manifest or publication failure can
+prevent installation.
 
-The official importer/native validator owns these checks. Use its supported
-conversion and diagnostics; this list explains admission rather than requiring
-the model to build a second validator or audit every script. The importer checks supported declarations, not arbitrary script semantics:
+Generated native manifests, MCP config and the single Pulsara Hook source describe
+the selected subset. That Hook source is also written for an empty selection.
+Links to generated configuration refer to its installed normalized contents.
+Native OpenAI Hook declarations retain their actual manifest source path instead.
 
-1. Install supported selected-format Skills, MCP connections and command Hooks.
-2. Copy scripts and Skill resources unchanged; do not execute them during import.
-3. Preserve supported MCP declarations and credential boundaries. Invalid supported
-   configuration still blocks installation; unsupported settings are not guessed.
-4. Report unsupported host components and Hook events/handler types in preview
-   notices and installation diagnostics. They are not registered or executed.
-5. Unreferenced directories are resources; do not infer another host's components.
-6. Preserve licensing and truthful compatibility statements.
-7. Validate the native candidate through the existing production owner.
+Installation and replacement leave the instance disabled. The result explains
+imported and inactive features; runtime behavior can still depend on the original
+host's inputs or APIs. Use the ordinary enablement and Hook reviews to activate
+available components.
 
-Installation means the supported subset was installed, not that the original
-harness behavior is preserved. Unknown source-host extensions are reported and
-not activated. Invalid supported components, unsafe paths, source races and actual
-credential literals still block installation. The model cannot override them.
-
-For compatibility questions, explain the exact unsupported host dependency.
-Do not silently drop behavior or rewrite declarations merely to force an import.
-
-## User-only import and advanced administration
-
-The capability page's model-free wizard selects a source directory and detects
-its sole distribution. If multiple manifests exist, compare previews and select
-one; never union them. The user classifies fields and fills ordinary parameters
-before installation. Use this path for parameterized sources needing user input;
-credential values never enter the native candidate or INSTALL_PLUGIN arguments.
-
-The installed `pulsara plugins` CLI offers `validate`, `add`, `list`, `doctor`,
-`enable`, `disable`, `remove` and `gc`. Check actual help; foreign import uses the
-typed tool/UI unless the CLI explicitly supports that format. This is an
-explicitly out-of-band path, not a way to bypass review in a conversation.
-Adopt external changes through GUI refresh or an allowed `reload_capabilities`
-call; CLI does not update live sessions automatically. Do not substitute a
-checkout, private installer, raw package copy or managed-state edits.
+The capability-page wizard supports format selection and connection inputs.
+For requested standalone administration, inspect `pulsara plugins --help`;
+refresh changes made outside the app with the capability page or
+`reload_capabilities`.

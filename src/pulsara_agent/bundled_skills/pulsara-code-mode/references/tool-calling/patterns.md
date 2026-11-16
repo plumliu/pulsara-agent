@@ -18,15 +18,18 @@ const reads = await Promise.all(["README.md","pyproject.toml"].map(path=>
 console.log({content:reads.flatMap(result=>result.content)});
 ```
 
-For MCP, query current capabilities, explicitly output the complete selected
-input schema and REF, then author a later business Cell using that actual REF.
-Keeping a schema in an unreported variable does not show it to the model. Use the
-actual REF in the same session.
+For MCP, first obtain the needed input schema, available return description and
+invocation reference through native query_capabilities or a preparation Cell:
 
 ```js
 const matches = await tools.query_capabilities({kind:"MCP",query:"find issues"});
 console.log(matches);
 ```
+
+Once the model has received the relevant interface, write the business Cell with
+that actual reference. It works across native calls and Cells in the same session;
+a second query inside the business Cell is unnecessary. Query results in JS memory
+become model-visible through explicit output.
 
 Use tools.decide only for semantic predicates over supplied strings. Its
 available() method takes no arguments, returns the Cell's frozen configuration

@@ -122,7 +122,6 @@ class PluginInspectionService:
             hook_lifetime_anchor=hook_anchor,
             hook_declaration_environment=plugin_hook_environment(package_root, layout.data_root),
             scan_active_api_key=False,
-            enforce_managed_admission=False,
         )
         try:
             if observation.summary.manifest.name != state.plugin_id:

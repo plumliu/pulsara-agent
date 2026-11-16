@@ -27,7 +27,7 @@ Target 只携带定位所必需的组合，不要求统一成固定两个字段�
 | --- | --- | --- |
 | SKILL | skill_path | SKILL.md 的绝对路径 |
 | PLUGIN | plugin_path | Plugin 稳定实例目录的绝对路径，即现有存储的 plugin_package_parent；不包含某次 package_install_id |
-| HOOK_SOURCE | config_path | 本地或 Plugin Hook 配置文件的绝对路径 |
+| HOOK_SOURCE | config_path | 本地或 Plugin Hook 配置声明文件的绝对路径 |
 | MCP_CONNECTION | config_path、server_id | 配置文件绝对路径及其中声明该服务的原始键；Plugin 来源使用 local_server_id |
 | MCP_TOOL | server_id、remote_tool_name | 调用者当前运行目录中的实际服务标识及服务声明的原始工具名 |
 
@@ -358,7 +358,7 @@ JS 完整值不按 12k 分页，数组及每个对象字段均可直接访问，
 
 查询本地及 Plugin 提供的 Hook 配置来源、状态和规则。每条记录对应一份配置来源，其中 definitions 包含实际观察到的规则；保留现有来源级信任及管理粒度，不新增逐条 Hook 身份或管理动作。
 
-列表和精确查询都只返回常规查看所需信息：配置位置、简短状态，以及每条规则的事件、匹配条件和执行命令。详细配置需要时由模型沿 config_path 使用 read_file 读取，不增加详细查询参数，不自动读取或另存整份配置正文。
+列表和精确查询都只返回常规查看所需信息：配置位置、简短状态，以及每条规则的事件、匹配条件和执行命令。详细配置需要时由模型沿 config_path 使用 read_file 读取；原生 OpenAI Plugin 来源可能指向 plugin.json 或 .codex-plugin/plugin.json，读取声明后再沿 hooks 路径查看具体文件，不假定必为 hooks.json。不增加详细查询参数，不自动读取或另存整份配置正文。
 
 范围继续覆盖调用者可观察的 USER 和当前 GUI 项目的 WORKSPACE 来源，包括已禁用 Plugin 中可观察的声明。不支持项目来源时显式查询 WORKSPACE 按既有规则失败，不借 terminal cwd 扩大范围。查询不启用、信任或执行任何 Hook。
 
@@ -1088,7 +1088,7 @@ PLUGIN 负责包的概览及组件导航，不复制 SKILL、HOOK、MCP 的详�
 
 PLUGIN Target 只含 kind、plugin_path。plugin_path 是现有存储的稳定实例目录 plugin_package_parent，例如 /Users/example/.pulsara/plugins/packages/user/example-plugin，不是带某次 package_install_id 的包目录。由 Plugin owner 按存储布局及当前状态解析实际实例，模型不填写 scope、plugin_id 或安装身份，不新造独立 ID、映射表或正文实体。包更新后仍用同一实例目录查询当前包；已删除或不可观察的实例按实际事实报告。
 
-组件 Target 复制实际观察值：SKILL 使用 SKILL.md 路径，HOOK_SOURCE 使用 Hook 配置路径，MCP_CONNECTION 使用 MCP 配置路径及其中的服务键。Hook 配置是一份来源，即使包含多条规则也只返回一个来源 Target；MCP 配置中的每个服务分别返回一个连接 Target。不递归展开工具 schema、Hook 全量配置或 Skill 正文，也不自动调用这些组件。
+组件 Target 复制实际观察值：SKILL 使用 SKILL.md 路径，HOOK_SOURCE 使用实际 Hook 声明路径（也可能是原生 OpenAI manifest，详见第 2.1 节），MCP_CONNECTION 使用 MCP 配置路径及其中的服务键。Hook 配置是一份来源，即使包含多条规则也只返回一个来源 Target；MCP 配置中的每个服务分别返回一个连接 Target。不递归展开工具 schema、Hook 全量配置或 Skill 正文，也不自动调用这些组件。
 
 ### 4.2 参数
 

@@ -194,9 +194,14 @@ class PluginManagementService:
             )
         observer = PluginSourceObserver(self._credential_boundary)
         try:
-            from .source_import import observe_plugin_import
+            from .source_import import PluginImportError, observe_plugin_import
 
             observation = observe_plugin_import(observer, request, scrub_set=scrub_set)
+        except PluginImportError as exc:
+            return replace(InvalidPluginValidationOutcome(
+                request.source_path,
+                (PluginDiagnostic(PluginDiagnosticCode.MANIFEST_INVALID, str(exc), str(request.source_path)),),
+            ), scrub_set=scrub_set)
         except PluginPackageInvalid as exc:
             return replace(InvalidPluginValidationOutcome(
                 request.source_path,
@@ -231,18 +236,14 @@ class PluginManagementService:
             summary = observation.summary
             if observation.source_import is not None:
                 source = observation.source_import
-                _, _, skill_directories = source.component_plan()
-                paths = {
-                    str(observation.source_path / "skills" / directory.name / "SKILL.md"):
-                    str(source.source / directory / "SKILL.md")
-                    for directory in skill_directories
-                }
                 summary = replace(
                     summary,
                     skills=replace(
                         summary.skills,
                         skills=tuple(
-                            replace(item, skill_path=paths[item.skill_path])
+                            replace(item, skill_path=str(
+                                source.source / Path(item.skill_path).relative_to(observation.source_path)
+                            ))
                             for item in summary.skills.skills
                         ),
                     ),
@@ -330,11 +331,17 @@ class PluginManagementService:
             ), scrub_set=scrub_set)
         observer = PluginSourceObserver(self._credential_boundary)
         try:
-            from .source_import import observe_plugin_import
+            from .source_import import PluginImportError, observe_plugin_import
 
             observation = await asyncio.to_thread(
                 observe_plugin_import, observer, request, scrub_set=scrub_set
             )
+        except PluginImportError as exc:
+            return replace(FailedPluginInstallOutcome(
+                PluginInstallDisposition.INVALID,
+                source_path,
+                diagnostics=(PluginDiagnostic(PluginDiagnosticCode.MANIFEST_INVALID, str(exc), str(source_path)),),
+            ), scrub_set=scrub_set)
         except PluginPackageInvalid as exc:
             return replace(FailedPluginInstallOutcome(
                 PluginInstallDisposition.INVALID,

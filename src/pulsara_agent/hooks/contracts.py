@@ -126,8 +126,10 @@ class PluginHookSourceIdentity:
 
         if not self.canonical_path.is_absolute():
             raise ValueError("Plugin Hook source path must be absolute")
-        if self.config_relative_path != "dev.pulsara/hooks/hooks.json":
-            raise ValueError("Plugin Hook source location is not fixed")
+        if self.config_relative_path not in {
+            "dev.pulsara/hooks/hooks.json", "plugin.json", ".codex-plugin/plugin.json"
+        }:
+            raise ValueError("Plugin Hook source is not a supported declaration entry")
         if not re.fullmatch(
             r"(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?",
             self.plugin_id,

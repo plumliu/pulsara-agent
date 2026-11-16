@@ -1,6 +1,15 @@
 # `tools.call_mcp_tool(args)`
 
-Call an MCP tool using the invocation.target returned by query_capabilities. Supply arguments matching its input_schema. Read the relevant parameter and available output descriptions before composing calls; output_schema may be absent. The reference can be reused in this conversation, including Code Mode. If it is stale or unavailable, query the tool again; do not automatically repeat a call whose effect is uncertain.
+Call an MCP tool with the invocation.target returned by query_capabilities and
+arguments matching its input_schema. Obtain the relevant parameter and available
+return descriptions before composing a business Cell. References work across
+native calls and Cells in the same session.
+
+content contains ordered text/image items. Optional structuredContent preserves
+the remote JSON value; output_schema, when supplied, describes its successful
+value. On failure, read the message and actual err.result for completed effects
+and whether the call was dispatched. Refresh an invalid reference through query;
+check an uncertain dispatched outcome before deciding on a retry.
 
 See the [API rules](index.md) for successful resolution, actual `err.result` and explicit output. Array constraints are retained in type annotations.
 

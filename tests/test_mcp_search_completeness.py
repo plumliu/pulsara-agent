@@ -69,6 +69,7 @@ def test_partial_error_preserves_callable_ref_and_scope_filter(tmp_path):
             result=await invoke(port,'query_capabilities',{'kind':'MCP','query':'fake_echo'})
             assert result['meta']['status']=='ERROR',result
             record=next(p['value'] for p in result['content'] if p['type']=='object' and 'invocation' in p['value'])
+            assert record['description']=='One fake read-only tool.'
             called=await invoke(port,'call_mcp_tool',{'target':record['invocation']['target'],'arguments':{'text':'known partial hit'}})
             assert called['meta']['status']=='SUCCESS',called
             assert called['content'][0]['value']=='fake-result'

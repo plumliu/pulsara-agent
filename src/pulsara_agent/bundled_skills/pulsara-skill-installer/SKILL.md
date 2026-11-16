@@ -1,71 +1,66 @@
 ---
 name: pulsara-skill-installer
-description: Install or replace a loose Agent Skill from a local source, and diagnose installation conflicts or ineffective copies. Use for these workflows; ordinary queries and known-copy enable/disable/removal use the capability tools directly.
+description: Install or replace a loose Agent Skill from a local source and resolve installation conflicts or unexpected same-name selection.
 ---
 
 # Pulsara Skill Installer
 
 ## Install
 
-Prepare one local source directory, then pass its absolute path to
-ROOT-native `manage_capability`. Reuse the user's scope: `WORKSPACE` is the GUI project,
-`USER` is the Host home. Ask only when that choice is ambiguous.
+Prepare a local directory containing `SKILL.md`, then use ROOT-native
+`manage_capability`. `USER` installs under the effective Pulsara home;
+`WORKSPACE` installs under the current GUI project's `.pulsara/skills`.
+Quick-start sessions use USER because their temporary directory is not a project.
+Reuse the user's intended scope; clarify it when the choice affects the task.
 
 ```json
 {"target":{"kind":"PATH","path":"/absolute/source/example-skill"},"action":"INSTALL_LOOSE_SKILL","scope":"WORKSPACE"}
 ```
 
-The Host chooses the destination; terminal cwd does not. Use terminal/file tools
-for downloading or editing the source, and the management tool for installation.
-Name and description come from valid source frontmatter.
+The document's valid frontmatter supplies the name and description. Its name
+selects the installed directory, so a downloaded source directory may have a
+different name. Supporting scripts and resources are copied with the Skill.
 
-Reuse the result's `target` for subsequent management. Details are
-queried with `query_capabilities`, using an observed path rather than this example:
+The result's SKILL Target identifies the installed `SKILL.md`. Use that Target
+for management and its `skill_path` in a read_file PATH Target to read instructions.
+ROOT can inspect the copy with:
 
 ```json
-{"target":{"kind":"SKILL","skill_path":"/absolute/project/.pulsara/skills/example-skill/SKILL.md"},"kind":"SKILL"}
+{"kind":"SKILL","target":{"kind":"SKILL","skill_path":"/absolute/project/.pulsara/skills/example-skill/SKILL.md"}}
 ```
 
-The Target's skill_path identifies SKILL.md; its parent contains relative
-resources. List copies with kind SKILL and read their source/status text.
-Plugin components belong to their whole Plugin; bundled Skills are read-only.
-Discovery does not imply removability, and .agents/skills copies are not loose
-removal targets. Management checks the actual copy when called.
+The returned status explains whether this copy is enabled and selected. A
+same-name copy can take precedence over it.
 
-## Replace from another source
+## Edit or replace
 
-For content edits to an installed loose Skill, use `pulsara-skill-creator` to
-edit it in place. Installation never overwrites an existing destination.
+Edit an installed loose Skill in place for content changes; see
+`pulsara-skill-creator`. Installation creates a new directory and reports a
+conflict when that destination already exists.
 
-When the user requests replacement from another source, prepare it first, identify
-the exact old copy and reuse its scope. Call `REMOVE_LOOSE_SKILL`
-with its `SKILL` target, then `INSTALL_LOOSE_SKILL` with the replacement
-source. That request authorizes the sequence; do not ask again. It is not atomic:
-if installation fails after deletion, report both outcomes and resolve the failure
-without replaying removal.
+To replace a copy from another source, prepare the new source first, then use
+`REMOVE_LOOSE_SKILL` on the old SKILL Target and `INSTALL_LOOSE_SKILL` in the same
+scope. If the second step fails, report the completed removal and the installation
+error, then continue from that result.
 
-## Verify or diagnose
+`SET_LOOSE_SKILL_ENABLED` changes a copy's enabled setting using its SKILL Target
+and `enabled:true|false`. Both `.pulsara/skills` and `.agents/skills` copies support
+these settings. Removal through `REMOVE_LOOSE_SKILL` covers Pulsara home `skills`
+and project `.pulsara/skills`; `.agents/skills` copies remain editable files.
+Plugin components use Plugin management. Bundled Skills are packaged defaults;
+a loose same-name copy provides customization.
 
-A capability-page result notice can be acknowledged without repeating its action
-or querying merely to confirm it. Diagnose concrete damage using the exact Target
-and relevant files; missing one file does not prove removal.
+## Read the result
 
-An owned loose directory can be removed even if SKILL.md is missing or invalid;
-use REMOVE_LOOSE_SKILL rather than creating a document to make removal work.
-An absent directory can use ordinary installation from an available source.
-Keep other copies and source directories distinct; reinstalling does not promise
-enablement or remove all same-name Skills.
+`meta.status` and `content` describe what happened. ERROR can include an installed
+copy followed by a refresh or cleanup failure; continue with that failed step
+rather than repeating a completed installation. Normal installation refreshes
+capabilities automatically. Use `reload_capabilities` for reported refresh problems
+or changes made outside the running app.
 
-Read meta.status and actual content. ERROR may still describe a completed change
-followed by cleanup or refresh failure. Address the failed step without replaying
-the install. ROOT-native reload_capabilities is for out-of-band changes or
-reported incomplete adoption, not a routine second step.
+For a damaged copy, inspect the named path and the concrete error. A managed loose
+directory can be removed even when its document is missing or invalid. Preserve
+the distinction between the source directory and installed copy during recovery.
 
-Installation does not require reading every supporting resource.
-A requested toggle uses `SET_LOOSE_SKILL_ENABLED` with the same target and
-`enabled`. Mutations retain ordinary permissions and any required user forms.
-Use these owners for installation, removal and enablement; content editing uses
-ordinary file tools.
-
-Read `references/directory-contract.md` for directory admission, source-change
-errors, copying rules or explicitly out-of-band administration.
+Read [directory details](references/directory-contract.md) for source layout,
+copying rules or standalone administration.

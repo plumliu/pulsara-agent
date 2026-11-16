@@ -95,7 +95,7 @@ def query_output_schema():
     }, ["target", "status"])
     common_detail = {
         "target": capability_target_schema("MCP_TOOL"),
-        "description": {"type": "string", "description": "精确查询为完整说明；关键词查询为首个命中位置附近的连续摘录，未命中说明时省略。"},
+        "description": {"type": "string", "description": "精确查询提供完整描述；关键词查询可能提供描述原文的连续摘录。"},
         "input_schema": {"type": "object", "description": "远端完整参数 JSON Schema；按它构造 call_mcp_tool.arguments。"},
         "output_schema": {"type": "object", "description": "仅在远端实际声明时提供，描述成功 structuredContent，不是整个 Pulsara 返回包。"},
     }

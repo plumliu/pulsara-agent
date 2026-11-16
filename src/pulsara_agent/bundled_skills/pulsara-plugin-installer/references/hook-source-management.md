@@ -1,52 +1,49 @@
-# Local and Plugin Hook Source Management
+# Local and Plugin Hooks
 
-Queries observe definitions; ROOT-native manage_capability changes trust or
-source enablement. WORKSPACE means the current GUI project, not terminal cwd.
-A transient session cannot manage a WORKSPACE source; do not silently switch scopes.
+ROOT-native `manage_capability` changes trust and source enablement. WORKSPACE
+means the current GUI project; quick-start sessions use USER.
 
-## Observe and identify the source
-
-List current project sources with query_capabilities:
+## Find the source
 
 ```json
 {"kind":"HOOK","scope":"WORKSPACE"}
 ```
 
-Records are object content items with a HOOK_SOURCE Target, status text and
-actual definitions. The Target contains only kind and absolute config_path.
-For a particular Plugin, list kind HOOK with its observed PLUGIN Target as parent.
-For exact observation, copy the returned source Target:
+Records contain a HOOK_SOURCE Target, status and definitions. To list a Plugin's
+Hooks, use its PLUGIN Target as `parent`. An exact query uses:
 
 ```json
-{"target":{"kind":"HOOK_SOURCE","config_path":"/actual/project/.pulsara/hooks.json"},"kind":"HOOK"}
+{"kind":"HOOK","target":{"kind":"HOOK_SOURCE","config_path":"/actual/project/.pulsara/hooks.json"}}
 ```
 
-Exact queries do not include scope or parent. Unknown enablement/trust is not
-false, and an unavailable source is not empty. Querying does not grant trust,
-execute commands or establish that the current runtime selected the definitions.
+The returned `config_path` identifies the source. For a native OpenAI Plugin it
+can identify a manifest; follow its referenced Hook files. Status distinguishes
+enablement, trust and unavailable definitions.
 
-## Prepare local definitions
+## Create or edit a local Hook
 
-Only create/edit the resolved local source when requested. A simple command
-after a file read uses this native JSON shape:
+Local definitions use user `<effective Pulsara home>/hooks.json` or project
+`.pulsara/hooks.json`. Edit the requested source with file tools. For example,
+this command records a diagnostic after a file read:
 
 ```json
-{"hooks":{"PostToolUse":[{"matcher":"^read_file$","hooks":[{"type":"command","command":"printf 'file read\\n'","timeout":5,"async":false,"additionalContextLimit":300}]}]}}
+{"hooks":{"PostToolUse":[{"matcher":"^read_file$","hooks":[{"type":"command","command":"printf 'file read\\n'","timeout":5}]}]}}
 ```
 
-The source parser and trust owner validate the current declaration. Editing does
-not grant trust or execute it. Matchers use case-sensitive RE2; native names such
-as read_file and manage_capability work. Read pulsara-hook-extension.md for other
-events, inputs, output control, Windows commands or Plugin conversion. Plugin
-definitions belong to the immutable package, not editable loose sources.
+Commands run in the current workspace. Use case-sensitive RE2 matchers and
+Pulsara tool names such as `read_file`. The [configuration reference](pulsara-hook-extension.md)
+covers event inputs, model context, control outputs and Windows commands.
+Plugin definitions are updated through Plugin source editing and replacement.
 
-## Trust, enable, disable or revoke
-
-Copy the actual Target unchanged into each requested management action:
+## Trust and enable
 
 ```json
 {"target":{"kind":"HOOK_SOURCE","config_path":"/actual/project/.pulsara/hooks.json"},"action":"TRUST_HOOK_SOURCE"}
 ```
+
+The user reviews the current commands and settings. Enabling a source and trusting
+it are separate: trust preserves a disabled state, and disabling preserves trust.
+Plugin sources also depend on their Plugin being enabled.
 
 ```json
 {"target":{"kind":"HOOK_SOURCE","config_path":"/actual/project/.pulsara/hooks.json"},"action":"SET_HOOK_SOURCE_ENABLED","enabled":false}
@@ -56,33 +53,17 @@ Copy the actual Target unchanged into each requested management action:
 {"target":{"kind":"HOOK_SOURCE","config_path":"/actual/project/.pulsara/hooks.json"},"action":"REVOKE_HOOK_TRUST"}
 ```
 
-Plugin sources use the same Target shape with their actual returned config_path.
-The original owner resolves source, scope and Plugin identity. Do not add a digest,
-expected guard, acceptance flag or user confirmation claim. TRUST_HOOK_SOURCE
-requires GUI review of all current commands, environment, events, matchers and
-execution fields even under full access. Enable/disable and revoke use their normal
-permission path without another full trust review. Trust does not enable a disabled
-source or Plugin; disabling does not necessarily remove a trust record.
+All actions use the actual returned source Target. Changes apply to future events.
+Read `meta.status` and `content` for the saved outcome and any refresh failure.
 
-Read meta.status and text content. ERROR can still report a confirmed change
-followed by cleanup or refresh failure; address the failure without replaying the
-mutation. Adopted definitions apply to future events. The management call uses its
-captured predecessor Hook view, so newly trusted Hooks cannot trigger that call's
-own PostTool. Current provider prefixes remain unchanged.
+## Diagnose
 
-## Missing or damaged sources
+Check the definition file, command script and source status for the reported
+failure. A local source can be disabled or have trust revoked even when its file
+is missing or invalid. Removing a local rule is a file edit; the management actions
+preserve its definitions and scripts.
 
-Distinguish definition file, enablement, trust state and command script. For a local
-missing/invalid definition, requested disable or revoke still uses the same owner;
-it does not delete definitions/scripts. Requested deletion edits only the exact
-local rule/source and preserves other rules. Restore from a known source, then
-follow parsing and any required GUI trust review; recovery does not grant trust.
-Trust covers normalized definitions, not all script bytes, so script failure need
-not change trust. Do not execute Hooks merely as a health test.
-
-Plugin Hooks remain package-owned; damaged inventory can prevent component
-management even when the instance itself can still be removed. An explicit
-mutation may recreate unreadable trust state using owner defaults. Its settled
-result does not establish previous enablement or another actor's actions.
-A successful mutation need not be reloaded just to prove it; observe again for a
-concrete contradiction or requested diagnosis.
+After restoring definitions, use the ordinary trust review for their changed
+contents. Trust covers the definitions; a script failure can occur while those
+definitions remain trusted. For damaged Plugin contents, recovery uses the Plugin
+source and package workflow.

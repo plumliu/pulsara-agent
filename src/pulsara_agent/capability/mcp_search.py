@@ -23,11 +23,11 @@ def _description_excerpt(description: str, query: str) -> str | None:
     if not description or not terms:
         return None
     match = re.search("|".join(re.escape(term) for term in terms), description, re.IGNORECASE)
-    if match is None:
-        return None
     # This is a display excerpt, never the schema or invocation's input range.
-    start = max(0, match.start() - 120)
-    end = min(len(description), max(match.end(), start + 400))
+    start = max(0, match.start() - 120) if match is not None else 0
+    end = min(len(description), start + 400)
+    if match is not None:
+        end = max(end, match.end())
     return ("…" if start else "") + description[start:end] + ("…" if end < len(description) else "")
 
 

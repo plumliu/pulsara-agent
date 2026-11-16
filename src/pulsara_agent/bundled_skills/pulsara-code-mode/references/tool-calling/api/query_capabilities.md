@@ -1,6 +1,14 @@
 # `tools.query_capabilities(args)`
 
-Discover installed capabilities. kind is required: SKILL, HOOK, MCP, or PLUGIN. List SKILL, HOOK or MCP with kind, scope? and parent?; list PLUGIN with kind and scope?. Inspect with kind and target only. MCP also accepts query to search tool names, descriptions and services; do not combine query with target. Tool hits include input_schema and invocation.target for call_mcp_tool; a service hit does not expand its tools. Read Skill or Hook files when details are needed. Subagents may query MCP only. Omit unused fields; null is not omission.
+Discover installed capabilities with a required kind: SKILL, HOOK, MCP or PLUGIN.
+
+- List SKILL, HOOK or MCP with optional scope and PLUGIN parent; list PLUGIN with optional scope.
+- Inspect one Target with kind and target only. Read Skill or Hook files for detailed instructions or configuration.
+- Search MCP with query and optional scope/parent. Tool hits come first and include input_schema, available output_schema and invocation; service hits provide connection records.
+
+An MCP_CONNECTION query lists tools; an MCP_TOOL query gives its full interface.
+Use invocation.target for call_mcp_tool. Print the needed interface when preparing
+a later business Cell; its reference is reusable in the same session.
 
 See the [API rules](index.md) for successful resolution, actual `err.result` and explicit output. Array constraints are retained in type annotations.
 
@@ -181,7 +189,7 @@ export type QueryCapabilitiesValue =
                     remote_tool_name: string;
                   };
                   /**
-                   * 精确查询为完整说明；关键词查询为首个命中位置附近的连续摘录，未命中说明时省略。
+                   * 精确查询提供完整描述；关键词查询可能提供描述原文的连续摘录。
                    */
                   description?: string;
                   /**
@@ -211,7 +219,7 @@ export type QueryCapabilitiesValue =
                     remote_tool_name: string;
                   };
                   /**
-                   * 精确查询为完整说明；关键词查询为首个命中位置附近的连续摘录，未命中说明时省略。
+                   * 精确查询提供完整描述；关键词查询可能提供描述原文的连续摘录。
                    */
                   description?: string;
                   /**

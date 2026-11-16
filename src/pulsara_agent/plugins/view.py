@@ -69,6 +69,7 @@ class FrozenPluginHookComponentObservation:
     disposition: PluginComponentObservationDisposition
     parsed: ParsedHookConfig | None = None
     diagnostics: tuple[object, ...] = ()
+    source_relative_path: str | None = None
 
     def __post_init__(self) -> None:
         if (self.disposition is PluginComponentObservationDisposition.COMPLETE) != (
@@ -230,7 +231,6 @@ class EnabledPluginViewOwner:
                     hook_lifetime_anchor=hook_anchor,
                     hook_declaration_environment=plugin_hook_environment(package_root, data_root),
                     scan_active_api_key=False,
-                    enforce_managed_admission=False,
                 )
                 try:
                     if observation.summary.manifest.name != state.plugin_id:
@@ -315,6 +315,7 @@ def freeze_enabled_plugin_instance(
         observation.summary.hooks.disposition,
         observation.hook_config,
         observation.summary.hooks.diagnostics,
+        observation.summary.hooks.source_relative_path,
     )
     return FrozenEnabledPluginInstance(
         identity,
@@ -378,7 +379,7 @@ def _prepare_local_process_data(
         if has_hooks:
             hooks = FrozenPluginHookComponentObservation(
                 PluginComponentObservationDisposition.UNAVAILABLE,
-                diagnostics=(diagnostic,),
+                diagnostics=(diagnostic,), source_relative_path=hooks.source_relative_path,
             )
         return replace(
             instance,

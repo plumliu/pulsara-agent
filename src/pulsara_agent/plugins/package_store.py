@@ -600,12 +600,13 @@ class ManagedPluginStore:
             phase = "stage"
             _normalize_stage_modes(
                 stage_fd,
-                observation.entries,
+                stage_observation.entries,
                 deadline_monotonic=deadline_monotonic,
                 cancellation=cancellation,
             )
             normalized_entries = _observe_membership(
                 stage_fd,
+                source_path=stage_path,
                 deadline_monotonic=deadline_monotonic,
                 cancellation=cancellation,
             )
@@ -1055,7 +1056,6 @@ class ManagedPluginStore:
                 hook_workspace_state_key=layout.identity.workspace_state_key,
                 hook_lifetime_anchor=anchor,
                 scan_active_api_key=False,
-                enforce_managed_admission=False,
             )
             try:
                 if observed.summary.manifest.name != layout.identity.plugin_id:
@@ -1630,6 +1630,84 @@ def _open_lock_file(path: Path) -> int:
         os.close(parent)
 
 
+_EMPTY_PLUGIN_HOOK_PATH = PurePosixPath("dev.pulsara/hooks/hooks.json")
+_EMPTY_PLUGIN_HOOK_BYTES = b'{"hooks":{}}'
+
+
+def _normalizes_empty_hook_source(observation: HeldPluginPackageObservation) -> bool:
+    if observation.summary.hooks.source_relative_path != _EMPTY_PLUGIN_HOOK_PATH.as_posix():
+        return False
+    entry = next((item for item in observation.entries if item.relative_path == _EMPTY_PLUGIN_HOOK_PATH), None)
+    return entry is None or entry.kind is not PackageEntryKind.REGULAR_FILE
+
+
+def _empty_hook_physical_path(observation: HeldPluginPackageObservation) -> PurePosixPath:
+    by_path = {entry.relative_path: entry for entry in observation.entries}
+    for parent in _EMPTY_PLUGIN_HOOK_PATH.parents:
+        entry = by_path.get(parent)
+        if entry is not None and entry.kind is PackageEntryKind.DIRECTORY:
+            return (entry.resolved_relative_path or parent) / _EMPTY_PLUGIN_HOOK_PATH.relative_to(parent)
+    return _EMPTY_PLUGIN_HOOK_PATH
+
+
+def _empty_hook_shapes(observation: HeldPluginPackageObservation):
+    target = _empty_hook_physical_path(observation)
+    mappings = [(PurePosixPath(), PurePosixPath())]
+    mappings.extend((entry.relative_path, entry.resolved_relative_path or entry.relative_path)
+        for entry in observation.entries if entry.kind is PackageEntryKind.DIRECTORY)
+    shapes = set()
+    for path in (*reversed(target.parents[:-1]), target):
+        for logical, physical in mappings:
+            if path.is_relative_to(physical):
+                shapes.add((logical / path.relative_to(physical),
+                    PackageEntryKind.REGULAR_FILE if path == target else PackageEntryKind.DIRECTORY,
+                    False, None))
+    return shapes
+
+
+def _stage_source_entries(observation: HeldPluginPackageObservation):
+    if not _normalizes_empty_hook_source(observation):
+        return observation.entries
+    parents = {shape[0] for shape in _empty_hook_shapes(observation)
+        if shape[1] is PackageEntryKind.DIRECTORY}
+    return tuple(item for item in observation.entries
+        if item.relative_path not in parents or item.kind is PackageEntryKind.DIRECTORY)
+
+
+def _write_empty_hook_source(stage_fd: int, target: PurePosixPath) -> None:
+    """Freeze a rejected explicit Pulsara selection instead of activating a fallback.
+
+    Removing an escaping declaration must not turn an unselected OpenAI profile
+    into executable hooks. This is supported-subset config normalization, with
+    no additional runtime state or changes to vendor scripts.
+    """
+    current = os.dup(stage_fd)
+    try:
+        for component in target.parts[:-1]:
+            try:
+                os.mkdir(component, 0o700, dir_fd=current)
+            except FileExistsError:
+                pass
+            next_fd = os.open(component, DIRECTORY_NOFOLLOW_FLAGS, dir_fd=current)
+            os.close(current)
+            current = next_fd
+        descriptor = os.open(target.name, _FILE_CREATE_FLAGS, 0o600, dir_fd=current)
+        try:
+            _write_all(descriptor, _EMPTY_PLUGIN_HOOK_BYTES)
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(current)
+
+
+def _copied_entries(entries: tuple[FrozenPackageEntry, ...]):
+    """Copy each real member once and preserve contained relative links."""
+    links = {item.relative_path for item in entries if item.link_target is not None}
+    return tuple(item for item in entries
+        if item.kind in {PackageEntryKind.DIRECTORY, PackageEntryKind.REGULAR_FILE}
+        and not any(parent in links for parent in item.relative_path.parents))
+
+
 def _copy_observation_to_stage(
     observation: HeldPluginPackageObservation,
     stage_fd: int,
@@ -1637,13 +1715,35 @@ def _copy_observation_to_stage(
     deadline_monotonic: float,
     cancellation: PluginCancellationPort,
 ) -> None:
-    for entry in observation.entries:
+    _copy_package_entries(
+        observation.descriptor, _stage_source_entries(observation), stage_fd,
+        deadline_monotonic=deadline_monotonic, cancellation=cancellation,
+    )
+    if _normalizes_empty_hook_source(observation):
+        _write_empty_hook_source(stage_fd, _empty_hook_physical_path(observation))
+
+
+def _copy_package_entries(
+    source_fd: int,
+    entries: tuple[FrozenPackageEntry, ...],
+    stage_fd: int,
+    *,
+    deadline_monotonic: float,
+    cancellation: PluginCancellationPort,
+) -> None:
+    for entry in _copied_entries(entries):
         _check_abort(deadline_monotonic, cancellation)
         try:
             parent, name = _open_relative_parent(stage_fd, entry.relative_path)
         except OSError as exc:
             raise _StageUnavailable from exc
         try:
+            if entry.link_target is not None:
+                try:
+                    os.symlink(entry.link_target, name, dir_fd=parent)
+                except OSError as exc:
+                    raise _StageUnavailable from exc
+                continue
             if entry.kind is PackageEntryKind.DIRECTORY:
                 try:
                     os.mkdir(name, 0o700, dir_fd=parent)
@@ -1655,7 +1755,7 @@ def _copy_observation_to_stage(
                 except OSError as exc:
                     raise _StageUnavailable from exc
                 continue
-            source = _open_regular_entry(observation.descriptor, entry)
+            source = _open_regular_entry(source_fd, entry)
             try:
                 try:
                     destination = os.open(
@@ -1705,16 +1805,30 @@ def _verify_paired_bytes(
     deadline_monotonic: float,
     cancellation: PluginCancellationPort,
 ) -> None:
-    source_shape = tuple(
-        (item.relative_path, item.kind, item.executable) for item in source.entries
-    )
+    accepted_entries = _stage_source_entries(source)
+    source_shape = {
+        (item.relative_path, item.kind, item.executable, item.link_target) for item in accepted_entries
+        if item.kind in {PackageEntryKind.DIRECTORY, PackageEntryKind.REGULAR_FILE}
+    }
+    if _normalizes_empty_hook_source(source):
+        present = {item[0] for item in source_shape}
+        source_shape.update(shape for shape in _empty_hook_shapes(source) if shape[0] not in present)
+    source_shape = tuple(sorted(source_shape, key=lambda item: item[0].as_posix()))
     stage_shape = tuple(
-        (item.relative_path, item.kind, item.executable) for item in stage.entries
+        (item.relative_path, item.kind, item.executable, item.link_target) for item in stage.entries
     )
     if source_shape != stage_shape:
         raise OSError("staged Plugin shape changed")
     by_path = {item.relative_path: item for item in stage.entries}
-    for source_entry in source.entries:
+    if _normalizes_empty_hook_source(source):
+        generated = by_path[_empty_hook_physical_path(source)]
+        descriptor = _open_regular_entry(stage.descriptor, generated)
+        try:
+            if os.read(descriptor, len(_EMPTY_PLUGIN_HOOK_BYTES) + 1) != _EMPTY_PLUGIN_HOOK_BYTES:
+                raise _StageUnavailable("normalized empty Hook source changed")
+        finally:
+            os.close(descriptor)
+    for source_entry in accepted_entries:
         if source_entry.kind is not PackageEntryKind.REGULAR_FILE:
             continue
         stage_entry = by_path[source_entry.relative_path]
@@ -1767,7 +1881,9 @@ def _normalize_stage_modes(
     deadline_monotonic: float,
     cancellation: PluginCancellationPort,
 ) -> None:
-    for entry in reversed(entries):
+    for entry in reversed(_copied_entries(entries)):
+        if entry.link_target is not None:
+            continue
         _check_abort(deadline_monotonic, cancellation)
         parent, name = _open_relative_parent(stage_fd, entry.relative_path)
         try:
@@ -1794,7 +1910,9 @@ def _verify_normalized_modes(
     root_mode = stat.S_IMODE(os.fstat(stage_fd).st_mode)
     if root_mode != 0o500:
         raise _StageUnavailable("staged Plugin root mode is not normalized")
-    for entry in entries:
+    for entry in _copied_entries(entries):
+        if entry.link_target is not None:
+            continue
         parent, name = _open_relative_parent(stage_fd, entry.relative_path)
         try:
             metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
@@ -1837,11 +1955,8 @@ def _write_all(descriptor: int, data: bytes) -> None:
 def _summary_semantic(summary: PluginValidationSummary) -> object:
     return (
         summary.manifest,
-        summary.skills.disposition,
         tuple((skill.name, skill.description) for skill in summary.skills.skills),
-        summary.mcp.disposition,
         summary.mcp.mcp_servers,
-        summary.hooks.disposition,
         summary.hooks.hook_definitions,
     )
 

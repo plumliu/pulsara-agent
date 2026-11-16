@@ -653,6 +653,88 @@ def test_round9_2_parser_rejects_duplicate_keys_nonfinite_and_source_bounds(
         parse_hook_config(nested.encode(), provenance=provenance)
 
 
+def test_hook_optional_codex_config_values_bind_to_existing_command_defaults(
+    tmp_path: Path,
+) -> None:
+    parsed = parse_hook_config(
+        json.dumps(
+            {
+                "hooks": {
+                    "SessionStart": [
+                        {"matcher": None},
+                        {
+                            "matcher": None,
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "printf ready",
+                                    "command_windows": "Write-Output ready",
+                                    "timeout": None,
+                                    "statusMessage": None,
+                                    "additionalContextLimit": None,
+                                }
+                            ],
+                        },
+                    ]
+                }
+            }
+        ).encode(),
+        provenance=_provenance(tmp_path),
+    )
+
+    assert parsed.diagnostics == ()
+    (definition,) = parsed.definitions
+    assert definition.command == "printf ready"
+    assert definition.command_windows == "Write-Output ready"
+    assert definition.matcher.matches_all
+    assert definition.timeout_seconds == 600
+    assert definition.additional_context_limit == 2_500
+
+
+def test_hook_conflicting_command_aliases_and_bad_handlers_keep_valid_siblings(
+    tmp_path: Path,
+) -> None:
+    parsed = parse_hook_config(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "printf conflict",
+                                    "commandWindows": "Write-Output first",
+                                    "command_windows": "Write-Output second",
+                                },
+                                {"type": "command", "command": "printf bad", "timeout": 0},
+                                {"type": "mcp_tool", "server": "docs", "tool": "check"},
+                                {
+                                    "type": "command",
+                                    "command": "printf valid",
+                                    "commandWindows": "Write-Output valid",
+                                    "command_windows": "Write-Output valid",
+                                },
+                            ],
+                        }
+                    ]
+                }
+            }
+        ).encode(),
+        provenance=_provenance(tmp_path),
+    )
+
+    assert [definition.command for definition in parsed.definitions] == ["printf valid"]
+    assert parsed.definitions[0].command_windows == "Write-Output valid"
+    assert parsed.definitions[0].handler_ordinal == 3
+    assert {diagnostic.code for diagnostic in parsed.diagnostics} == {
+        "HOOK_CONFIG_CONFLICTING_COMMAND_WINDOWS",
+        "HOOK_CONFIG_INVALID_HANDLER",
+        "HOOK_CONFIG_KNOWN_UNSUPPORTED_HANDLER",
+    }
+
+
 def test_round9_2_matcher_aliases_and_no_exact_alternative_bypass(
     tmp_path: Path,
 ) -> None:

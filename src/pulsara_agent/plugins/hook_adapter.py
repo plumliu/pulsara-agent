@@ -119,6 +119,9 @@ def _snapshot(
             trust,
         )
 
+    relative = component.source_relative_path
+    if relative is None:
+        return None
     visibility = (
         HookVisibilityScope.USER
         if instance.identity.scope is PluginScopeKind.USER
@@ -129,8 +132,8 @@ def _snapshot(
         visibility,
         instance.identity.plugin_id,
         instance.state.current_package_install_id,
-        "dev.pulsara/hooks/hooks.json",
-        instance.package_root / "dev.pulsara/hooks/hooks.json",
+        relative,
+        (instance.package_root / relative).resolve(strict=False),
         instance.identity.workspace_state_key,
         anchor,
     )

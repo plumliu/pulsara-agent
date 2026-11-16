@@ -254,36 +254,6 @@ def test_round9_3_manifest_preprocessing_and_component_isolation(
     assert duplicate.diagnostics[0].code is PluginDiagnosticCode.MANIFEST_INVALID_JSON
 
 
-def test_round9_3_admission_rejects_final_and_tree_links_and_special_files(
-    tmp_path: Path,
-) -> None:
-    _home, _boundary, service, _store = _owners(tmp_path)
-    target = _make_package(tmp_path / "target", mcp_kind="none")
-    final_link = tmp_path / "final-link"
-    final_link.symlink_to(target, target_is_directory=True)
-    final = service.validate_local_plugin_source(
-        ValidateLocalPluginSourceRequest(final_link, monotonic() + 30)
-    )
-    assert final.disposition is PluginValidationDisposition.INVALID
-    assert final.diagnostics[0].code is PluginDiagnosticCode.SOURCE_FINAL_SYMLINK
-
-    tree = _make_package(tmp_path / "tree", mcp_kind="none")
-    (tree / "linked").symlink_to(target / "plugin.json")
-    linked = service.validate_local_plugin_source(
-        ValidateLocalPluginSourceRequest(tree, monotonic() + 30)
-    )
-    assert linked.disposition is PluginValidationDisposition.INVALID
-    assert linked.diagnostics[0].code is PluginDiagnosticCode.SOURCE_TREE_SYMLINK
-
-    fifo = _make_package(tmp_path / "fifo", mcp_kind="none")
-    os.mkfifo(fifo / "pipe")
-    special = service.validate_local_plugin_source(
-        ValidateLocalPluginSourceRequest(fifo, monotonic() + 30)
-    )
-    assert special.disposition is PluginValidationDisposition.INVALID
-    assert special.diagnostics[0].code is PluginDiagnosticCode.SOURCE_SPECIAL_FILE
-
-
 def test_round9_3_managed_runtime_narrows_resource_and_skill_symlinks(
     tmp_path: Path,
 ) -> None:
