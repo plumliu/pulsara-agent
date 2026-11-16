@@ -108,6 +108,20 @@ class _HostPromptOperations:
         result: KernelRunResult | KernelCommandOutcome | None = None,
         error: BaseException | None = None,
     ) -> None:
+        task = asyncio.create_task(
+            self._settle_prompt_admission_attempt_owned(attempt, result=result, error=error)
+        )
+        _, cancelled = await self._drain_start_settlement(task)
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _settle_prompt_admission_attempt_owned(
+        self,
+        attempt: _PromptAdmissionAttempt,
+        *,
+        result: KernelRunResult | KernelCommandOutcome | None,
+        error: BaseException | None,
+    ) -> None:
         async with self._lock:
             if self._prompt_admission_attempts.get(attempt.key.command_id) is attempt:
                 self._prompt_admission_attempts.pop(attempt.key.command_id, None)
@@ -985,6 +999,7 @@ class _HostPromptOperations:
                         self._retire_done_active_root_locked()
                         if (
                             self._closing
+                            or self._runtime_reopen_quiescence is not None
                             or self._active_task is not None
                             or self._external_new_turn_accepting
                             or self._plan_exit_fence

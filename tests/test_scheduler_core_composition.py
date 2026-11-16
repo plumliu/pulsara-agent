@@ -37,6 +37,8 @@ def test_core_owns_scheduler_before_any_resources_or_ui_exist():
 def test_shared_resume_waiter_cancellation_keeps_one_physical_open(tmp_path):
     async def run():
         core = KernelHostCore.production(model_runtime=test_model_runtime())
+        core._ensure_resources = AsyncMock(return_value=SimpleNamespace(
+            read_agent_runtime_state=lambda **kwargs: None))
         entered, release = asyncio.Event(), asyncio.Event()
         result = object()
         async def open_owner(*args, **kwargs):
@@ -84,6 +86,8 @@ def test_pending_resume_never_joins_a_conflicting_owner_configuration(tmp_path, 
         from pulsara_agent.primitives.permission import PermissionMode
         from pulsara_agent.tool_permission import preset_to_policy
         core = KernelHostCore.production(model_runtime=test_model_runtime())
+        core._ensure_resources = AsyncMock(return_value=SimpleNamespace(
+            read_agent_runtime_state=lambda **kwargs: None))
         entered, release = asyncio.Event(), asyncio.Event()
         async def open_owner(*args, **kwargs):
             entered.set()
@@ -117,6 +121,8 @@ def test_pending_resume_never_joins_a_conflicting_owner_configuration(tmp_path, 
 def test_ui_lifecycle_fence_blocks_scheduler_and_management_until_released(tmp_path):
     async def run():
         core = KernelHostCore.production(model_runtime=test_model_runtime())
+        core._ensure_resources = AsyncMock(return_value=SimpleNamespace(
+            read_agent_runtime_state=lambda **kwargs: None))
         session_id = random_id("session")
         token = await core.reserve_session_operation(session_id)
         result = object()
@@ -141,6 +147,8 @@ def test_ui_lifecycle_fence_blocks_scheduler_and_management_until_released(tmp_p
 def test_lost_writer_recovery_joins_real_close_and_retains_failed_owner(tmp_path, close_fails):
     async def run():
         core = KernelHostCore.production(model_runtime=test_model_runtime())
+        core._ensure_resources = AsyncMock(return_value=SimpleNamespace(
+            read_agent_runtime_state=lambda **kwargs: None))
         entered, release = asyncio.Event(), asyncio.Event()
         session_id, host_id = random_id("session"), random_id("host")
         old = SimpleNamespace(session_id=session_id, host_session_id=host_id,
@@ -197,6 +205,8 @@ def test_lost_writer_recovery_joins_real_close_and_retains_failed_owner(tmp_path
 def test_shutdown_wins_while_recovery_waits_for_old_physical_close(tmp_path):
     async def run():
         core = KernelHostCore.production(model_runtime=test_model_runtime())
+        core._ensure_resources = AsyncMock(return_value=SimpleNamespace(
+            read_agent_runtime_state=lambda **kwargs: None))
         entered, release = asyncio.Event(), asyncio.Event()
         session_id, host_id = random_id("session"), random_id("host")
         async def close(**kwargs):

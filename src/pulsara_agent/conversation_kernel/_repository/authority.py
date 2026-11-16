@@ -135,11 +135,27 @@ class _AuthorityOperations:
                 row_factory=dict_row,
                 deadline_monotonic=deadline_monotonic,
             ) as connection:
+                # A child shares the root's archive boundary. Read its immutable
+                # parent only to choose the lock order, then verify it under lock.
+                parent = None
+                if intent != "NEW":
+                    parent = connection.execute(
+                        "SELECT root_session_id FROM pulsara_v3.sessions WHERE id=%s",
+                        (session_id,),
+                    ).fetchone()
+                root_id = None if parent is None else parent["root_session_id"]
+                root = None
+                if root_id is not None:
+                    lock_session_admission(connection, session_id=str(root_id))
+                    root = connection.execute(
+                        "SELECT lifecycle FROM pulsara_v3.sessions WHERE id=%s FOR UPDATE",
+                        (root_id,),
+                    ).fetchone()
                 lock_session_admission(connection, session_id=session_id)
                 row = connection.execute(
                     """
                     SELECT id, workspace_id, memory_domain_id, lifecycle, writer_generation,
-                           writer_lease_owner_id, writer_lease_expires_at
+                           writer_lease_owner_id, writer_lease_expires_at, root_session_id
                     FROM pulsara_v3.sessions
                     WHERE id = %s
                     FOR UPDATE
@@ -150,6 +166,11 @@ class _AuthorityOperations:
                     raise ConversationKernelConflict("session is unavailable")
                 if intent == "NEW" and row is not None:
                     raise UnpublishedIdentityCollision("IDENTITY_CONFLICT: new session identity exists")
+                if intent != "NEW" and row is not None:
+                    if row["root_session_id"] != root_id:
+                        raise ConversationKernelConflict("session ownership changed")
+                    if root_id is not None and (root is None or root["lifecycle"] != "OPEN"):
+                        raise ConversationKernelConflict("root session is archived or unavailable")
                 # For an existing Session this follows the frozen
                 # session -> workspace order; for first creation there is no
                 # Session row to lock yet. The workspace is immutable and the

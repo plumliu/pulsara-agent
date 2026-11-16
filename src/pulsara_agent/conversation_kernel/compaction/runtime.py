@@ -333,15 +333,31 @@ class HostCompactionRuntimeOwner:
             try:
                 return await operation()
             finally:
-                if remove is None:
-                    async with self._state_lock:
-                        self.remove_fence_under_host_lock(
-                            scope=scope,
-                            attempt_id=attempt_id,
-                            owner_task=current,
-                        )
-                else:
-                    await remove(scope, attempt_id, current)
+                async def remove_fence() -> None:
+                    if remove is None:
+                        async with self._state_lock:
+                            self.remove_fence_under_host_lock(
+                                scope=scope,
+                                attempt_id=attempt_id,
+                                owner_task=current,
+                            )
+                    else:
+                        await remove(scope, attempt_id, current)
+
+                # Keep this attempt and the summary lane owned until the exact
+                # fence removal settles, even if its waiter is cancelled again.
+                cleanup = asyncio.create_task(remove_fence())
+                cancellation = None
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError as exc:
+                        cancellation = cancellation or exc
+                    except BaseException:
+                        break
+                cleanup.result()
+                if cancellation is not None:
+                    raise cancellation
 
     def is_fenced(
         self,

@@ -13,14 +13,22 @@ from .locking import lock_session_admission
 
 
 # Used both for UI eligibility and, authoritatively, under the session writer lock.
+# Attempts from terminal turns are history, not proof of physical execution.
+# The live Host gates separately retain ownership of work still settling.
 IDLE_SESSION_SQL = """
-NOT EXISTS (SELECT 1 FROM pulsara_v3.turns t WHERE t.session_id=s.id AND t.status='RUNNING')
-AND NOT EXISTS (SELECT 1 FROM pulsara_v3.prompt_queue_items q WHERE q.session_id=s.id AND q.status='PENDING')
-AND NOT EXISTS (SELECT 1 FROM pulsara_v3.plan_workflows p WHERE p.session_id=s.id AND p.status='ACTIVE')
-AND NOT EXISTS (SELECT 1 FROM pulsara_v3.plan_interactions p WHERE p.session_id=s.id AND p.status='OPEN')
-AND NOT EXISTS (SELECT 1 FROM pulsara_v3.tool_execution_attempts a WHERE a.session_id=s.id
-                AND NOT EXISTS (SELECT 1 FROM pulsara_v3.tool_results r
-                                WHERE r.session_id=a.session_id AND r.attempt_id=a.id))
+NOT EXISTS (
+    SELECT 1 FROM pulsara_v3.sessions owned
+    WHERE (owned.id=s.id OR owned.root_session_id=s.id) AND (
+        EXISTS (SELECT 1 FROM pulsara_v3.turns t
+                WHERE t.session_id=owned.id AND t.status='RUNNING')
+        OR EXISTS (SELECT 1 FROM pulsara_v3.prompt_queue_items q
+                   WHERE q.session_id=owned.id AND q.status='PENDING')
+        OR EXISTS (SELECT 1 FROM pulsara_v3.plan_workflows p
+                   WHERE p.session_id=owned.id AND p.status='ACTIVE')
+        OR EXISTS (SELECT 1 FROM pulsara_v3.plan_interactions p
+                   WHERE p.session_id=owned.id AND p.status='OPEN')
+    )
+)
 """
 
 
@@ -41,8 +49,12 @@ class _SessionArchiveOperations:
                     f"SELECT s.id FROM pulsara_v3.sessions s WHERE s.memory_domain_id=%s "
                     f"AND s.lifecycle='OPEN' AND {IDLE_SESSION_SQL} "
                     "AND (s.id=ANY(%s) OR s.writer_lease_owner_id IS NULL "
-                    "OR s.writer_lease_expires_at <= clock_timestamp())",
-                    (memory_domain_id, list(local_session_ids)),
+                    "OR s.writer_lease_expires_at <= clock_timestamp()) "
+                    "AND NOT EXISTS (SELECT 1 FROM pulsara_v3.sessions child "
+                    "WHERE child.root_session_id=s.id AND child.writer_lease_owner_id IS NOT NULL "
+                    "AND child.writer_lease_expires_at > clock_timestamp() "
+                    "AND NOT (child.id=ANY(%s)))",
+                    (memory_domain_id, list(local_session_ids), list(local_session_ids)),
                 ).fetchall()
             )
 
@@ -67,6 +79,7 @@ class _SessionArchiveOperations:
         closed_writer: HostWriterGuard | None,
         deadline_monotonic: float,
         check_only: bool = False,
+        child_writers: tuple[HostWriterGuard, ...] = (),
     ) -> str:
         with self._provider.connection(
             lane=PostgresConnectionLane.HOST_CONTROL,
@@ -95,6 +108,36 @@ class _SessionArchiveOperations:
                 raise SessionWriterConflict("session has a live writer")
             if row["lifecycle"] == "ARCHIVED":
                 return "ARCHIVED"
+            # ROOT admission also serializes new Agent creation. Lock existing
+            # children in the same order as delegation/deletion before checking
+            # their current work or accepting their exact gated Host owners.
+            children = connection.execute(
+                "SELECT id FROM pulsara_v3.sessions WHERE root_session_id=%s ORDER BY id",
+                (session_id,),
+            ).fetchall()
+            for child in children:
+                lock_session_admission(connection, session_id=child["id"])
+            children = connection.execute(
+                """SELECT id, writer_generation, writer_lease_owner_id,
+                          writer_lease_expires_at > clock_timestamp() AS lease_live
+                   FROM pulsara_v3.sessions WHERE root_session_id=%s ORDER BY id FOR UPDATE""",
+                (session_id,),
+            ).fetchall()
+            expected_children = {guard.session_id: guard for guard in child_writers}
+            if len(expected_children) != len(child_writers):
+                raise SessionWriterConflict("multiple Agent Host owners have not settled")
+            for child in children:
+                guard = expected_children.pop(child["id"], None)
+                if guard is not None:
+                    if (
+                        child["writer_generation"] != guard.writer_generation
+                        or child["writer_lease_owner_id"] not in (None, guard.writer_owner_id)
+                    ):
+                        raise SessionWriterConflict("owned Agent writer changed")
+                elif child["writer_lease_owner_id"] is not None and child["lease_live"]:
+                    raise SessionWriterConflict("owned Agent has a live writer")
+            if expected_children:
+                raise SessionWriterConflict("owned Agent is unavailable")
             # Fresh statement after acquiring the writer lock, not a lock-wait snapshot.
             idle = connection.execute(
                 f"SELECT {IDLE_SESSION_SQL} AS idle FROM pulsara_v3.sessions s WHERE s.id=%s",

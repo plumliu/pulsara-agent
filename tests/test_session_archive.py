@@ -2,6 +2,7 @@
 
 import asyncio
 from dataclasses import replace
+from datetime import datetime, timezone
 from time import monotonic
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -143,6 +144,73 @@ def test_canonical_unfinished_work_rejects_archive_without_changes(repo, work):
     )
 
 
+@pytest.mark.parametrize("reason", ["USER_STOPPED", "HOST_CRASH"])
+def test_terminal_turn_can_archive_with_unresolved_native_and_cell_calls(repo, reason):
+    from pulsara_agent.conversation_kernel.contracts import InlineContent
+    from pulsara_agent.conversation_kernel.tool_invocations import (
+        ToolInvocationSource,
+        ToolInvocationSourceKind,
+        current_tool_invocation,
+    )
+    from pulsara_agent.primitives.context import freeze_json
+    from tests.support.tool_outputs import _install_tool_call
+    from tests.test_stage2_conversation_kernel_postgres import _assistant_permission_fingerprint
+
+    code = 'await tools.read_file({target:{kind:"PATH",path:"notes.txt"}});'
+    lease, turn_id, entry_id, _, exec_attempt = _install_tool_call(
+        repo, identity("workspace"), tool_name="exec_cell",
+        arguments={"code": code},
+    )
+    repo.freeze_code_mode_source(
+        lease.guard, attempt_id=exec_attempt,
+        content=InlineContent.from_bytes(code.encode(), media_type="text/javascript"),
+        deadline_monotonic=monotonic() + 30,
+    )
+    call_id = identity("call")
+    token = current_tool_invocation.set(ToolInvocationSource(
+        call_id, ToolInvocationSourceKind.CODE_MODE_CALL, turn_id,
+        source_exec_attempt_id=exec_attempt, call_sequence=1, tool_name="read_file",
+        original_arguments=freeze_json({"target": {"kind": "PATH", "path": "notes.txt"}}),
+    ))
+    try:
+        repo.accept_tool_attempt(
+            lease.guard, attempt_id=identity("attempt"), assistant_entry_id=None,
+            tool_call_id=call_id, authorization_kind="policy", authorization_reference="allow",
+            actor_kind="runtime", actor_id="test", remote_idempotency_key=None,
+            retry_of_attempt_id=None,
+            permission_snapshot_fingerprint=_assistant_permission_fingerprint(
+                repo, lease.guard, entry_id, monotonic() + 30,
+            ),
+            occurred_at=datetime.now(timezone.utc), deadline_monotonic=monotonic() + 30,
+        )
+    finally:
+        current_tool_invocation.reset(token)
+    sid = lease.guard.session_id
+
+    def eligible():
+        return sid in repo.idle_session_ids(
+            memory_domain_id="u_local", local_session_ids=(sid,),
+            deadline_monotonic=monotonic() + 30,
+        )
+
+    assert not eligible()
+    with pytest.raises(SessionDeletionBusy, match="unfinished"):
+        archive(repo, lease)
+    repo.interrupt_turn(
+        lease.guard, turn_id=turn_id, reason=reason, actor_id="test",
+        occurred_at=datetime.now(timezone.utc), deadline_monotonic=monotonic() + 30,
+    )
+    attempts = rows(repo, "SELECT * FROM pulsara_v3.tool_execution_attempts WHERE session_id=%s ORDER BY id", (sid,))
+    transcript = rows(repo, "SELECT * FROM pulsara_v3.transcript_entries WHERE session_id=%s ORDER BY entry_sequence", (sid,))
+    assert len(attempts) == 2
+    assert rows(repo, "SELECT id FROM pulsara_v3.tool_results WHERE session_id=%s", (sid,)) == []
+    assert eligible()
+    assert archive(repo, lease, check_only=True) == "OPEN"
+    assert archive(repo, lease) == "ARCHIVED"
+    assert rows(repo, "SELECT * FROM pulsara_v3.tool_execution_attempts WHERE session_id=%s ORDER BY id", (sid,)) == attempts
+    assert rows(repo, "SELECT * FROM pulsara_v3.transcript_entries WHERE session_id=%s ORDER BY entry_sequence", (sid,)) == transcript
+
+
 def test_cold_archive_checks_domain_live_lease_and_exact_writer(
     repo, stage2_migrated_postgres_database
 ):
@@ -182,16 +250,19 @@ def test_cold_archive_checks_domain_live_lease_and_exact_writer(
     assert repo.archive_session(memory_domain_id="u_local", **params) == "ARCHIVED"
 
 
-@pytest.mark.parametrize("kind", ["process", "idle"])
-def test_archive_terminal_admission(kind):
+@pytest.mark.parametrize(
+    "state,busy", [("RUNNING", True), ("TERMINALIZING", True),
+                   ("PHYSICALLY_JOINED", False), ("PRUNABLE", False), (None, False)],
+)
+def test_archive_terminal_admission(state, busy):
     tools = SimpleNamespace(
         list_background_terminal_processes=lambda: (
-            [SimpleNamespace(physical_state="RUNNING")] if kind == "process" else []
+            [SimpleNamespace(physical_state=state)] if state is not None else []
         ),
     )
     assert KernelHostSession.archive_has_terminal_work(
         SimpleNamespace(_tools=tools, root_session_id=None)
-    ) is (kind != "idle")
+    ) is busy
 
 
 def test_busy_archive_keeps_original_connection_and_runtime(tmp_path):
@@ -304,7 +375,7 @@ def test_archive_preflight_after_real_writer_takeover_preserves_new_owner_and_re
         assert new.guard.writer_generation > old.guard.writer_generation
         before = rows(repo, "SELECT * FROM pulsara_v3.sessions WHERE id=%s", (sid,))
         gate = object()
-        session = SimpleNamespace(session_id=sid, _lease=old,
+        session = SimpleNamespace(session_id=sid, root_session_id=None, _lease=old,
             prepare_safe_runtime_reopen=AsyncMock(return_value=gate),
             archive_has_terminal_work=lambda: False,
             abort_safe_runtime_reopen=AsyncMock(), commit_safe_runtime_reopen=AsyncMock())

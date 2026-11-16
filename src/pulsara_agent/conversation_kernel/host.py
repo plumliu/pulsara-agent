@@ -395,9 +395,12 @@ class KernelRuntimeReopenQuiescence:
 
 @dataclass(slots=True)
 class KernelSessionOpenAttempt:
+    """One open/control owner; related IDs also coordinate ROOT retirement."""
+
     session_ids: frozenset[str]
     task: asyncio.Task[KernelHostSession] | asyncio.Task[object] | None = None
     scheduled: bool = False
+    opening_session_id: str | None = None
     configuration: (
         tuple[HostWorkspaceInput, EffectivePermissionPolicy, str | None, frozenset[str]]
         | None
@@ -913,8 +916,20 @@ class KernelHostSession(
     async def _release_compaction_write_reservation(
         self, reservation: CompactionWriteReservation
     ) -> None:
-        async with self._lock:
+        # The admitted write remains live until its reservation is released.
+        cancellation = None
+        while True:
+            try:
+                await self._lock.acquire()
+                break
+            except asyncio.CancelledError as exc:
+                cancellation = cancellation or exc
+        try:
             self._release_compaction_write_reservation_locked(reservation)
+        finally:
+            self._lock.release()
+        if cancellation is not None:
+            raise cancellation
 
     def _release_compaction_write_reservation_locked(
         self, reservation: CompactionWriteReservation
@@ -2931,7 +2946,8 @@ class KernelHostCore(_HostCoreManagementOperations):
         async with self._lock:
             self._require_session_control_available_locked(session_id)
             pending = any(session_id in attempt.session_ids
-                          and (attempt.task is None or attempt.configuration is not None)
+                          and (attempt.task is None or (attempt.configuration is not None
+                               and attempt.opening_session_id == session_id))
                           for attempt in self._open_attempts.values())
             live = next((item for item in self._sessions.values() if item.session_id == session_id), None)
             if live is not None and live._memory_domain_id != self.memory_domain_id:
@@ -2961,7 +2977,8 @@ class KernelHostCore(_HostCoreManagementOperations):
         async with self._lock:
             self._require_session_control_available_locked(session_id)
             if any(session_id in attempt.session_ids
-                   and (attempt.task is None or attempt.configuration is not None)
+                   and (attempt.task is None or (attempt.configuration is not None
+                               and attempt.opening_session_id == session_id))
                    for attempt in self._open_attempts.values()):
                 raise SessionControlRejected("SESSION_CONTROL_BUSY", "会话正在处理另一项操作。")
             live = next((item for item in self._sessions.values() if item.session_id == session_id), None)
@@ -2974,7 +2991,8 @@ class KernelHostCore(_HostCoreManagementOperations):
         async with self._lock:
             self._require_session_control_available_locked(session_id)
             if any(session_id in attempt.session_ids
-                   and (attempt.task is None or attempt.configuration is not None)
+                   and (attempt.task is None or (attempt.configuration is not None
+                               and attempt.opening_session_id == session_id))
                    for attempt in self._open_attempts.values()):
                 raise SessionControlRejected("SESSION_CONTROL_BUSY", "会话正在处理另一项操作。")
             settlement = asyncio.get_running_loop().create_future()
@@ -3054,6 +3072,7 @@ class KernelHostCore(_HostCoreManagementOperations):
             pending = [attempt for token, attempt in self._open_attempts.items()
                        if session_id in attempt.session_ids and token is not operation
                        and attempt.task is not current
+                       and (attempt.configuration is None or attempt.opening_session_id == session_id)
                        and (previous is None or attempt.task is None or attempt.configuration is not None)]
             if pending:
                 attempt = pending[0]
@@ -3089,7 +3108,8 @@ class KernelHostCore(_HostCoreManagementOperations):
                     restore_missing_workspace=restore_missing_workspace, scheduled=scheduled,
                 ), name=f"kernel-session-open:{session_id}")
                 self._open_attempts[settlement] = KernelSessionOpenAttempt(
-                    frozenset((session_id,)), task=task, scheduled=scheduled, configuration=configuration,
+                    frozenset((session_id,)), task=task, scheduled=scheduled,
+                    opening_session_id=session_id, configuration=configuration,
                 )
                 task.add_done_callback(lambda completed: None if completed.cancelled() else completed.exception())
         return await asyncio.shield(task)
@@ -3102,6 +3122,21 @@ class KernelHostCore(_HostCoreManagementOperations):
         restore_missing_workspace: bool, scheduled: bool,
     ) -> KernelHostSession:
         try:
+            if session_start_source != "startup":
+                repository = await self._ensure_resources()
+                state = await asyncio.to_thread(
+                    repository.read_agent_runtime_state,
+                    session_id=session_id,
+                    deadline_monotonic=self._canonical_deadline(),
+                )
+                root_id = None if state is None else state["root_session_id"]
+                if root_id is not None:
+                    async with self._lock:
+                        self._require_session_control_available_locked(str(root_id))
+                        attempt = self._open_attempts.get(settlement)
+                        if attempt is None or attempt.task is not asyncio.current_task():
+                            raise RuntimeError("session open owner is stale")
+                        attempt.session_ids = attempt.session_ids | {str(root_id)}
             if previous is not None:
                 try:
                     await self.close_session(previous.host_session_id)

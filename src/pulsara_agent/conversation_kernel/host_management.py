@@ -358,13 +358,21 @@ class _HostCoreManagementOperations:
     async def idle_session_ids(self, memory_domain_id: str):
         repository = await self._ensure_resources()
         async with self._lock:
-            local_session_ids = tuple(s.session_id for s in self._sessions.values())
-        return await asyncio.to_thread(
-            repository.idle_session_ids,
-            memory_domain_id=memory_domain_id,
-            local_session_ids=local_session_ids,
-            deadline_monotonic=self._canonical_deadline(),
+            sessions = tuple(self._sessions.values())
+            local_session_ids = tuple(s.session_id for s in sessions)
+        idle = set(
+            await asyncio.to_thread(
+                repository.idle_session_ids,
+                memory_domain_id=memory_domain_id,
+                local_session_ids=local_session_ids,
+                deadline_monotonic=self._canonical_deadline(),
+            )
         )
+        for session in sessions:
+            affected_ids = {session.session_id, session.root_session_id or session.session_id}
+            if idle.intersection(affected_ids) and not await session.inspect_archive_idle():
+                idle.difference_update(affected_ids)
+        return frozenset(idle)
 
     @_core_database_operation
     async def read_session_lifecycle(self, session_id: str, memory_domain_id: str):
@@ -392,10 +400,12 @@ class _HostCoreManagementOperations:
                 s
                 for s in self._sessions.values()
                 if s.session_id == operation.session_id
+                or s.root_session_id == operation.session_id
             )
+        root_sessions = tuple(s for s in sessions if s.session_id == operation.session_id)
         gates = []
         try:
-            if len(sessions) > 1:
+            if len(root_sessions) > 1:
                 raise SessionWriterConflict("multiple Host owners have not settled")
             for session in sessions:
                 gate = await session.prepare_safe_runtime_reopen()
@@ -406,7 +416,10 @@ class _HostCoreManagementOperations:
                 repository.archive_session,
                 session_id=operation.session_id,
                 memory_domain_id=operation.memory_domain_id,
-                closed_writer=sessions[0]._lease.guard if sessions else None,
+                closed_writer=root_sessions[0]._lease.guard if root_sessions else None,
+                child_writers=tuple(
+                    s._lease.guard for s in sessions if s.session_id != operation.session_id
+                ),
                 check_only=True,
                 deadline_monotonic=self._canonical_deadline(),
             )

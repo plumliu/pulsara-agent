@@ -427,10 +427,23 @@ class _HostPlanOperations:
             )
             return _plan_workflow_command_outcome(accepted)
         finally:
-            async with self._lock:
+            # An admitted transition retains its fence until cleanup owns the lock,
+            # even if its caller is cancelled repeatedly while waiting.
+            cancellation = None
+            while True:
+                try:
+                    await self._lock.acquire()
+                    break
+                except asyncio.CancelledError as exc:
+                    cancellation = cancellation or exc
+            try:
                 self._plan_exit_fence = False
                 self._queue_wake.set()
                 self._cell_output_wake.set()
+            finally:
+                self._lock.release()
+            if cancellation is not None:
+                raise cancellation
 
     async def _prepare_plan_resolution_page(self, resolution, *, prepared_page=None):
         from pulsara_agent.conversation_kernel.tool_outputs import (
@@ -1032,10 +1045,22 @@ class _HostPlanOperations:
             delay_seconds = min(delay_seconds * 2, 0.5)
 
     async def _release_plan_continuation_reservation(self) -> None:
-        async with self._lock:
+        # Release the admission before allowing waiter cancellation to escape.
+        cancellation = None
+        while True:
+            try:
+                await self._lock.acquire()
+                break
+            except asyncio.CancelledError as exc:
+                cancellation = cancellation or exc
+        try:
             self._external_new_turn_accepting = False
             self._external_new_turn_cancellation_intent = None
             self._external_new_turn_settled.set()
+        finally:
+            self._lock.release()
+        if cancellation is not None:
+            raise cancellation
 
 
 def _plan_workflow_command_outcome(

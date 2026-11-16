@@ -6,14 +6,17 @@
 
 - `sessions.lifecycle` 硬切为 `OPEN / ARCHIVED`，无 CLOSED、归档布尔字段或兼容读取。表数不变，不新增事件、任务、回执或墓碑。归档时间使用该次状态转换写入的 `updated_at`，归档中不接纳执行写入。独立展示元数据允许按《会话标题修改》规格改名；只更新 title，不修改 lifecycle 或作为归档时间的 updated_at。
 - 普通运行时关闭和 CLI 退出只释放运行时，保持 OPEN；移除 `close_conversation` 参数、canonical close 升级及旧强制结束会话分支。`POST /api/sessions/{id}/close` 仅接受空对象，仍可停止运行时。
-- 仅 idle 可归档；不存在运行中 turn、待消费输入、未结算工具 attempt、未结束子任务、ACTIVE plan workflow 或 OPEN plan interaction。已加载 Host 还须通过现有安全重载的进程内空闲门禁，且没有运行中的后台进程、监控或待交付终端观察。归档不替用户取消工作。
+- 仅 idle 可归档；根会话及其子会话均不存在运行中 turn、待消费输入、ACTIVE plan workflow 或 OPEN plan interaction。已结束轮次中缺少正式工具结果的 attempt 属于历史事实，不单独阻挡归档，不补造结果或改写历史。真实尚未结束的执行和结算由现有进程内 owner 判断。
+- 根会话及全部已加载子 Host 均须通过现有安全重载的进程内空闲门禁；运行中或正在收尾的终端进程、Cell、已接纳工具调用、输入接纳及压缩等实际工作继续阻挡。已经完成物理收尾的终端记录不阻挡。停止或取消后的占用标记必须随实际结算清理，即使清理等待锁时再次取消，也先完成清理再传播取消。归档不替用户取消工作。
 - 冷会话只检查 canonical idle 和 writer；不为归档启动 Host、模型或 MCP。其他有效 writer 拒绝；过期 writer 遵循已有冷删除的有限权限边界，不声称停止不可观察的远端进程。有遗留待处理工作时拒绝，需先打开并处理。
 - 归档保留历史、fork、记忆、来源 FK、文件与 blob 引用。记忆来源投影为 ARCHIVED，提示先取消归档；不能说来源已删除。已归档源不接受普通 resume、reopen、fork 或旧窗口自动连接。
 - 取消归档仅 ARCHIVED → OPEN；不创建缺失会话、不加载 Host、不发送输入、不恢复已终止任务。之后用户打开走既有 cold epoch，不新增 prefix 重建边界。
 
 ## 唯一控制路径
 
-复用删除已有的 session 级 controller/core admission、bridge detach 与 full close owner，扩展为删除/归档两种收起操作，不复制另一套调度器。归档先冻结准入并验证空闲，再断开窗口、关闭空闲 Host，最后在 session FOR UPDATE 下重新验证 domain、exact writer generation/owner 和 canonical idle，原子改为 ARCHIVED 并清 lease。任何 idle 检查失败不关闭原 Host，释放检查门禁。未完成物理关闭则隔离且不改状态。
+复用删除已有的 session 级 controller/core admission、bridge detach 与 full close owner，扩展为删除/归档两种收起操作，不复制另一套调度器。归档先冻结根会话及已加载子 Host 的准入并验证空闲，再断开窗口、关闭空闲 Host，最后在 session FOR UPDATE 下重新验证 domain、exact writer generation/owner 和 canonical idle，原子改为 ARCHIVED 并清 lease。任何 idle 检查失败不关闭原 Host，释放检查门禁。未完成物理关闭则隔离且不改状态。
+
+数据库检查按根会话准入与行锁、按 ID 排序的子会话准入与行锁串行。预检只接受已通过进程内静默门禁的本地子 Host 的准确 writer；最终提交须确认子 writer 已释放，不能关闭其他实例的有效 writer。子会话取得 writer 同样先锁定并验证根会话为 OPEN；归档后不能通过直接恢复子会话重新启动工作。进程内打开子会话也登记所属根会话，让根会话收起沿原有 owner 等待已经接纳的打开操作，或拒绝后来到达的打开。
 
 DB 事务不得等待物理关闭或网络。接纳后的操作由已有 process-local task shield，等待实际 DB worker；模糊提交读取 canonical lifecycle，无法确认就保留门禁，重试仅确认。不因为 ACK 丢失重建会话。取消归档与永久删除按同一 session row lock 串行，缺失为 unavailable；归档/取消归档的重复请求按当前状态幂等。
 
