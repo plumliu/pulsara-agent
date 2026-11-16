@@ -1850,6 +1850,37 @@ describe('PulsaraApp', () => {
     await waitFor(() => expect(menu.open).toBe(false));
   });
 
+  it.each([['n', '新建会话'], ['k', '搜索会话']])('closes the session menu when shortcut %s opens a modal', async (key, label) => {
+    // jsdom does not reflect the inert property to its native HTML attribute.
+    const inert = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'inert');
+    Object.defineProperty(HTMLElement.prototype, 'inert', { configurable: true,
+      get() { return this.hasAttribute('inert'); },
+      set(value: boolean) { this.toggleAttribute('inert', value); },
+    });
+    const hidePopover = vi.spyOn(HTMLElement.prototype, 'hidePopover');
+    try {
+      renderWorkbench(<PulsaraApp adapter={new FakeAdapter()} />);
+      const trigger = await screen.findByLabelText(`${initialSession.title} 更多操作`);
+      fireEvent.click(trigger);
+      const menu = trigger.closest('details')!;
+      const actions = menu.querySelector<HTMLElement>('.session-row__menu-actions')!;
+      await waitFor(() => expect(actions.style.visibility).toBe('visible'));
+      trigger.focus();
+      fireEvent.keyDown(trigger, { key, ctrlKey: true });
+      const dialog = await screen.findByRole('dialog', { name: label });
+      await waitFor(() => expect(menu.open).toBe(false));
+      expect(hidePopover.mock.contexts).toContain(actions);
+      expect(actions.style.display).toBe('none');
+      fireEvent.keyDown(dialog.querySelector('input, button')!, { key: 'Escape' });
+      await waitFor(() => expect(screen.queryByRole('dialog', { name: label })).toBeNull());
+      expect(document.activeElement).toBe(trigger);
+    } finally {
+      hidePopover.mockRestore();
+      if (inert) Object.defineProperty(HTMLElement.prototype, 'inert', inert);
+      else Reflect.deleteProperty(HTMLElement.prototype, 'inert');
+    }
+  });
+
   it('archives only eligible sessions, restores from settings without opening, and deletes there', async () => {
     const adapter = new FakeAdapter();
     adapter.sessions = [{ ...initialSession, canArchive: false }];

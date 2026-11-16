@@ -103,7 +103,8 @@ function SessionItem({
   useLayoutEffect(() => {
     const reference = menuTrigger.current;
     const floating = menuActions.current;
-    if (!menuOpen || !reference || !floating) return;
+    if (!menuOpen || !reference || !floating || !reference.closest('details')?.open
+      || reference.closest<HTMLElement>('main.pulsara-shell')?.inert) return;
     floating.style.visibility = 'hidden';
     floating.showPopover();
     let disposed = false;
@@ -124,7 +125,7 @@ function SessionItem({
       });
     };
     const cleanup = autoUpdate(reference, floating, update);
-    return () => { disposed = true; cleanup(); floating.hidePopover(); };
+    return () => { disposed = true; cleanup(); if (floating.isConnected && floating.matches(':popover-open')) floating.hidePopover(); };
   }, [menuOpen]);
   return (
     <div className="session-row">
@@ -248,6 +249,18 @@ export function SessionSidebar({
   );
   useEffect(() => {
     const openMenus = () => sidebarRef.current?.querySelectorAll<HTMLDetailsElement>('.session-row__menu[open]');
+    const app = sidebarRef.current?.closest<HTMLElement>('main.pulsara-shell');
+    const closeForModal = () => {
+      if (!app?.inert) return;
+      openMenus()?.forEach(menu => {
+        const actions = menu.querySelector<HTMLElement>('.session-row__menu-actions');
+        if (actions?.isConnected && actions.matches(':popover-open')) actions.hidePopover();
+        menu.open = false;
+      });
+    };
+    const observer = new MutationObserver(closeForModal);
+    if (app) observer.observe(app, { attributes: true, attributeFilter: ['inert'] });
+    closeForModal();
     const dismissOutside = (event: MouseEvent) => {
       if (!(event.target instanceof Node)) return;
       openMenus()?.forEach(menu => {
@@ -264,6 +277,7 @@ export function SessionSidebar({
     document.addEventListener('click', dismissOutside, true);
     document.addEventListener('keydown', dismissOnEscape);
     return () => {
+      observer.disconnect();
       document.removeEventListener('click', dismissOutside, true);
       document.removeEventListener('keydown', dismissOnEscape);
     };

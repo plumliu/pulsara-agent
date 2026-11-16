@@ -42,17 +42,23 @@ function composerIsDisabled(composer: HTMLElement): boolean {
   return composer.getAttribute('contenteditable') === 'false';
 }
 
+const openedPopovers = new WeakSet<HTMLElement>();
+let matchesPopover: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
   sessionMenuClipping.hidden = false;
   Object.defineProperty(HTMLDialogElement.prototype, 'showModal', {
     configurable: true, value() { this.setAttribute('open', ''); },
   });
   // jsdom hides popovers but does not implement opening them.
+  const nativeMatches = HTMLElement.prototype.matches;
+  matchesPopover = vi.spyOn(HTMLElement.prototype, 'matches').mockImplementation(function (this: HTMLElement, selector: string) {
+    return selector === ':popover-open' ? openedPopovers.has(this) : nativeMatches.call(this, selector);
+  });
   Object.defineProperty(HTMLElement.prototype, 'showPopover', {
-    configurable: true, value() { this.style.display = 'block'; },
+    configurable: true, value() { openedPopovers.add(this); this.style.display = 'block'; },
   });
   Object.defineProperty(HTMLElement.prototype, 'hidePopover', {
-    configurable: true, value() { this.style.display = 'none'; },
+    configurable: true, value() { openedPopovers.delete(this); this.style.display = 'none'; },
   });
   // Each test starts with its own browser selection; remounts within a test
   // still exercise the production preference persistence.
@@ -65,6 +71,7 @@ afterEach(() => { delete window.pulsaraDesktop;
   cleanup();
   Reflect.deleteProperty(HTMLElement.prototype, 'showPopover');
   Reflect.deleteProperty(HTMLElement.prototype, 'hidePopover');
+  matchesPopover.mockRestore();
 });
 
 const bootstrap: RuntimeBootstrap = {
