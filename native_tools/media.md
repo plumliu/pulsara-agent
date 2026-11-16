@@ -372,9 +372,27 @@ type ReadVideoFramesArgs =
 | --- | --- | --- |
 | overview | 范围说明；逐张拼图索引 object → 拼图 image | 现有稀疏代表状态选择、拼图质量和时间映射；不表示连续看过范围内每一帧 |
 | detail | 范围说明；逐个观察时间 object → 清晰 image | 对有效视频交集选首、中、严格位于结束前的目标；同一源帧命中多个目标时合并为一次实际观察，完整计划为一至三个不同源观察 |
-| motion | 范围说明；逐张索引 object → 等格拼图 image | 现行连续观察、真实时间顺序、裁剪及空间质量；完整请求范围先生成并保存，窗口仅内部使用 |
+| motion | 范围说明；逐张索引 object → 等格拼图 image | 有效请求范围内全部实际源展示观察、真实时间顺序、裁剪及既定空间质量；完整请求范围先生成并保存，窗口仅内部使用 |
 
-保留现有三个 action 的选择与质量，不采纳另行延后讨论的 motion 改版，不新增变化筛帧、降 FPS、多画布排版策略或采样类型。业务处理期间的文件绑定及实际变化检查仍由视频 owner 承担，不能把这一过程的瞬时检查变成模型续读条件。
+保留现有三个 action 的选择与质量，本轮不改变选帧、时间采样或拼图算法；画布布局与 motion 额外精确共享留待实验。业务处理期间的文件绑定及实际变化检查仍由视频 owner 承担，不能把这一过程的瞬时检查变成模型续读条件。
+
+#### 三种 action 的职责与交错使用
+
+三者按取证目的分工，可以独立使用，也可按未解决的问题交错调用：
+
+| action | 主要职责 | 典型问题与边界 |
+| --- | --- | --- |
+| overview | 获得稀疏总体认识、概括主要内容和寻找候选位置 | 可直接支持总体认识与清楚可见的状态；代表区间用于导航，不保证区间内没有未采样变化或事件 |
+| detail | 看清已定位短范围的局部状态和空间细节 | 读取文字、数值、物体、姿态或接触位置；首中尾之间的连续变化仍需相应过程证据 |
+| motion | 提供核对先后、变化、持续、重复与短暂往返所需的连续视觉证据 | 保留全部实际源展示观察，不自动识别动作或保证模型正确理解、计数 |
+
+motion 以持续运动为主要场景，适用于体育、影视、自然拍摄、实验及软件录像，不依赖重复界面或可去重画面的存在。overview 和 motion 同样可以使用多张拼图，区别来自选择的证据及时间覆盖；无需刻意制造不同的视觉风格。
+
+例如概括跳远并判断手或脚谁先触沙：overview 定位助跑、腾空和落地；motion 核对落地过程；接触位置难辨时用局部 detail/crop；先后仍未明确时回到保留手、脚和沙面参照物的 motion。若已有画面足够回答，就结束该问题。已知时点的状态可直接 detail，已知位置的动作过程可直接 motion，总体认识也可以只用 overview，不设置固定调用顺序。
+
+一个清楚的可见对象可以支持相应出现事实，单张姿态不能独自证明先后、重复或整个范围的缺失。“首次”“第几次”“总次数”或完整区间的否定结论，需要覆盖支持它的过程和可见证据。motion 的范围由问题决定，必要时可长范围或全片读取，不因效率自动缩范围；不新增总时长或累计观察数上限。
+
+一次调用先完成并保存整个请求，后续少读 NEXT 只减少模型阅读，不节省本次已经完成的解码和渲染。JS 内存中的完整结果也不等于模型已读，实际交付的文字和图片才构成模型已取得的证据。完整流程及待实验方向见[三 action 与 motion 产品语义](../PULSARA_MOTION_PRODUCT_SEMANTICS_DRAFT.zh.md)。
 
 ### 2.2 最简返回值与索引类型
 
@@ -694,7 +712,7 @@ console.log({sequence: result.content});
 
 ### 2.6 冻结 12k／NEXT 与图片公共语义
 
-三个 action 都是先完成本次请求的全部既定证据及保存，再交付原生第一页或返回 JS 值。图像清晰度、选择时刻、裁剪及拼图由视频 owner 冻结，不能因当前模型页余量重新选帧、降低 FPS 或缩图；独立 motion 修订仍延后。
+三个 action 都是先完成本次请求的全部既定证据及保存，再交付原生第一页或返回 JS 值。图像清晰度、选择时刻、裁剪及拼图由视频 owner 冻结，不能因当前模型页余量重新选帧、降低 FPS 或缩图；画布布局和 motion 额外精确共享仍待实验，不改变现有执行路径。
 
 原生按共同 12k 预算顺序分页；object 的 JSON 文字可以拆分，图片不可拆，索引和图片允许跨页，不保存绑定标记、不重排、不复制前页说明。单张超大拼图也适用独占页例外。next 仅是 NEXT Target，原样传给 read_file，不暴露源帧位置或字符偏移；正常首屏和续页的 tool_result 指向同一完整结果。
 
@@ -715,6 +733,10 @@ JS 返回完整类型化业务值，不携带原生 tool_result、next 或时间
 | 结果保存失败或未确认 | ERROR，说明已知事实，不提供假可读 tool_result／NEXT，不自动重做 |
 | 调用取消 | CANCELLED，按现有取消及清理 owner 结算，保留确实存在的失败业务值 |
 | 图片模型能力或单图读取失败 | 沿第 1 章和统一投影规则原位说明，不删除其他证据，不重新解码视频 |
+
+容器结束与视频结束须区分。选中视频轨终点元数据缺失，而执行中已确认实际视频展示先于请求结束时，overview／detail 应在计划冻结前按真实有效交集完成原有选择；detail 的两秒校验仍针对原始请求。有效证据取得完整后为 SUCCESS，并在 text 说明尾部缺口；不把末帧延长至容器终点，不只跳过失败末目标。motion 继续保留交集内全部实际展示观察。请求完全落在无视频尾部则 ERROR；无法确认展示终点、解码失败或源变化仍按真实错误结算。
+
+这项容器尾隙处理已明确为待实施缺陷修复，不改变参数和返回形状；重现事实、实现边界与验收要求见[motion 产品语义第 4.1 节](../PULSARA_MOTION_PRODUCT_SEMANTICS_DRAFT.zh.md#41-容器尾部超过实际视频展示终点待实施修复)。NEXT 仍只读取保存结果，不参与源终点探测。
 
 失败值可保留可解析的请求 target；已取得且属于真实失败业务值的文字、索引及图片继续完整保存，不能将原生错误页作为 JS 完整值。JS 失败沿既有异常通道，在确有业务值时通过 err.result 取得全部失败内容；没有业务值就不伪造。
 
@@ -1074,21 +1096,19 @@ next: null
 - [图片读取、SVG／HTML 渲染及当前原生准入](../src/pulsara_agent/conversation_kernel/tool_runtime.py)
 - [图片实际解码验证](../src/pulsara_agent/conversation_kernel/image_validation.py)
 - [当前图片引用读取实现](../src/pulsara_agent/conversation_kernel/prompt_storage.py)
-- [共同存储接入前的图文内容及图片绑定](../src/pulsara_agent/conversation_kernel/prompt_content.py)
+- [图文内容及图片绑定](../src/pulsara_agent/conversation_kernel/prompt_content.py)
 - [当前图文结果的文字投影](../src/pulsara_agent/llm/input.py)
 - [当前 Code Mode 工具目录](../src/pulsara_agent/conversation_kernel/tool_surface.py)
 - [视频参数及校验](../src/pulsara_agent/tools/builtins/media.py)
 - [视频选择及拼图渲染](../src/pulsara_agent/media/frames.py)
 - [detail 目标范围](../src/pulsara_agent/media/frames_detail.py)
 - [detail 精确图片共享](../src/pulsara_agent/media/frames_detail_render.py)
-- [待替换的源续读实现](../src/pulsara_agent/media/frames_paging.py)
-- [视频执行和当前图文页面准入](../src/pulsara_agent/media/execution.py)
-- [转录业务、累计 ASR 限制及旧结果字段](../src/pulsara_agent/media/transcript.py)
-- [待替换的转录源位置与文字分页](../src/pulsara_agent/media/transcript_paging.py)
+- [完整视频业务值执行及图片准入](../src/pulsara_agent/media/execution.py)
+- [完整范围转录及缓存](../src/pulsara_agent/media/transcript.py)
 - [字幕解码与轨道选择](../src/pulsara_agent/media/subtitles.py)
 - [已接受 ASR 工作及结算](../src/pulsara_agent/media/transcript_work.py)
 - [ASR 实际识别、缓存与失败事实](../src/pulsara_agent/media/transcript_recognition.py)
 - [时间标注的成功记录与文件匹配读取](../src/pulsara_agent/conversation_kernel/media_annotations.py)
-- [当前标注内部事实与公开正文投影](../src/pulsara_agent/primitives/tool_result_projection.py)
+- [规范结果读取、冻结分页及正文投影](../src/pulsara_agent/conversation_kernel/tool_outputs.py)
 
-这些链接用于核对实施接点，不表示当前生产代码已经实现本草案。实施须接入前三个工具的 JS 目录及返回声明，视频公开 action 取代 mode，删除源 continuation 和旧结果字段，先完整生成保存再分页；同时切换共同存储、全局图片资产、递归图片识别及逐图失败占位。转录须删除单次累计 180 秒 ASR 限制、展示预算对业务读取的提前截停及公开 media_version，保留实际识别、共享工作、缓存和取消结算。annotate_media 继续仅原生，替换公开成功标记为简短 text，保留调用参数中的标注与内部文件绑定；前端读取适配同一结果事实，不增加重复标注正文或因 NEXT 再次追加。
+参数与结果以本文及共同合同为准；源解码、选择、渲染、识别、缓存和取消结算复用对应实现。视频和转录先取得并保存完整业务范围，再由共同结果读取层处理原生分页；标注的内部文件绑定和前端读取保持既定语义。三种视频 action 的职责和交错使用按第 2.1 节，布局与 motion 额外精确共享仍为待实验方向。

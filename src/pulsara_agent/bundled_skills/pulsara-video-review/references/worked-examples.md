@@ -1,56 +1,110 @@
-# Worked examples
+# Worked video-review examples
 
-The times below illustrate choices based on the content and question.
+Times and crops below illustrate decisions; use the positions found in the
+actual video. Each next read follows what is still unresolved.
 
-## Review a long tutorial together
+## Summarize a long jump and check contact order
 
-The user asks you to review a 12-minute dashboard tutorial and mark the key steps so they can follow along. This example uses visual evidence.
+The user asks for an account of a trial and whether the hand or heel touches the
+sand first.
 
-1. Start with a target-only overview. The video opens automatically in the sidebar. Locate the setup, chart and export sections.
-2. Explore the setup with a local overview. When its main step is clear, use `annotate_media` on the relevant passage, for example: “Import the orders table and select the date column before opening the dashboard.” The user can already select this note and review the setup while you continue.
-3. In the chart section, use overview on 240–250 s to locate the filter, then detail from 245.2 to 246.2 with a crop to read it. If the label shows October, annotate that visible state at 245.2–246.2: “The chart is filtered to October; check this selection when comparing the totals.”
-4. The user selects that note and asks, “Did changing the filter also change the total?” Inspect the filter operation around 242–247 s with motion. Read the before/after amounts with short detail calls if needed, then annotate the operation's range with the observed change. Resume the chart section after answering.
-5. Continue through the export section and the ending at 720 s. Add useful notes as each finding becomes clear. A passage may need only overview, only detail, or a combination with motion. Finish with a summary that points the user to the relevant annotated passages.
+1. Use overview across the trial to locate approach, take-off, flight and landing.
+2. Read motion around landing. For example, if the candidate is around 42 s:
 
-The notes give the user places to revisit and discuss throughout the review. If the task also asks about spoken explanations, read the corresponding transcript passages alongside the visual review.
+```json
+{"target":{"kind":"PATH","path":"trial.mp4"},"from":41.6,"to":43.2,"action":"motion"}
+```
 
-## Read an amount at a supplied time
+3. If contact is unclear, use detail around a returned frame time. A crop can
+   retain the hand, heel and sand while making their positions easier to see:
 
-The user asks, “What amount is shown at 12.4 seconds?”
+```json
+{"target":{"kind":"PATH","path":"trial.mp4"},"from":42.3,"to":42.38,"action":"detail","crop":[0.2,0.45,0.8,1]}
+```
 
-Use detail from 12.32 to 12.56, with a crop around the amount if its position is known. Read the returned pictures and actual times. If the value is clear, answer directly. If you need to find the amount on the screen first, use the full-frame detail, then tighten the crop around the relevant area.
+4. If order is still unresolved, read motion over the relevant contact interval
+   with that suitable crop. The clear detail posture helps identify what to
+   compare; the neighboring observations support order.
+5. If the user asks when balance was lost, inspect the preceding flight with
+   motion. Distinguish visible sequence and posture from a causal explanation
+   that would need further evidence.
 
-If the tool returns one picture and a next call, check whether that picture already contains the amount. Continue only if another selected picture is needed.
+If the first motion already shows the answer, finish there. Add a timeline note
+when it would help the user revisit the landing, and link the video in the answer.
 
-## Check a save operation
+## Start directly with a bird leaving a branch
 
-The user asks, “Did the save near the end succeed?”
+The user points to 18 s and asks whether the bird spreads its wings before its
+feet leave the branch. Start with motion around that time. A preceding overview
+is unnecessary when the location is already known.
 
-1. Use a local overview of the ending to find the save passage.
-2. Inspect 83–90 s with motion. At 84 s the save dialog is visible; at 85 s an error appears.
-3. If the text is readable, answer. If it is small, use detail from 85.1 to 85.8 with a crop around the message.
-4. Report the actual outcome: for example, “At 85 s the app reports ‘Save failed: read-only folder.’” An optional timeline note can mark that finding.
+If the feet are difficult to identify, use detail near a returned time and a
+crop retaining the bird and branch. Return to motion over the unresolved
+transition if needed. Use the actual times and visibility; a sampled pose or
+occluded foot alone does not settle the order.
 
-For “When did the error first appear?”, concentrate the motion review around the transition and use its frame times. For “What does the error at 85 seconds say?”, start directly with detail.
+## Follow a liquid-drop experiment
 
-## Look for a brief return to an earlier state
+The user asks whether recoil precedes breakup after maximum spreading.
+Overview can locate the experiment and its broad stages. Motion follows impact,
+spreading and the subsequent sequence. Detail can identify a rim filament or
+read a scale; return to motion to establish when it appears relative to breakup.
 
-The user asks whether a menu opened and closed during 20–24 s. Review that interval with motion, following its pages through the relevant sequence. Inspect the opening, visible menu and return to the original screen in order. Use detail around the open menu only if its items matter to the answer.
+Once the maximum-spreading moment is established, a question about its diameter
+may end with a clear detail read and scale. A question about which event happens
+first needs the relevant sequence.
+The crop should retain the reference surface and the parts being compared.
 
-For “Did this warning appear anywhere in 20–40 s?”, follow motion through the whole requested interval. Keep the remaining interval in view while reading pages. If a warning is found, use a short detail to read it when necessary. State the time and content that answer the user's question.
+## Read a known-time state or compare distant states
 
-## Recover from an oversized detail request
+“What amount is visible at 12.4 s?” starts with detail around that time, such as
+12.32–12.56 s. Crop the display if its position is known, and use the returned
+frame times when reporting the amount.
 
-A detail request for 245–250 s returns the two-second reminder.
+“How does the result at 30 s compare with 90 s?” can use separate local detail
+reads with comparable crops. Inspect the intervening process only when it is
+part of the question. Reuse a delivered picture when it already answers it.
 
-If the question is “Which filter is selected?”, use overview on 245–250 s to locate a useful screen, then detail on a local range such as 245.2–246.2 with a crop. If the question is “How did the filter change?”, use motion on the relevant sequence. Once the question is answered, move on.
+## Review a longer passage and verify repetition
 
-## Compare distant results
+For a general account, use a whole-range overview and refine relevant passages
+with local overviews. Read a state with detail or a process with motion when
+that part of the account needs it. A useful broad summary need not call all
+three actions.
 
-The user asks how the displayed total differs between 30 s and 90 s. Use separate detail reads near each location, for example 29.8–30.2 and 89.8–90.2, with comparable crops. Reuse an existing picture when it already shows one of the totals. Report the two values and their difference. Inspect the intervening process with motion only if the user also asks how the change happened.
+For “How many rotations occurred?” or “Was this the first contact?”, sparse
+candidates are a starting point. Read the relevant process across the interval
+needed for the count or first-occurrence claim. A full-range motion request can
+be appropriate. Keep track of the actual evidence already delivered when
+continuing through its saved pages.
 
-## Finish a transcript explanation
+If a clear picture establishes that an object appeared, that may settle an
+existence question. An absence claim across a range needs adequate coverage and
+visibility throughout that range.
 
-A lecture transcript page ends with “We rejected the second design because …”. Copy the complete next call to read the reason, even if `processed_range` already reaches the requested endpoint. Once the explanation is clear, answer the targeted question or continue to the next topic for a whole-lecture summary.
+## Continue saved evidence or change the question
 
-Use the same decision for frame pages: continue when the remaining pictures are needed, start a fresh range for a different passage, and answer when the requested evidence is in hand.
+A native response with NEXT has more saved content. Pass that NEXT Target to
+read_file when it contains evidence still needed. The remaining content was
+already generated; reading it does not decode the source again.
+
+A different time range or crop is a new read_video_frames request. Stopping NEXT
+can save further model reading, while the source-processing cost of the completed
+request has already been incurred. Code Mode instead returns the complete value;
+console.log or a top-level return makes the chosen content model-visible.
+
+The same frozen-result rule applies to read_transcript. If a delivered segment
+ends before the needed explanation, continue the saved result. Use its reported
+source and actual segment times, and distinguish obtained text from an incomplete
+recognition result.
+
+## Annotate and respond during a shared review
+
+Once an observation is clear, use annotate_media with the original PATH Target,
+the finding's from/to and concise text. For a landing, the note may identify the
+observed contact order and useful return point. For an experiment, it may mark
+maximum spreading or the visible onset of breakup.
+
+When the user asks about a note, inspect that passage with the appropriate
+action. Add a further finding if useful, then continue the wider task. Video
+playback remains under the user's control throughout the review.

@@ -49,13 +49,15 @@ def render_detail_images(
     if width < minimum[0] or height < minimum[1]:
         raise MediaError(
             "RESOURCE_BOUNDARY",
-            "Clear detail images do not fit the physical page allocation",
+            f"This aspect ratio needs a minimum clear size of {minimum[0]}x{minimum[1]}, "
+            f"which does not fit the {width}x{height} detail render size; use a less narrow crop",
         )
     pixels = width * height
     if pixels > budget.image_pixels:
         raise MediaError(
             "RESOURCE_BOUNDARY",
-            "A clear detail image exceeds the physical pixel allocation",
+            f"A {width}x{height} detail image needs {pixels} pixels, "
+            f"exceeding the physical pixel allocation of {budget.image_pixels}",
         )
     unique: list[Image.Image] = []
     index: list[dict] = []

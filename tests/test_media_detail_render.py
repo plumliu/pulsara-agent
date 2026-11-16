@@ -4,6 +4,7 @@ from dataclasses import replace
 from fractions import Fraction
 import io
 from pathlib import Path
+import re
 import weakref
 
 import av
@@ -147,6 +148,31 @@ def test_an_inadmissible_first_picture_is_a_resource_boundary(tmp_path, options)
     with pytest.raises(MediaError) as error:
         render(path, **options)
     assert error.value.code == "RESOURCE_BOUNDARY"
+
+
+def test_narrow_crop_reports_render_geometry_instead_of_page_allocation(tmp_path):
+    path = video(tmp_path / "narrow.mkv", ["red"], size=(800, 450))
+    with pytest.raises(MediaError) as error:
+        render(path, crop=(0, 0, 1, 0.14))
+
+    assert error.value.code == "RESOURCE_BOUNDARY"
+    assert "aspect ratio" in str(error.value)
+    sizes = re.search(
+        r"minimum clear size of (\d+)x(\d+).* (\d+)x(\d+) detail render size",
+        str(error.value),
+    )
+    assert sizes is not None
+    minimum_width, minimum_height, width, height = map(int, sizes.groups())
+    assert width < minimum_width and height < minimum_height
+
+
+def test_readable_crop_reports_actual_pixel_allocation_when_too_small(tmp_path):
+    path = video(tmp_path / "pixel-limit.mkv", ["red"], size=(800, 450))
+    with pytest.raises(MediaError) as error:
+        render(path, crop=(0, 0, 1, 0.25), pixels=1280 * 180 - 1)
+
+    assert error.value.code == "RESOURCE_BOUNDARY"
+    assert "pixel allocation" in str(error.value)
 
 
 def test_many_observations_fit_one_unique_picture_budget(tmp_path):

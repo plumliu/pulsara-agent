@@ -63,7 +63,7 @@ MCP 的完整结果指按第 2.3 节完成 audience 过滤后接受的结果；�
 
 业务 owner 可以使用有界工作集、内部流式扫描、分块解码、分批渲染和增量存储完成一次调用，完整保存不要求所有内容同时驻留内存。原生第一页和 JS 正常返回均在完整结果保存后产生；内部处理批次不成为对外结果范围，也不能变成模型需要续接的后台任务。JS 取得完整业务值时仍可能需要相应执行内存，实际资源失败如实报告。
 
-motion 同样以本次参数确定的完整视频范围为边界，一次完成该范围的全部现行观察与拼图并保存。分析窗口仅保留为内部有界处理方式，不再需要模型逐窗口发起读取。其观察选择、时间顺序、空间质量和等格拼图规则保留；独立的画布、采样及图片共享修订继续延后。
+motion 同样以本次参数确定的完整视频范围为边界，一次完成该范围的全部现行观察与拼图并保存。分析窗口仅保留为内部有界处理方式，不再需要模型逐窗口发起读取。其观察选择、时间顺序、空间质量和等格拼图规则保留；画布布局与额外精确共享仍待实验。
 
 ### 2.2 next 只读取本次已保存结果
 
@@ -463,7 +463,7 @@ overview、motion 的每个格子均向模型提供编号、真实时刻和归�
 
 读取任何后续页均不再次打开原视频、不重新解码、不重新渲染。原视频在完整结果接受后被修改或移除，不改变已经保存的结果；结果可读性由保存内容及既有访问边界决定。`write_file(tool_result_target=tool_result)` 同样导出整个已保存结果的正文，不止当前交付页。
 
-不采纳画布比例优化、额外图片共享、降 FPS 或变化检测筛帧等独立修订。本轮不改根目录 motion 修订草稿，不以它作为本次产品依据；本节已明确的完整生成、保存与分页合同不再作为该修订的待定项。
+三种 action 按“稀疏总体认识／局部状态辨认／连续过程核对”分工，可按未解问题交错使用，详见[三 action 与 motion 产品语义](PULSARA_MOTION_PRODUCT_SEMANTICS_DRAFT.zh.md)及[多媒体工具合同](native_tools/media.md#2-read_video_frames取得视频图像证据与时间索引)。画布布局与 motion 额外精确共享只作待实验方向，不改变本节选帧、质量、完整生成、保存和分页合同，不引入降 FPS 或变化检测筛帧。
 
 ### 8.7 Code Mode：JS 取得完整的类型化业务值
 
@@ -725,7 +725,7 @@ write_file 导出读取已保存的完整工具结果，不依赖原临时日志
 6. 闭合文件正文与行号投影、memory exposure、Code Mode 完整业务值与 bridge 边界、历史与 UI 展开复制等消费者。按第 8.7 节调整业务生产者，先完整执行和保存，再由原生入口按 12k 交付，或向 JS 返回完整业务值；不能仅取消 bridge 限制，却继续把工具内部切好的原生页作为 JS 完整值。ROOT 展示准入不提前作用于 JS 中间结果；落实第 9.1 节单值限制与旧错误指引的删除，不将 JS 返回误记为 ROOT 已读，不静默截短程序值或改变副作用结算。暂存额度的必要性和取值后续讨论，不直接沿用旧初值作为本规格结论。
 7. 用 SDK 正式内容类型接入 MCP inline 图片，先按第 2.3 节过滤并移除 audience，再按第 8.4 节适配保留内容及附带说明。排除项不入库、不保存图片、不进入 JS；原生与 JS 共用同一接受结果，保留其顺序和公开业务字段。删除仅输出 Base64 JSON 而未交付真实图片的专用路径，失败不重放远端效果。
 8. 将 view_image 的自然语言/图片结果、overview 的拼图局部索引、detail 的逐观察 inline 结果接到同一 owner；普通图片说明为 text，视频索引为 object 并确定投影为 JSON 文字，各自按文字计量；与图片顺序分页，可跨页，不保存绑定标记或重复说明。JS 完整取得同一内容数组，不套用页预算；保留视频既有业务定位事实与精确共享判据。
-9. motion 按第 8.6 节一次完成请求范围内的全部观察、拼图和保存，窗口仅用于内部有界处理；移除公开的后续解码 continuation。`read_file` 只读取固定结果，不打开视频、不解码、不渲染；独立画布与采样修订不纳入。
+9. motion 按第 8.6 节一次完成请求范围内的全部观察、拼图和保存，窗口仅用于内部有界处理；移除公开的后续解码 continuation。`read_file` 只读取固定结果，不打开视频、不解码、不渲染；尚待实验的布局与额外精确共享不纳入。
 10. 按第 8.7–8.8 节将内置图像工具及 read_transcript 接入 JS，返回完整业务值并共用内容项，支持 console.log 每个参数及显式 return 任意层级的 image 节点；组合输出沿现有 Cell 接纳链路整条交付，不加 steer 分页预算，不新增 emit，正常执行时不把内部调用自动披露给 ROOT；第 8.8 节既有异常诊断及晚到结果补发保持。图片引用统一按已知身份直接读取，删除 session／workspace、来源 entry 及队列消费资格检查；无效或缺失节点原位文字占位，其他内容继续；Cell steer 本身不提供 read_file 入口或读取／导出 Target。永久拒绝经现有路径收束，不依赖已回收 Cell 或新增恢复机制。
 11. 按第 8.9 节为每个工具固定并生成输入/完整返回声明、错误说明与字段处理及图文组合示例。更新 bundled Code Mode Skill、提示词及当前合同测试，删除“图片仅原生”等被替代的规定，不保留旧接口兼容。
 12. 按第 8.10 节接通 read_transcript 的完整业务生产者，删除累计 180 秒 ASR 停止逻辑及公开 media_version、continuation、源位置分页；同时删除旧 maximum_text_bytes 字幕截断返回、页面装满后停止业务及 ASR 前的装页门槛。字幕读取、缓存和分批识别完整完成并保存后再分页；保留实际失败、取消和远端提交结算。
@@ -760,7 +760,7 @@ write_file 导出读取已保存的完整工具结果，不依赖原临时日志
 - MCP 变化：删除原生兼容和降级测试，保留实际发现、刷新及准入验证；A 定义变化拒绝其旧引用，B 增删不影响未变 A，同目标重连可复用，实际目标／账户改变不得沿用旧资格。刷新失败不误报删除；新查询读当前已接纳目录，NEXT 读冻结结果；已接纳操作正常结算，未发送和已发送后失败如实说明，不自动重做。
 - audience：缺失、null、空数组均保留；非空数组包含 assistant 保留，明确不含 assistant 才丢弃。原生与 JS 对文字、图片及其他正式内容项采用同一规则；排除内容及其附带信息不入库、不解码保存图片、不进入 JS，也不通过续读或导出恢复。保留内容和说明均不再暴露 audience，不保留该字段的原始响应备份；全部过滤为空时业务状态及已知效果保持原义，内置工具未带 audience 时正常保留。
 - motion：完整处理跨越多个内部分析/渲染批次的请求，保存全部观察与拼图后才交付第一页；批次边界无重复、遗漏或时间错序，窗口和交付页大小不改变观察选择与既定质量。
-- motion 冻结结果读取：首屏后修改或移除原视频，`read_file` 仍能交付所有已保存页面；补页和导出不增加视频打开、解码或渲染次数。完整结果 Target 始终相同，next 仅推进保存结果的位置，独立 motion 修订未被带入。
+- motion 冻结结果读取：首屏后修改或移除原视频，`read_file` 仍能交付所有已保存页面；补页和导出不增加视频打开、解码或渲染次数。完整结果 Target 始终相同，next 仅推进保存结果的位置，尚待实验的布局与额外精确共享未被带入。
 - read_transcript：覆盖超过 180 秒的新增识别、缓存与新识别交错及长字幕，成功时完成本次范围并完整保存后再交付；原生 12k／NEXT 不增加字幕解码、缓存查询或 ASR 请求，JS 不分页且无公开 media_version、源位置或展示 next。字幕空白不自动补 ASR，无文字不推断静音；失败和取消保留实际文字及未完成／远端不确定事实，失败结果补页不重试识别。缓存清理及媒体变化不改变冻结结果。
 - annotate_media：四个必填参数、仅 ROOT 原生，成功返回 PATH、meta.status 和简短 text；标注正文仍在调用参数，内部路径／修改时间匹配及原有读取语义保持。错误和取消如实说明效果，NEXT、导出和观察恢复均不再次添加标注，不引入 JS API 或独立标注正文存储。
 - 不可交付：实际图片尺寸/传输/上下文边界正确区分；不能只交引用称成功，不能空成功或用原地 next 假装推进。完整保存失败不返回完整结果 Target 或 next；保存成功但本页交付失败返回完整结果 Target 和指向本页未交付起点的 NEXT。首屏失败可从开头读取，续页失败可从原位置重试；不跳过失败内容、不重执行业务、不把失败记为已读。
@@ -794,9 +794,8 @@ write_file 导出读取已保存的完整工具结果，不依赖原临时日志
 - [共享身份层](src/pulsara_agent/identity.py)
 - [现有 SESSION_ENTRY Target](src/pulsara_agent/ports/session_content.py)
 - [现有精确正文读取边界](src/pulsara_agent/ports/tool_output.py)
-- [结果正文存储 owner](src/pulsara_agent/conversation_kernel/tool_outputs.py)
+- [结果正文存储、冻结分页与投影 owner](src/pulsara_agent/conversation_kernel/tool_outputs.py)
 - [现有文件读取与导出实现](src/pulsara_agent/tools/builtins/filesystem.py)
-- [当前预览投影](src/pulsara_agent/conversation_kernel/tool_result_display.py)
 - [完整页面预算](src/pulsara_agent/primitives/tool_result_budget.py)
 - [唯一 v3 estimator](src/pulsara_agent/llm/estimator.py)
 - [现有图文附件投递](src/pulsara_agent/model_input/compiler.py)
@@ -808,6 +807,6 @@ write_file 导出读取已保存的完整工具结果，不依赖原临时日志
 - [视频观察与拼图实现](src/pulsara_agent/media/frames.py)
 - [detail 原帧精确共享](src/pulsara_agent/media/frames_detail_render.py)
 - [现行 detail 产品规格](archived_docs/PULSARA_VIDEO_DETAIL_AND_REVIEW_STRATEGY_REVISION_SPEC.zh.md)
-- [延后讨论的 motion 专属草稿，不作为本次实施依据](PULSARA_MOTION_PRODUCT_SEMANTICS_DRAFT.zh.md)
+- [三 action 的职责、交错使用与 motion 待实验方向](PULSARA_MOTION_PRODUCT_SEMANTICS_DRAFT.zh.md)
 
 这些链接用于核对现状与复用边界，不表示生产代码已实现本草案。

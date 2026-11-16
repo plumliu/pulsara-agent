@@ -142,9 +142,9 @@ def scene_dimensions(
     aspect = _fraction(aspect)
     long, short = (160, 90) if floor else (320, 180)
     required_width, required_height = (long, short) if aspect >= 1 else (short, long)
-    width = max(required_width, math.ceil(required_height * aspect))
-    height = max(required_height, math.ceil(Fraction(width, 1) / aspect))
-    return width, height
+    # Round both axes once from the same aspect-preserving scale.
+    height = max(required_height, Fraction(required_width, 1) / aspect)
+    return math.ceil(height * aspect), math.ceil(height)
 
 
 def overview_allocation(aspect: Fraction | float) -> int:

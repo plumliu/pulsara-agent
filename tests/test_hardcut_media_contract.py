@@ -154,6 +154,40 @@ def test_detail_keeps_every_observation_and_exact_shared_image(tmp_path):
     }
 
 
+@pytest.mark.parametrize(
+    "size,crop,dimensions",
+    [
+        ((800, 450), [0, 0, 1, 0.25], (1280, 180)),
+        ((450, 800), [0, 0, 0.25, 1], (180, 1280)),
+        ((800, 450), [0, 0, 0.8, 0.2], (1280, 180)),
+    ],
+)
+def test_detail_crop_at_readable_boundary_returns_validated_images(
+    tmp_path, size, crop, dimensions
+):
+    from tests.test_media_detail_render import video
+
+    video(tmp_path / "crop.mkv", ["red", "blue", "red"], size=size)
+    result = asyncio.run(
+        _execute(
+            tmp_path,
+            "read_video_frames",
+            {
+                "target": {"kind": "PATH", "path": "crop.mkv"},
+                "action": "detail",
+                "from": 0,
+                "to": 1.5,
+                "crop": crop,
+            },
+        )
+    )
+
+    assert result.state == "SUCCESS", result.content.content
+    assert [part.value["t"] for part in result.content.content if part.type == "object"] == [0, 0.5, 1]
+    assert len(result.pending_images) == 2
+    assert all((image.width, image.height) == dimensions for image in result.pending_images)
+
+
 def test_motion_runs_all_internal_windows_without_model_continuations(
     tmp_path, monkeypatch
 ):
