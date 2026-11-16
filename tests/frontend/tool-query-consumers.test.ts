@@ -13,7 +13,7 @@ describe('query and cell tool consumers', () => {
   it('selects capability list and detail presentation from the request branch', () => {
     expect(builtinToolSummary(trace('query_capabilities', {}, {meta:{status:'SUCCESS'},content:[]}))?.title).toBe('查看能力');
     expect(builtinToolSummary(trace('query_capabilities', {
-      target: { kind: 'MCP_TOOL', server_id: 'local', tool_name: 'read' },
+      target: { kind: 'MCP_TOOL', server_id: 'local', remote_tool_name: 'read' },
     }, {meta:{status:'SUCCESS'},content:[]}))?.title).toBe('查看能力详情');
   });
 

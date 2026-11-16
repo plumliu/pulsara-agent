@@ -114,7 +114,7 @@ import { WelcomeTypewriter } from './welcome-typewriter';
 import { AnimatedDisclosure } from './animated-disclosure';
 import { AnimatedPromptQueue, queuePreviewCapacity } from './animated-prompt-queue';
 import { builtinToolSummary } from '../lib/builtin-tool-summary';
-import { ToolResultDisplayContext } from '../lib/tool-result-display';
+import { ToolResultDisplayContext, isUserFacingToolResult, toolResultCanExpand, toolResultDiagnosticText } from '../lib/tool-result-display';
 import { PromptDraftStore } from '../lib/prompt-draft';
 import { useWorkbenchFileDrop } from '../lib/workbench-file-drop';
 import { promptContentTextProjection } from '../lib/prompt-content';
@@ -269,28 +269,6 @@ const traceIcons: Record<ToolTrace['kind'], typeof TerminalSquare> = {
 
 type JsonObject = Record<string, unknown>;
 
-interface McpToolIdentity {
-  serverId: string;
-  remoteToolName: string;
-}
-
-interface McpDetailRow {
-  label: string;
-  value: string;
-}
-
-interface McpDetailItem {
-  name: string;
-  detail?: string;
-}
-
-interface McpTraceDetail {
-  subtitle: string;
-  rows: McpDetailRow[];
-  items: McpDetailItem[];
-  suppressGenericSuccess: boolean;
-}
-
 function parseJsonObject(value?: string): JsonObject | undefined {
   if (!value) return undefined;
   try {
@@ -311,46 +289,8 @@ function objectField(value: JsonObject | undefined, key: string): JsonObject | u
     : undefined;
 }
 
-function objectArrayField(value: JsonObject | undefined, key: string): JsonObject[] {
-  const field = value?.[key];
-  return Array.isArray(field)
-    ? field.filter((item): item is JsonObject => Boolean(item) && typeof item === 'object' && !Array.isArray(item))
-    : [];
-}
-
 function stringValue(value: unknown): string {
   return typeof value === 'string' ? value : '';
-}
-
-function numberValue(value: unknown): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
-}
-
-function collectMessageTraces(messages: Message[]): ToolTrace[] {
-  const traces: ToolTrace[] = [];
-  for (const message of messages) {
-    traces.push(...(message.traces ?? []));
-
-  }
-  return traces;
-}
-
-function buildMcpToolRefIndex(messages: Message[]): ReadonlyMap<string, McpToolIdentity> {
-  const result = new Map<string, McpToolIdentity>();
-  for (const trace of collectMessageTraces(messages)) {
-    if (trace.toolName !== 'query_capabilities') continue;
-    const descriptor = parseJsonObject(trace.resultText);
-    const toolRef = stringValue(objectField(objectField(descriptor, 'invocation'), 'target')?.tool_ref);
-    const target = objectField(descriptor, 'target');
-    const serverId = stringValue(target?.server_id);
-    const remoteToolName = stringValue(target?.tool_name);
-    if (!toolRef || !serverId || !remoteToolName) continue;
-    result.set(toolRef, {
-      serverId,
-      remoteToolName,
-    });
-  }
-  return result;
 }
 
 function normalizedSkillDocumentPath(value: string): string {
@@ -372,75 +312,6 @@ function traceSkill(trace: ToolTrace, skills: SkillCapability[]): SkillCapabilit
   ));
 }
 
-function mcpTraceDetail(
-  trace: ToolTrace,
-  toolRefs: ReadonlyMap<string, McpToolIdentity>,
-): McpTraceDetail | undefined {
-  const name = trace.toolName;
-  if (!name || !['query_capabilities', 'use_new_mcp_tool'].includes(name)) {
-    return undefined;
-  }
-  const args = parseJsonObject(trace.argumentsJson);
-  const result = parseJsonObject(trace.resultText);
-  if (name === 'query_capabilities' && !Object.hasOwn(args ?? {}, 'target')) {
-    if (!Array.isArray(result?.items) || typeof result?.total_count !== 'number') return undefined;
-    const items = objectArrayField(result, 'items');
-    const total = numberValue(result?.total_count);
-    return {
-      subtitle: `观察到 ${total} 项能力${result?.completeness === 'PARTIAL' ? ' · 观察不完整' : ''}`,
-      rows: total > items.length ? [{ label: '当前页', value: `${items.length} / ${total}` }] : [],
-      items: items.map((item) => ({ name: stringValue(item.name) || '未命名能力', detail: stringValue(item.status) })),
-      suppressGenericSuccess: true,
-    };
-  }
-  if (name === 'query_capabilities') {
-    const target = objectField(result, 'target') ?? objectField(args, 'target');
-    if (!stringValue(target?.kind).startsWith('MCP_')) return undefined;
-    const serverId = stringValue(target?.server_id) || stringValue(target?.runtime_server_id);
-    const toolName = stringValue(target?.tool_name) || stringValue(target?.name);
-    return {
-      subtitle: [serverId, toolName].filter(Boolean).join(' · ') || 'MCP 详情',
-      rows: [{ label: 'MCP 服务', value: serverId }, ...(toolName ? [{ label: '所选能力', value: toolName }] : [])],
-      items: [], suppressGenericSuccess: true,
-    };
-  }
-  const toolRef = stringValue(objectField(args, 'target')?.tool_ref);
-  const identity = toolRefs.get(toolRef);
-  const rows: McpDetailRow[] = identity
-    ? [
-      { label: 'MCP 服务', value: identity.serverId },
-      { label: '调用的工具', value: identity.remoteToolName },
-    ]
-    : [{ label: '调用方式', value: '使用此前检查通过的 MCP 工具' }];
-  return {
-    subtitle: identity
-      ? `${identity.serverId} · ${identity.remoteToolName}`
-      : '调用已经检查的 MCP 工具',
-    rows,
-    items: [],
-    suppressGenericSuccess: true,
-  };
-}
-
-function McpTraceDetails({ detail }: { detail: McpTraceDetail }) {
-  return (
-    <section className="mcp-trace-details" aria-label="MCP 操作详情">
-      {detail.rows.length ? (
-        <dl>{detail.rows.map((row) => (
-          <div key={`${row.label}:${row.value}`}><dt>{row.label}</dt><dd>{row.value}</dd></div>
-        ))}</dl>
-      ) : null}
-      {detail.items.length ? (
-        <div className="mcp-trace-list">{detail.items.map((item, index) => (
-          <div className="mcp-trace-list__item" key={`${item.name}:${index}`}>
-            <strong>{item.name}</strong>{item.detail && <span>{item.detail}</span>}
-          </div>
-        ))}</div>
-      ) : null}
-    </section>
-  );
-}
-
 function TraceSummary({ icon, title, purpose, subtitle, state, status, action }: {
   icon: ReactNode; title: string; purpose?: string; subtitle: string;
   state?: ReactNode; status: string; action?: ReactNode;
@@ -460,7 +331,6 @@ function TraceCard({
   trace,
   disclosureOwnerId,
   skills,
-  mcpToolRefs,
   outputOwnerKey,
   onReadToolOutput,
   onReadPromptImage,
@@ -469,7 +339,6 @@ function TraceCard({
   trace: ToolTrace;
   disclosureOwnerId: string;
   skills: SkillCapability[];
-  mcpToolRefs: ReadonlyMap<string, McpToolIdentity>;
   outputOwnerKey: string;
   onReadToolOutput: WorkbenchViewProps['onReadToolOutput'];
   onReadPromptImage: WorkbenchViewProps['onReadPromptImage'];
@@ -502,11 +371,10 @@ function TraceCard({
   }, [outputOwnerKey, trace.resultEntryId]);
   const Icon = traceIcons[trace.kind];
   const skill = traceSkill(trace, skills);
-  const mcpDetail = mcpTraceDetail(trace, mcpToolRefs);
   const builtinSummary = builtinToolSummary(trace);
   const purpose = skill ? `使用 ${skill.name} 技能` : builtinSummary?.title ?? trace.title;
-  const showPurposeAsTitle = Boolean(builtinSummary) || trace.toolName === 'use_new_mcp_tool';
-  const subtitle = mcpDetail?.subtitle ?? builtinSummary?.subtitle ?? trace.subtitle;
+  const showPurposeAsTitle = Boolean(builtinSummary);
+  const subtitle = builtinSummary?.subtitle ?? trace.subtitle;
   const showTargets = useContext(PresentationContext);
   const sourceWorkspace = useDesktopWorkspace();
   const openSource = useInputNavigation(onNotify);
@@ -529,24 +397,20 @@ function TraceCard({
     const output = terminalOutputRef.current;
     if (output) output.scrollTop = output.scrollHeight;
   }, [expanded, terminalOutput, trace.status]);
-  // MCP provider names follow the kernel naming contract; the late-tool bridge
-  // also returns an external tool's output. UI icon categories are not origins.
-  const showRawResult = showBuiltinToolResults
-    || trace.toolName?.startsWith('mcp__')
-    || trace.toolName === 'use_new_mcp_tool';
-  const hasRawResult = showRawResult && !trace.businessValue && Object.prototype.hasOwnProperty.call(trace, 'resultText');
-  const diffText = trace.toolName === 'edit_file' && trace.status === 'completed' ? businessText ?? '' : '';
-  const canReadOutput = Boolean(
-    showRawResult && trace.resultEntryId
-    && trace.outputBody?.available,
-  );
-  const outputUnavailable = Boolean(showRawResult && trace.outputBody?.omitted && !trace.outputBody.available);
+  const userFacing = isUserFacingToolResult(trace);
+  const diagnosticText = !userFacing || trace.toolName === 'exec_cell' ? toolResultDiagnosticText(trace) : undefined;
+  const diffText = trace.toolName === 'edit_file' && trace.status === 'completed' ? businessText ?? trace.resultText ?? '' : '';
+  const hasRawResult = !trace.businessValue && !terminalTool && !diffText
+    && Object.prototype.hasOwnProperty.call(trace, 'resultText');
+  const canReadOutput = Boolean(!trace.businessValue && trace.resultEntryId && trace.outputBody?.available);
+  const outputUnavailable = Boolean(trace.outputBody?.omitted && !trace.outputBody.available);
   const hasMediaEvidence = ['read_video_frames', 'read_transcript'].includes(trace.toolName ?? '')
     && Boolean(trace.resultText || trace.resultContent);
-  const expandable = trace.toolName !== 'exec_cell' && (Boolean(trace.programCalls?.length) || Boolean(
-    presentation || trace.command || diffText || hasTerminalOutput || hasRawResult
-    || trace.resultContent || trace.businessValue || mcpDetail || canReadOutput || outputUnavailable || hasMediaEvidence
-  ));
+  const expandable = toolResultCanExpand(trace, showBuiltinToolResults) && Boolean(
+    trace.programCalls?.length || presentation || trace.command || diffText
+    || hasTerminalOutput || hasRawResult || trace.resultContent || trace.businessValue
+    || canReadOutput || outputUnavailable || hasMediaEvidence
+  );
   const outputAtEnd = Boolean(outputPage && !outputPage.next);
   const outputIsSinglePage = Boolean(
     outputAtEnd
@@ -596,34 +460,44 @@ function TraceCard({
     purpose={!showPurposeAsTitle && trace.toolName && purpose !== trace.toolName ? purpose : undefined}
     subtitle={subtitle} status={trace.status}
     state={trace.status === 'running' ? `进行中 · ${trace.duration ?? ''}` : trace.duration ?? (builtinSummary ? undefined : trace.meta)}
-    action={(cellSource || expandable) && <ChevronRight className="trace-chevron" size={13} />} />;
+    action={cellSource ? <ArrowUpRight size={13} /> : expandable && <ChevronRight className="trace-chevron" size={13} />} />;
+  const toggleResult = () => {
+    if (expanded) closeOutputPage();
+    else terminalFollowTailRef.current = true;
+    setExpanded(value => !value);
+  };
+  const disclosureKey = JSON.stringify(['trace', disclosureOwnerId, trace.id]);
 
   return (
     <div className={`trace-node trace-node--${trace.status}`}>
       <span className="trace-node__dot" />
       <article data-result-entry={trace.resultEntryId} className={`trace-card${expandable && expanded ? ' is-expanded' : ''}`}>
         {cellSource ? (
-          <button type="button" className="trace-card__summary" aria-label="查看运行脚本"
-            onClick={() => void openSource(cellSource)}>{summary}</button>
+          <div className="trace-card__heading">
+            <button type="button" className="trace-card__summary" aria-label="查看运行脚本"
+              onClick={() => void openSource(cellSource)}>{summary}</button>
+            {expandable && <button type="button" className="trace-card__result-toggle"
+              data-thread-disclosure="" data-disclosure-key={disclosureKey}
+              aria-expanded={expanded} aria-label={`${expanded ? '收起' : '展开'}工具详情：${trace.toolName}`}
+              onClick={toggleResult}><ChevronRight className="trace-chevron" size={13} /></button>}
+          </div>
         ) : expandable ? (
           <button
-            data-thread-disclosure="" data-disclosure-key={JSON.stringify(['trace', disclosureOwnerId, trace.id])} className="trace-card__summary"
-            onClick={() => {
-              if (expanded) closeOutputPage();
-              else terminalFollowTailRef.current = true;
-              setExpanded((value) => !value);
-            }}
+            data-thread-disclosure="" data-disclosure-key={disclosureKey} className="trace-card__summary"
+            onClick={toggleResult}
             aria-expanded={expanded}
             aria-label={`${expanded ? '收起' : '展开'}工具详情：${trace.toolName ?? trace.title}`}
           >{summary}</button>
-        ) : <div data-thread-disclosure="" data-disclosure-key={JSON.stringify(['trace', disclosureOwnerId, trace.id])} className="trace-card__summary">{summary}</div>}
+        ) : <div className="trace-card__summary">{summary}</div>}
         {expandable && <AnimatedDisclosure unmountOnClose open={expanded} className="trace-card__disclosure">
           {trace.programCalls?.map(call => <TraceCard key={call.id} trace={call} disclosureOwnerId={disclosureOwnerId}
-            skills={skills} mcpToolRefs={mcpToolRefs} outputOwnerKey={outputOwnerKey}
+            skills={skills} outputOwnerKey={outputOwnerKey}
             onReadToolOutput={onReadToolOutput} onReadPromptImage={onReadPromptImage} onNotify={onNotify} />)}
           {presentation && <PresentationResult result={presentation} onOpen={showTargets} />}
           {!trace.businessValue && <MediaEvidenceIndex trace={trace} />}
-          {trace.businessValue && !terminalTool && !diffText ? <ToolBusinessContent value={trace.businessValue} toolName={trace.toolName} onCopy={copyOutput}/> : trace.resultContent ? (
+          {diagnosticText ? <section className="tool-result-raw tool-result-images" aria-label="工具执行说明"><pre>{diagnosticText}</pre></section>
+            : trace.toolName === 'exec_cell' && userFacing && trace.programCalls?.length ? null
+            : trace.businessValue && !terminalTool && !diffText ? <ToolBusinessContent value={trace.businessValue} toolName={trace.toolName} onCopy={copyOutput} inspectFields={!userFacing}/> : trace.resultContent ? (
             <section className="tool-result-images" aria-label="工具读取的图片">
               <PromptContentView
                 content={trace.resultContent}
@@ -634,7 +508,6 @@ function TraceCard({
           ) : (
             (!presentation || hasRawResult || canReadOutput) && <div className="terminal-output">
             {trace.command && <div className="terminal-command"><span>$</span> {trace.command}</div>}
-            {mcpDetail && <McpTraceDetails detail={mcpDetail} />}
             {hasTerminalOutput && (
               <section className="terminal-stream" aria-label="命令输出">
                 <header>
@@ -663,7 +536,7 @@ function TraceCard({
                 <section className="terminal-stream"><header><strong>文件差异</strong>
                   <button type="button" aria-label="复制文件差异" onClick={()=>copyOutput(diffText)}><Copy size={12}/></button>
                 </header><pre className="tool-result-diff tool-output-scroll" aria-label="文件差异">{diffText}</pre></section></>
-              : showRawResult && trace.toolName !== 'exec_process' && trace.resultSummary
+              : trace.toolName !== 'exec_process' && trace.resultSummary
                 && <div className="tool-result-summary">{trace.resultSummary}</div>}
             {hasRawResult && (
               <section className="tool-result-raw" aria-label="工具展示结果">
@@ -764,7 +637,6 @@ function TraceCard({
                 )}
               </section>
             )}
-            {trace.meta && !presentation && <footer><span>{trace.meta}</span></footer>}
             </div>
           )}
         </AnimatedDisclosure>}
@@ -1106,7 +978,6 @@ function AssistantMessage({
   joinsPreviousToolChain,
   joinsNextToolChain,
   skills,
-  mcpToolRefs,
   onNotify,
   onFork,
   canFork,
@@ -1123,7 +994,6 @@ function AssistantMessage({
   joinsPreviousToolChain: boolean;
   joinsNextToolChain: boolean;
   skills: SkillCapability[];
-  mcpToolRefs: ReadonlyMap<string, McpToolIdentity>;
   onNotify: WorkbenchViewProps['onNotify'];
   onFork: WorkbenchViewProps['onFork'];
   canFork: boolean;
@@ -1205,7 +1075,7 @@ function AssistantMessage({
         <div className="assistant-progress"><i /> 正在处理…</div>
       )}
 
-      {message.traces && <div className="execution-rail">{message.traces.map((trace) => <TraceCard onNotify={onNotify} key={`${outputOwnerKey}:${trace.id}`} trace={trace} disclosureOwnerId={message.sourceEntryIds?.[0] ?? messageViewKey(message)} skills={skills} mcpToolRefs={mcpToolRefs} outputOwnerKey={outputOwnerKey} onReadToolOutput={onReadToolOutput} onReadPromptImage={onReadPromptImage} />)}</div>}
+      {message.traces && <div className="execution-rail">{message.traces.map((trace) => <TraceCard onNotify={onNotify} key={`${outputOwnerKey}:${trace.id}`} trace={trace} disclosureOwnerId={message.sourceEntryIds?.[0] ?? messageViewKey(message)} skills={skills} outputOwnerKey={outputOwnerKey} onReadToolOutput={onReadToolOutput} onReadPromptImage={onReadPromptImage} />)}</div>}
 
     </article>
   );
@@ -1544,7 +1414,6 @@ export function ConversationMessages({
   const toolChainConnections = useMemo(
     () => findToolChainConnections(messages), [messages],
   );
-  const mcpToolRefs = useMemo(() => buildMcpToolRefIndex(messages), [messages]);
   const knownPromptContent = (message: Message) => message.role === 'user'
     ? localSubmissions.find(item => item.commandId === message.inputSource?.commandId
       && (!item.queueItemId || item.queueItemId === message.inputSource?.queueItemId))?.content ?? message.pendingContent
@@ -1557,7 +1426,7 @@ export function ConversationMessages({
     const assistant = (value: Message, preview = false) => <AssistantMessage message={value}
       responseActionEligible={!preview && isCompleteAnswer(value)} startsAssistantRun={startsRun}
       joinsPreviousToolChain={toolChainConnections.before.has(value.id)}
-      joinsNextToolChain={toolChainConnections.after.has(value.id)} skills={skills} mcpToolRefs={mcpToolRefs}
+      joinsNextToolChain={toolChainConnections.after.has(value.id)} skills={skills}
       onNotify={onNotify} onFork={onFork} canFork={!preview && canFork} outputOwnerKey={outputOwnerKey}
       onReadToolOutput={onReadToolOutput} onReadPromptImage={onReadPromptImage}
       onReadVisualization={onReadVisualization} onReadVisualizationThumbnail={onReadVisualizationThumbnail}

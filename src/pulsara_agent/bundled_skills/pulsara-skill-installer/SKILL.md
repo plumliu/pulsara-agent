@@ -29,8 +29,9 @@ ROOT can inspect the copy with:
 {"kind":"SKILL","target":{"kind":"SKILL","skill_path":"/absolute/project/.pulsara/skills/example-skill/SKILL.md"}}
 ```
 
-The returned status explains whether this copy is enabled and selected. A
-same-name copy can take precedence over it.
+Installation and enablement changes apply in existing sessions after refresh.
+A fresh query's status explains whether this copy is enabled and selected;
+a same-name copy can take precedence over it.
 
 ## Edit or replace
 

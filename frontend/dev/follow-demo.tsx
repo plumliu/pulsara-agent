@@ -31,7 +31,7 @@ const oldMessages: Message[] = [1, 2, 3].flatMap(index => [
   {id:`user-${index}`,role:'user',time:'',body:`历史问题 ${index}：请检查长思考和工具详情。`},
   {id:`process-${index}`,role:'assistant',assistantKind:'tool-request',turnId:`old-${index}`,time:'',body:'检查历史输出。',
     reasoning:[{id:`thought-${index}`,kind:'full',body:longThought}],
-    traces:[{id:`tool-${index}`,kind:'mcp',toolName:'mcp__demo__read',title:'读取演示文本',subtitle:'已完成',status:'completed',resultText:longThought}]},
+    traces:[{id:`tool-${index}`,kind:'mcp',toolName:'call_mcp_tool',title:'读取演示文本',subtitle:'已完成',status:'completed',resultText:longThought}]},
   {id:`answer-${index}`,role:'assistant',assistantKind:'terminal',turnId:`old-${index}`,rootFinal:true,time:'',body:`历史回答 ${index}。\n\n${paragraph(index)}`},
 ]);
 function delayedRead(signal: AbortSignal) {
@@ -60,7 +60,7 @@ function Demo() {
   const currentId=useMemo(()=>randomIdentity('view'),[version]);
   const current:Message={id:currentId,viewSource:{kind:'draft',identity:{kind:'turn',value:'current'}},role:'assistant',assistantKind:'live',turnId:'current',time:'',status:cellOutputDemo?'completed':running?'running':'completed',body:'',
     reasoning:[{id:'current-thought',kind:'full',active:running,body}],
-    traces:[{id:'current-tool',kind:'mcp',toolName:'mcp__demo__read',title:'读取演示文本',subtitle:'已完成',status:'completed',resultText:longThought}]};
+    traces:[{id:'current-tool',kind:'mcp',toolName:'call_mcp_tool',title:'读取演示文本',subtitle:'已完成',status:'completed',resultText:longThought}]};
   const [sent,setSent]=useState<Message[]>([]);
   const messages:Message[]=cellOutputDemo?[
     {id:"cell-request",role:"user",time:"",body:"请比对两份导出记录，并说明检查结果。"},

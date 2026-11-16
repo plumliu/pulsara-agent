@@ -23,7 +23,7 @@ import { randomIdentity } from '../../frontend/lib/identity';
 
 const isWelcomeHeading = (name: string) => (WELCOME_TYPEWRITER_PHRASES as readonly string[]).includes(name);
 
-function renderWithRawResults(ui: ReactElement) {
+function renderWithToolDetails(ui: ReactElement) {
   return render(ui, { wrapper: ({ children }: PropsWithChildren) => (
     <ToolResultDisplayContext.Provider value={{ showBuiltinToolResults: true, onChange: () => {} }}>
       {children}
@@ -893,7 +893,7 @@ describe('empty session welcome composer', () => {
   });
 });
 
-describe('WorkbenchView PR03 control and raw-result contract', () => {
+describe('WorkbenchView controls and tool results', () => {
   it('positions latest above the composer, TODO and queue independently of welcome animation', async () => {
     let composerTop = 650;
     const visualOffset = -300;
@@ -977,67 +977,6 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
     expect(screen.getByText('此窗口仅供查看')).toBeTruthy();
   });
 
-  it('hides builtin raw previews and output pages by default, retaining diffs, commands, and terminal output', async () => {
-    const readOutput = vi.fn(async () => ({ resultEntryId: 'result', text: 'retained output',
-      position: { line: 1, charOffset: 0 },  }));
-    const viewProps = props({ isRunning: true, onReadToolOutput: readOutput, messages: [{
-      id: 'assistant', role: 'assistant', time: '现在', body: '', status: 'running', traces: [{
-        id: 'edit', kind: 'edit', toolName: 'edit_file', title: '更新文件', subtitle: 'file',
-        status: 'completed', businessValue: {meta:{status:'SUCCESS'},content:[{type:'text',value:'-old\n+new'}]},
-        resultSummary: 'raw body', resultEntryId: 'result',
-        outputBody: { available: true, sourceCoverage: 'COMPLETE', omitted: true },
-      }, {
-        id: 'terminal', kind: 'terminal', toolName: 'exec_process', title: '运行命令', subtitle: 'pwd',
-        status: 'completed', command: 'pwd', resultText: 'raw stdout', resultSummary: 'raw stdout',
-      }, {
-        id: 'read', kind: 'read', toolName: 'read_file', title: '读取文件', subtitle: 'file',
-        status: 'completed', resultText: 'raw file', resultSummary: 'raw file',
-      }],
-    }] });
-    const display = (show: boolean) => <ToolResultDisplayContext.Provider value={{ showBuiltinToolResults: show, onChange: () => {} }}><WorkbenchView {...viewProps} /></ToolResultDisplayContext.Provider>;
-    const view = render(display(false));
-    const titles = [...view.container.querySelectorAll('.trace-summary-title strong')].map(node => node.textContent);
-    expect(titles).toEqual(['修改文件', '运行命令', '读取文件']);
-    fireEvent.click(screen.getByRole('button', { name: '展开工具详情：edit_file' }));
-    fireEvent.click(screen.getByRole('button', { name: '展开工具详情：exec_process' }));
-    expect(screen.getByLabelText('文件差异').textContent).toBe('-old\n+new');
-    expect(view.container.querySelector('.terminal-command')?.textContent).toContain('pwd');
-    expect(screen.getByRole('region', { name: '命令输出' }).textContent).toContain('raw stdout');
-    expect(screen.queryByRole('button', { name: '展开工具详情：read_file' })).toBeNull();
-    expect(screen.queryByText('raw body')).toBeNull();
-    expect(screen.queryByRole('region', { name: '工具展示结果' })).toBeNull();
-    expect(screen.queryByRole('button', { name: '查看完整输出' })).toBeNull();
-    expect(readOutput).not.toHaveBeenCalled();
-
-    view.rerender(display(true));
-    expect(screen.getAllByRole('region', { name: '工具展示结果' })).toHaveLength(1);
-    fireEvent.click(screen.getByRole('button', { name: '查看完整输出' }));
-    expect(await screen.findByText('retained output')).toBeTruthy();
-    view.rerender(display(false));
-    expect(screen.queryByText('retained output')).toBeNull();
-    expect(screen.queryByRole('region', { name: '完整工具输出' })).toBeNull();
-    expect(screen.getByLabelText('文件差异')).toBeTruthy();
-  });
-
-  it('shows a localized memory-relation tool card with a concise result', () => {
-    const view = render(<WorkbenchView {...props({
-      isRunning: false,
-      messages: [{
-        id: 'assistant-relation', role: 'assistant', time: '现在', body: '', status: 'completed',
-        traces: [{
-          id: 'relation', kind: 'tool', toolName: 'mark_memory_relation',
-          title: '使用工具', subtitle: '已完成', status: 'completed', resultState: 'SUCCESS',
-          argumentsJson: JSON.stringify({ relation_kind: 'SUPERSEDES', source_memory_id: 'private-source', target_memory_id: 'private-target' }),
-          resultText: JSON.stringify({ status: 'SAVED', relation_kind: 'SUPERSEDES', relation_id: 'private-relation' }),
-        }],
-      }],
-    })} />);
-    fireEvent.click(screen.getByRole('button', { name: '展开处理过程' }));
-    expect(view.container.querySelector('.trace-summary-title strong')?.textContent).toBe('标记记忆关系');
-    expect(view.container.querySelector('.trace-summary-copy small')?.textContent).toBe('已标记取代关系');
-    expect(view.container.querySelector('.trace-card')?.textContent).not.toMatch(/private-|mark_memory_relation/);
-  });
-
   it('streams exact terminal text and uses the final saved typed process value', () => {
     const terminalTrace = (resultText: string, status: 'running' | 'completed', resultState?: string, businessValue?: ToolBusinessValue) => ({
       id: 'terminal-stream', kind: 'terminal' as const, toolName: 'exec_process', title: '运行命令',
@@ -1103,46 +1042,26 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
     expect(backgroundNotice.closest('[aria-label="命令输出"]')).toBeTruthy();
   });
 
-  it('keeps exact typed edit diff and copy, and reads exported output on request', async () => {
+  it('copies the exact complete typed edit diff', () => {
     const raw = '--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new';
     const writeText = vi.fn(async () => undefined);
     stubClipboard(writeText);
-    const pages: ToolOutputPage[] = [{
-      resultEntryId: 'entry-result', text: 'output-page-one', position: { line: 1, charOffset: 0 },
-      next: { line: 1, charOffset: 17 },
-    }, {
-      resultEntryId: 'entry-result', text: 'output-page-two', position: { line: 1, charOffset: 17 },
-
-    }];
-    const readOutput = vi.fn(async (_entryId: string, position: ToolOutputPage['position']) => pages[position.charOffset === 0 ? 0 : 1]!);
-    renderWithRawResults(<WorkbenchView {...props({
+    render(<WorkbenchView {...props({
       isRunning: false,
       messages: [{
         id: 'assistant-one', role: 'assistant', time: '现在', body: '文件已处理。', status: 'completed',
         traces: [{
           id: 'trace-edit', kind: 'edit', toolName: 'edit_file', title: '更新文件', subtitle: '已完成',
-          status: 'completed', meta: '操作完成', businessValue:{meta:{status:'SUCCESS'},content:[{type:'text',value:raw}]}, resultEntryId: 'entry-result',
-          outputBody: { available: true, sourceCoverage: 'COMPLETE', omitted: true },
+          status: 'completed', businessValue:{meta:{status:'SUCCESS'},content:[{type:'text',value:raw}]},
+          resultEntryId: 'entry-result',
         }],
       }],
-      onReadToolOutput: readOutput,
     })} />);
-
     fireEvent.click(screen.getByRole('button', { name: '展开处理过程' }));
     fireEvent.click(screen.getByRole('button', { name: '展开工具详情：edit_file' }));
     expect(screen.getByLabelText('文件差异').textContent).toBe(raw);
     fireEvent.click(screen.getByRole('button', {name:'复制文件差异'}));
     expect(writeText).toHaveBeenCalledWith(raw);
-
-    fireEvent.click(screen.getByRole('button', { name: '查看完整输出' }));
-    expect(await screen.findByText('output-page-one')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: '复制当前工具输出页' }));
-    expect(writeText).toHaveBeenLastCalledWith('output-page-one');
-    expect(readOutput).toHaveBeenCalledWith('entry-result', { line: 1, charOffset: 0 });
-    fireEvent.click(screen.getByRole('button', { name: '读取下一页' }));
-    expect(await screen.findByText('output-page-two')).toBeTruthy();
-    expect(readOutput).toHaveBeenCalledWith('entry-result', { line: 1, charOffset: 17 });
-    expect(screen.getByRole('status', { name: '完整输出读取状态' }).textContent).toContain('已到末页');
   });
 
   it('does not apply an output page after the whole tool card is collapsed', async () => {
@@ -1154,7 +1073,7 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
       messages: [{
         id: 'assistant-one', role: 'assistant', time: '现在', body: '完成。', status: 'completed',
         traces: [{
-          id: 'trace-tool', kind: 'mcp', toolName: 'mcp__example__unknown', title: '未知工具', subtitle: '已完成',
+          id: 'trace-tool', kind: 'mcp', toolName: 'call_mcp_tool', title: '未知工具', subtitle: '已完成',
           status: 'completed', resultText: '{"value":true}', resultEntryId: 'entry-result',
           outputBody: { available: true, sourceCoverage: 'COMPLETE', omitted: true },
         }],
@@ -1162,15 +1081,15 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
       onReadToolOutput: readOutput,
     })} />);
     fireEvent.click(screen.getByRole('button', { name: '展开处理过程' }));
-    fireEvent.click(screen.getByRole('button', { name: '展开工具详情：mcp__example__unknown' }));
+    fireEvent.click(screen.getByRole('button', { name: '展开工具详情：call_mcp_tool' }));
     fireEvent.click(screen.getByRole('button', { name: '查看完整输出' }));
-    fireEvent.click(screen.getByRole('button', { name: '收起工具详情：mcp__example__unknown' }));
+    fireEvent.click(screen.getByRole('button', { name: '收起工具详情：call_mcp_tool' }));
     resolve({
       resultEntryId: 'entry-result', text: 'late-output-page', position: { line: 1, charOffset: 0 },
 
     });
     await Promise.resolve();
-    fireEvent.click(screen.getByRole('button', { name: '展开工具详情：mcp__example__unknown' }));
+    fireEvent.click(screen.getByRole('button', { name: '展开工具详情：call_mcp_tool' }));
     await waitFor(() => expect(readOutput).toHaveBeenCalledTimes(1));
     expect(screen.queryByText('late-output-page')).toBeNull();
   });
@@ -1297,7 +1216,7 @@ describe('completed reply process disclosure', () => {
   });
 
   it('keeps streaming and steer in order, closes only on a confirmed final, and preserves manual expansion', () => {
-    const view = renderWithRawResults(<WorkbenchView {...props({ activeTurnId: 'turn-one', messages: [progress, steer] })} />);
+    const view = renderWithToolDetails(<WorkbenchView {...props({ activeTurnId: 'turn-one', messages: [progress, steer] })} />);
     expect(hiddenProgress()).toBe(false);
     const draft = { ...final, id: 'live-final', assistantKind: 'live' as const, status: 'running' as const, rootFinal: false, forkEligible: false };
     view.rerender(<WorkbenchView {...props({ activeTurnId: 'turn-one', messages: [progress, steer, draft] })} />);
@@ -1406,7 +1325,7 @@ describe('completed reply process disclosure', () => {
       messages: [{ ...progress, historyGroupId: 'before-adoption' }, { ...steer, historyGroupId: 'before-adoption' }, { ...final, historyGroupId: 'after-adoption' }], outputOwnerKey: 'session-one',
       onReadToolOutput: vi.fn(), onNotify: vi.fn(), history: { hasOlder: false, loading: false, windows: [], compactions: [{ eventId: 'adoption', adoptedAfterEntrySequence: 3, displayAfterEntryId: 'steer' }] },
     };
-    const view = renderWithRawResults(<ConversationMessages {...common} />);
+    const view = renderWithToolDetails(<ConversationMessages {...common} />);
     expect(hiddenProgress()).toBe(true);
     expect(screen.queryByRole('separator', { name: '上下文已压缩' })).toBeNull();
     expect(screen.getAllByRole('button', { name: '展开处理过程' })).toHaveLength(1);
@@ -2165,23 +2084,23 @@ it('keeps the same expanded tool card when its committed result arrives and reje
   const display = (resultEntryId?: string) => <WorkbenchView {...props({
     activeTurnId: 'turn-one', onReadToolOutput: read, messages: [{
       id: 'tool-request', turnId: 'turn-one', role: 'assistant', time: '', body: '', assistantKind: 'tool-request',
-      traces: [{ id: 'call', kind: 'mcp', toolName: 'mcp__demo__read', title: '读取', subtitle: '',
+      traces: [{ id: 'call', kind: 'mcp', toolName: 'call_mcp_tool', title: '读取', subtitle: '',
         status: resultEntryId ? 'completed' : 'running', resultEntryId, resultText: resultEntryId ?? 'streamed output',
         outputBody: resultEntryId ? { available: true, sourceCoverage: 'COMPLETE', omitted: true } : undefined,
       }],
     }],
   })} />;
   const view = render(display());
-  fireEvent.click(screen.getByRole('button', { name: '展开工具详情：mcp__demo__read' }));
-  const button = screen.getByRole('button', { name: '收起工具详情：mcp__demo__read' });
+  fireEvent.click(screen.getByRole('button', { name: '展开工具详情：call_mcp_tool' }));
+  const button = screen.getByRole('button', { name: '收起工具详情：call_mcp_tool' });
   view.rerender(display('result-one'));
-  expect(screen.getByRole('button', { name: '收起工具详情：mcp__demo__read' })).toBe(button);
+  expect(screen.getByRole('button', { name: '收起工具详情：call_mcp_tool' })).toBe(button);
   fireEvent.click(screen.getByRole('button', { name: '查看完整输出' }));
   view.rerender(display('result-two'));
   await act(async () => resolveOld({ resultEntryId: 'result-one', text: 'stale result page',
     position: { line: 1, charOffset: 0 },  }));
   expect(screen.queryByText('stale result page')).toBeNull();
-  expect(screen.getByRole('button', { name: '收起工具详情：mcp__demo__read' })).toBe(button);
+  expect(screen.getByRole('button', { name: '收起工具详情：call_mcp_tool' })).toBe(button);
   expect(screen.getByRole('region', { name: '工具展示结果' }).textContent).toContain('result-two');
 });
 
@@ -2195,7 +2114,7 @@ it('keeps a streamed final visible until exact canonical grouping and body reads
   const bodyGate = new Promise<void>(resolve => { releaseBody = resolve; });
   const previous = [{ entry_id: 'request-before-final', turn_id: 'turn-final', entry_sequence: '1',
     entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
-    blocks: [{ block_id: 'tool-block', block_kind: 'TOOL_CALL', tool_call_id: 'tool-before-final', tool_name: 'mcp__demo__read' }] },
+    blocks: [{ block_id: 'tool-block', block_kind: 'TOOL_CALL', tool_call_id: 'tool-before-final', tool_name: 'call_mcp_tool' }] },
   { entry_id: 'result-before-final', turn_id: 'turn-final', entry_sequence: '2', entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
     content: { kind: 'INLINE', inline_content: Buffer.from('tool completed').toString('base64') },
     tool_result: { assistant_entry_id: 'request-before-final', tool_call_id: 'tool-before-final', result_state: 'SUCCESS' } }];
@@ -2244,12 +2163,12 @@ it('keeps a streamed final visible until exact canonical grouping and body reads
   const unsubscribe = connection.subscribe(() => view.rerender(display()));
   try {
     expect(screen.getByText(text)).toBeTruthy();
-    expect(screen.getByRole('button', { name: '展开工具详情：mcp__demo__read' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '展开工具详情：call_mcp_tool' })).toBeTruthy();
     await act(async () => { await connection.observe(); view.rerender(display()); });
     expect(connection.current().isRunning).toBe(false);
     expect(screen.getAllByText(text)).toHaveLength(1);
     expect(screen.queryByRole('button', { name: '复制回复' })).toBeNull();
-    expect(screen.queryByRole('button', { name: '展开工具详情：mcp__demo__read' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '展开工具详情：call_mcp_tool' })).toBeNull();
     expect(view.container.querySelectorAll('.conversation-run')).toHaveLength(1);
     await act(async () => { releaseContext(); await contextGate; });
     await waitFor(() => expect(connection.current().messages.find(message => message.id === 'final-entry')?.historyContextState).toBe('ready'));
@@ -2305,19 +2224,19 @@ it('keeps tail-follow aligned while queue animations resize the viewport between
 
 it('restores explicit process, tool and reasoning choices after their history page is reread', () => {
  const messages: ComponentProps<typeof WorkbenchView>['messages']=[
-  {id:'process',historyGroupId:'segment:one',role:'assistant',assistantKind:'tool-request',turnId:'turn-one',time:'',body:'处理中',reasoning:[{id:'reason',kind:'full',body:'思考正文'}],traces:[{id:'tool',kind:'mcp',toolName:'mcp__demo__read',title:'读取',subtitle:'完成',status:'completed',resultText:'tool body'}]},
+  {id:'process',historyGroupId:'segment:one',role:'assistant',assistantKind:'tool-request',turnId:'turn-one',time:'',body:'处理中',reasoning:[{id:'reason',kind:'full',body:'思考正文'}],traces:[{id:'tool',kind:'mcp',toolName:'call_mcp_tool',title:'读取',subtitle:'完成',status:'completed',resultText:'tool body'}]},
   {id:'answer',historyGroupId:'segment:one',role:'assistant',assistantKind:'terminal',turnId:'turn-one',rootFinal:true,time:'',body:'最终正文'},
  ];
  const base=props({messages,isRunning:false});
  const view=render(<WorkbenchView {...base}/>);
  fireEvent.click(screen.getByRole('button',{name:'展开处理过程'}));
- fireEvent.click(screen.getByRole('button',{name:'展开工具详情：mcp__demo__read'}));
+ fireEvent.click(screen.getByRole('button',{name:'展开工具详情：call_mcp_tool'}));
  fireEvent.click(screen.getByRole('button',{name:'展开思考'}));
  view.rerender(<WorkbenchView {...base} messages={[]}/>);
  expect(screen.queryByText('tool body')).toBeNull();
  view.rerender(<WorkbenchView {...base} messages={messages.map(message=>({...message,historyWindowId:'reread-window'}))}/>);
  expect(screen.getByRole('button',{name:'收起处理过程'})).toBeTruthy();
- expect(screen.getByRole('button',{name:'收起工具详情：mcp__demo__read'})).toBeTruthy();
+ expect(screen.getByRole('button',{name:'收起工具详情：call_mcp_tool'})).toBeTruthy();
  expect(screen.getByRole('button',{name:'收起思考'})).toBeTruthy();
  view.rerender(<WorkbenchView {...base} session={{...base.session,id:'other-session'}}/>);
  expect(screen.getByRole('button',{name:'展开处理过程'})).toBeTruthy();
@@ -2346,25 +2265,25 @@ it('reports viewport working-set interests through the existing thread scroll ow
 
 it('keeps repeated tool-call and live reasoning IDs isolated by their canonical assistant owner on reread', () => {
  const makeMessages=(owner:string):ComponentProps<typeof WorkbenchView>['messages']=>[
-  {id:`process:${owner}`,historyGroupId:`segment:${owner}`,role:'assistant',assistantKind:'tool-request',turnId:`turn:${owner}`,time:'',body:'处理中',reasoning:[{id:'reasoning:0',kind:'full',body:'思考正文'}],traces:[{id:'call_1',kind:'mcp',toolName:'mcp__demo__read',title:'读取',subtitle:'完成',status:'completed',resultText:'tool body'}]},
+  {id:`process:${owner}`,historyGroupId:`segment:${owner}`,role:'assistant',assistantKind:'tool-request',turnId:`turn:${owner}`,time:'',body:'处理中',reasoning:[{id:'reasoning:0',kind:'full',body:'思考正文'}],traces:[{id:'call_1',kind:'mcp',toolName:'call_mcp_tool',title:'读取',subtitle:'完成',status:'completed',resultText:'tool body'}]},
   {id:`answer:${owner}`,historyGroupId:`segment:${owner}`,role:'assistant',assistantKind:'terminal',turnId:`turn:${owner}`,rootFinal:true,time:'',body:'最终正文'},
  ];
  const base=props({isRunning:false,messages:makeMessages('a')});
  const view=render(<WorkbenchView {...base}/>);
  fireEvent.click(screen.getByRole('button',{name:'展开处理过程'}));
- fireEvent.click(screen.getByRole('button',{name:'展开工具详情：mcp__demo__read'}));
+ fireEvent.click(screen.getByRole('button',{name:'展开工具详情：call_mcp_tool'}));
  fireEvent.click(screen.getByRole('button',{name:'展开思考'}));
  view.rerender(<WorkbenchView {...base} messages={makeMessages('b')}/>);
  fireEvent.click(screen.getByRole('button',{name:'展开处理过程'}));
- expect(screen.getByRole('button',{name:'展开工具详情：mcp__demo__read'})).toBeTruthy();
+ expect(screen.getByRole('button',{name:'展开工具详情：call_mcp_tool'})).toBeTruthy();
  expect(screen.getByRole('button',{name:'展开思考'})).toBeTruthy();
- fireEvent.click(screen.getByRole('button',{name:'展开工具详情：mcp__demo__read'}));
- fireEvent.click(screen.getByRole('button',{name:'收起工具详情：mcp__demo__read'}));
+ fireEvent.click(screen.getByRole('button',{name:'展开工具详情：call_mcp_tool'}));
+ fireEvent.click(screen.getByRole('button',{name:'收起工具详情：call_mcp_tool'}));
  view.rerender(<WorkbenchView {...base} messages={makeMessages('a')}/>);
- expect(screen.getByRole('button',{name:'收起工具详情：mcp__demo__read'})).toBeTruthy();
+ expect(screen.getByRole('button',{name:'收起工具详情：call_mcp_tool'})).toBeTruthy();
  expect(screen.getByRole('button',{name:'收起思考'})).toBeTruthy();
  view.rerender(<WorkbenchView {...base} messages={makeMessages('b')}/>);
- expect(screen.getByRole('button',{name:'展开工具详情：mcp__demo__read'})).toBeTruthy();
+ expect(screen.getByRole('button',{name:'展开工具详情：call_mcp_tool'})).toBeTruthy();
  expect(screen.getByRole('button',{name:'展开思考'})).toBeTruthy();
 });
 
@@ -2377,7 +2296,7 @@ it('follows an automatically open tail process and its tool, then yields to upwa
   });
   const messages: ComponentProps<typeof WorkbenchView>['messages']=[
     {id:'process',role:'assistant',assistantKind:'tool-request',turnId:'turn-one',time:'',body:'处理中',traces:[
-      {id:'tool',kind:'mcp',toolName:'mcp__demo__read',title:'读取',subtitle:'完成',status:'completed',resultText:'tool body'},
+      {id:'tool',kind:'mcp',toolName:'call_mcp_tool',title:'读取',subtitle:'完成',status:'completed',resultText:'tool body'},
     ]},
   ];
   const base=props({messages,isRunning:true,activeTurnId:'turn-one'});
@@ -2390,7 +2309,7 @@ it('follows an automatically open tail process and its tool, then yields to upwa
   height=1500;act(()=>resizeColumn());
   expect(top).toBe(1100);
   expect(screen.queryByRole('button', {name: '回到最新'})).toBeNull();
-  const tool=screen.getByRole('button',{name:'展开工具详情：mcp__demo__read'});
+  const tool=screen.getByRole('button',{name:'展开工具详情：call_mcp_tool'});
   vi.spyOn(tool,'getBoundingClientRect').mockImplementation(()=>new DOMRect(0,800-top,600,24));
   fireEvent.click(tool);
   height=1800;act(()=>resizeColumn());
@@ -3481,7 +3400,7 @@ it.each(['running', 'completed'] as const)('opens the %s Cell bubble in the side
  const messages: Message[] = [{id:'cell-request',role:'assistant',assistantKind:'tool-request',time:'',body:'',
   traces:[{id:'cell-call',kind:'tool',toolName:'exec_cell',attemptId,title:'运行脚本',subtitle:'脚本已接纳',status,
    resultText:'inline Cell receipt',resultEntryId:'cell-result'}]}];
- const view = renderWithRawResults(<DesktopWorkspaceProvider sessionId={sessionId} onShow={onShow}>
+ const view = renderWithToolDetails(<DesktopWorkspaceProvider sessionId={sessionId} onShow={onShow}>
   <Probe/><ConversationMessages messages={messages} outputOwnerKey={sessionId} onReadToolOutput={readOutput} onNotify={vi.fn()}/>
  </DesktopWorkspaceProvider>);
  fireEvent.click(screen.getByRole('button', {name:'展开处理过程'}));

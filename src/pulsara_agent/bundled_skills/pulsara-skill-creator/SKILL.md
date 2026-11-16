@@ -12,8 +12,10 @@ ROOT can find installed copies with `query_capabilities({kind:"SKILL"})` or
 inspect one with `kind` and its Target. Scripts, references and assets are
 relative to the directory containing the document.
 
-Edit a loose Skill in place with file tools. Content changes need no reinstall
-or routine reload. Keep its name and location when the task is a content edit.
+Edit a loose Skill in place with file tools. Body and resource edits take effect
+on subsequent reads without reinstalling or routine reload. Read the edited
+`SKILL.md` with `read_file` to use its new instructions. Keep its name and location
+when the task is a content edit.
 For a new Skill, prepare a local source directory and follow
 `pulsara-skill-installer` when installation is requested.
 

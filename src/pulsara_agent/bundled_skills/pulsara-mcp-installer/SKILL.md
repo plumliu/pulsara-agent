@@ -19,6 +19,8 @@ Use `query_capabilities` with `kind:"MCP"`:
 Lists can use `scope:"USER"|"WORKSPACE"` and a PLUGIN `parent`. Exact queries
 use `kind` and `target`. Search tool hits already contain their interface and
 invocation reference; service hits can be expanded with the connection Target.
+While some services are still being discovered, search can return ERROR with
+usable tool interfaces; read the content for which services remain unknown.
 
 Follow the service instructions and tool `input_schema`. Call `call_mcp_tool`
 with the returned `invocation.target` and matching `arguments`. Available
@@ -29,7 +31,8 @@ before writing a business Cell.
 
 Read failure content for whether the remote call was dispatched and what is
 known about its effects. An invalid reference can be refreshed by querying the
-tool. An uncertain dispatched call needs its outcome checked before retrying.
+tool; a temporary connection failure alone does not invalidate it. An uncertain
+dispatched call needs its outcome checked before retrying.
 
 `read_mcp_resource` with an MCP_CONNECTION lists resources and URI templates.
 Read an actual resource with its returned MCP_RESOURCE Target. For a template,
@@ -68,8 +71,9 @@ public config, changing transports or working with Plugin connection settings.
 ## Verify and recover
 
 Saving, authentication and background discovery have separate results. Query the
-service status and the required tool to check readiness. Use a representative call
-when it is part of the task, choosing its parameters for the intended effect.
+service status and the required tool to check readiness. After refresh, existing
+sessions can discover and call ready connections. Use a representative call when
+it is part of the task, choosing its parameters for the intended effect.
 
 Use the returned Target for subsequent actions. The configured service key can
 differ from the `server_id` in tool and resource Targets. A missing executable or
