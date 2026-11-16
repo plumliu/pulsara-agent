@@ -180,3 +180,24 @@ it('adopts the nearest reachable anchor after clamping instead of repaying old c
   expect(top).toBe(500);expect(anchor.top).toBe(400);
   limit=1000;restoreHistoryAnchor(root,anchor);expect(top).toBe(500);
 });
+
+it('does not accumulate native pixel-rounding residue into the reading position', () => {
+  const root = document.createElement('div'); document.body.append(root);
+  root.innerHTML = '<div data-source-entry="rounded"><article>正文</article></div>';
+  let top = 500, contentTop = 600;
+  Object.defineProperties(root, {
+    scrollHeight: { value: 3000 }, clientHeight: { value: 400 },
+    scrollTop: { get: () => top, set: value => { top = Math.round(value); } },
+  });
+  vi.spyOn(root, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 600, 400));
+  const article = root.querySelector('article')!;
+  vi.spyOn(article, 'getBoundingClientRect').mockImplementation(() => new DOMRect(0, contentTop - top, 600, 40));
+  const anchor = captureHistoryAnchor(root)!;
+  for (const offset of [1.4, 2.8, 5.2, 8.6, 5.2, 2.8, 1.4, 0]) {
+    contentTop = 600 + offset;
+    restoreHistoryAnchor(root, anchor);
+    expect(anchor.top).toBe(100);
+    expect(Math.abs(article.getBoundingClientRect().top - 100)).toBeLessThanOrEqual(.5);
+  }
+  expect(top).toBe(500);
+});

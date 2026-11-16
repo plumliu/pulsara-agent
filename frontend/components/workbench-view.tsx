@@ -1357,7 +1357,7 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
     const finalId = (finalAnswer && messageSourceEntryId(finalAnswer)) ?? messages.find(message => message.historyFinalEntryId)?.historyFinalEntryId;
     const commit = () => {
       choices?.set(choiceKey, expanded);
-      // Reverse an unfinished exit from its current clip edge. A fresh open
+      // Reverse an unfinished exit from its current content edge. A fresh open
       // starts at the bottom; each close uses the control that was clicked.
       const reversing = expanded && Boolean(runRef.current?.querySelector('.conversation-run__drawer-body'));
       setDisclosure(previous => ({ ...previous, expanded, motionEdge: expanded ? (reversing ? previous.motionEdge : 'bottom') : edge }));
@@ -2156,8 +2156,8 @@ function useConversationReading({ sessionId, history, onLoadHistory, onReadLates
       const thread = threadRef.current;
       const drawerAnimations = [...thread?.querySelectorAll<HTMLElement>('.conversation-run__drawer') ?? []]
         .flatMap(drawer => drawer.getAnimations?.() ?? []);
-      if (drawerAnimations.length && follow.canFollow) {
-        // A moving clip must not retire the contents it is revealing. Retry
+      if (drawerAnimations.length) {
+        // A moving drawer must not retire the contents it is revealing. Retry
         // with the settled DOM and current reading owner after finish/cancel.
         void Promise.allSettled(drawerAnimations.map(animation => animation.finished)).then(reportResidence);
         return;
@@ -2235,14 +2235,15 @@ function useConversationReading({ sessionId, history, onLoadHistory, onReadLates
   useLayoutEffect(() => {
     if (!savedState) return;
     const saved = savedState.anchor;
+    const entryId = saved?.entryId;
     const controller = new AbortController();
-    if (saved && onLocateAnnotation) {
+    if (saved && entryId && onLocateAnnotation) {
       void (async () => {
         try {
-          await onLocateAnnotation(saved.entryId, controller.signal);
+          await onLocateAnnotation(entryId, controller.signal);
           const thread = threadRef.current;
           if (!thread || controller.signal.aborted) return;
-          await waitForHistoryEntry(thread, saved.entryId, controller.signal);
+          await waitForHistoryEntry(thread, entryId, controller.signal);
           if (controller.signal.aborted) return;
           follow.read();
           restoreHistoryAnchor(thread, saved);

@@ -2368,7 +2368,7 @@ it('keeps repeated tool-call and live reasoning IDs isolated by their canonical 
  expect(screen.getByRole('button',{name:'展开思考'})).toBeTruthy();
 });
 
-it('keeps tail process and tool expansion following, and protects them after upward reading', () => {
+it('follows an automatically open tail process and its tool, then yields to upward reading', () => {
   let resizeColumn: () => void = () => {};
   vi.stubGlobal('ResizeObserver', class {
     constructor(private callback: () => void) {}
@@ -2379,17 +2379,14 @@ it('keeps tail process and tool expansion following, and protects them after upw
     {id:'process',role:'assistant',assistantKind:'tool-request',turnId:'turn-one',time:'',body:'处理中',traces:[
       {id:'tool',kind:'mcp',toolName:'mcp__demo__read',title:'读取',subtitle:'完成',status:'completed',resultText:'tool body'},
     ]},
-    {id:'answer',role:'assistant',assistantKind:'terminal',turnId:'turn-one',rootFinal:true,time:'',body:'最终正文'},
   ];
-  const base=props({messages,isRunning:false});
+  const base=props({messages,isRunning:true,activeTurnId:'turn-one'});
   const view=render(<WorkbenchView {...base}/>);
   const thread=view.container.querySelector('.thread-scroll')! as HTMLElement;
   let height=1000, top=600;
   Object.defineProperties(thread,{scrollHeight:{get:()=>height},clientHeight:{get:()=>400},scrollTop:{get:()=>top,set:value=>{top=Math.max(0,Math.min(height-400,value));},configurable:true}});
   vi.spyOn(thread,'getBoundingClientRect').mockReturnValue(new DOMRect(0,0,600,400));
-  const process=screen.getByRole('button',{name:'展开处理过程'});
-  vi.spyOn(process,'getBoundingClientRect').mockImplementation(()=>new DOMRect(0,740-top,600,24));
-  fireEvent.click(process);
+  expect(screen.getByRole('button',{name:'收起处理过程'})).toBeTruthy();
   height=1500;act(()=>resizeColumn());
   expect(top).toBe(1100);
   expect(screen.queryByRole('button', {name: '回到最新'})).toBeNull();

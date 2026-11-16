@@ -1,6 +1,7 @@
 /** Browser-only semantic positions; these never represent canonical read coverage. */
 export interface HistoryReadingAnchor {
-  entryId: string;
+  // A live process can have a disclosure key before any canonical entry exists.
+  entryId?: string;
   viewRole?: 'process' | 'final';
   traceId?: string;
   sourceOffset?: number;
@@ -114,20 +115,27 @@ export function captureHistoryAnchor(root: HTMLElement): HistoryReadingAnchor | 
 
 export function restoreHistoryAnchor(root: HTMLElement, anchor: HistoryReadingAnchor): number | undefined {
   const headers = anchor.header ? [...root.querySelectorAll<HTMLElement>('[data-history-entry]')].filter(node => !node.closest('[hidden], [inert]') && (!anchor.processEdge || node.dataset.processEdge === anchor.processEdge)) : [];
-  let node = anchor.header ? headers.find(node => node.dataset.historyEntry === anchor.entryId)
-    ?? headers.find(node => node.dataset.historyEntryAliases?.split(' ').includes(anchor.entryId))
-    : findHistoryEntry(root, anchor.traceId ?? anchor.entryId, anchor.viewRole);
+  const entryId = anchor.entryId;
+  let node = entryId ? (anchor.header ? headers.find(node => node.dataset.historyEntry === entryId)
+    ?? headers.find(node => node.dataset.historyEntryAliases?.split(' ').includes(entryId))
+    : findHistoryEntry(root, anchor.traceId ?? entryId, anchor.viewRole)) : undefined;
   if (anchor.disclosureKey) {
-    const controls = [...root.querySelectorAll<HTMLElement>('[data-disclosure-key]')]
-      .filter(candidate => candidate.dataset.disclosureKey === anchor.disclosureKey && !candidate.closest('[hidden], [inert]'));
-    node = controls.find(candidate => candidate.dataset.processEdge === anchor.processEdge)
+    const matching = [...root.querySelectorAll<HTMLElement>('[data-disclosure-key]')]
+      .filter(candidate => candidate.dataset.disclosureKey === anchor.disclosureKey);
+    const controls = matching.filter(candidate => !candidate.closest('[hidden], [inert]'));
+    // The top button belongs to the exiting (inert) drawer. Its run boundary
+    // survives both that exit and unmount; never substitute the lower button.
+    const upperBoundary = anchor.processEdge === 'top'
+      ? controls.find(candidate => candidate.hasAttribute('data-process-toggle'))?.closest<HTMLElement>('.conversation-run')
+      : undefined;
+    node = upperBoundary ?? controls.find(candidate => candidate.dataset.processEdge === anchor.processEdge)
       ?? controls.find(candidate => candidate.dataset.processEdge === 'bottom') ?? controls[0];
   }
   // A collapsed body resolves to its corresponding visible entry point. A
   // replaced node is always located by semantic identity, never object identity.
-  node ??= [...root.querySelectorAll<HTMLElement>('[data-history-entry]')].find(candidate =>
-    !candidate.closest('[hidden], [inert]') && (candidate.dataset.historyEntry === anchor.entryId
-      || candidate.dataset.historyEntryAliases?.split(' ').includes(anchor.entryId)));
+  node ??= entryId ? [...root.querySelectorAll<HTMLElement>('[data-history-entry]')].find(candidate =>
+    !candidate.closest('[hidden], [inert]') && (candidate.dataset.historyEntry === entryId
+      || candidate.dataset.historyEntryAliases?.split(' ').includes(entryId))) : undefined;
   if (!node) {
     const nearby = captureHistoryAnchor(root);
     if (nearby) Object.assign(anchor, {
@@ -147,10 +155,13 @@ export function restoreHistoryAnchor(root: HTMLElement, anchor: HistoryReadingAn
   const delta = node.getBoundingClientRect().top - root.getBoundingClientRect().top - anchor.top;
   if (Math.abs(delta) > 0.5) {
     const before = root.scrollTop;
-    root.scrollTop += delta;
-    // Only adopt the unreachable remainder. This also works with deterministic
-    // rect mocks whose coordinates do not move when scrollTop changes.
-    anchor.top += delta - (root.scrollTop - before);
+    const requested = before + delta;
+    root.scrollTop = requested;
+    // Adopt only a real range boundary. Native pixel rounding inside the
+    // range must not move the target and accumulate drift on each frame.
+    if (requested < 0 || requested > Math.max(0, root.scrollHeight - root.clientHeight)) {
+      anchor.top += delta - (root.scrollTop - before);
+    }
   }
   return root.scrollTop;
 }

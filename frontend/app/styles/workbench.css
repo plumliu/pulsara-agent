@@ -729,16 +729,15 @@
 .conversation-run > [data-source-entry]:last-child .assistant-turn,
 .conversation-run > [data-source-entry]:last-child .assistant-copy { margin-bottom: 0; }
 
-/* Position the reading anchor once, then reveal pixels without animating the
-   scroll range. Fractional height frames otherwise fight scrollTop rounding.
-   Keep the closing layout until its clip finishes and the body can unmount. */
-.conversation-run__drawer.animated-disclosure { opacity: 1; visibility: visible; overflow: clip; align-content: end; clip-path: inset(100% 0 0); transition: clip-path .26s cubic-bezier(.2,.7,.2,1), grid-template-rows 0s .26s; }
-.conversation-run__drawer.animated-disclosure.is-open { clip-path: inset(0); transition: clip-path .26s cubic-bezier(.2,.7,.2,1), grid-template-rows 0s; }
+/* Fold layout and content together. Whole CSS-pixel height steps match native
+   scroll rounding, so the reading anchor stays still throughout the motion. */
+@property --process-reveal { syntax: '<number>'; inherits: false; initial-value: 0; }
+.conversation-run__drawer.animated-disclosure { --process-reveal: 0; grid-template-rows: minmax(0, 1fr); height: calc-size(auto, round(nearest, size * var(--process-reveal), 1px)); opacity: 1; visibility: visible; overflow: clip; align-content: end; transition: --process-reveal .26s cubic-bezier(.2,.7,.2,1); }
+.conversation-run__drawer.animated-disclosure.is-open { --process-reveal: 1; }
 .conversation-run__drawer > .animated-disclosure__content { display: flex; flex-direction: column; justify-content: flex-end; overflow: visible; }
 /* Top control keeps the upper content fixed and removes the lower edge.
    Bottom control keeps the lower content fixed and removes the upper edge. */
 .conversation-run[data-process-motion-edge="top"] .conversation-run__drawer { align-content: start; }
-.conversation-run[data-process-motion-edge="top"] .conversation-run__drawer:not(.is-open) { clip-path: inset(0 0 100%); }
 .conversation-run[data-process-motion-edge="top"] .conversation-run__drawer > .animated-disclosure__content { justify-content: flex-start; }
 /* The drawer owns process spacing, including its trailing gap before the
    persistent lower control. Closing folds content and spacing together. */

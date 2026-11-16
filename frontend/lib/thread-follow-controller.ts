@@ -75,15 +75,25 @@ export class ThreadFollowController {
     const root = this.root();
     if (!root || this.disposed) return;
     const animations = this.animations(root);
+    let settledProcess: HistoryReadingAnchor | undefined;
     for (const [key, view] of this.views) {
       const controls = this.controls(root, key);
-      if (!view.pending && (!controls.length || controls.every(node => node.closest('[hidden], [inert]'))
-        || (view.closing && controls.every(node => node.getAttribute('aria-expanded') === 'false') && !animations.length))) {
+      const missing = !controls.length || controls.every(node => node.closest('[hidden], [inert]'));
+      const closed = view.closing && controls.every(node => node.getAttribute('aria-expanded') === 'false') && !animations.length;
+      if (!view.pending && (missing || closed)) {
+        if (!missing && closed && view.anchor.processEdge) {
+          // Apply the last zero-height frame before handing back to ordinary
+          // reading. A stale pre-disclosure anchor would undo the whole fold.
+          this.anchor = settledProcess = view.anchor;
+        }
         this.views.delete(key);
       }
     }
     if (!this.native && !this.navigating) {
       const before = root.scrollTop;
+      const clamped = this.last && this.last.top !== before
+        && (this.last.height !== root.scrollHeight || this.last.viewport !== root.clientHeight)
+        && Math.abs(before - Math.max(0, root.scrollHeight - root.clientHeight)) < .01;
       const view = [...this.views.values()].at(-1);
       if (this.canFollow) {
         if (Math.abs(root.scrollTop - Math.max(0, root.scrollHeight - root.clientHeight)) > .01) root.scrollTop = root.scrollHeight;
@@ -92,7 +102,10 @@ export class ThreadFollowController {
         const anchor = view?.anchor ?? this.anchor;
         if (anchor) restoreHistoryAnchor(root, anchor);
       }
-      if (root.scrollTop !== before) this.writtenTop = root.scrollTop;
+      if (root.scrollTop !== before || clamped) this.writtenTop = root.scrollTop;
+    }
+    if (settledProcess && !this.views.size && !this.native && !this.navigating) {
+      this.anchor = captureHistoryAnchor(root) ?? settledProcess;
     }
     this.publish();
     if (animations.length && this.animationFrame === undefined) {
@@ -149,7 +162,8 @@ export class ThreadFollowController {
     this.writtenTop = undefined;
     const clamped = previous && (previous.height !== root.scrollHeight || previous.viewport !== root.clientHeight)
       && Math.abs(root.scrollTop - Math.max(0, root.scrollHeight - root.clientHeight)) < .01;
-    if (!programmed && !clamped && (moved || this.tailDistance(root) > TAIL_MEASUREMENT_TOLERANCE)) {
+    // Duplicate geometry notifications cannot revoke a disclosure edge.
+    if (!programmed && !clamped && (moved || (!this.views.size && this.tailDistance(root) > TAIL_MEASUREMENT_TOLERANCE))) {
       // Covers native scrollbar paths without DOM pointerdown. Unknown movement
       // yields to reading rather than letting the next token steal the viewport.
       const direction = moved > 0 ? 'down' : 'up';
@@ -210,12 +224,18 @@ export class ThreadFollowController {
       .filter(node => node.closest('.conversation-run__drawer')).at(-1);
     const tail = this.containsLatest() && run?.dataset.threadTail === 'true'
       && (button.hasAttribute('data-process-toggle') || host === lastProcessHost);
-    if (this.intent === 'follow' && tail && !this.views.size && !this.selecting) return;
-    const entryId = button.dataset.historyEntry ?? host?.getAttribute('data-source-entry');
-    if (!entryId) return;
+    const process = button.hasAttribute('data-process-toggle');
+    if (!process && this.intent === 'follow' && tail && !this.views.size && !this.selecting) return;
+    const entryId = button.dataset.historyEntry ?? host?.getAttribute('data-source-entry') ?? undefined;
+    if (!entryId && !(process && run)) return;
+    // An explicit process gesture owns its edge, including in the final turn.
+    // Automatic completion still follows the tail because it has no gesture.
+    if (process) { this.intent = 'read'; this.navigating = false; }
+    const anchorNode = process && button.dataset.processEdge === 'top' && run ? run : button;
+    this.views.delete(key);
     this.views.set(key, { key, closing: button.getAttribute('aria-expanded') === 'true', pending: false,
       anchor: { entryId, disclosureKey: key, processEdge: button.dataset.processEdge,
-        top: button.getBoundingClientRect().top - root.getBoundingClientRect().top } });
+        top: anchorNode.getBoundingClientRect().top - root.getBoundingClientRect().top } });
     this.anchor ??= captureHistoryAnchor(root);
   }
 

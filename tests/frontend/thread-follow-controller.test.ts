@@ -87,7 +87,7 @@ describe('follow intent and actual visible tail', () => {
 });
 
 describe('semantic detail protection and animation ownership', () => {
-  it.each(['thought', 'tool', 'process'])('keeps tail %s opening, streaming and closing continuously following', key => {
+  it.each(['thought', 'tool'])('keeps tail %s opening, streaming and closing continuously following', key => {
     const {controller, geometry, toggle} = setup(); toggle(key); geometry.height += 1200; controller.coordinate();
     expect(geometry.top).toBe(1800); expect(controller.canFollow).toBe(true);
     toggle(key); for (const height of [2000, 1500, 1100]) { geometry.height = height; controller.coordinate(); expect(geometry.top).toBe(height - 400); }
@@ -100,7 +100,8 @@ describe('semantic detail protection and animation ownership', () => {
   it('closing a child retains its parent view until the parent closes', () => {
     const {controller, geometry, toggle} = setup(); toggle('old-process'); toggle('old-thought'); toggle('old-thought');
     geometry.height += 500; controller.coordinate(); expect(geometry.top).toBe(600); expect(controller.canFollow).toBe(false);
-    toggle('old-process'); expect(controller.canFollow).toBe(true);
+    toggle('old-process'); expect(controller.canFollow).toBe(false);
+    controller.latest(); expect(controller.canFollow).toBe(true);
   });
   it('an upward gesture replaces the remembered follow intent before a detail closes', () => {
     const {controller, geometry, toggle, frame} = setup(); toggle('thought'); geometry.height += 1000; controller.coordinate();
@@ -167,6 +168,118 @@ describe('semantic detail protection and animation ownership', () => {
   it('disposed navigation/animation callbacks cannot write a successor session', () => {
     const {controller, geometry, frame} = setup(); controller.input('down'); controller.dispose(); geometry.height += 300;
     controller.coordinate(); controller.latest(); frame(); expect(geometry.top).toBe(600);
+  });
+});
+
+describe('manual process edges and finite scroll ranges', () => {
+  function processFixture(position: 'first' | 'middle' | 'last' | 'only') {
+    const base = setup();
+    const { root, geometry, controller } = base;
+    const before = position === 'first' || position === 'only' ? 0 : 700;
+    const after = position === 'last' || position === 'only' ? 100 : 900;
+    let height = 700, animating = false;
+    root.innerHTML = `<section class="conversation-run" data-thread-tail="${after === 100}">
+      <div class="conversation-run__drawer animated-disclosure"><button data-process-toggle data-disclosure-key="edge" data-history-entry="step" data-process-edge="top" aria-expanded="true">上方收起</button><div data-source-entry="step"><article>过程</article></div></div>
+      <button data-process-toggle data-disclosure-key="edge" data-history-entry="answer" data-process-edge="bottom" aria-expanded="true">下方收起</button>
+      <div data-source-entry="answer"><article>最终答案</article></div>
+    </section>`;
+    const run = root.querySelector<HTMLElement>('section')!;
+    const drawer = run.querySelector<HTMLElement>('.conversation-run__drawer')!;
+    const upper = run.querySelector<HTMLButtonElement>('[data-process-edge="top"]')!;
+    const lower = run.querySelector<HTMLButtonElement>('[data-process-edge="bottom"]')!;
+    vi.spyOn(run, 'getBoundingClientRect').mockImplementation(() => new DOMRect(0, before - geometry.top, 600, height + 100));
+    vi.spyOn(upper, 'getBoundingClientRect').mockImplementation(() => new DOMRect(0, before + 40 - geometry.top, 600, 26));
+    vi.spyOn(lower, 'getBoundingClientRect').mockImplementation(() => new DOMRect(0, before + 40 + height - geometry.top, 600, 26));
+    vi.spyOn(run.querySelector('[data-source-entry="answer"] article')!, 'getBoundingClientRect')
+      .mockImplementation(() => new DOMRect(0, before + 66 + height - geometry.top, 600, 100));
+    Object.defineProperty(root, 'getAnimations', { configurable: true,
+      value: () => animating ? [{ playState: 'running', effect: { target: drawer } }] : [] });
+    geometry.height = before + height + 100 + after;
+    const limit = () => Math.max(0, geometry.height - geometry.viewport);
+    const clamp = (value: number) => Math.max(0, Math.min(limit(), value));
+    return { ...base, run, drawer, upper, lower, before, clamp,
+      start(edge: 'top' | 'bottom') {
+        geometry.top = clamp(before + 40 + (edge === 'bottom' ? height : 0) - 120);
+        controller.disclose(edge === 'top' ? upper : lower);
+        upper.setAttribute('aria-expanded', 'false'); lower.setAttribute('aria-expanded', 'false');
+        drawer.setAttribute('inert', ''); animating = true;
+      },
+      resize(next: number) {
+        height = next; geometry.height = before + height + 100 + after;
+        geometry.top = clamp(geometry.top); // Native range clamp precedes ResizeObserver.
+        controller.coordinate();
+      },
+      reopen() {
+        controller.disclose(lower);
+        lower.setAttribute('aria-expanded', 'true'); drawer.removeAttribute('inert'); animating = true;
+      },
+      finish() { animating = false; upper.remove(); controller.coordinate(); },
+    };
+  }
+
+  it.each(['first', 'middle', 'last', 'only'] as const)('keeps either clicked edge at its nearest reachable position in the %s conversation', position => {
+    for (const edge of ['top', 'bottom'] as const) {
+      const f = processFixture(position);
+      f.start(edge);
+      expect(f.controller.intent).toBe('read');
+      let previousHeight = 700;
+      for (const height of [641, 509, 360, 185, 46, 0]) {
+        const requested = f.geometry.top + (edge === 'bottom' ? height - previousHeight : 0);
+        f.resize(height);
+        expect(f.geometry.top).toBe(f.clamp(requested));
+        expect(f.controller.canFollow).toBe(false);
+        f.controller.scroll(); f.controller.scroll();
+        expect(f.controller.hasViewProtection).toBe(true);
+        // The top entry is already inert during the entire exit. It must
+        // never redirect the anchor to the moving lower control.
+        previousHeight = height;
+      }
+      const settled = f.geometry.top;
+      f.finish();
+      expect(f.geometry.top).toBe(settled);
+      f.controller.coordinate();
+      expect(f.geometry.top).toBe(settled);
+      expect(f.controller.canFollow).toBe(false);
+      // A fresh expansion starts from the persistent lower entry, including
+      // when the collapsed first/only conversation does not fill a viewport.
+      f.reopen(); previousHeight = 0;
+      for (const height of [46, 185, 360, 509, 641, 700]) {
+        const requested = f.geometry.top + height - previousHeight;
+        f.resize(height);
+        expect(f.geometry.top).toBe(f.clamp(requested));
+        expect(f.controller.canFollow).toBe(false);
+        previousHeight = height;
+      }
+    }
+  });
+
+  it('replaces the closing edge with the current lower edge when the user reverses the fold', () => {
+    const f = processFixture('middle');
+    f.start('top'); f.resize(185);
+    f.controller.disclose(f.lower);
+    f.lower.setAttribute('aria-expanded', 'true');
+    f.upper.setAttribute('aria-expanded', 'true');
+    f.drawer.removeAttribute('inert');
+    const lowerTop = f.lower.getBoundingClientRect().top;
+    for (const height of [260, 410, 700]) {
+      f.resize(height);
+      expect(f.lower.getBoundingClientRect().top).toBe(lowerTop);
+    }
+    expect(f.controller.canFollow).toBe(false);
+  });
+
+  it.each(['top', 'bottom'] as const)('protects the %s edge of a live process without inventing a canonical entry', edge => {
+    const f = processFixture('middle');
+    for (const node of f.root.querySelectorAll('[data-history-entry], [data-source-entry]')) {
+      node.removeAttribute('data-history-entry'); node.removeAttribute('data-source-entry');
+    }
+    f.start(edge);
+    expect(f.controller.hasViewProtection).toBe(true);
+    expect(f.controller.protectedEntryIds).toEqual([]);
+    const expected = f.clamp(f.geometry.top - (edge === 'bottom' ? 515 : 0));
+    f.resize(185);
+    expect(f.geometry.top).toBe(expected);
+    expect(f.controller.intent).toBe('read');
   });
 });
 
