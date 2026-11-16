@@ -61,10 +61,25 @@
 .file-preview-table [role=columnheader] { font-weight: 600; background: var(--paper-deep); }
 @media (max-width: 640px) { .file-preview-header { padding: 10px; gap: 6px; } .file-preview-header nav { gap: 0; } .file-preview-page-position { display: none; } .file-preview-pagebar { flex-wrap: wrap; } }
 
+.session-dialog-overlay { position: fixed; inset: 0; z-index: 120; display: grid; place-items: center; padding: 20px; background: rgba(18,17,14,.3); backdrop-filter: blur(3px); animation: fade-in .15s ease-out; }
+.session-dialog { display: flex; flex-direction: column; width: min(680px,100%); max-height: calc(100dvh - 40px); min-height: 0; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 16px; background: var(--paper-solid); box-shadow: var(--shadow-lg); color: var(--ink); font-family: var(--sans); animation: dialog-in .2s cubic-bezier(.2,.8,.2,1); }
+.session-dialog :is(button,input,summary):focus-visible { outline: 2px solid var(--ink-soft); outline-offset: 2px; }
+.session-dialog button { font-size: var(--type-control); }
+.session-dialog button:disabled { opacity: .48; cursor: default; }
+.session-dialog > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex: none; padding: 21px 25px 18px; border-bottom: 1px solid var(--line); }
+.session-dialog h2 { margin: 4px 0 0; font-family: var(--serif); font-size: 23px; font-weight: 500; }
+.session-dialog > header button { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; color: var(--muted); }
+.session-dialog > header button:hover { background: var(--paper-deep); }
+.session-dialog-body { min-height: 0; overflow: auto; padding: 20px 25px 22px; }
+.session-dialog-alert { margin: 12px 0 0; padding: 10px 12px; border: 1px solid color-mix(in srgb,var(--red) 22%,var(--line)); border-radius: 8px; background: var(--red-soft); color: var(--red); font-size: var(--type-small); line-height: 1.6; overflow-wrap: anywhere; }
+.session-dialog > footer { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; flex: none; padding: 14px 25px; border-top: 1px solid var(--line); }
+.session-dialog > footer button { min-height: 35px; padding: 7px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); color: var(--ink-soft); }
+@media (max-width: 600px) { .session-dialog-overlay { padding: 10px; } .session-dialog { max-height: calc(100dvh - 20px); } }
+
 .session-rename-dialog { width: min(440px, calc(100vw - 32px)); }
-.memory-delete-dialog.session-rename-dialog > header { display: flex; align-items: center; gap: 10px; border-bottom: 0; padding: 12px 20px 4px; }
+.session-dialog.session-rename-dialog > header { display: flex; align-items: center; gap: 10px; border-bottom: 0; padding: 12px 20px 4px; }
 .session-rename-dialog > header h2 { flex: 1; margin: 0; font-size: var(--type-body); }
-.session-rename-dialog .memory-delete-body { padding: 6px 20px 12px; }
+.session-rename-dialog .session-dialog-body { padding: 6px 20px 12px; }
 .session-rename-dialog input { width: 100%; padding: 8px 12px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--paper); color: var(--ink); font: inherit; }
 .session-rename-dialog form > footer { display: flex; justify-content: flex-end; gap: 8px; padding: 10px 20px; border-top: 1px solid var(--line); }
 .session-rename-dialog footer button { padding: 7px 14px; border-radius: 8px; background: var(--paper-deep); }

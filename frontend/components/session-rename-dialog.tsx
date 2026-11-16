@@ -37,8 +37,8 @@ export function SessionRenameDialog({ session, onSave, onClose }: {
     catch (cause) { setError(cause instanceof Error ? cause.message : '未能确认保存结果，请刷新确认或重试。'); }
     finally { submitting.current = false; setBusy(false); }
   };
-  return createPortal(<div className="memory-delete-overlay">
-    <section ref={dialog} className="memory-delete-dialog session-rename-dialog" role="dialog" aria-modal="true"
+  return createPortal(<div className="session-dialog-overlay">
+    <section ref={dialog} className="session-dialog session-rename-dialog" role="dialog" aria-modal="true"
       aria-labelledby="session-rename-title" onKeyDown={event => {
         event.stopPropagation();
         if (event.key === 'Escape' && !event.nativeEvent.isComposing && !composing.current) {
@@ -55,7 +55,7 @@ export function SessionRenameDialog({ session, onSave, onClose }: {
         <button type="button" aria-label="关闭重命名" disabled={busy} onClick={onClose}><X size={17} /></button>
       </header>
       <form onSubmit={event => { event.preventDefault(); void save(); }}>
-        <div className="memory-delete-body">
+        <div className="session-dialog-body">
           <input ref={input} id="session-rename-input" aria-label="会话标题" value={title} disabled={busy} autoComplete="off"
             onChange={event => { setTitle(event.target.value); setError(''); }}
             onCompositionStart={() => { composing.current = true; }}
@@ -63,7 +63,7 @@ export function SessionRenameDialog({ session, onSave, onClose }: {
             onKeyDown={event => {
               if (event.key === 'Enter' && (composing.current || event.nativeEvent.isComposing || event.keyCode === 229)) event.preventDefault();
             }} />
-          {error && <p className="memory-delete-alert" role="alert">{error}</p>}
+          {error && <p className="session-dialog-alert" role="alert">{error}</p>}
         </div>
         <footer><button type="button" disabled={busy} onClick={onClose}>取消</button>
           <button type="submit" className="session-rename-save" disabled={busy || !title.trim()}>{busy ? '正在保存…' : '保存'}</button>

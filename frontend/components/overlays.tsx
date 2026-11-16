@@ -25,7 +25,18 @@ export function NewSessionDialog({ open, canCreateSession, onClose, onCreate, on
   const [picking, setPicking] = useState(false);
   const [pickerError, setPickerError] = useState('');
   const pickerRequest = useRef<AbortController | null>(null);
+  const dialog = useRef<HTMLFormElement>(null);
+  const closeButton = useRef<HTMLButtonElement>(null);
   useEffect(() => () => { pickerRequest.current?.abort(); }, []);
+  useLayoutEffect(() => {
+    if (!open) return;
+    const previous = document.activeElement as HTMLElement | null;
+    const app = document.querySelector<HTMLElement>('main.pulsara-shell');
+    const inert = app?.inert ?? false;
+    if (app) app.inert = true;
+    closeButton.current?.focus();
+    return () => { if (app) app.inert = inert; if (previous?.isConnected) previous.focus(); };
+  }, [open]);
 
   const pickDirectory = async () => {
     if (pickerRequest.current || submitting) return;
@@ -64,11 +75,18 @@ export function NewSessionDialog({ open, canCreateSession, onClose, onCreate, on
     }
   };
 
-  return (
+  return createPortal(
     <div className="overlay-root" role="dialog" aria-modal="true" aria-labelledby="new-session-title">
       <button className="overlay-scrim" onClick={onClose} aria-label="关闭新建会话" />
-      <form className="new-session-dialog" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
-        <header><div><span className="page-kicker">本地会话</span><h2 id="new-session-title">新建会话</h2><p>选择这次会话使用的工作目录</p></div><button type="button" onClick={onClose} aria-label="关闭"><X size={16} /></button></header>
+      <form ref={dialog} className="new-session-dialog" onKeyDown={event => {
+        if (event.key !== 'Tab') return;
+        const controls = [...(dialog.current?.querySelectorAll<HTMLElement>('input:not(:disabled),button:not(:disabled)') ?? [])];
+        const first = controls[0], last = controls.at(-1);
+        if (!first || !last) { event.preventDefault(); return; }
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+      }} onSubmit={(event) => { event.preventDefault(); void submit(); }}>
+        <header><div><span className="page-kicker">本地会话</span><h2 id="new-session-title">新建会话</h2><p>选择这次会话使用的工作目录</p></div><button ref={closeButton} type="button" onClick={onClose} aria-label="关闭"><X size={16} /></button></header>
         <div className="workspace-kind-grid" role="radiogroup" aria-label="工作目录来源">
           <button type="button" role="radio" aria-checked={workspaceKind === 'quick'} className={`workspace-kind-card${workspaceKind === 'quick' ? ' is-selected' : ''}`} onClick={() => setWorkspaceKind('quick')}>
             <span className="workspace-kind-icon"><FolderPlus size={18} /></span>
@@ -95,7 +113,7 @@ export function NewSessionDialog({ open, canCreateSession, onClose, onCreate, on
         )}
         <footer><button className="primary-action" type="submit" disabled={!canCreateSession || submitting || picking || (workspaceKind === 'project' && !workspacePath)}>{submitting ? '正在创建…' : '创建会话'} <span>↗</span></button></footer>
       </form>
-    </div>
+    </div>, document.body
   );
 }
 

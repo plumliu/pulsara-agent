@@ -58,3 +58,26 @@ it('blocks duplicate selection and submission while pending and ignores results 
   await act(async () => resolve('/tmp/late-selection'));
   expect(next.preview.value).toBe('');
 });
+
+it('contains keyboard focus and restores the opener when closed', () => {
+  const app = document.createElement('main');
+  app.className = 'pulsara-shell';
+  const opener = document.createElement('button');
+  app.append(opener);
+  document.body.append(app);
+  opener.focus();
+  const view = render(<NewSessionDialog open canCreateSession onClose={() => {}}
+    onCreate={async () => true} onPickDirectory={async () => null} />, { container: app.appendChild(document.createElement('div')) });
+  const first = screen.getByRole('button', { name: '关闭', exact: true });
+  const last = screen.getByRole('button', { name: /^创建会话/ });
+  expect(app.inert).toBe(true);
+  expect(document.activeElement).toBe(first);
+  fireEvent.keyDown(first, { key: 'Tab', shiftKey: true });
+  expect(document.activeElement).toBe(last);
+  fireEvent.keyDown(last, { key: 'Tab' });
+  expect(document.activeElement).toBe(first);
+  view.unmount();
+  expect(app.inert).toBe(false);
+  expect(document.activeElement).toBe(opener);
+  app.remove();
+});

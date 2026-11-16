@@ -1,5 +1,6 @@
 import { Archive, ChevronRight, Ellipsis, Pencil, Folder, FolderOpen, LoaderCircle, Plus, Search, SquarePen, Trash2 } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { autoUpdate, computePosition, flip, hide, offset, shift } from '@floating-ui/dom';
 import type { RuntimeStatus, SessionSummary, SessionWorkspaceSelection, Workspace } from '../lib/pulsara-types';
 import { desktopHost } from '../lib/desktop-host';
 import { BrandMark } from './brand-mark';
@@ -96,6 +97,35 @@ function SessionItem({
   onRefreshSessions: () => void;
 }) {
   const presence = getSessionPresence(session, activeSessionId);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuTrigger = useRef<HTMLElement>(null);
+  const menuActions = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const reference = menuTrigger.current;
+    const floating = menuActions.current;
+    if (!menuOpen || !reference || !floating) return;
+    floating.style.visibility = 'hidden';
+    floating.showPopover();
+    let disposed = false;
+    let positionRequest = 0;
+    const update = () => {
+      const request = ++positionRequest;
+      void computePosition(reference, floating, {
+        placement: 'bottom-end', strategy: 'fixed',
+        middleware: [offset(1), flip({ padding: 8 }), shift({ padding: 8, crossAxis: true }), hide({ strategy: 'referenceHidden' })],
+      }).then(({ x, y, middlewareData }) => {
+        if (disposed || request !== positionRequest) return;
+        if (middlewareData.hide?.referenceHidden) {
+          const details = reference.closest('details');
+          if (details) details.open = false;
+          return;
+        }
+        Object.assign(floating.style, { left: `${x}px`, top: `${y}px`, visibility: 'visible' });
+      });
+    };
+    const cleanup = autoUpdate(reference, floating, update);
+    return () => { disposed = true; cleanup(); floating.hidePopover(); };
+  }, [menuOpen]);
   return (
     <div className="session-row">
     <button
@@ -114,9 +144,9 @@ function SessionItem({
     {session.status === 'running' && <span className="session-row__activity" role="img" aria-label={`${session.title} 正在处理`} title="正在处理">
       <LoaderCircle size={14} className="is-spinning" aria-hidden="true" />
     </span>}
-    <details className="session-row__menu" onToggle={event => { if (event.currentTarget.open) onRefreshSessions(); }}>
-      <summary aria-label={`${session.title} 更多操作`}><Ellipsis size={15} /></summary>
-      <div className="session-row__menu-actions">
+    <details className="session-row__menu" onToggle={event => { const open = event.currentTarget.open; setMenuOpen(open); if (open) onRefreshSessions(); }}>
+      <summary ref={menuTrigger} aria-label={`${session.title} 更多操作`}><Ellipsis size={15} /></summary>
+      <div ref={menuActions} className="session-row__menu-actions" popover="manual">
       <button type="button" onClick={event => {
         const menu = event.currentTarget.closest('details');
         menu?.removeAttribute('open'); menu?.querySelector('summary')?.focus();

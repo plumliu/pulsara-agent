@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, vi } from 'vitest';
 import { LocalMemoryApi } from '../../frontend/lib/memory-api';
-
+import { sessionMenuClipping } from './setup';
 
 import { randomIdentity } from '../../frontend/lib/identity';
 import { RuntimeApiError } from '../../frontend/lib/runtime-adapter';
@@ -43,6 +43,7 @@ function composerIsDisabled(composer: HTMLElement): boolean {
 }
 
 beforeEach(() => {
+  sessionMenuClipping.hidden = false;
   Object.defineProperty(HTMLDialogElement.prototype, 'showModal', {
     configurable: true, value() { this.setAttribute('open', ''); },
   });
@@ -869,4 +870,4 @@ function renderWorkbench(ui: Parameters<typeof render>[0]) {
   return view;
 }
 
-export { isWelcomeHeading, deferred, textPrompt, stubClipboard, typeComposer, composerIsDisabled, bootstrap, initialSession, SOURCE_FIDELITY_MARKDOWN, SOURCE_FIDELITY_USER_TEXT, capabilitySnapshot, userCapabilitySnapshot, projection, FakeConnection, FakeAdapter, renderWorkbench };
+export { isWelcomeHeading, deferred, textPrompt, stubClipboard, typeComposer, composerIsDisabled, bootstrap, initialSession, SOURCE_FIDELITY_MARKDOWN, SOURCE_FIDELITY_USER_TEXT, capabilitySnapshot, userCapabilitySnapshot, projection, FakeConnection, FakeAdapter, renderWorkbench, sessionMenuClipping };

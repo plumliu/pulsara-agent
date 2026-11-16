@@ -59,8 +59,8 @@ export function SessionDeletionDialog({ session, sessions, results, busy, error,
       if (previousFocus?.isConnected) previousFocus.focus();
     };
   }, []);
-  return createPortal(<div className="memory-delete-overlay">
-    <section ref={dialog} className={`memory-delete-dialog session-delete-dialog${results ? ' has-archive-results' : ''}`} role="dialog" aria-modal="true"
+  return createPortal(<div className="session-dialog-overlay">
+    <section ref={dialog} className={`session-dialog session-delete-dialog${results ? ' has-archive-results' : ''}`} role="dialog" aria-modal="true"
       aria-labelledby="session-delete-title" aria-describedby="session-delete-description" tabIndex={-1} onKeyDown={event => {
         if (event.key === 'Escape') { event.preventDefault(); if (canClose) onClose(); }
         if (event.key !== 'Tab') return;
@@ -82,7 +82,7 @@ export function SessionDeletionDialog({ session, sessions, results, busy, error,
         {results && onRetry && incomplete > 0 && <button className="archive-delete-retry" disabled={busy} onClick={onRetry}><RotateCcw size={14} aria-hidden="true" /><span>重试未完成项…</span></button>}
         <button aria-label={results ? '关闭删除结果' : '关闭删除确认'} disabled={!canClose} onClick={onClose}><X size={17} /></button>
       </header>
-      <div className="memory-delete-body session-delete-body">
+      <div className="session-dialog-body session-delete-body">
         {session && <div className="session-delete-target">
           <MessageSquare size={17} aria-hidden="true" />
           <div><strong>{session.title}</strong>{session.workspace?.path && <span className="session-delete-path">{session.workspace.path}</span>}</div>
@@ -124,7 +124,7 @@ export function SessionDeletionDialog({ session, sessions, results, busy, error,
           </ul>
         </div>}
         {session?.live && <p className="session-delete-runtime"><CirclePause size={15} aria-hidden="true" />将先停止此会话及其后台任务。</p>}
-        {error && <p className="memory-delete-alert" role="alert">{error}</p>}
+        {error && <p className="session-dialog-alert" role="alert">{error}</p>}
       </div>
       {!results && <footer><button disabled={!canClose} onClick={onClose}>取消</button>
         <button className="is-danger" disabled={busy} onClick={onConfirm}>

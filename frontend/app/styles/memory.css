@@ -51,6 +51,7 @@
 .memory-row-heading time { color: var(--faint); font-size: 12px; line-height: 26.4px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .memory-statement { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 16px; line-height: 1.8; margin: 0 0 10px; }
 .memory-metadata { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; font-size: 12px; line-height: 1.6; color: var(--muted); }
+.memory-metadata > span { min-width: 0; overflow-wrap: anywhere; }
 .memory-kind { padding: 2px 6px; border-radius: 5px; background: var(--paper-deep); color: var(--ink-soft); }
 .memory-metadata time { margin-left: auto; color: var(--faint); font-variant-numeric: tabular-nums; }
 .memory-empty, .memory-loading { display: grid; justify-items: center; align-content: center; min-height: 330px; padding: 44px 28px; text-align: center; color: var(--muted); }
@@ -136,4 +137,4 @@
 .memory-editor .memory-kind { width: fit-content; }
 .memory-create { flex: none; white-space: nowrap; }
 .memory-delete-confirmation { margin-top: 18px; padding: 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); }
-.memory-delete-confirmation .memory-delete { margin-top: 0; background: var(--red); color: white; }
+.memory-delete-confirmation .memory-editor-actions .memory-delete { margin-top: 0; background: var(--red); color: white; }
