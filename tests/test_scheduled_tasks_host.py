@@ -545,6 +545,56 @@ def test_busy_timer_occurrences_stay_independent_and_pause_preserves_steer(
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("action", ["pause", "delete"])
+def test_host_management_shares_committed_pending_cancellations_with_caller(
+    tmp_path, stage2_migrated_postgres_database, monkeypatch, action,
+):
+    async def scenario():
+        from tests.test_scheduled_tasks_postgres import admission, enqueue
+        from pulsara_agent.conversation_kernel.host import KernelHostSession
+
+        monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "home"))
+        # Keep these inputs as queued NEW_TURNs rather than active-turn steer.
+        monkeypatch.setattr(KernelHostSession, "activate_execution", lambda self: None)
+        port = _SteerModelPort()
+        core, sessions, service, handle, _ = await setup(
+            tmp_path, stage2_migrated_postgres_database, monkeypatch, port,
+        )
+        try:
+            await handle.session.submit_prompt(
+                command_id=random_id("command"), content=PromptContent.text("Keep working"),
+            )
+            task = await create(service, handle.session)
+            task = await service.mutate(task_id=task["id"], expected_revision=task["revision"], action="pause")
+            owner = (await service._repository(), handle.session._lease,
+                     core.model_runtime.freeze_resolution_snapshot())
+            pending = [enqueue(owner, admission(task, manual=True, command=random_id("command")))[0]
+                       for _ in range(2)]
+            cancelled = []
+            row = await service._manage(
+                "mutate_scheduled_task", session_id=handle.session_id,
+                task_id=task["id"], expected_revision=task["revision"], action=action,
+                cancelled_candidates=cancelled,
+            )
+            assert {item.source_queue_item_id for item in cancelled} == {item.queue_item_id for item in pending}
+            rows = await queue(service, handle.session_id)
+            assert [item["status"] for item in rows] == ["PENDING", "CANCELLED", "CANCELLED"]
+            assert [item["input_origin"] for item in rows] == ["HUMAN_MESSAGE", "SCHEDULED_TASK", "SCHEDULED_TASK"]
+            assert port.requests == []
+            if action == "pause":
+                assert row["status"] == "PAUSED" and row["revision"] == task["revision"]
+            else:
+                with pytest.raises(KeyError):
+                    await service.get(task["id"])
+        finally:
+            port.release.set()
+            await service.aclose()
+            await sessions.aclose()
+            await core.shutdown()
+
+    asyncio.run(scenario())
+
+
 def test_missing_workspace_auto_pauses_without_mkdir_manual_keeps_plan(
     tmp_path, stage2_migrated_postgres_database, monkeypatch
 ):

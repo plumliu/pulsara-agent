@@ -7,9 +7,11 @@ from types import SimpleNamespace as NS
 import pytest
 
 from pulsara_agent.conversation_kernel.repository import AssistantToolCallBlock, ConversationKernelRepository
+from pulsara_agent.conversation_kernel.contracts import PromptDeliveryMode
 from pulsara_agent.conversation_kernel.tool_outputs import PostgresToolOutputReadPort, project_tool_result_export
 from pulsara_agent.conversation_kernel.tool_runtime_management import _ToolManagementOperations
 from pulsara_agent.identity import random_id
+from pulsara_agent.llm.input import FrozenPromptContent
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.ports.tool_execution import thaw_tool_json_object
 from pulsara_agent.primitives.context import freeze_json
@@ -18,7 +20,10 @@ from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from pulsara_agent.scheduling.requests import schedule_target
 from pulsara_agent.scheduling.service import ScheduledTaskService
 from pulsara_agent.scheduling.contracts import ScheduledTaskError
-from tests.support.model_config import test_model_resolution_snapshot as model_resolution_snapshot
+from tests.support.model_config import (
+    acquire_bound_test_writer, enqueue_test_prompt,
+    test_model_resolution_snapshot as model_resolution_snapshot,
+)
 from tests.support.postgres import verified_postgres_provider
 from tests.test_hardcut_entry_parts import open_turn, read
 from tests.test_hardcut_tool_settlement import executor
@@ -239,13 +244,35 @@ def test_native_queries_are_session_scoped_and_management_uses_latest_saved_revi
 
 
 @pytest.mark.parametrize("action", ["pause", "resume", "delete"])
-def test_remaining_management_actions_use_the_saved_snapshot_without_public_revision(repository, action):
+@pytest.mark.parametrize("initial_status", ["ACTIVE", "PAUSED"])
+@pytest.mark.parametrize("pending_inputs", [False, True])
+def test_remaining_management_actions_use_the_saved_snapshot_without_public_revision(repository, action, initial_status, pending_inputs):
     async def run():
-        lease, intent, _, cut = open_turn(repository, text="schedule action\n")
+        lease = acquire_bound_test_writer(repository, session_id=random_id("session"),
+            workspace_id=random_id("workspace"), writer_owner_id=random_id("host"),
+            lease_seconds=300, deadline_monotonic=monotonic()+30)
         service, _ = service_for(repository, lease)
         try:
             task = await service.create(session_id=lease.guard.session_id, values=VALUES,
-                status="PAUSED" if action == "resume" else "ACTIVE")
+                status=initial_status)
+            enqueue_test_prompt(repository, lease.guard, command_id=random_id("command"),
+                queue_item_id=random_id("queue"), client_submission_id=random_id("command"),
+                delivery_mode=PromptDeliveryMode.NEW_TURN, target_turn_id=None,
+                permission_snapshot_id=random_id("permission"), requested_permission_mode=DEFAULT_PERMISSION_MODE,
+                model_call_binding=None, content=FrozenPromptContent.text("schedule action\n"),
+                occurred_at=datetime.now(timezone.utc), actor_id="test", deadline_monotonic=monotonic()+30)
+            pending = []
+            if pending_inputs:
+                from tests.test_scheduled_tasks_postgres import admission, enqueue
+                owner = repository, lease, model_resolution_snapshot()
+                for _ in range(2):
+                    queued, _ = enqueue(owner, admission(task, manual=True, command=random_id("command")))
+                    pending.append(queued.queue_item_id)
+            head = repository.prepare_prompt_head_consumption(session_id=lease.guard.session_id,
+                occurred_at=datetime.now(timezone.utc), actor_id="test", deadline_monotonic=monotonic()+30)
+            repository.consume_prepared_prompt_head(lease.guard, candidate=head, deadline_monotonic=monotonic()+30)
+            intent = NS(turn_id=head.exact_turn_id)
+            cut = repository.prepare_provider_input_cut(lease.guard, turn_id=intent.turn_id, deadline_monotonic=monotonic()+30)
             query = admit(repository, lease, intent, cut, "query_schedules", {})
             await accept(repository, lease, query, await produce(service, query, "query_schedules", {}), "query_schedules", {})
             cut = repository.prepare_provider_input_cut(lease.guard, turn_id=intent.turn_id, deadline_monotonic=monotonic()+30)
@@ -254,18 +281,34 @@ def test_remaining_management_actions_use_the_saved_snapshot_without_public_revi
             result = await produce(service, candidate, "manage_schedule", arguments)
             await accept(repository, lease, candidate, result, "manage_schedule", arguments)
             value, facts = saved(repository, candidate)
-            assert value["meta"]["status"] == "SUCCESS" and value["target"] == schedule_target(task["id"])
+            expected = {"meta": {"status": "SUCCESS"}, "content": [{"type": "text", "value": {
+                "pause": "已暂停定时任务。", "resume": "已恢复定时任务。", "delete": "已删除定时任务。",
+            }[action]}]}
+            if action != "delete":
+                expected["target"] = schedule_target(task["id"])
+            if pending_inputs and action in {"pause", "delete"}:
+                expected["content"][0]["value"] = {
+                    "pause": "已暂停定时任务，并取消其待执行输入。",
+                    "delete": "已删除定时任务，并取消其待执行输入。",
+                }[action]
+            assert value == expected
             assert set(facts["schedule_revisions"]) == {task["id"]}
+            with read(repository) as connection:
+                states = connection.execute(
+                    "SELECT status FROM pulsara_v3.prompt_queue_items WHERE id=ANY(%s)", (pending,),
+                ).fetchall()
+                assert [row["status"] for row in states] == [
+                    "PENDING" if action == "resume" else "CANCELLED"
+                ] * len(pending)
+                assert connection.execute("SELECT status FROM pulsara_v3.turns WHERE id=%s", (intent.turn_id,)).fetchone()["status"] == "RUNNING"
             if action == "delete":
                 with pytest.raises(KeyError):
                     await service.get(task["id"])
-                assert set(value["meta"]) == {"status"}
             else:
                 actual = await service.get(task["id"])
                 assert actual["status"] == ("ACTIVE" if action=="resume" else "PAUSED")
                 assert actual["permission_mode"] == VALUES["permission_mode"]
-                assert value["meta"]["schedule_status"] == actual["status"]
-                assert value["meta"]["next_run_at"] == actual["next_run_at"]
+                assert facts["schedule_revisions"][task["id"]] == actual["revision"]
         finally:
             await service.aclose()
     asyncio.run(run())

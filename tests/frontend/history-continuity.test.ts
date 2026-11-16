@@ -257,6 +257,45 @@ it.each(['cancel', 'failure'])('keeps the old reading owner when return-latest e
   expect(reader.current().messages.map(m=>m.id)).toEqual(['old']);
 });
 
+it.each(['enter_plan', 'exit_plan'])(
+  'reads a %s turn ending in a tool result from cached and bounded history', async toolName => {
+    const entries = [
+      entry('start', 1, {entry_kind:'USER_MESSAGE',root_final:false,fork_eligible:false,blocks:[],
+        content:{media_type:'application/vnd.pulsara.prompt+json',...inline(JSON.stringify({parts:[{type:'text',text:'先规划这个任务'}]}))}}),
+      entry('control', 2, {entry_kind:'ASSISTANT_TOOL_REQUEST',root_final:false,fork_eligible:false,blocks:[
+        {block_id:'plan-call',block_kind:'TOOL_CALL',tool_call_id:'plan-call',tool_name:toolName,
+          tool_arguments_preview:inline(JSON.stringify(toolName==='enter_plan'?{}:{plan:'# 执行方案',summary:'方案'})).inline_content},
+      ]}),
+      entry('end', 3, {entry_kind:'TOOL_RESULT',root_final:false,fork_eligible:false,blocks:[],
+        content:{media_type:'application/vnd.pulsara.tool-result+json',
+          ...inline(JSON.stringify({meta:{status:'SUCCESS'},content:[{type:'text',value:'规划状态已更新。'}]}))},
+        tool_result:{assistant_entry_id:'control',tool_call_id:'plan-call',result_state:'SUCCESS'}}),
+    ];
+    const calls=fixture((url,body)=>{
+      if(url.endsWith('/context'))return context(body,{groups:[
+        {owner_kind:'EXECUTED_TURN',owner_id:'turn:root',initial_entry_id:'start',final_entry_id:'end'},
+      ]});
+      if(url.endsWith('/window'))return{session_id:'session:test',cut_sequence:'3',event_sequence_cut:'30',entries};
+      throw Error(url);
+    });
+    for(const cached of [true,false]) {
+      const reader=new CanonicalHistoryView('session:test',{path:'/missing',outcome:'MISSING',reason:null},
+        snapshot(cached?entries:entries.slice(-1),cached?undefined:{...cursor,cut_sequence:'3',entry_sequence:'3'},'3'));
+      await reader.initialize();await flush();
+      const windowsBefore=calls.filter(call=>call.url.endsWith('/window')).length;
+      const owner=reader.current().history!.readingOwner;
+      const projection=await reader.readProcessEnd('end',new AbortController().signal);
+      expect(projection.history!.windows[0].entryIds).toEqual(['start','control','end']);
+      expect(projection.messages.some(message=>message.rootFinal || message.forkEligible)).toBe(false);
+      expect(projection.messages.some(message=>message.sourceEntryIds?.includes('end'))).toBe(true);
+      expect(calls.filter(call=>call.url.endsWith('/window'))).toHaveLength(windowsBefore+(cached?0:1));
+      if(cached)expect(projection.history!.readingOwner).toBe(owner);
+      await reader.readProcessEnd('end',new AbortController().signal);
+      expect(calls.filter(call=>call.url.endsWith('/window'))).toHaveLength(windowsBefore+(cached?0:1));
+    }
+  },
+);
+
 it('selects a bounded process-end aperture even with 10,000 adjacent cached entries, then pages continuously', async () => {
   const range = (a: number, b: number) => Array.from({length:b-a+1}, (_,i) => entry(`e:${a+i}`, a+i,
     {root_final:a+i===10000,fork_eligible:a+i===10000}));
@@ -349,7 +388,8 @@ it('extends an aperture with adjacent live tail but never inserts that tail into
   let head=20;
   fixture((url,body)=>{
     if(url.endsWith('/connections'))return payload([entry('final',20)]);
-    if(url.endsWith('/context'))return context(body,{cut_sequence:String(head),event_sequence_cut:String(head+100)});
+    if(url.endsWith('/context'))return context(body,{cut_sequence:String(head),event_sequence_cut:String(head+100),
+      groups:[{owner_kind:'EXECUTED_TURN',owner_id:'turn:root',initial_entry_id:'start',final_entry_id:'final'}]});
     if(url.endsWith('/window'))return{session_id:'session:test',cut_sequence:'20',event_sequence_cut:'120',entries:[entry('final',20)]};
     if(url.endsWith('/observe'))return{observation:{through_event_sequence:String(head+100),committed:[{projection_kind:'IMMUTABLE_ENTRY',entry:entry(`e:${head}`,head)}]}};
     throw Error(url);

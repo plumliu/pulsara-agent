@@ -14,7 +14,7 @@ from pulsara_agent.conversation_kernel.steer import (
 )
 from pulsara_agent.llm.input import FrozenPromptContent
 from pulsara_agent.model_input.contracts import CanonicalInputOriginKind
-from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
+from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE, PermissionMode
 from pulsara_agent.scheduling.contracts import (
     ScheduledAdmission,
     ScheduledTriggerSource,
@@ -128,7 +128,7 @@ def admission(task, manual=False, command=None):
         if manual
         else task["next_run_at"].astimezone(timezone.utc),
         task["prompt"],
-        DEFAULT_PERMISSION_MODE,
+        PermissionMode(task["permission_mode"]),
         trigger_source=ScheduledTriggerSource.RUN_ONCE
         if manual
         else ScheduledTriggerSource.TIMER,
@@ -156,7 +156,7 @@ def enqueue(owner, a, command=None):
     permission = repo.prepare_root_permission_snapshot(
         lease.guard,
         snapshot_id=permissionid,
-        requested_mode=DEFAULT_PERMISSION_MODE,
+        requested_mode=a.permission_mode,
         deadline_monotonic=monotonic() + 30,
     )
     candidate = build_prompt_ingress_command(
@@ -167,7 +167,7 @@ def enqueue(owner, a, command=None):
         delivery_mode=PromptDeliveryMode.NEW_TURN,
         target_turn_id=None,
         permission_snapshot_id=permissionid,
-        requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        requested_permission_mode=a.permission_mode,
         canonical_prompt=freeze_canonical_prompt(FrozenPromptContent.text(a.prompt)),
         scheduled=a,
     )

@@ -20,6 +20,7 @@ from pulsara_agent.conversation_kernel.host import (
     SessionControlRejected,
 )
 from pulsara_agent.conversation_kernel.repository_errors import SessionWriterConflict
+from pulsara_agent.conversation_kernel.queued_prompt_actions import QueuedPromptAction
 from pulsara_agent.llm.input import PromptContent, LLMTextPart
 from pulsara_agent.llm.runtime import ModelRuntimeUnavailable
 from pulsara_agent.primitives.permission import PermissionMode
@@ -307,19 +308,20 @@ class ScheduledTaskService:
                     "schedule_status": active["status"], "next_run_at": task_payload(active)["next_run_at"]}}
                 return ScheduledToolObservation.from_rows(ToolBusinessValue(public_fields=public,
                     content=(ResultPart("text", "已暂停原计划并启用替换计划。"),)), (paused, active))
+            cancelled: list[QueuedPromptAction] = []
             row = await self._manage("mutate_scheduled_task", session_id=default_session_id, task_id=task_id,
-                expected_revision=revisions[task_id], action=action, values=value.get("values"))
+                expected_revision=revisions[task_id], action=action, values=value.get("values"),
+                cancelled_candidates=cancelled)
             self._prepare_errors.pop(task_id, None)
             self.wake()
             if action == "update":
                 text = "定时任务未发生变化。" if row["revision"] == revisions[task_id] else "已更新定时任务。"
             else:
-                text = {"pause": "已暂停定时任务，尚未执行的排队输入已取消。", "resume": "已启用定时任务。", "delete": "已删除定时任务，已开始的回复继续运行。"}[action]
-            public = {"target": schedule_target(task_id)}
-            if action == "pause":
-                public["meta"] = {"schedule_status": "PAUSED", "next_run_at": None}
-            elif action == "resume":
-                public["meta"] = {"schedule_status": row["status"], "next_run_at": task_payload(row)["next_run_at"]}
+                text = {"pause": "已暂停定时任务。", "resume": "已恢复定时任务。", "delete": "已删除定时任务。"}[action]
+                # Successful management has committed these existing queue actions.
+                if cancelled:
+                    text = {"pause": "已暂停定时任务，并取消其待执行输入。", "delete": "已删除定时任务，并取消其待执行输入。"}[action]
+            public = {} if action == "delete" else {"target": schedule_target(task_id)}
             return ScheduledToolObservation.from_rows(ToolBusinessValue(public_fields=public,
                 content=(ResultPart("text", text),)), (row,))
         finally:

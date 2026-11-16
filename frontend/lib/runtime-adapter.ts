@@ -2147,8 +2147,7 @@ abstract class CanonicalHistoryReader {
         && page.context && compareSequence(page.context.event_sequence_cut, this.presentationBoundaryEventSequence) >= 0
         ? page.context.groups : []).find(group => group.final_entry_id === entryId);
       const initial = group && ids.has(group.initial_entry_id) ? this.entries.get(group.initial_entry_id) : undefined;
-      if (initial && cachedFinal && ids.has(entryId) && cachedFinal.entry_kind === 'ASSISTANT_MESSAGE'
-        && (cachedFinal.root_final || cachedFinal.fork_eligible) && this.entryContentState(entryId) === 'ready') {
+      if (initial && cachedFinal && ids.has(entryId) && this.entryContentState(entryId) === 'ready') {
         const span = [...ids].map(id => this.entries.get(id)!).filter(entry =>
           compareSequence(entry.entry_sequence, initial.entry_sequence) >= 0
           && compareSequence(entry.entry_sequence, cachedFinal.entry_sequence) <= 0);
@@ -2170,8 +2169,7 @@ abstract class CanonicalHistoryReader {
       signal.throwIfAborted();
       if (this.readerClosed || this.navigation !== navigation) throw new DOMException('Navigation superseded', 'AbortError');
       const final = window.entries.find(entry => entry.entry_id === entryId);
-      if (window.session_id !== this.sessionId || !final || final.entry_kind !== 'ASSISTANT_MESSAGE'
-        || !(final.root_final || final.fork_eligible)) throw new RuntimeApiError('HISTORY_FINAL_MISSING', '找不到这轮的最终回复。', false);
+      if (window.session_id !== this.sessionId || !final) throw new RuntimeApiError('HISTORY_PROCESS_END_MISSING', '找不到这轮处理过程的结束记录。', false);
       decimal(window.cut_sequence); decimal(window.event_sequence_cut);
       if (window.entries.some((entry, index) => compareSequence(entry.entry_sequence, window.cut_sequence) > 0
         || (index > 0 && BigInt(decimal(entry.entry_sequence)) !== BigInt(decimal(window.entries[index - 1].entry_sequence)) + BigInt(1)))) {
@@ -2186,8 +2184,14 @@ abstract class CanonicalHistoryReader {
       const page = this.installPage(window.entries, window, window.older_cursor, window.newer_cursor, false, true)!;
       await waitForRead(this.loadPageContext(page), signal);
       if (page.contextState !== 'ready') throw new RuntimeApiError('HISTORY_CONTEXT_UNAVAILABLE', '处理过程暂时无法读取，请重试。', true);
+      // A Plan transition can finish a turn with a tool result. The canonical
+      // group owns its end; final-answer and fork flags only describe replies.
+      const endContext = page.context?.entry_contexts.find(entry => entry.entry_id === entryId);
+      const endGroup = endContext && page.context?.groups.find(group =>
+        group.owner_kind === endContext.owner_kind && group.owner_id === endContext.owner_id);
+      if (endGroup?.final_entry_id !== entryId) throw new RuntimeApiError('HISTORY_PROCESS_END_MISSING', '找不到这轮处理过程的结束记录。', false);
       await this.hydrateEntries([entryId], signal);
-      if (this.entryContentState(entryId) !== 'ready') throw new RuntimeApiError('HISTORY_CONTENT_UNAVAILABLE', '最终回复暂时无法读取，请重试。', true);
+      if (this.entryContentState(entryId) !== 'ready') throw new RuntimeApiError('HISTORY_CONTENT_UNAVAILABLE', '处理过程结束记录暂时无法读取，请重试。', true);
       signal.throwIfAborted();
       if (this.readerClosed || this.navigation !== navigation) throw new DOMException('Navigation superseded', 'AbortError');
       this.readingEntryId = entryId;

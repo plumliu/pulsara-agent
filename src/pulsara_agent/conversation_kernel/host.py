@@ -1800,6 +1800,8 @@ class KernelHostSession(
                 scope_kind=self._session_scope_kind)
         cancelled: list[QueuedPromptAction] = []
         if method in {"mutate_scheduled_task", "switch_scheduled_task", "retire_expired_paused_once"}:
+            if arguments.get("cancelled_candidates") is not None:
+                cancelled = arguments["cancelled_candidates"]
             arguments = {**arguments, "cancelled_candidates": cancelled}
         try:
             result = await self._io.run(getattr(self.repository, method),
