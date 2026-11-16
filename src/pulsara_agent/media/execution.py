@@ -382,10 +382,13 @@ async def execute_media(
                     part.type == "text" and part.value == message for part in parts
                 ):
                     parts.append(ResultPart("text", message))
-            if plan.video_ended:
+            if plan.video_ended and plan.complete:
+                video_end = float(plan.processed_range[1])
                 parts.append(
                     ResultPart(
-                        "text", "视频轨在请求终点之前结束；结尾缺少可验证画面。\n"
+                        "text",
+                        f"视频轨在 {video_end} 秒结束；请求尾部 "
+                        f"[{video_end},{end}) 秒没有可验证画面。\n",
                     )
                 )
             if plan.complete:

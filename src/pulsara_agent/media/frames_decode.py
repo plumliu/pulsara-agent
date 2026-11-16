@@ -49,6 +49,17 @@ class VisibleFrame:
     next_position: FramePosition | None
 
 
+class VideoEndReached(MediaError):
+    """Clean EOF with a verified relative presentation endpoint."""
+
+    def __init__(self, end: Fraction) -> None:
+        self.end = end
+        super().__init__(
+            "NO_VIDEO_IN_RANGE",
+            f"The video track ends at {float(end)} seconds, before this position.",
+        )
+
+
 class VideoDecoder:
     def __init__(
         self,
@@ -263,9 +274,11 @@ class VideoDecoder:
             while not self._late(start, target, before):
                 if self._contains(target, before):
                     break
+                if self._following is None:
+                    end = self._end()
+                    if end is not None and not self._selected_corrupt():
+                        raise VideoEndReached(end - self.info.timeline_origin)
                 if not self._advance():
-                    # Restore the terminal interval: callers need its truthful
-                    # endpoint rather than an invented held frame after EOF.
                     raise MediaError(
                         "MEDIA_FRAME_UNAVAILABLE",
                         "Video has no confirmed visible frame at this position.",

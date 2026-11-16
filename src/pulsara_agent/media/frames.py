@@ -17,7 +17,7 @@ from PIL import Image, ImageDraw
 
 from pulsara_agent.llm.input import MAXIMUM_PROMPT_IMAGE_PIXELS
 from .source import FramePosition, MediaError, MediaInfo, MediaSource
-from .frames_decode import FrameTarget, VideoDecoder
+from .frames_decode import FrameTarget, VideoDecoder, VideoEndReached
 from .frames_detail import validate_detail_range
 from .frames_layout import Cell, Layout, maximum_cell_width, pack_rows, row_candidates
 from .frames_selection import (
@@ -240,7 +240,7 @@ def _prepare_detail_plan(
         mode="detail",
         crop=crop,
         display_aspect=aspect,
-        complete=effective_start == start_time,
+        complete=True,
         video_ended=end_time < requested_end,
         probe_count=len(observations),
         max_probe_gap=max(
@@ -264,6 +264,41 @@ def prepare_frame_plan(
     progress: Callable[[tuple[float, float]], None] | None = None,
 ) -> FramePlan:
     """Prepare a bounded, exact source plan without any delivery allowance."""
+    options = dict(
+        start=start,
+        end=end,
+        mode=mode,
+        crop=crop,
+        window_start=window_start,
+        analysis_frames=analysis_frames,
+        cancelled=cancelled,
+        progress=progress,
+    )
+    try:
+        return _prepare_frame_plan(source, info, **options)
+    except VideoEndReached as exc:
+        confirmed_end = exc.end
+    # A sparse target can discover an EOF absent from track metadata. Resolve
+    # the same selection over the valid intersection before freezing any plan;
+    # ordinary requests need no extra scan and decode failures are not EOF.
+    return _prepare_frame_plan(
+        source, replace(info, video_end=confirmed_end), **options
+    )
+
+
+def _prepare_frame_plan(
+    source,
+    info,
+    *,
+    start,
+    end,
+    mode,
+    crop,
+    window_start,
+    analysis_frames,
+    cancelled,
+    progress,
+) -> FramePlan:
     _check(cancelled)
     source.assert_unchanged()
     _validate_request(start, end, mode, crop)
