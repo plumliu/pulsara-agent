@@ -1,4 +1,5 @@
 """A recorded public MCP catalog stays queryable through one fixed meta API."""
+from tests.support.mcp import finish_connection_attempts
 
 import asyncio
 import json
@@ -27,7 +28,7 @@ def test_recorded_notion_directory_and_full_schema_use_actual_sdk_meta_call(tmp_
         port=_port(tmp_path,supervisor)
         try:
             await supervisor.start()
-            await supervisor.wait_initial_readiness()
+            await finish_connection_attempts(supervisor)
             port.prepare_tool_surface_safe_point()
             names={item.name for item in prepare_test_direct_tool_surface(port,
                 effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS).model_surface.tool_specs}
@@ -70,7 +71,7 @@ def test_tools_with_equal_native_aliases_keep_distinct_meta_targets_and_dispatch
             port=_port(tmp_path,supervisor)
             try:
                 await supervisor.start()
-                await supervisor.wait_initial_readiness()
+                await finish_connection_attempts(supervisor)
                 port.prepare_tool_surface_safe_point()
                 for name in ('a-b','a_b'):
                     detail=await invoke(port,'query_capabilities',{'kind':'MCP',

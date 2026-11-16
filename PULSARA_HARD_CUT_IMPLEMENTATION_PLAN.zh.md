@@ -18,6 +18,8 @@
 
 默认提示词沿旧结构删改，ROOT 与 Subagent 篇幅均缩短。23 个 JS API 的参数和完整返回声明仅在 bundled Code Mode Skill 的按需参考中提供，由实际参数与业务 owner 生成，不向原生工具描述／参数 schema 添加返回声明，不新增运行时已读门槛或输出校验器。
 
+MCP 初始服务目录增量按[实施规范](PULSARA_MCP_CATALOG_INCREMENTAL_IMPLEMENTATION_SPEC.zh.md)接入 collector／compiler／continuity，保留固定 native tools、按需查询及 meta 调用。该增量的测试与双协议真实 DeepSeek 记录见[报告](output/hardcut-20261116/mcp-catalog/REPORT.md)；本增量不构建、安装或操作运行中的应用，不修改生产配置或生产数据库。 本增量最终 205 项相关测试通过、无跳过；保存的 DeepSeek 两协议完成 19 次真实请求、6 次 SDK MCP 调用和 13 对同 epoch 前缀核验，冷／压缩目录及引用复用均通过。
+
 ## 1. 实施依据与范围
 
 本计划组织现有合同的实施依赖、并行分工和验收，不重新定义产品语义。以用户最新明确决定、根目录现行草案及 `native_tools/` 下已确定的合同为准，现行代码用于定位需要替换或复用的接点，历史文档和实验草稿不构成另一套合同。
@@ -29,6 +31,7 @@
 | [有序内容数据库 hardcut](PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md) | 唯一正文、内容类型、队列归属转移、图片资产、业务字段与内部事实、存储消费者及停用实施 |
 | [统一结果交付与分页 hardcut](PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md) | 完整接受与保存、原生 12k／NEXT、完整导出、JS 全值、Cell 显式图文输出、真实失败和资源边界 |
 | [记忆 CRUD hardcut](PULSARA_MEMORY_CRUD_HARD_CUT_DRAFT.zh.md) | 新记忆对象、CRUD、并发、检索、回答偏好及混合隐式召回 |
+| [MCP 初始服务目录](PULSARA_MCP_CATALOG_INCREMENTAL_IMPLEMENTATION_SPEC.zh.md) | 新上下文轻量名称目录、同次冻结比较点、未知恢复与发现指引 |
 | [MCP meta-only 架构](PULSARA_MCP_META_ONLY_CALLING_ARCHITECTURE_DRAFT.zh.md) | 删除 MCP direct、当前目录、session 共用引用、权限、刷新和执行结算 |
 | [Runtime Observation 修订](PULSARA_RUNTIME_OBSERVATION_REVISION_DRAFT.zh.md) | source／body 数组、三个发送入口、能力净变化、记忆增量及压缩恢复 |
 | [Hook 独立消息修订](PULSARA_HOOK_CONTEXT_MESSAGE_REVISION_DRAFT.zh.md) | pulsara_hook_context、事件放置、后台文字、输入候选隔离及现有控制语义 |
@@ -261,3 +264,5 @@ output/hardcut-20261116/
 | 单一路径与文档 | 本次替代的旧生产入口、载荷、展示分页、MCP direct、关系记忆及旧 source 已随相应改造删除；固定 SDK、提示词、bundled 教程、当前测试和现行文档描述同一合同，无旧兼容路径 |
 
 恢复前由协调者按工作包明确完成范围、测试证据和仍缺消费者。所有必要链路完成后，使用当前 clean-v0 和当前二进制恢复正常使用；不保留或恢复实施前会话，不为临时可用牺牲单一路径。
+
+MCP 首请求不等待后台连接或发现；删除专属等待状态及 UI，保留配置采用 safe point 和用户级能力页。搜索按当前配置、scope／parent 的已接纳目录判断完整性，未知范围返回 ERROR 并保留可用命中及引用，遵循 [非阻塞启动合同](PULSARA_MCP_NONBLOCKING_STARTUP_IMPLEMENTATION_SPEC.zh.md)。

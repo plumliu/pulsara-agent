@@ -1,8 +1,12 @@
 # Pulsara 原生工具修订与使用教程草案
 
+MCP 首请求采用[非阻塞启动与不完整搜索合同](PULSARA_MCP_NONBLOCKING_STARTUP_IMPLEMENTATION_SPEC.zh.md)：后台发现不阻塞 provider；不完整搜索返回 ERROR 和已知可用结果，接受后的有效引用仍可调用。默认提示词只说明结果语义；ROOT 的 Code Mode 具体写法集中在 bundled Skill，Subagent 提示词不包含 Code Mode 内容。
+
 日期：2026-11-12。
 
 状态：各工具族的当前合同已接入生产代码，包含 read_file 原生 NEXT 续读与 write_file 完整结果导出，已完成 hardcut 跨层及真实 provider 验收；正常应用尚未重启，完成范围见实施计划。本文件记录已确定的参数、业务返回值、原生交付形状及 Code Mode 用法，也作为后续 bundled skill 的教程底稿。工具、数据库、SDK、提示词和 bundled skill 使用同一当前合同。
+
+MCP 发现上下文遵循[MCP 初始服务目录规范](PULSARA_MCP_CATALOG_INCREMENTAL_IMPLEMENTATION_SPEC.zh.md)：合法新上下文在 Skill 目录后提供轻量已启用服务名称，接口与引用仍按任务查询；不增加工具数量或 API 边界。增量验收见[实施报告](output/hardcut-20261116/mcp-catalog/REPORT.md)。 本增量最终 205 项相关测试通过、无跳过；保存的 DeepSeek 两协议完成 19 次真实请求、6 次 SDK MCP 调用和 13 对同 epoch 前缀核验，冷／压缩目录及引用复用均通过。
 
 ## 1. 范围与阅读方式
 

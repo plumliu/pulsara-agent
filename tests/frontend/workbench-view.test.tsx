@@ -519,25 +519,6 @@ function props(overrides: Partial<ComponentProps<typeof WorkbenchView>> = {}): C
   };
 }
 
-it('shows MCP connection and discovery in the existing execution status while stop remains available', () => {
-  const onStop = vi.fn();
-  const input = props({ activeTurnId: 'waiting-turn', onStop, mcpReadiness: { waiting: true, servers: [
-    { server_id: 'one', display_name: 'Search', state: 'CONNECTING', failure: null },
-    { server_id: 'two', display_name: 'Files', state: 'DISCOVERING', failure: null },
-  ] } });
-  const view = render(<WorkbenchView {...input} />);
-  expect(screen.getByText('正在连接 MCP').closest('[aria-label="Pulsara 处理状态"]')).toBeTruthy();
-  expect(screen.getByText('Search · 连接中；Files · 读取目录')).toBeTruthy();
-  expect(screen.queryByRole('dialog')).toBeNull();
-  fireEvent.click(screen.getByRole('button', { name: '停止本轮运行' }));
-  expect(onStop).toHaveBeenCalledOnce();
-  view.rerender(<WorkbenchView {...input} mcpReadiness={{ waiting: false, servers: [
-    { server_id: 'one', display_name: 'Search', state: 'FAILED_RETRYABLE', failure: 'timed out' },
-  ] }} />);
-  expect(screen.queryByText('正在连接 MCP')).toBeNull();
-  expect(screen.getByText('Search 连接失败，继续处理')).toBeTruthy();
-});
-
 it('keeps confirmed history readable while the old execution is stopping and offers the native restart action', () => {
   const restartWorkbench = vi.fn(async () => {});
   window.pulsaraDesktop = { restartWorkbench } as unknown as PulsaraDesktop;

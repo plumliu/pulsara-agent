@@ -101,7 +101,6 @@ import type {
   ToolOutputPage,
   CanonicalPromptImagePart,
   EditablePromptContent,
-  McpReadinessProgress,
 } from '../lib/runtime-adapter';
 import type { Message, PermissionMode, ReasoningBlock, RuntimeStatus, SessionSummary, SkillCapability, TodoRun, ToolTrace, Workspace } from '../lib/pulsara-types';
 import { permissionLabels, permissionModeOrder, messageSourceEntryId, messageViewKey } from '../lib/pulsara-types';
@@ -185,7 +184,6 @@ interface WorkbenchViewProps {
   todo?: TodoRun;
   activePlanMode: boolean;
   providerRetry?: import('../lib/runtime-adapter').ProviderRetry | null;
-  mcpReadiness?: McpReadinessProgress | null;
   isRunning: boolean;
   activeTurnId?: string;
   manualCompactionCommandId?: string;
@@ -2438,7 +2436,6 @@ export function WorkbenchView({
   activePlanMode,
   isRunning,
   providerRetry,
-  mcpReadiness,
   activeTurnId,
   manualCompactionCommandId,
   inspectorOpen,
@@ -3107,16 +3104,8 @@ export function WorkbenchView({
             <article className="assistant-turn assistant-turn--operational assistant-turn--run-start" aria-label="Pulsara 处理状态">
               <AssistantHeading message={{ id: 'pending-preparation', role: 'assistant', time: '', body: '' }} response={false} />
               <div className="assistant-progress" role="status"><i aria-hidden="true" />
-                {mcpReadiness?.waiting ? '正在连接 MCP' : preparingSubmission ? '准备开始…' : '正在处理…'}
+                {preparingSubmission ? '准备开始…' : '正在处理…'}
               </div>
-              {mcpReadiness?.waiting && <div className="assistant-progress" role="status">
-                {mcpReadiness.servers.filter(server => server.state === 'CONNECTING' || server.state === 'DISCOVERING')
-                  .map(server => `${server.display_name} · ${server.state === 'DISCOVERING' ? '读取目录' : '连接中'}`).join('；')}
-              </div>}
-              {mcpReadiness?.servers.some(server => server.state === 'FAILED_RETRYABLE' || server.state === 'FAILED_TERMINAL') && <div className="assistant-progress" role="status">
-                {mcpReadiness.servers.filter(server => server.state === 'FAILED_RETRYABLE' || server.state === 'FAILED_TERMINAL')
-                  .map(server => `${server.display_name} 连接失败，继续处理`).join('；')}
-              </div>}
             </article>
           )}
           {atLatestHistory && pendingSteers.map(item => (

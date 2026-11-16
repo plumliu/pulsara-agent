@@ -89,16 +89,6 @@ export interface ModelCallBindingPayload {
   reasoning: ReasoningSelectionPayload | null;
 }
 
-export interface McpReadinessProgress {
-  waiting: boolean;
-  servers: Array<{
-    server_id: string;
-    display_name: string;
-    state: 'CONNECTING' | 'DISCOVERING' | 'READY' | 'FAILED_RETRYABLE' | 'FAILED_TERMINAL';
-    failure: string | null;
-  }>;
-}
-
 export interface SessionEphemeralResults {
   session_id: string;
   host_session_id: string | null;
@@ -111,7 +101,6 @@ export interface SessionEphemeralResults {
     text: string | null;
   };
   title: { state: 'pending' | 'adopted' | 'absent' };
-  mcp_readiness?: McpReadinessProgress | null;
 }
 
 /** Disposable preview of the selected next-turn model, not admission authority. */

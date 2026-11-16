@@ -53,7 +53,7 @@ def queue_identity(rows):
 @pytest.mark.parametrize(('finish', 'root_only_ready'), [
     ('ready', True), ('ready', False), ('close', False),
 ])
-def test_process_loss_pending_agent_waits_before_final_provider_and_preserves_scope(
+def test_process_loss_pending_agent_starts_before_discovery_and_preserves_scope(
     tmp_path, monkeypatch, stage2_migrated_postgres_database, phase, finish, root_only_ready,
 ):
     async def scenario():
@@ -77,11 +77,9 @@ def test_process_loss_pending_agent_waits_before_final_provider_and_preserves_sc
         clients = []
         requests, prefix_installs = [], []
         before_registration = asyncio.Event()
-        child_waiting = asyncio.Event()
         provider_sent = asyncio.Event()
         original_stream = OpenAIChatCompletionsTransport.stream
         original_registration = KernelHostCore._register_prepared_session
-        original_wait = mcp_module.McpHostSupervisor.wait_initial_readiness
         # Discovery has the existing one-reservation physical bound. Put an
         # already-ready ROOT_ONLY peer first; put the blocked peer after the
         # shared peer so it cannot prevent that peer from entering discovery.
@@ -144,12 +142,6 @@ def test_process_loss_pending_agent_waits_before_final_provider_and_preserves_sc
                 await release_registration.wait()
             return await original_registration(owner, session, capability_baseline)
 
-        async def wait(owner, **kwargs):
-            if child is not None and owner is child._mcp_supervisor:
-                assert kwargs['conversation_scope_kind'] is ModelInputScopeKind.SUBAGENT
-                child_waiting.set()
-            return await original_wait(owner, **kwargs)
-
         async def stream(adapter, *, call, context):
             if call.fact.purpose is ModelCallPurpose.AGENT_MODEL_LOOP:
                 assert child is not None
@@ -189,7 +181,6 @@ def test_process_loss_pending_agent_waits_before_final_provider_and_preserves_sc
             monkeypatch.setattr(host_module.LocalMcpManagementService, 'load_configs',
                                 lambda *args, **kwargs: (shared, root_only))
             monkeypatch.setattr(KernelHostCore, '_register_prepared_session', register)
-            monkeypatch.setattr(mcp_module.McpHostSupervisor, 'wait_initial_readiness', wait)
             monkeypatch.setattr(OpenAIChatCompletionsTransport, 'stream', stream)
             core = KernelHostCore.production(model_runtime=make_runtime(
                 model_id='test-pro', wire_api='openai_chat_completions', postgres_dsn=database))
@@ -201,17 +192,13 @@ def test_process_loss_pending_agent_waits_before_final_provider_and_preserves_sc
             assert queue_rows(database, identities['agent_id'])[1]['status'] == 'PENDING'
             assert requests == [] and prefix_installs == []
             release_registration.set()
-            await asyncio.wait_for(child_waiting.wait(), 10)
+            await asyncio.wait_for(provider_sent.wait(), 10)
             await asyncio.wait_for(child_phase_entered.wait(), 5)
             assert core._sessions[child.host_session_id] is child
             assert child._delivery_task is not None and child._cell_output_task is not None
-            progress = child.mcp_readiness_progress()
-            assert progress is not None and progress['waiting'] is True
-            assert {item['server_id'] for item in progress['servers']} == {'fixture'}
-            assert progress['servers'][0]['state'] == ('CONNECTING' if phase == 'initialize' else 'DISCOVERING')
-            assert requests == [] and prefix_installs == []
+            assert len(requests) == len(prefix_installs) == 1
             for scope in child._input_continuity._slots:
-                assert child._input_continuity.current_view(scope) is None
+                assert child._input_continuity.current_view(scope) is not None
             attempt = child._mcp_supervisor._tasks['fixture']
             assert not attempt.done()
             if root_only_ready:
@@ -238,6 +225,9 @@ def test_process_loss_pending_agent_waits_before_final_provider_and_preserves_sc
                 names = {tool['function']['name'] for tool in requests[0]['tools']}
                 assert {'query_capabilities','call_mcp_tool','read_mcp_resource'} <= names
                 assert not any(name.startswith('mcp__') for name in names)
+                initial_catalog = json.dumps(requests[0]['messages'][2], ensure_ascii=False)
+                assert '当前已启用的 MCP 服务' in initial_catalog and '- fixture' in initial_catalog
+                assert root_only_id not in initial_catalog
                 catalog=child._tools._mcp_current.catalog_for_scope(ModelInputScopeKind.SUBAGENT)
                 assert 'fixture' in {item.server_id for item in catalog.servers}
                 assert root_only_id not in {item.server_id for item in catalog.servers}
@@ -251,7 +241,7 @@ def test_process_loss_pending_agent_waits_before_final_provider_and_preserves_sc
                 assert attempt.done()
                 release.set()
                 release_root_only.set()
-                assert requests == [] and prefix_installs == []
+                assert len(requests) == len(prefix_installs) == 1
             final_rows = queue_rows(database, identities['agent_id'])
             assert queue_identity(final_rows) == queue_identity(original_rows)
             assert (workspace / 'effect-count.txt').read_text() == 'x'

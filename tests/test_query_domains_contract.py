@@ -99,7 +99,7 @@ def test_query_schemas_and_parsers_reject_cross_branch_fields(
 
 def test_capability_owner_rejects_mixed_query_before_observing_runtime(monkeypatch):
     query = CapabilitySourceQuery(
-        None, runtime=None, scope=ModelInputScopeKind.ROOT, inspect_tool=None
+        None, runtime=None, mcp_configs=(), scope=ModelInputScopeKind.ROOT, inspect_tool=None
     )
 
     async def unexpected(*args):

@@ -552,15 +552,19 @@ class StructuredModelInputCompiler:
             source_messages.append((item.source_kind, (message, None, origin, None)))
         # A cold catalogue starts the context. Active-compaction restoration is
         # adjacent to the summary and handoff; new input notices stay at its suffix.
+        initial_catalogues = {
+            ContextSourceKind.SKILL_CATALOG,
+            ContextSourceKind.MCP_CATALOG,
+        }
         catalogue = [
             value
             for kind, value in source_messages
-            if kind is ContextSourceKind.SKILL_CATALOG
+            if kind in initial_catalogues
         ]
         remaining = [
             (kind, value)
             for kind, value in source_messages
-            if kind is not ContextSourceKind.SKILL_CATALOG
+            if kind not in initial_catalogues
         ]
         if not new_epoch and catalogue:
             raise StructuredModelInputCompileError(

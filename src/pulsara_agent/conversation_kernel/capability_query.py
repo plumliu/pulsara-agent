@@ -32,9 +32,10 @@ def _status(enabled, selected=None):
 
 
 class CapabilitySourceQuery:
-    def __init__(self, service, *, runtime, scope, inspect_tool):
+    def __init__(self, service, *, runtime, scope, inspect_tool, mcp_configs):
         self.service, self.runtime, self.scope = service, runtime, scope
         self.inspect_tool = inspect_tool
+        self.mcp_configs = {config.server_id: config for config in mcp_configs}
         self.deadline = service.deadline() if service is not None else None
         self.cancellation = EventPluginCancellationPort()
         self.held = []
@@ -256,6 +257,10 @@ class CapabilitySourceQuery:
             return []
         result = []
         for server in self.runtime.catalog_for_scope(self.scope).servers:
+            config = self.mcp_configs.get(server.server_id)
+            if config is None or (self.scope is ModelInputScopeKind.SUBAGENT
+                    and config.scope_policy is not McpScopePolicy.ROOT_AND_SUBAGENTS):
+                continue
             target = server.connection_target
             if target is None:
                 continue
@@ -270,22 +275,40 @@ class CapabilitySourceQuery:
             result.append(server)
         return result
 
+    def _matching_config(self, server):
+        config = self.mcp_configs.get(server.server_id)
+        return config if config is not None and config.runtime_source == server.runtime_source else None
+
     def _service_record(self, server):
         status = {"READY": "已连接，目录已发现。", "DISABLED": "已禁用。", "CONNECTING": "连接中，目录未知。",
             "DISCOVERING": "正在发现目录。", "FAILED_RETRYABLE": "连接暂不可用。", "FAILED_TERMINAL": "连接失败。"}.get(server.status.value, server.status.value)
         record = {"target": dict(server.connection_target), "name": server.display_name, "status": status}
         if server.sanitized_instructions:
             record["instructions"] = server.sanitized_instructions
-        candidate = self._current_candidate(server.server_id)
-        if server.status.value == "READY" and candidate is None:
+        config = self._matching_config(server)
+        candidate = self._current_candidate(server.server_id) if config is not None else None
+        if config is not None and not config.enabled:
+            record["status"] = "已禁用。"
+        elif server.status.value == "READY" and candidate is None:
             record["status"] = "连接或目录暂不可用。"
         if candidate is not None:
             record["resource_count"] = len(candidate.discovery_snapshot.resources)
             record["resource_template_count"] = len(candidate.discovery_snapshot.resource_templates)
         return record
 
-    def _current_candidate(self, server_id):
+    def _accepted_directory(self, server_id):
+        # The candidate carries the complete accepted discovery; the existing
+        # semantic-config boundary joins it to this query's current config.
+        # A physical reconnect alone does not erase that accepted knowledge.
+        config = self.mcp_configs.get(server_id)
         candidate = self.runtime.candidates.get(server_id) if self.runtime is not None else None
+        if (config is not None and config.enabled and candidate is not None
+                and candidate.expected_semantic_config_fingerprint == config.semantic_config_fingerprint):
+            return candidate
+        return None
+
+    def _current_candidate(self, server_id):
+        candidate = self._accepted_directory(server_id)
         if candidate is not None:
             lease = candidate.slot_lease
             if lease._slot.lease_is_current(lease):
@@ -363,7 +386,7 @@ class CapabilitySourceQuery:
                     return
                 raise CapabilityQueryError("NOT_FOUND", "未找到当前范围内的 MCP 连接。")
             server = servers[0]
-            candidate = self._current_candidate(server.server_id)
+            candidate = self._current_candidate(server.server_id) if self._matching_config(server) is not None else None
             if candidate is None:
                 raise CapabilityQueryError("DIRECTORY_UNAVAILABLE", "该服务当前目录未知或不可读取。")
             specs = self.runtime.root_tool_specs if self.scope is ModelInputScopeKind.ROOT else self.runtime.subagent_tool_specs
@@ -374,10 +397,10 @@ class CapabilitySourceQuery:
             if not tools:
                 self.content.append(_text("该服务当前没有可见工具。"))
             return
-        ids = {server.server_id for server in servers}
+        ids = {server.server_id for server in servers if self._matching_config(server) is not None}
         specs = (() if self.runtime is None else self.runtime.root_tool_specs
             if self.scope is ModelInputScopeKind.ROOT else self.runtime.subagent_tool_specs)
-        tools = [tool for tool in specs if tool.server_id in ids]
+        tools = [tool for tool in specs if tool.server_id in ids and self._accepted_directory(tool.server_id) is not None]
         if target is not None:
             tools = [tool for tool in tools if tool.server_id == target["server_id"] and tool.remote_tool_name == target["remote_tool_name"]]
             if not tools:
@@ -408,7 +431,22 @@ class CapabilitySourceQuery:
                 else:
                     record.pop("description", None)
                 self.content.append(_object(record))
-        if not matches:
+        incomplete = [server for server in servers
+            if ((config.enabled if (config := self._matching_config(server)) is not None
+                else server.status.value != "DISABLED")
+                and (config is None or self._accepted_directory(server.server_id) is None))]
+        if incomplete:
+            names = []
+            for server in incomplete:
+                origin = server.runtime_source
+                suffix = (f"（来自插件 {origin.package_owner_key}）"
+                    if isinstance(origin, ManagedPackageMcpRuntimeSource) else "")
+                names.append(server.connection_target["server_id"] + suffix)
+            self._failure(
+                ("已返回已知匹配；" if matches else "在已知目录中未找到匹配；")
+                + "以下已启用服务的工具目录尚未取得或无法可靠读取："
+                + "、".join(names) + "。本次搜索不完整，不能确认没有其他合适工具。可使用已返回的可用接口，或按需再次查询。")
+        elif not matches and not self.failed:
             self.content.append(_text("没有找到匹配的 MCP 工具或服务。"))
 
     async def execute(self, arguments):

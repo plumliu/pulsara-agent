@@ -11,7 +11,7 @@ Plan 提问和方案审批统一使用 **10 分钟**交互等待期限，从交�
 
 enter_plan 本身不等待用户答复，不适用这项期限；该期限不限制整个规划任务或工作流的累计时长。
 
-本轮运行信息和规划相关 observation 统一遵循[Runtime Observation 修订草案](../PULSARA_RUNTIME_OBSERVATION_REVISION_DRAFT.zh.md)第 1.3、6 节：所有新 turn 首次输入、用户主动 steer 及活动 turn 压缩后的恢复说明按各 source 规则发送。Runtime 交接专指压缩后的 TODO／PCA 状态交接，Plan 自动续接属于新 turn 的开始。环境、权限、时间合为 TURN_CONTEXT；PLAN_MODE 只在活动规划 turn 压缩后说明状态，并附进入规划前 turn A 最后一条已交付真实用户消息／steer 的完整原文，标为“进入规划前的用户输入”；APPROVED_PLAN 在批准后的执行续接 turn 携带完整获批原文，并随该执行 turn 的压缩恢复承接。每类独立使用 source／body 块，压缩后与 TODO／PCA 并列，不在普通规划过程中重复追加状态提示。runtime 自动续接按新 turn 规则，在准备汇报时比较 Skill／MCP 最新相关状态快照与上次已告知快照，临时计算最新净 diff，有相关变化才通知；输入安装成功后，用生成本次通知所依据的状态快照替换上次已告知快照，安装失败保留旧快照。通知侧只保存上次已告知快照，diff 用完即可丢弃，准备消息后再发生的变化留待下一次比较。不冒充用户输入触发 slash 激活或记忆观察。初始／压缩后的完整目录及新上下文比较快照的初始化仍按其独立规则处理。
+本轮运行信息和规划相关 observation 统一遵循[Runtime Observation 修订草案](../PULSARA_RUNTIME_OBSERVATION_REVISION_DRAFT.zh.md)第 1.3、6 节：所有新 turn 首次输入、用户主动 steer 及活动 turn 压缩后的恢复说明按各 source 规则发送。Runtime 交接专指压缩后的 TODO／PCA 状态交接，Plan 自动续接属于新 turn 的开始。环境、权限、时间合为 TURN_CONTEXT；PLAN_MODE 只在活动规划 turn 压缩后说明状态，并附进入规划前 turn A 最后一条已交付真实用户消息／steer 的完整原文，标为“进入规划前的用户输入”；APPROVED_PLAN 在批准后的执行续接 turn 携带完整获批原文，并随该执行 turn 的压缩恢复承接。每类独立使用 source／body 块，压缩后与 TODO／PCA 并列，不在普通规划过程中重复追加状态提示。runtime 自动续接按新 turn 规则，在准备汇报时比较 Skill／MCP 最新相关状态快照与上次已告知快照，临时计算最新净 diff，有相关变化才通知；输入安装成功后，用生成本次通知所依据的状态快照替换上次已告知快照，安装失败保留旧快照。通知侧只保存上次已告知快照，diff 用完即可丢弃，准备消息后再发生的变化留待下一次比较。不冒充用户输入触发 slash 激活或记忆观察。合法冷上下文及采用的压缩 successor 按 Skill 完整目录、轻量 MCP 服务目录、压缩交接手册的顺序建立初始能力区域，并从各自冻结事实初始化比较快照。Plan 普通新 turn 本身不重发完整目录；初始目录不属于 TODO／PCA 或 runtime observation，具体遵循[MCP 初始目录规范](../PULSARA_MCP_CATALOG_INCREMENTAL_IMPLEMENTATION_SPEC.zh.md)。
 
 ## 1. enter_plan：进入计划模式
 
@@ -453,6 +453,6 @@ ask_plan_question 超时后，模型也可以按此方式自行结束规划；ru
 - [Plan 参数解析](../src/pulsara_agent/primitives/plan_workflow.py)
 - [原生批次处理](../src/pulsara_agent/conversation_kernel/plan_runtime.py)
 - [模式切换、幂等进入与自动交接](../src/pulsara_agent/conversation_kernel/_repository/plans.py)
-- [当前模型可见结果投影](../src/pulsara_agent/primitives/tool_result_projection.py)
+- [共同业务结果投影与状态映射](../src/pulsara_agent/conversation_kernel/tool_outputs.py)
 
 这些链接用于核对实施接点，不表示当前代码已经符合本草案。

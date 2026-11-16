@@ -1,4 +1,5 @@
 """Modern catalog observation through official SDK servers over local HTTP."""
+from tests.support.mcp import finish_connection_attempts
 
 import asyncio
 from contextlib import asynccontextmanager
@@ -96,7 +97,7 @@ def test_modern_catalog_changes_relist_same_physical_session(tmp_path, surface):
             first = second = None
             try:
                 await supervisor.start()
-                await supervisor.wait_initial_readiness()
+                await finish_connection_attempts(supervisor)
                 first = supervisor.install_pending_at_safe_point()
                 slot = first.slot_lease_by_server["catalog"]._slot
                 assert filters == [{f"{surface}_list_changed": True}]
@@ -160,7 +161,7 @@ def test_modern_subscription_end_reconnects_and_refetches(tmp_path, closure):
             supervisor = _supervisor(tmp_path, endpoint)
             try:
                 await supervisor.start()
-                await supervisor.wait_initial_readiness()
+                await finish_connection_attempts(supervisor)
                 original = supervisor._slots["catalog"]
                 revision = 2
                 if closure == "lost":

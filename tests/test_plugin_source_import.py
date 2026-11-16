@@ -394,7 +394,7 @@ def test_external_install_uses_native_disabled_instance_and_preserves_source(tmp
 
         async def query(arguments, *, inspect=False):
             return await CapabilitySourceQuery(
-                service, runtime=None, scope=ModelInputScopeKind.ROOT, inspect_tool=None,
+                service, runtime=None, mcp_configs=(), scope=ModelInputScopeKind.ROOT, inspect_tool=None,
             ).execute(arguments)
 
         listed = await query({"kind":"SKILL"})

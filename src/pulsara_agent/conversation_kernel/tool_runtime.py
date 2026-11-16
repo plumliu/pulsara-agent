@@ -811,13 +811,6 @@ class DirectKernelToolPort(
                 raise RuntimeError("tool surface is closed")
             self._mcp_supervisor = supervisor
 
-    async def wait_initial_mcp_readiness(self, *, conversation_scope_kind: ModelInputScopeKind) -> None:
-        supervisor = self._mcp_supervisor
-        if supervisor is None:
-            raise RuntimeError("MCP supervisor is not bound")
-        await supervisor.wait_initial_readiness(conversation_scope_kind=conversation_scope_kind)
-
-
     async def reload_mcp_configs(
         self,
         configs: tuple[McpServerConfig, ...],
@@ -1211,12 +1204,13 @@ class DirectKernelToolPort(
             values = parse_query(arguments, subagent=scope is ModelInputScopeKind.SUBAGENT)
             runtime, _ = self._current_mcp_runtime_for_borrow(borrow)
             result = await CapabilitySourceQuery(self._capability_management,
-                runtime=runtime, scope=scope, inspect_tool=inspect_tool).execute(values)
+                runtime=runtime, scope=scope, inspect_tool=inspect_tool,
+                mcp_configs=self._mcp_supervisor.configs).execute(values)
             token = None
             if prepared_refs:
                 token = ProcessLocalEffectSettlementToken(random_id("settlement"), tuple(prepared_refs))
                 self._mcp_ref_settlements[token.token_id] = token
-            return KernelToolResult(state=result["meta"]["status"],
+            return KernelToolResult(state="APPLICATION_ERROR" if result["meta"]["status"] == "ERROR" else result["meta"]["status"],
                 content=ToolBusinessValue(content=tuple(ResultPart(item["type"], item["value"])
                     for item in result["content"])),
                 process_local_settlement=token, effect_class="read_only")
@@ -1229,7 +1223,7 @@ class DirectKernelToolPort(
                 scrub = await asyncio.to_thread(self._capability_management.plugins._capture_scrub_set,
                     InspectLocalPluginsRequest(self._capability_management.deadline()))
                 message = scrub.scrub_text(message)
-            return KernelToolResult(state="ERROR",
+            return KernelToolResult(state="APPLICATION_ERROR",
                 content=ToolBusinessValue(content=(ResultPart("text", message),)), effect_class="read_only")
         except BaseException:
             for prepared in prepared_refs:

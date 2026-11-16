@@ -18,20 +18,16 @@ function ready(): SessionEphemeralResults {
 afterEach(() => vi.useRealTimers());
 
 describe('PulsaraApp ephemeral integration', () => {
-  it('keeps observing MCP readiness when suggestions are disabled and retires it after stopping', async () => {
+  it('keeps observing a running turn when suggestions are disabled and retires progress after stopping', async () => {
     const adapter = new FakeAdapter();
     adapter.connectionValue = { ...projection(), messages: [], todo: undefined, hostSessionId: 'host-1' };
     vi.spyOn(adapter, 'bootstrap').mockResolvedValue({ ...bootstrap,
       local_settings: { ...bootstrap.local_settings, input_suggestions_enabled: false } });
     const reads = vi.spyOn(adapter, 'ephemeralResults').mockImplementation(async () => ({
       ...ready(), suggestion: { ...ready().suggestion, state: 'absent' },
-      mcp_readiness: { waiting: true, servers: [
-        { server_id: 'docs', display_name: 'Docs', state: 'CONNECTING', failure: null },
-      ] },
     }));
     renderWorkbench(<PulsaraApp adapter={adapter} />);
-    expect(await screen.findByText('正在连接 MCP')).toBeTruthy();
-    expect(screen.getByText('Docs · 连接中')).toBeTruthy();
+    expect(await screen.findByText('正在处理…')).toBeTruthy();
     const count = reads.mock.calls.length;
     vi.useFakeTimers();
     // Re-enter the existing observation effect under the controlled clock.
@@ -42,7 +38,7 @@ describe('PulsaraApp ephemeral integration', () => {
     expect(reads.mock.calls.length).toBeGreaterThan(count);
     await act(async () => adapter.lastConnection!.emit({ ...adapter.connectionValue,
       isRunning: false, activeTurnId: undefined, eventSequence: 3 }));
-    expect(screen.queryByText('正在连接 MCP')).toBeNull();
+    expect(screen.queryByText('正在处理…')).toBeNull();
   });
 
   it('keeps the final answer and composer usable while a complete suggestion arrives behind a draft', async () => {

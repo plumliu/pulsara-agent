@@ -45,7 +45,7 @@ async def query_sources(service, **arguments):
     from pulsara_agent.model_input.contracts import ModelInputScopeKind
 
     return await CapabilitySourceQuery(
-        service, runtime=None, scope=ModelInputScopeKind.ROOT, inspect_tool=None
+        service, runtime=None, mcp_configs=(), scope=ModelInputScopeKind.ROOT, inspect_tool=None
     ).execute(arguments)
 
 

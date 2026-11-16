@@ -1,4 +1,5 @@
 """Observable consumer, scope and current-Work contracts for the hard cut."""
+from tests.support.mcp import finish_connection_attempts
 
 from tests.support.model_config import scheduled_task_service
 from dataclasses import replace
@@ -315,7 +316,7 @@ def test_native_mcp_query_is_callable_from_cells_and_changed_binding_does_not_re
             borrow = slow = None
             try:
                 await supervisor.start()
-                await supervisor.wait_initial_readiness()
+                await finish_connection_attempts(supervisor)
                 port.prepare_tool_surface_safe_point()
                 detail = await invoke(
                     port,

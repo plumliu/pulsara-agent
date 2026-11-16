@@ -25,7 +25,7 @@ from tests.test_app_capability_boundary import skill_source, hook_document, invo
 
 async def query(service, arguments, *, scope=ModelInputScopeKind.ROOT):
     value = await CapabilitySourceQuery(
-        service, runtime=None, scope=scope, inspect_tool=None
+        service, runtime=None, mcp_configs=(), scope=scope, inspect_tool=None
     ).execute(arguments)
     Draft202012Validator(query_output_schema()).validate(value)
     return value
@@ -208,7 +208,7 @@ def test_repeated_query_cancellation_joins_native_observation_and_closes_anchor(
             )
 
         owner = CapabilitySourceQuery(
-            service, runtime=None, scope=ModelInputScopeKind.ROOT, inspect_tool=None
+            service, runtime=None, mcp_configs=(), scope=ModelInputScopeKind.ROOT, inspect_tool=None
         )
         work = asyncio.create_task(owner._native(observe))
         assert await asyncio.to_thread(started.wait, 2)

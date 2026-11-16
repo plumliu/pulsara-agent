@@ -119,7 +119,7 @@ def test_complete_core_schedule_tools_execute_and_user_management_needs_no_ui_se
 
 @pytest.mark.parametrize("phase", ["initialize", "discovery"])
 @pytest.mark.parametrize("finish", ["ready", "stop", "close"])
-def test_canonical_scheduled_pending_restore_waits_before_actual_provider_and_prefix(
+def test_canonical_scheduled_pending_restore_starts_before_discovery(
     tmp_path, stage2_migrated_postgres_database, monkeypatch, phase, finish,
 ):
     async def scenario():
@@ -141,10 +141,12 @@ def test_canonical_scheduled_pending_restore_waits_before_actual_provider_and_pr
         original_stream = OpenAIChatCompletionsTransport.stream
         requests = []
         provider_sent = asyncio.Event()
+        finish_provider = asyncio.Event()
         async def stream(adapter, *, call, context):
             if call.fact.purpose is ModelCallPurpose.AGENT_MODEL_LOOP:
                 requests.append(build_chat_completions_payload(call=call, context=context))
                 provider_sent.set()
+                await finish_provider.wait()
             adapter._mock_chunks = [
                 {"choices": [{"index": 0, "delta": {"content": "SCHEDULE COMPLETED"}}]},
                 {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
@@ -182,13 +184,10 @@ def test_canonical_scheduled_pending_restore_waits_before_actual_provider_and_pr
             assert core._sessions[session.host_session_id] is session
             assert session._delivery_task is not None
             await asyncio.wait_for(entered.wait(), 5)
-            async with asyncio.timeout(10):
-                while session.mcp_readiness_progress() is None:
-                    await asyncio.sleep(0)
-            assert session.mcp_readiness_progress()["waiting"] is True
+            await asyncio.wait_for(provider_sent.wait(), 10)
             scope = next(iter(session._input_continuity._slots))
-            assert session._input_continuity.current_view(scope) is None
-            assert requests == []
+            assert session._input_continuity.current_view(scope) is not None
+            assert len(requests) == 1
             attempt = session._mcp_supervisor._tasks["fixture"]
             if finish == "stop":
                 await session.request_stop_turn(command_id=random_id("command"),
@@ -200,6 +199,7 @@ def test_canonical_scheduled_pending_restore_waits_before_actual_provider_and_pr
                 await core.close_session(session.host_session_id)
                 assert attempt.done()
             release.set()
+            finish_provider.set()
             if finish == "ready":
                 await asyncio.wait_for(provider_sent.wait(), 10)
                 async with asyncio.timeout(10):
@@ -216,10 +216,10 @@ def test_canonical_scheduled_pending_restore_waits_before_actual_provider_and_pr
             else:
                 if not attempt.done():
                     await asyncio.wait_for(attempt, 5)
-                assert requests == []
-                assert session._input_continuity.current_view(scope) is None
+                assert len(requests) == 1
         finally:
             release.set()
+            finish_provider.set()
             await core.shutdown()
     asyncio.run(scenario())
 

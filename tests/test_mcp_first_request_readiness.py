@@ -1,4 +1,4 @@
-"""First MCP attempt observation and real Host/provider cold preparation."""
+"""Nonblocking MCP startup and real Host/provider cold preparation."""
 
 import asyncio
 from datetime import datetime, timezone
@@ -54,7 +54,7 @@ def readiness_config(**fields):
     })
 
 
-def test_config_removal_releases_observer_before_old_physical_cleanup(tmp_path):
+def test_config_removal_preserves_old_physical_cleanup_ownership(tmp_path):
     async def scenario():
         entered, cleanup, release_cleanup = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
@@ -75,78 +75,13 @@ def test_config_removal_releases_observer_before_old_physical_cleanup(tmp_path):
         try:
             await owner.start()
             await entered.wait()
-            waiting = asyncio.create_task(owner.wait_initial_readiness())
-            await asyncio.sleep(0)
-            assert owner.readiness_progress()['waiting'] is True
             owner.reload_configs(())
-            await asyncio.wait_for(waiting, 1)
             await asyncio.wait_for(cleanup.wait(), 1)
             assert owner._connection_tasks
-            assert owner.readiness_progress() is None
         finally:
             release_cleanup.set()
             await owner.aclose()
         assert not owner._connection_tasks
-
-    asyncio.run(scenario())
-
-
-def test_two_configuration_changes_during_adoption_do_not_expand_captured_wait(tmp_path):
-    async def scenario():
-        entered, never_ready = asyncio.Event(), asyncio.Event()
-        changes = asyncio.Event()
-        first_adoption, release_first = asyncio.Event(), asyncio.Event()
-        second_adoption, release_second = asyncio.Event(), asyncio.Event()
-        adoptions = []
-
-        class Client(_FakeMcpClient):
-            async def open(self):
-                entered.set()
-                await never_ready.wait()
-
-        async def adopt():
-            adoptions.append(len(adoptions) + 1)
-            if len(adoptions) == 1:
-                owner.reload_configs(())
-                first_adoption.set()
-                await release_first.wait()
-            else:
-                owner.reload_configs((readiness_config(transport={
-                    'type': 'stdio', 'command': sys.executable, 'args': ['replacement'],
-                }),))
-                second_adoption.set()
-                await release_second.wait()
-            return True
-
-        owner = mcp_module.McpHostSupervisor(
-            workspace_root=tmp_path, configs=(readiness_config(),),
-            credential_boundary=ProcessCredentialBoundary(), client_factory=Client,
-            configuration_change=changes, adopt_configuration=adopt,
-        )
-        waiter = None
-        try:
-            await owner.start()
-            await entered.wait()
-            changes.set()
-            waiter = asyncio.create_task(owner.wait_initial_readiness())
-            await asyncio.wait_for(first_adoption.wait(), 1)
-            changes.set()
-            release_first.set()
-            await asyncio.wait_for(second_adoption.wait(), 1)
-            assert not waiter.done()
-            release_second.set()
-            await asyncio.wait_for(waiter, 1)
-            assert adoptions == [1, 2]
-            assert not changes.is_set()
-            assert not owner._tasks['fixture'].done()
-            assert owner._config_by_id['fixture'].transport.args == ('replacement',)
-        finally:
-            release_first.set()
-            release_second.set()
-            never_ready.set()
-            if waiter is not None:
-                await waiter
-            await owner.aclose()
 
     asyncio.run(scenario())
 
@@ -169,31 +104,10 @@ def test_configuration_owner_failure_escapes_execution_preparation(tmp_path):
     asyncio.run(scenario())
 
 
-def test_subagent_readiness_does_not_wait_for_root_only_connection(tmp_path):
-    async def scenario():
-        Client, entered, release = controlled_mcp_client('initialize')
-        owner = mcp_module.McpHostSupervisor(
-            workspace_root=tmp_path, configs=(readiness_config(scope_policy='ROOT_ONLY'),),
-            credential_boundary=ProcessCredentialBoundary(), client_factory=Client,
-        )
-        try:
-            await owner.start()
-            await entered.wait()
-            await asyncio.wait_for(owner.wait_initial_readiness(
-                conversation_scope_kind=ModelInputScopeKind.SUBAGENT), 1)
-            assert not owner._tasks['fixture'].done()
-            assert owner.readiness_progress() is None
-        finally:
-            release.set()
-            await owner.aclose()
-
-    asyncio.run(scenario())
-
-
 @pytest.mark.postgres
 @pytest.mark.parametrize('phase', ['initialize', 'discovery'])
-@pytest.mark.parametrize('finish', ['ready', 'stop', 'close', 'disable'])
-def test_restored_pending_waits_before_final_provider_and_prefix(
+@pytest.mark.parametrize('finish', ['ready', 'stop', 'close'])
+def test_restored_pending_provider_runs_while_connection_is_blocked(
     tmp_path, monkeypatch, stage2_migrated_postgres_database, phase, finish,
 ):
     from pulsara_agent.conversation_kernel import host as host_module
@@ -215,11 +129,13 @@ def test_restored_pending_waits_before_final_provider_and_prefix(
         requests = []
         provider_sent = asyncio.Event()
         advisory_sent = asyncio.Event()
+        finish_provider = asyncio.Event()
 
         async def stream(adapter, *, call, context):
             if call.fact.purpose is ModelCallPurpose.AGENT_MODEL_LOOP:
                 requests.append(build_chat_completions_payload(call=call, context=context))
                 provider_sent.set()
+                await finish_provider.wait()
             elif call.fact.purpose is ModelCallPurpose.SESSION_TITLE:
                 assert context.tools == ()
                 advisory_sent.set()
@@ -263,19 +179,14 @@ def test_restored_pending_waits_before_final_provider_and_prefix(
             assert core._sessions[session.host_session_id] is session
             assert session._delivery_task is not None
             await asyncio.wait_for(entered.wait(), 5)
-            async with asyncio.timeout(10):
-                while session.mcp_readiness_progress() is None:
-                    await asyncio.sleep(0)
-            assert session.mcp_readiness_progress()['waiting'] is True
+            await asyncio.wait_for(provider_sent.wait(), 10)
             await asyncio.wait_for(advisory_sent.wait(), 10)
             scope = next(iter(session._input_continuity._slots))
-            assert session._input_continuity.current_view(scope) is None
-            assert requests == []
-            # The same read-only preview remains usable and cannot consume or
-            # bypass the execution wait, or install a provider prefix.
+            installed = session._input_continuity.current_view(scope)
+            assert installed is not None
+            assert len(requests) == 1
             await asyncio.wait_for(session.read_context_usage(), 10)
-            assert session._input_continuity.current_view(scope) is None
-            assert requests == []
+            assert session._input_continuity.current_view(scope) is installed
             attempt = session._mcp_supervisor._tasks['fixture']
             if finish == 'stop':
                 await session.request_stop_turn(command_id=random_id('command'),
@@ -287,40 +198,38 @@ def test_restored_pending_waits_before_final_provider_and_prefix(
             elif finish == 'close':
                 await core.close_session(session.host_session_id)
                 assert attempt.done()
-            elif finish == 'disable':
-                configured[0] = ()
-                await session.request_capability_refresh()
-            if finish != 'disable':
-                release.set()
-            if finish in {'ready', 'disable'}:
-                await asyncio.wait_for(provider_sent.wait(), 10)
+            release.set()
+            finish_provider.set()
+            if finish == 'ready':
                 async with asyncio.timeout(10):
                     while (await session.query_command(command_id)).status == 'PENDING':
                         await asyncio.sleep(0)
                 assert len(requests) == 1
                 names = {item['function']['name'] for item in requests[0]['tools']}
                 assert {'query_capabilities','call_mcp_tool'} <= names
-                if finish == 'ready':
-                    # A later physical reconnect is not another cold boundary.
-                    release.clear()
-                    entered.clear()
-                    session._mcp_supervisor.reconnect('fixture')
-                    await asyncio.wait_for(entered.wait(), 5)
-                    replacement = session._mcp_supervisor._tasks['fixture']
-                    assert not replacement.done()
-                    await asyncio.wait_for(session.run_turn(PromptContent.text('Continue the same installed epoch.'),
-                        command_id=random_id('command')), 10)
-                    assert len(requests) == 2
-                    assert requests[1]['tools'] == requests[0]['tools']
-                    assert requests[1]['messages'][:len(requests[0]['messages'])] == requests[0]['messages']
-                    assert not replacement.done()
+                initial_catalog = json.dumps(requests[0]['messages'][2], ensure_ascii=False)
+                assert '当前已启用的 MCP 服务' in initial_catalog and '- fixture' in initial_catalog
+                await asyncio.wait_for(asyncio.shield(attempt), 5)
+                # A later physical reconnect is not another cold boundary.
+                release.clear()
+                entered.clear()
+                session._mcp_supervisor.reconnect('fixture')
+                await asyncio.wait_for(entered.wait(), 5)
+                replacement = session._mcp_supervisor._tasks['fixture']
+                assert not replacement.done()
+                await asyncio.wait_for(session.run_turn(PromptContent.text('Continue the same installed epoch.'),
+                    command_id=random_id('command')), 10)
+                assert len(requests) == 2
+                assert requests[1]['tools'] == requests[0]['tools']
+                assert requests[1]['messages'][:len(requests[0]['messages'])] == requests[0]['messages']
+                assert not replacement.done()
             else:
                 if not attempt.done():
                     await asyncio.wait_for(attempt, 5)
-                assert requests == []
-                assert session._input_continuity.current_view(scope) is None
+                assert len(requests) == 1
         finally:
             release.set()
+            finish_provider.set()
             await core.shutdown()
 
     asyncio.run(scenario())
@@ -418,6 +327,7 @@ def test_failure_then_ready_on_tool_continuation_keeps_actual_prefix_and_uses_me
         try:
             session = await core.open_session(HostWorkspaceInput(workspace_kind='project', workspace_root=tmp_path))
             await session.update_model_call_binding(test_model_binding(runtime))
+            await asyncio.shield(session._mcp_supervisor._tasks['fixture'])
             result = await session.run_turn(PromptContent.text('Use the late MCP through its catalog.'), command_id=random_id('command'))
             assert result.final_text == 'DONE'
             assert len(requests) == 4
@@ -441,7 +351,7 @@ def test_failure_then_ready_on_tool_continuation_keeps_actual_prefix_and_uses_me
 
 @pytest.mark.postgres
 @pytest.mark.parametrize('phase', ['initialize', 'discovery'])
-def test_new_child_canonical_work_uses_its_own_cold_readiness_scope(
+def test_new_child_provider_runs_while_its_connection_is_blocked(
     tmp_path, monkeypatch, stage2_migrated_postgres_database, phase,
 ):
     from pulsara_agent.conversation_kernel import host as host_module
@@ -457,7 +367,7 @@ def test_new_child_canonical_work_uses_its_own_cold_readiness_scope(
 
     async def scenario():
         monkeypatch.setenv('PULSARA_HOME', str(tmp_path / 'home'))
-        (tmp_path/'delegation.js').write_text('await tools.run_agent([{instruction:"CHILD_MCP_ONLY",work_title:"Child MCP readiness"}]);')
+        (tmp_path/'delegation.js').write_text('await tools.run_agent([{instruction:"CHILD_MCP_ONLY",work_title:"Child MCP startup"}]);')
         ChildClient, entered, release = controlled_mcp_client(phase)
         preparations = []
 
@@ -505,14 +415,15 @@ def test_new_child_canonical_work_uses_its_own_cold_readiness_scope(
             async with asyncio.timeout(10):
                 while True:
                     child = next((item for item in core._sessions.values() if item.root_session_id == root.session_id), None)
-                    if child is not None and child.mcp_readiness_progress() is not None:
+                    if child is not None and child_sent.is_set():
                         break
                     await asyncio.sleep(0)
             assert child._delivery_task is not None
             scope = next(iter(child._input_continuity._slots))
             assert scope.scope_kind is ModelInputScopeKind.SUBAGENT
-            assert child._input_continuity.current_view(scope) is None
-            assert child_requests == []
+            assert child._input_continuity.current_view(scope) is not None
+            assert len(child_requests) == 1
+            assert not child._mcp_supervisor._tasks['fixture'].done()
             assert len(root_requests) == 2
             root_names = {item['function']['name'] for item in root_requests[0]['tools']}
             assert {'exec_cell', 'query_agents', 'send_agent_message', 'stop_agent'} <= root_names

@@ -541,7 +541,6 @@ class KernelHostSession(
         self._cell_output_wake = asyncio.Event()
         self._hook_diagnostics = LoggingHookDiagnosticAdapter()
         self._scheduled_tasks = scheduled_tasks
-        self._capability_refresh_wake = asyncio.Event()
         self._hook_context = HookContextOwner(self._hook_diagnostics)
         self._hook_root_scope = HookDispatchScopeRef(
             self,
@@ -669,8 +668,6 @@ class KernelHostSession(
             user_config_path=mcp_management.user_config_path,
             configs=mcp_configs,
             credential_boundary=credential_boundary,
-            configuration_change=self._capability_refresh_wake,
-            adopt_configuration=self._adopt_capabilities_for_execution,
         )
         self._tools.bind_mcp_supervisor(self._mcp_supervisor)
         from pulsara_agent.code_mode.host import CodeModeHost
@@ -817,9 +814,6 @@ class KernelHostSession(
         if self.root_session_id is None:
             self._memory_embedding_maintainer.start()
         self._queue_wake.set()
-
-    def mcp_readiness_progress(self) -> dict[str, object] | None:
-        return self._mcp_supervisor.readiness_progress()
 
     async def _agent_admission_facts(self, context, requests) -> dict[str, object]:
         if self.root_session_id is not None or context.session_id != self.session_id:
@@ -1085,7 +1079,6 @@ class KernelHostSession(
         async with self._lock:
             self._require_open()
             self._capability_refresh_requested_revision += 1
-            self._capability_refresh_wake.set()
             revision = self._capability_refresh_requested_revision
             return revision
 

@@ -1,4 +1,5 @@
 """Native turn Stop must cancel lane waits without dispatching effects."""
+from tests.support.mcp import finish_connection_attempts
 import asyncio
 import json
 import re
@@ -78,7 +79,7 @@ if __name__ == "__main__":
         try:
             await session.attach_controller("browser:stop-test")
             await session.reload_mcp_configs(configs, deadline_monotonic=monotonic() + 20)
-            await session._mcp_supervisor.wait_initial_readiness()
+            await finish_connection_attempts(session._mcp_supervisor)
             session._tools.prepare_tool_surface_safe_point()
             slot = session._mcp_supervisor._slots["fixture"]
             server_capacity, host_capacity = slot._lane._value, slot._host_lane._value

@@ -15,6 +15,11 @@ try {
 ```
 
 A failure with an actual business value exposes that full value as err.result.
+An ERROR business value may contain completed effects or usable partial results,
+including callable references returned by an incomplete capability search. Inspect
+its content to distinguish succeeded, failed and unknown parts; do not assume
+every part failed or blindly repeat the whole action. Failure or cancellation
+does not prove rollback.
 An earlier argument or transport failure may have no business value. Never
 re-execute a write or remote action merely to obtain its response. Accepted effects
 and their result settlement remain owned by the original tool call.

@@ -1,4 +1,5 @@
 """Scheduling isolation through real SDK sessions and local HTTP peers."""
+from tests.support.mcp import finish_connection_attempts
 
 import asyncio
 from contextlib import asynccontextmanager
@@ -175,7 +176,7 @@ def test_serial_server_queue_leaves_host_capacity_for_healthy_server(tmp_path):
             tasks = []
             try:
                 await supervisor.start()
-                await supervisor.wait_initial_readiness()
+                await finish_connection_attempts(supervisor)
                 runtime = supervisor.install_pending_at_safe_point()
                 executors = {item.semantic.server_id: item for item in runtime.executors.values()}
                 slow_slot = runtime.slot_lease_by_server["a_slow"]._slot
@@ -219,7 +220,7 @@ def test_cancel_waiting_for_host_releases_server_lane(tmp_path, waiting_operatio
             tasks = []
             try:
                 await supervisor.start()
-                await supervisor.wait_initial_readiness()
+                await finish_connection_attempts(supervisor)
                 runtime = supervisor.install_pending_at_safe_point()
                 executors = {item.semantic.server_id: item for item in runtime.executors.values()}
                 fast_slot = runtime.slot_lease_by_server["b_fast"]._slot
@@ -301,7 +302,7 @@ def test_catalog_refresh_queue_does_not_reserve_host_io_capacity(tmp_path):
             runtime = None
             try:
                 await supervisor.start()
-                await supervisor.wait_initial_readiness()
+                await finish_connection_attempts(supervisor)
                 runtime = supervisor.install_pending_at_safe_point()
                 refreshing = True
                 await bus.publish(ToolsListChanged())

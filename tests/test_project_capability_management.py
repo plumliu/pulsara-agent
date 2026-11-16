@@ -902,7 +902,7 @@ def test_live_session_refresh_is_lazy_until_the_next_turn_safe_point() -> None:
         session = SimpleNamespace(
             _lock=asyncio.Lock(),
             _queue_wake=asyncio.Event(),
-            _capability_refresh_requested_revision=0, _capability_refresh_wake=asyncio.Event(),
+            _capability_refresh_requested_revision=0,
             _capability_refresh_applied_revision=0,
             _capability_refresh_attention=None,
             _require_open=lambda: None,
@@ -930,7 +930,7 @@ def test_failed_project_capability_adoption_does_not_starve_the_queued_turn() ->
         session = SimpleNamespace(
             _lock=asyncio.Lock(),
             _queue_wake=asyncio.Event(),
-            _capability_refresh_requested_revision=0, _capability_refresh_wake=asyncio.Event(),
+            _capability_refresh_requested_revision=0,
             _capability_refresh_applied_revision=0,
             _capability_refresh_attention=None,
             _require_open=lambda: None,

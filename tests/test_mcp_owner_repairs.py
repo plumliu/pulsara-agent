@@ -1,6 +1,7 @@
 """MCP refresh/permission and Plugin data-owner hard-cut contracts."""
 
 from __future__ import annotations
+from tests.support.mcp import finish_connection_attempts
 
 import asyncio
 import json
@@ -151,7 +152,7 @@ def test_periodic_refresh_reuses_connection_and_keeps_old_lease_stale(
 
         monkeypatch.setattr(asyncio, "sleep", controlled_sleep)
         await supervisor.start()
-        await supervisor.wait_initial_readiness()
+        await finish_connection_attempts(supervisor)
         first = supervisor.install_pending_at_safe_point()
         second = None
         try:
@@ -212,7 +213,7 @@ def test_relist_drains_bounded_calls_and_retries_notification_race(tmp_path):
             client_factory=Client,
         )
         await supervisor.start()
-        await supervisor.wait_initial_readiness()
+        await finish_connection_attempts(supervisor)
         client = supervisor._slots["fixture"].client
         first = supervisor.install_pending_at_safe_point()
         second = None
@@ -276,7 +277,7 @@ def test_late_session_id_fences_parallel_slot_but_accepted_call_settles(tmp_path
             client_factory=Client,
         )
         await supervisor.start()
-        await supervisor.wait_initial_readiness()
+        await finish_connection_attempts(supervisor)
         client = supervisor._slots["fixture"].client
         runtime = supervisor.install_pending_at_safe_point()
         try:
@@ -529,7 +530,7 @@ def test_safe_point_defers_other_server_while_dirty_call_drains(tmp_path):
             client_factory=Client,
         )
         await supervisor.start()
-        await supervisor.wait_initial_readiness()
+        await finish_connection_attempts(supervisor)
         first = supervisor.install_pending_at_safe_point()
         second = None
         clients = {name: supervisor._slots[name].client for name in ("a", "b")}

@@ -9,7 +9,7 @@ from dataclasses import dataclass, field, fields
 from importlib import import_module
 from pathlib import Path
 from threading import RLock
-from typing import TYPE_CHECKING, Awaitable, Callable, Mapping
+from typing import TYPE_CHECKING, Mapping
 
 from pulsara_agent.capability.contracts import (
     CapabilityKind,
@@ -709,8 +709,6 @@ class McpHostSupervisor:
         user_config_path: Path | None = None,
         client_factory: type[BoundedMcpSdkClient] | None = None,
         connect_attempt_timeout_seconds: float = DEFAULT_MCP_CONNECT_ATTEMPT_TIMEOUT_SECONDS,
-        configuration_change: asyncio.Event | None = None,
-        adopt_configuration: Callable[[], Awaitable[bool]] | None = None,
     ) -> None:
         if len(configs) > MAXIMUM_CONFIGURED_MCP_SERVERS:
             raise ValueError("too many configured MCP servers")
@@ -722,10 +720,6 @@ class McpHostSupervisor:
         self._config_by_id = {item.server_id: item for item in self.configs}
         self._client_factory = client_factory
         self._credential_boundary = credential_boundary
-        if (configuration_change is None) != (adopt_configuration is None):
-            raise ValueError("MCP configuration observation requires its adoption owner")
-        self._adoption_requested = configuration_change
-        self._adopt_configuration = adopt_configuration
         if connect_attempt_timeout_seconds <= 0:
             raise ValueError("MCP connection watchdog must be positive")
         self._connect_attempt_timeout_seconds = connect_attempt_timeout_seconds
@@ -768,12 +762,6 @@ class McpHostSupervisor:
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
         self._capability_owner_authenticity = object()
-        self._configuration_changed = asyncio.Event()
-        # Only current execution observers live here; outcomes remain owned by
-        # the existing connection tasks, including a failed task being retried.
-        self._readiness_waits: dict[
-            asyncio.Task, tuple[tuple[McpServerConfig, asyncio.Task[_McpConnectOutcome]], ...]
-        ] = {}
 
     @property
     def owner_epoch(self) -> str:
@@ -807,98 +795,6 @@ class McpHostSupervisor:
                     name=f"mcp-periodic-refresh:{config.server_id}",
                 )
 
-    async def wait_initial_readiness(self, *, conversation_scope_kind: ModelInputScopeKind = ModelInputScopeKind.ROOT) -> None:
-        """Observe the captured attempts once, never their automatic successors.
-
-        No input snapshot or surface borrow may be held by the caller. A
-        cancelled observer leaves connection/cleanup ownership with supervisor.
-        Config replacement releases that observer without waiting for old IO.
-        """
-        observer = asyncio.current_task()
-        assert observer is not None
-        with self._lock:
-            if self._closed:
-                raise asyncio.CancelledError
-            captured = tuple(
-                (config, self._tasks[config.server_id])
-                for config in self.configs
-                if config.enabled
-                and config.server_id in self._tasks
-                and not self._installed_semantic_surface_retained_locked(config.server_id)
-                and (conversation_scope_kind is ModelInputScopeKind.ROOT
-                     or config.scope_policy is McpScopePolicy.ROOT_AND_SUBAGENTS)
-            )
-            self._readiness_waits[observer] = captured
-        try:
-            while True:
-                if self._adoption_requested is not None and self._adoption_requested.is_set():
-                    self._adoption_requested.clear()
-                    assert self._adopt_configuration is not None
-                    await self._adopt_configuration()
-                    if self._adoption_requested.is_set():
-                        continue
-                with self._lock:
-                    if self._closed:
-                        raise asyncio.CancelledError
-                    current = tuple(
-                        (config, task) for config, task in captured
-                        if (actual := self._config_by_id.get(config.server_id)) is not None
-                        and actual.enabled
-                        and actual.resolved_config_identity == config.resolved_config_identity
-                    )
-                    changed = self._configuration_changed
-                pending = set()
-                for _config, task in current:
-                    if task.done():
-                        # Expected connect/discovery failures are typed outcomes.
-                        # Unexpected cleanup/owner exceptions must still escape.
-                        task.result()
-                    else:
-                        pending.add(task)
-                if not pending:
-                    return
-                configuration_wait = asyncio.create_task(changed.wait())
-                adoption_wait = (None if self._adoption_requested is None else
-                                 asyncio.create_task(self._adoption_requested.wait()))
-                try:
-                    waits = (*pending, configuration_wait) if adoption_wait is None else (*pending, configuration_wait, adoption_wait)
-                    await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
-                finally:
-                    configuration_wait.cancel()
-                    observers = [configuration_wait]
-                    if adoption_wait is not None:
-                        adoption_wait.cancel()
-                        observers.append(adoption_wait)
-                    await asyncio.gather(*observers, return_exceptions=True)
-        finally:
-            with self._lock:
-                self._readiness_waits.pop(observer, None)
-
-    def readiness_progress(self) -> dict[str, object] | None:
-        """Disposable current-execution progress; reads never start/wait work."""
-        with self._lock:
-            if not self._readiness_waits:
-                return None
-            servers = {}
-            for captured in self._readiness_waits.values():
-                for config, task in captured:
-                    actual = self._config_by_id.get(config.server_id)
-                    if (actual is None or not actual.enabled
-                            or actual.resolved_config_identity != config.resolved_config_identity):
-                        continue
-                    if task.done() and not task.cancelled() and task.exception() is None:
-                        outcome = task.result()
-                        state, failure = outcome.state, outcome.failure
-                    else:
-                        state, failure = self._live_state_locked(config, None)
-                    servers[config.server_id] = {"server_id": config.server_id,
-                        "display_name": config.display_name, "state": state.value,
-                        "failure": failure}
-            values = list(servers.values())
-            return {"servers": values, "waiting": any(item["state"] in {
-                McpServerState.CONNECTING.value, McpServerState.DISCOVERING.value,
-            } for item in values)}
-
     def reload_configs(
         self, configs: tuple[McpServerConfig, ...]
     ) -> frozenset[str]:
@@ -918,8 +814,6 @@ class McpHostSupervisor:
         with self._lock:
             if self._closed:
                 raise RuntimeError("MCP supervisor is closed")
-            self._configuration_changed.set()
-            self._configuration_changed = asyncio.Event()
             old = self._config_by_id
             changed_ids = {
                 server_id
@@ -2296,7 +2190,6 @@ class McpHostSupervisor:
         with self._lock:
             if self._close_task is None:
                 self._closed = True
-                self._configuration_changed.set()
                 self._close_task = asyncio.create_task(
                     self._close(), name="mcp-supervisor-physical-close"
                 )

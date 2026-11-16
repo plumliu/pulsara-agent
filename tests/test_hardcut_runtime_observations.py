@@ -267,7 +267,7 @@ def test_mcp_schema_diff_survives_notready_and_ignores_aba_aliases():
     changed.catalog_snapshot.servers[0].configuration.transport = "changed endpoint"
     notice = _mcp_changes(first, _mcp_comparison_snapshot(first, changed))
     assert len(notice) == 1 and "连接配置" in notice[0].text
-    assert notice[0].target == _mcp_changes(None, first)[0].target
+    assert notice[0].target == freeze_json(first.catalog_snapshot.servers[0].connection_target)
 
 
 def test_memory_reads_only_real_root_human_and_carries_uninstalled_candidate():
@@ -534,7 +534,7 @@ def test_mcp_notice_targets_are_consumable_local_and_plugin_query_targets(tmp_pa
             workspace_root=tmp_path/'workspace',pulsara_home=tmp_path/'home',user_config_path=tmp_path/'home'/'mcp.json')
         server=NS(server_id=server_id,runtime_source=origin,connection_target=target,configuration=None,
             display_name='Service',status=NS(value='READY'),sanitized_instructions='',scope_subagents=False)
-        notice=_mcp_changes(None,NS(catalog_snapshot=NS(servers=(server,)),inspection_inputs=()))[0]
+        notice=_mcp_changes(NS(catalog_snapshot=NS(servers=()),inspection_inputs=()),NS(catalog_snapshot=NS(servers=(server,)),inspection_inputs=()))[0]
         actual=thaw_json(notice.target)
         assert parse_query({'kind':'MCP','target':actual})['target']==target
         assert actual==target
@@ -675,3 +675,220 @@ def test_cell_payload_read_failure_keeps_identity_quote_and_installed_prefix():
     assert sum(isinstance(part, LLMImagePart) for message in cold.messages for part in message.content) == 1
     assert image in cold.messages[0].content
     assert not any(failure.reason in part.text for message in cold.messages for part in message.content if isinstance(part, LLMTextPart))
+
+
+def _mcp_catalog_collector(tmp_path):
+    from tests.support.model_input import _Capability
+    return KernelContextSourceCollector(
+        workspace_kind="project", workspace_root=tmp_path,
+        capability_composer=_Capability(), base_system_prompt="BASE",
+        display_timezone=timezone.utc,
+    )
+
+
+def _collect_mcp_catalog(collector, canonical, mcp_owner, *, previous=None,
+                         new_context=False, active=False, idle=False, human=False,
+                         skill_unavailable=False):
+    from pulsara_agent.capability.contracts import CapabilitySourceSnapshotDisposition
+    from pulsara_agent.model_input.contracts import CapabilityActivationSubjectKind
+    skill = collector.freeze_skill_capability_source_snapshot(
+        conversation_scope_kind=canonical.identity.conversation_scope_kind)
+    if skill_unavailable:
+        # Skill collection can fail independently of the scoped MCP owner.
+        from types import SimpleNamespace
+        skill = replace(skill, source_snapshot=SimpleNamespace(
+            disposition=CapabilitySourceSnapshotDisposition.UNAVAILABLE))
+    return collector.collect(
+        activation_subject=CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT if human else None,
+        activation_text="", skill_reference_surfaces=(), tool_surface=None,
+        canonical_facts=static_canonical_compile_facts(canonical),
+        tool_exposure_plan=None, skill_dispatch_view=None, skill_owner_snapshot=skill,
+        mcp_owner_snapshot=mcp_owner, previous_state=previous, new_context=new_context,
+        active_compaction=active, allow_turn_observations=not idle,
+    )
+
+
+def _mcp_catalog_config(server_id="search", *, enabled=True, runtime_source=None, scope="ROOT_AND_SUBAGENTS"):
+    from pulsara_agent.mcp_config import _parse_server
+    import sys
+    return _parse_server(server_id, {
+        "enabled": enabled, "scope_policy": scope,
+        "transport": {"type": "stdio", "command": sys.executable},
+    }, runtime_source=runtime_source)
+
+
+def _mcp_catalog_supervisor(tmp_path, *, enabled=True, configs=None):
+    from pulsara_agent.conversation_kernel.mcp.supervisor import McpHostSupervisor
+    from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
+    config = _mcp_catalog_config(enabled=enabled)
+    return McpHostSupervisor(workspace_root=tmp_path, configs=(config,) if configs is None else configs,
+                             credential_boundary=ProcessCredentialBoundary())
+
+
+def test_initial_mcp_catalog_uses_scoped_enabled_public_connections(tmp_path):
+    from pulsara_agent.conversation_kernel.context_sources import _mcp_catalog_text
+    from pulsara_agent.mcp_config import (
+        LocalConfiguredMcpRuntimeSource, ManagedPackageMcpRuntimeSource,
+        McpLocalConfigSourceKind, _parse_server,
+    )
+    from pulsara_agent.plugins.mcp_adapter import framed_plugin_mcp_server_id
+    from tests.support.model_input import _snapshot, _user
+    supervisor = _mcp_catalog_supervisor(tmp_path)
+    config = supervisor.configs[0]
+    plugin = _mcp_catalog_config(
+        framed_plugin_mcp_server_id('knowledge-tools', 'search'),
+        runtime_source=ManagedPackageMcpRuntimeSource(store_scope_key='user',
+            package_owner_key='knowledge-tools', package_install_id=random_id('package')))
+    root_only = _parse_server('root-only', {
+        'scope_policy': 'ROOT_ONLY',
+        'transport': {'type':'stdio', 'command': config.transport.command}})
+    disabled = _mcp_catalog_config('disabled', enabled=False)
+    internal = _mcp_catalog_config('internal', runtime_source=LocalConfiguredMcpRuntimeSource(
+        source_kind=McpLocalConfigSourceKind.HOST_OVERRIDE))
+    supervisor = _mcp_catalog_supervisor(tmp_path, configs=(plugin, disabled, internal, root_only, config))
+    scope = ModelInputScopeKind.ROOT
+    frozen = supervisor.freeze_capability_source_snapshot_set(conversation_scope_kind=scope)
+    sources = _collect_mcp_catalog(_mcp_catalog_collector(tmp_path), _snapshot(_user('search')),
+                                   frozen, new_context=True, human=True, skill_unavailable=True)
+    catalog = next(c for c in sources.candidates if c.source_kind is ContextSourceKind.MCP_CATALOG)
+    assert catalog.channel is ContextChannel.CONTEXT_MESSAGE
+    assert catalog.text.splitlines()[1:4] == ['- root-only', '- search（来自插件 knowledge-tools）', '- search']
+    assert '当前无法获取技能目录。' in [c.text for c in sources.candidates]
+    assert all(s.status.value != 'READY' for s in frozen.catalog_snapshot.servers)
+    assert sources.observation_state.mcp_catalog.catalog_snapshot is frozen.catalog_snapshot
+    assert ContextSourceKind.MCP_CATALOG_CHANGES not in {c.source_kind for c in sources.candidates}
+    child = supervisor.freeze_capability_source_snapshot_set(conversation_scope_kind=ModelInputScopeKind.SUBAGENT)
+    child_text = _mcp_catalog_text(child)
+    assert child_text.splitlines()[1:3] == ['- search（来自插件 knowledge-tools）', '- search']
+    assert 'root-only' not in child_text
+    for forbidden in ('disabled', 'internal', 'config_path', 'MCP_CONNECTION', 'stdio', 'knowledge-tools:'):
+        assert forbidden not in catalog.text
+    assert len([s for s in child.catalog_snapshot.servers if s.connection_target and s.connection_target['server_id'] == 'search']) == 2
+
+
+@pytest.mark.parametrize('enabled', [False, True])
+def test_unknown_mcp_catalog_recovers_honestly_and_accepts_observed_empty(tmp_path, enabled):
+    from tests.support.model_input import _snapshot, _user
+    collector = _mcp_catalog_collector(tmp_path)
+    canonical = _snapshot(_user('search'))
+    initial = _collect_mcp_catalog(collector, canonical, None, new_context=True)
+    assert initial.observation_state.mcp_catalog is None
+    assert '这不表示没有已安装的服务' in next(c.text for c in initial.candidates if c.source_kind is ContextSourceKind.MCP_CATALOG)
+    supervisor = _mcp_catalog_supervisor(tmp_path, enabled=enabled)
+    frozen = supervisor.freeze_capability_source_snapshot_set(conversation_scope_kind=ModelInputScopeKind.ROOT)
+    state = replace(initial.observation_state, last_turn_id=canonical.identity.turn_id)
+    recovered = _collect_mcp_catalog(collector, canonical, frozen, previous=state, human=True)
+    notice, = [c for c in recovered.candidates if c.source_kind is ContextSourceKind.MCP_CATALOG_CHANGES]
+    text = json.loads(notice.text)['pulsara_runtime_observation']['body'][0]['text']
+    assert '服务目录已恢复' in text
+    assert ('- search' in text) is enabled
+    assert ('当前没有已启用的 MCP 服务' in text) is not enabled
+    assert '已添加' not in text and '新增' not in text
+    assert recovered.observation_state.mcp_catalog.catalog_snapshot is frozen.catalog_snapshot
+    repeated = _collect_mcp_catalog(collector, canonical, frozen,
+        previous=recovered.observation_state, human=True)
+    assert ContextSourceKind.MCP_CATALOG_CHANGES not in {c.source_kind for c in repeated.candidates}
+
+
+def test_catalog_freeze_install_and_later_turn_diff_preserve_prefix(tmp_path):
+    from tests.support.model_input import (_snapshot, _user, _prepared_request,
+        _compile_and_install_append, _prepare_append_candidate)
+    from tests.support.round3 import new_test_provider_input_continuity_owner
+    collector = _mcp_catalog_collector(tmp_path)
+    supervisor = _mcp_catalog_supervisor(tmp_path)
+    frozen = supervisor.freeze_capability_source_snapshot_set(conversation_scope_kind=ModelInputScopeKind.ROOT)
+    user = _user('search')
+    canonical = _snapshot(user)
+    initial = _collect_mcp_catalog(collector, canonical, frozen, new_context=True)
+    compiler = StructuredModelInputCompiler()
+    owner = new_test_provider_input_continuity_owner()
+    req = _prepared_request(canonical, initial)
+    _, candidate = _prepare_append_candidate(compiler=compiler, owner=owner, request=req)
+    owner.register(candidate)
+    supervisor.reload_configs((_mcp_catalog_config(enabled=False),))
+    later = supervisor.freeze_capability_source_snapshot_set(conversation_scope_kind=ModelInputScopeKind.ROOT)
+    assert owner.current_view(candidate.scope) is None
+    def reject_install():
+        raise RuntimeError('installation rejected')
+    with pytest.raises(RuntimeError, match='installation rejected'):
+        owner.install(candidate=candidate, execution=object(), before_install=reject_install)
+    assert owner.current_view(candidate.scope) is None
+    owner.install(candidate=candidate, execution=object())
+    first = owner.current_view(candidate.scope)
+    assert first.observation_state.mcp_catalog.catalog_snapshot is frozen.catalog_snapshot
+    assert [join_text_content(m.content) for m in first.messages[:2]] == [
+        '当前没有可用技能。', next(c.text for c in initial.candidates if c.source_kind is ContextSourceKind.MCP_CATALOG)]
+    continued = _collect_mcp_catalog(collector, canonical, later, previous=first.observation_state)
+    assert ContextSourceKind.MCP_CATALOG_CHANGES not in {c.source_kind for c in continued.candidates}
+    new_turn = random_id('turn')
+    next_user = replace(_user('next', sequence=2), source_turn_id=new_turn)
+    next_canonical = _snapshot(user, next_user, turn_id=new_turn)
+    changed = _collect_mcp_catalog(collector, next_canonical, later, previous=first.observation_state)
+    notice, = [c.text for c in changed.candidates if c.source_kind is ContextSourceKind.MCP_CATALOG_CHANGES]
+    assert '已停用' in notice and ContextSourceKind.MCP_CATALOG not in {c.source_kind for c in changed.candidates}
+    # A discarded preview has no effect. A -> B -> A is compared with installed A.
+    preview = _collect_mcp_catalog(collector, canonical, later, previous=first.observation_state,
+                                   new_context=True, active=True)
+    assert preview.observation_state.mcp_catalog.catalog_snapshot is later.catalog_snapshot
+    assert owner.current_view(candidate.scope) is first
+    aba = _collect_mcp_catalog(collector, next_canonical, frozen, previous=first.observation_state)
+    assert ContextSourceKind.MCP_CATALOG_CHANGES not in {c.source_kind for c in aba.candidates}
+    _, second = _compile_and_install_append(compiler=compiler, owner=owner,
+        request=_prepared_request(next_canonical, changed))
+    assert second.system_prompt == first.system_prompt and second.tools == first.tools
+    assert second.messages[:len(first.messages)] == first.messages
+    assert second.observation_state.mcp_catalog.catalog_snapshot is later.catalog_snapshot
+    from pulsara_agent.model_input.contracts import StructuredModelInputCompileError, ModelInputCompileFailureKind
+    with pytest.raises(StructuredModelInputCompileError) as conflict:
+        _prepare_append_candidate(compiler=compiler, owner=owner,
+            request=_prepared_request(next_canonical, initial))
+    assert conflict.value.kind is ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+    assert owner.current_view(candidate.scope) is second
+
+
+@pytest.mark.parametrize('active', [False, True])
+def test_compaction_catalogues_precede_summary_and_reset_comparison(tmp_path, active):
+    from pulsara_agent.conversation_kernel.context_sources import build_compaction_context_source
+    from tests.support.model_input import _snapshot, _user, _prepared_request
+    collector = _mcp_catalog_collector(tmp_path)
+    supervisor = _mcp_catalog_supervisor(tmp_path)
+    old = supervisor.freeze_capability_source_snapshot_set(conversation_scope_kind=ModelInputScopeKind.ROOT)
+    supervisor = _mcp_catalog_supervisor(tmp_path, configs=(*supervisor.configs, _mcp_catalog_config('new-service')))
+    current = supervisor.freeze_capability_source_snapshot_set(conversation_scope_kind=ModelInputScopeKind.ROOT)
+    from pulsara_agent.conversation_kernel.compaction.prompt import (
+        build_compaction_snapshot_carrier, freeze_compaction_summary_output)
+    from pulsara_agent.conversation_kernel.compaction.contracts import CompactionContinuationMode
+    retained = _user('retained request', sequence=2)
+    carrier = build_compaction_snapshot_carrier(
+        summary=freeze_compaction_summary_output('model handoff summary', maximum_utf8_bytes=100),
+        retained_entry_ids=(retained.source_entry_id,), continuation_mode=CompactionContinuationMode.RESUME_ACTIVE_TURN
+        if active else CompactionContinuationMode.AWAIT_NEXT_USER,
+        active_request_entry_id=retained.source_entry_id if active else None)
+    summary = FrozenProviderInputItem(FrozenProviderInputItemKind.CONTEXT_SNAPSHOT,
+        None, 1, None, carrier)
+    from pulsara_agent.conversation_kernel.compaction.contracts import provider_input_item_canonical_expanded_bytes
+    canonical = _snapshot(summary, retained, canonical_expanded_bytes=
+        len(carrier.body) + provider_input_item_canonical_expanded_bytes(retained))
+    from pulsara_agent.conversation_kernel.context_sources import _mcp_comparison_snapshot
+    previous = InstalledObservationState(last_turn_id=canonical.identity.turn_id,
+        mcp_catalog=_mcp_comparison_snapshot(None, old))
+    sources = _collect_mcp_catalog(collector, canonical, current, previous=previous,
+        new_context=True, active=active, idle=not active)
+    if active:
+        sources = replace(sources, candidates=(*sources.candidates,
+            build_compaction_context_source(text='TODO/PCA handoff')))
+    compiled = StructuredModelInputCompiler().compile(_prepared_request(canonical, sources))
+    text = [join_text_content(m.content) for m in compiled.messages]
+    assert text[0] == '当前没有可用技能。'
+    assert text[1].startswith('当前已启用的 MCP 服务：\n- new-service\n- search')
+    assert text[2].endswith('model handoff summary')
+    if active:
+        assert text[3] == 'TODO/PCA handoff'
+        assert 'TURN_CONTEXT' in text[4]
+    else:
+        assert len(text) == 4 and text[-1] == 'retained request'
+    assert sources.observation_state.mcp_catalog.catalog_snapshot is current.catalog_snapshot
+    assert previous.mcp_catalog.catalog_snapshot is old.catalog_snapshot
+    next_sources = _collect_mcp_catalog(collector, canonical, current,
+        previous=sources.observation_state, human=True)
+    assert ContextSourceKind.MCP_CATALOG_CHANGES not in {c.source_kind for c in next_sources.candidates}

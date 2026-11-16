@@ -1,5 +1,7 @@
 # Pulsara MCP 统一 Meta 调用架构草案
 
+MCP 在后台连接和发现，首条模型请求不等待其完成。关键词搜索仅在当前 scope／parent 内判断目录覆盖；已启用服务尚无当前配置对应的已接纳目录时，返回 ERROR 并说明未完成范围，即使已有命中也保留已知记录和可用调用引用。ERROR 不代表这些部分无效。已禁用及作用域外服务不影响覆盖；同语义重连保留已接纳目录的可搜索性，物理不可用只影响调用准入。查询不会自动等待或重试。
+
 状态：统一 meta 调用已接入生产代码，已完成 hardcut 跨层及真实 provider 验收；正常应用尚未重启。本文件记录统一 meta 的架构决定，与 MCP 接入、能力查询、能力管理、统一交付、数据库及原生工具索引共同适用。MCP 变化通知沿[Runtime Observation 修订草案](PULSARA_RUNTIME_OBSERVATION_REVISION_DRAFT.zh.md)第 7 节。
 
 ## 1. 目标与范围
@@ -117,6 +119,8 @@ JS 使用 `tools.call_mcp_tool({target, arguments})`。本轮不改变参数校�
 
 ### 4.1 查询与固定入口
 
+按[MCP 初始服务目录规范](PULSARA_MCP_CATALOG_INCREMENTAL_IMPLEMENTATION_SPEC.zh.md)，合法冷上下文及采用的压缩 successor 在 Skill 目录后提供已启用 MCP 服务名称与固定发现指引。目录使用当前作用域的公开 server_id，Plugin 补轻量来源；名称不代表连接就绪或唯一定位身份，不显示工具详情和 Target。模型可用 query_capabilities(kind:"MCP", query:任务关键词) 直接取得匹配工具的完整 input_schema 和可用 invocation.target；仅命中服务时再按连接 Target 查询工具，不强制三级逐层查询。
+
 继续使用已确定的服务列表、服务内工具目录、工具精确详情三层查询和最小 Target。服务记录保留实际提供的 instructions，可附已知 resource_count 和 resource_template_count；未知计数省略，确认没有才填 0，计数随本次已接纳目录快照冻结，不额外请求 MCP。不默认交付所有远端工具的完整输入输出 schema，也不展开资源目录；需要时将连接 Target 交给 read_mcp_resource，不新增全量接口注入或自动探索流程。
 
 工具精确详情删除 DIRECT 分支及其 `tool_name`。可调用时返回既有 meta 调用引用；不可用时说明实际原因，不生成假引用。暂沿现有 META／UNAVAILABLE 表达，不在本轮另行设计查询结果包装。查询与管理入口中的权限、启停、信任、ROOT／子代理范围保持各自已确定的合同。
@@ -157,7 +161,7 @@ JS 使用 `tools.call_mcp_tool({target, arguments})`。本轮不改变参数校�
 
 ### 4.4 MCP 变化通知
 
-MCP_CATALOG_CHANGES 按服务聚合建议性的 text＋可选 MCP_CONNECTION Target。每个新 turn 的首次模型输入或本次新采用的用户主动 steer，都在准备汇报时比较最新已接纳的相关状态快照与上次已告知快照，临时计算最新净 diff；有筛选后的相关变化就汇报一次，无变化或 A→B→A 不通知。服务及工具变化范围、实际事实比较和初始化规则，沿[Runtime Observation 修订草案第 7 节](PULSARA_RUNTIME_OBSERVATION_REVISION_DRAFT.zh.md#7-mcp-变化通知)。Plan 自动续接遵循同一新 turn 规则；压缩成功采用新上下文时初始化比较快照，不补报此前变化，也不注入全量远端 schema。查询、引用有效性和执行继续沿本架构的既定规则。
+MCP_CATALOG_CHANGES 按服务聚合建议性的 text＋可选 MCP_CONNECTION Target。每个新 turn 的首次模型输入或本次新采用的用户主动 steer，都在准备汇报时比较最新已接纳的相关状态快照与上次已告知快照，临时计算最新净 diff；有筛选后的相关变化就汇报一次，无变化或 A→B→A 不通知。服务及工具变化范围、实际事实比较和初始化规则，沿[Runtime Observation 修订草案第 7 节](PULSARA_RUNTIME_OBSERVATION_REVISION_DRAFT.zh.md#7-mcp-变化通知)。Plan 自动续接遵循同一新 turn 规则；压缩候选从同次冻结 owner 生成新的轻量服务目录和完整比较快照，在既有 provider 输入安装成功时一起接受，不补报此前变化，也不注入全量远端 schema。候选测量／预览／放弃不改变已安装状态，普通新 turn 不重发初始目录；初始未知在下一个合格入口成功观察时报告目录恢复，空集也明确说明，不伪称新安装。查询、引用有效性和执行继续沿本架构的既定规则。
 
 通知侧只保存上次已告知的相关状态快照，diff 只临时计算，用于生成通知后即可丢弃。在既有 provider 输入安装成功时，用生成本次通知所依据的状态快照替换上次已告知快照，不在候选准备或队列采用时提前替换，也不等待模型回复；安装失败保留旧快照。准备消息后再发生的变化留待下一次比较，不重新读取安装时的最新状态来替换。实施时删除普通工具续跑触发目录通知及按展示摘要文字判重的旧路径，底层发现、刷新和执行准入继续按实际事实运行。
 
@@ -195,16 +199,17 @@ MCP 权限判断保持现有 meta 语义，使用当前 turn 冻结的权限模�
 
 ## 6. 当前代码接点与关联文档
 
-当前代码仍是混合入口，本草案不宣称已经实施：
+当前实现接点如下：
 
-- [tool_runtime_surface.py](src/pulsara_agent/conversation_kernel/tool_runtime_surface.py) 删除 MCP direct 绑定、不可用占位及 `freeze_code_mode_tool_directory` 中收录远端独立方法的分支，保留内置工具的安装与绑定。
-- [tool_runtime.py](src/pulsara_agent/conversation_kernel/tool_runtime.py) 的 `_inspect_mcp_tool_result` 目前按冻结目录返回 DIRECT 或 meta 引用；统一后查询使用 meta 路径。
-- [planner.py](src/pulsara_agent/capability/planner.py) 删除 MCP direct 选择、预算分流及详情 FULL 展示门槛；[mcp_compatibility.py](src/pulsara_agent/capability/mcp_compatibility.py) 的 MCP 原生定义兼容判断随调用方一起删除。
-- [tool_runtime_authorization.py](src/pulsara_agent/conversation_kernel/tool_runtime_authorization.py) 与 tool_runtime 删除 direct 专属授权和执行分支，保留 meta 权限矩阵、确认、执行准入及共同结算路径。
-- [provider_dispatch.py](src/pulsara_agent/conversation_kernel/provider_dispatch.py)、[能力合同](src/pulsara_agent/capability/contracts.py)及[前缀连续性](src/pulsara_agent/model_input/continuity.py)中的公共原生工具投影继续服务内置工具；删除 MCP direct 专属依赖，不拆除公共前缀核对。
-- [mcp/meta.py](src/pulsara_agent/conversation_kernel/mcp/meta.py) 及 tool_runtime 中的消费者绑定、结果接纳和清理接点，改为同一 session 共用引用、查询结果完整接纳后可调用；删除原生 FULL 安装和 Cell 交付回调对引用激活的依赖，以及 MAXIMUM_LIVE_NEW_MCP_TOOL_REFS_PER_EPOCH、McpToolRefCapacityExceeded 和 MCP_REF_CAPACITY_EXCEEDED 对应的旧上限路径及专属测试，不影响其他有独立用途的交付处理。
-- [supervisor.py](src/pulsara_agent/conversation_kernel/mcp/supervisor.py)、[slots.py](src/pulsara_agent/conversation_kernel/mcp/slots.py)和[SDK facade](src/pulsara_agent/conversation_kernel/mcp/sdk_facade.py)继续负责通知、目录刷新、SDK 缓存更新、当前连接及物理准入。将当前已接纳目录用于原生／JS 查询与新调用解析；从逻辑引用有效性中移除全局 runtime_generation 相等要求，保留执行许可与实际物理 owner 的核对。
-- 同一文件已有 meta 调用接纳与执行路径；[builtin_catalog.py](src/pulsara_agent/capability/builtin_catalog.py) 定义当前元工具参数。改名须覆盖原生目录、JS 目录、查询说明和教程，不改变远端参数语义。
+- [tool_runtime_surface.py](src/pulsara_agent/conversation_kernel/tool_runtime_surface.py) 负责内置工具安装、固定 Code Mode 方法目录及 MCP 当前运行时的 safe point 采用。远端工具不安装为独立原生定义或独立方法。
+- [capability_query.py](src/pulsara_agent/conversation_kernel/capability_query.py) 和 [mcp_search.py](src/pulsara_agent/capability/mcp_search.py) 负责服务、工具详情与 BM25 搜索；按当前来源和已接纳目录判断覆盖，未知目录不冒充完整无匹配。
+- [tool_runtime.py](src/pulsara_agent/conversation_kernel/tool_runtime.py) 的 `_query_capabilities_result` 负责查询值、引用准备和接受后结算；公开 ERROR 映射为既有内部 APPLICATION_ERROR，SUCCESS／CANCELLED 保持原义。
+- [planner.py](src/pulsara_agent/capability/planner.py) 生成内置工具投影，MCP 工具按需查询，不参与 direct 选择、预算分流或完整交付资格判断。
+- [tool_runtime_authorization.py](src/pulsara_agent/conversation_kernel/tool_runtime_authorization.py) 与 tool_runtime 负责 meta 权限矩阵、确认、执行准入及共同结算。
+- [provider_dispatch.py](src/pulsara_agent/conversation_kernel/provider_dispatch.py)、[能力合同](src/pulsara_agent/capability/contracts.py)及[前缀连续性](src/pulsara_agent/model_input/continuity.py) 负责固定 provider 输入与候选采用；动态 MCP 目录不改变同 epoch 的 SYSTEM、tools 或已安装消息前缀。
+- [mcp/meta.py](src/pulsara_agent/conversation_kernel/mcp/meta.py) 管理同 session 共用的调用引用、完整查询结果接纳与实际依据核对；NEXT 及 Cell 输出不承担引用激活。
+- [supervisor.py](src/pulsara_agent/conversation_kernel/mcp/supervisor.py)、[slots.py](src/pulsara_agent/conversation_kernel/mcp/slots.py)和[SDK facade](src/pulsara_agent/conversation_kernel/mcp/sdk_facade.py) 负责异步连接、通知、完整目录刷新、SDK 缓存更新及物理准入。首个模型请求不等待全部 MCP，实际调用仍核对当前执行许可与物理 owner。
+- [builtin_catalog.py](src/pulsara_agent/capability/builtin_catalog.py) 定义固定元工具参数及描述；原生与 JS 调用使用同一参数及业务结果合同。
 
 以下文档共同约束实施，职责如下：
 

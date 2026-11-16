@@ -1,4 +1,5 @@
 """Device MCP status follows real physical owners, not frozen provider semantics."""
+from tests.support.mcp import finish_connection_attempts
 
 import asyncio
 from types import SimpleNamespace
@@ -104,7 +105,7 @@ def test_failed_reconnect_is_not_ready_and_other_working_owner_still_wins(tmp_pa
             try:
                 for supervisor in supervisors:
                     await supervisor.start()
-                    await supervisor.wait_initial_readiness()
+                    await finish_connection_attempts(supervisor)
                     runtimes.append(supervisor.install_pending_at_safe_point())
                 first, second = supervisors
                 controller._by_session["first"] = SimpleNamespace(session=_session(first))
@@ -195,7 +196,7 @@ def test_subscription_relist_fences_management_tools_without_changing_provider_c
             runtime = None
             try:
                 await supervisor.start()
-                await supervisor.wait_initial_readiness()
+                await finish_connection_attempts(supervisor)
                 runtime = supervisor.install_pending_at_safe_point()
                 controller._by_session["owner"] = SimpleNamespace(session=_session(supervisor))
                 semantic_before = supervisor.catalog_snapshot().semantic_fingerprint
@@ -253,7 +254,7 @@ def test_replaced_connect_task_cannot_supply_status_for_new_config(tmp_path, mon
             runtime = None
             try:
                 await supervisor.start()
-                await supervisor.wait_initial_readiness()
+                await finish_connection_attempts(supervisor)
                 runtime = supervisor.install_pending_at_safe_point()
                 controller._by_session["owner"] = SimpleNamespace(session=_session(supervisor))
                 blocked = True

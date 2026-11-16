@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.support.mcp import finish_connection_attempts
 from tests.support.model_config import scheduled_task_service
 from pulsara_agent.identity import derive_id
 
@@ -683,7 +684,7 @@ async def _installed_runtime(tmp_path: Path):
         configs=(_config(tmp_path),),
     )
     await supervisor.start()
-    await supervisor.wait_initial_readiness()
+    await finish_connection_attempts(supervisor)
     runtime = supervisor.install_pending_at_safe_point()
     assert runtime is not None
     return supervisor, runtime
@@ -699,7 +700,7 @@ def test_round6_discovery_calls_only_negotiated_listing_capabilities(
             client_factory=_ToolsOnlyFakeMcpClient,  # type: ignore[arg-type]
         )
         await supervisor.start()
-        await supervisor.wait_initial_readiness()
+        await finish_connection_attempts(supervisor)
         runtime = supervisor.install_pending_at_safe_point()
         assert runtime is not None
         try:
@@ -728,7 +729,7 @@ def test_round9_discovery_retains_canonical_valid_wire_incompatible_mcp_tool(
             client_factory=_MixedSchemaFakeMcpClient,  # type: ignore[arg-type]
         )
         await supervisor.start()
-        await supervisor.wait_initial_readiness()
+        await finish_connection_attempts(supervisor)
         runtime = supervisor.install_pending_at_safe_point()
         assert runtime is not None
         try:
@@ -797,7 +798,7 @@ def test_round6_host_discovery_reservation_covers_client_open(
         )
         try:
             await supervisor.start()
-            await supervisor.wait_initial_readiness()
+            await finish_connection_attempts(supervisor)
             assert _DiscoveryReservationFakeMcpClient.peak_open == 1
         finally:
             await supervisor.aclose()
@@ -815,7 +816,7 @@ def test_round6_long_remote_tool_name_has_bounded_settleable_identity(
             client_factory=_LongNameFakeMcpClient,  # type: ignore[arg-type]
         )
         await supervisor.start()
-        await supervisor.wait_initial_readiness()
+        await finish_connection_attempts(supervisor)
         runtime = supervisor.install_pending_at_safe_point()
         assert runtime is not None
         try:
@@ -874,7 +875,7 @@ def test_round6_advertised_resource_template_instance_is_readable(
             client_factory=_TemplateResourceFakeMcpClient,  # type: ignore[arg-type]
         )
         await supervisor.start()
-        await supervisor.wait_initial_readiness()
+        await finish_connection_attempts(supervisor)
         runtime = supervisor.install_pending_at_safe_point()
         assert runtime is not None
         arguments = {'target': {"kind":'MCP_RESOURCE', "server_id":"fixture", 'uri':"fixture://round6/users/alice"}}
@@ -1485,7 +1486,7 @@ def test_round6_stdio_legacy_initialize_normalizes_implicit_complete(
             configs=(config,),
         )
         await supervisor.start()
-        await supervisor.wait_initial_readiness()
+        await finish_connection_attempts(supervisor)
         runtime = supervisor.install_pending_at_safe_point()
         assert runtime is not None
         try:
@@ -1530,7 +1531,7 @@ def test_round6_runtime_only_reconnect_preserves_semantic_surface_until_safe_poi
             client_factory=_FakeMcpClient,  # type: ignore[arg-type]
         )
         await supervisor.start()
-        await supervisor.wait_initial_readiness()
+        await finish_connection_attempts(supervisor)
         first = supervisor.install_pending_at_safe_point()
         assert first is not None
         second_config = _config(tmp_path, default_tool_timeout_ms=20_000)
@@ -1630,7 +1631,7 @@ def test_round9_old_draining_slot_failure_keeps_old_config_provenance(
             client_factory=_DelayedSuccessFakeMcpClient,  # type: ignore[arg-type]
         )
         await supervisor.start()
-        await supervisor.wait_initial_readiness()
+        await finish_connection_attempts(supervisor)
         first = supervisor.install_pending_at_safe_point()
         assert first is not None
         old_slot = next(iter(first.candidates.values())).slot_lease._slot  # noqa: SLF001
@@ -1672,7 +1673,7 @@ def test_round9_semantic_config_reload_publishes_catalog_only_successor(
             client_factory=_FakeMcpClient,  # type: ignore[arg-type]
         )
         await supervisor.start()
-        await supervisor.wait_initial_readiness()
+        await finish_connection_attempts(supervisor)
         first = supervisor.install_pending_at_safe_point()
         assert first is not None
         successor = None
@@ -1713,7 +1714,7 @@ def test_round6_replacement_attempt_keeps_installed_catalog_status_stable(
             client_factory=_FakeMcpClient,  # type: ignore[arg-type]
         )
         await supervisor.start()
-        await supervisor.wait_initial_readiness()
+        await finish_connection_attempts(supervisor)
         first = supervisor.install_pending_at_safe_point()
         assert first is not None
         before = supervisor.catalog_snapshot()
@@ -1936,7 +1937,7 @@ def test_round6_terminal_failure_retires_only_exact_pending_slot(
             client_factory=_FakeMcpClient,  # type: ignore[arg-type]
         )
         await supervisor.start()
-        await supervisor.wait_initial_readiness()
+        await finish_connection_attempts(supervisor)
         first = supervisor.install_pending_at_safe_point()
         assert first is not None
         installed = supervisor._installed["fixture"]  # noqa: SLF001
@@ -1978,7 +1979,7 @@ def test_round6_tool_failure_matrix_separates_exact_response_from_unknown(
             client_factory=client_factory,
         )
         await supervisor.start()
-        await supervisor.wait_initial_readiness()
+        await finish_connection_attempts(supervisor)
         runtime = supervisor.install_pending_at_safe_point()
         assert runtime is not None
         try:
@@ -2071,7 +2072,7 @@ def test_mcp_call_failure_preserves_outcome_and_cancellation(
             client_factory=Client,
         )
         await supervisor.start()
-        await supervisor.wait_initial_readiness()
+        await finish_connection_attempts(supervisor)
         runtime = supervisor.install_pending_at_safe_point()
         assert runtime is not None
         try:
@@ -2192,7 +2193,7 @@ def test_mcp_sse_failure_continues_batch_and_agent_loop(
         port.bind_mcp_supervisor(supervisor)
         _seal_mcp_test_port(port)
         await supervisor.start()
-        await supervisor.wait_initial_readiness()
+        await finish_connection_attempts(supervisor)
 
         async def stream(request):
             if request.model_call_index == 1:
@@ -2297,7 +2298,7 @@ def test_mcp_standard_read_keeps_connection_failure_detail(
             client_factory=Client,
         )
         await supervisor.start()
-        await supervisor.wait_initial_readiness()
+        await finish_connection_attempts(supervisor)
         runtime = supervisor.install_pending_at_safe_point()
         assert runtime is not None
         arguments = {'target': {"kind":'MCP_RESOURCE', "server_id":"fixture", 'uri':"fixture://slow/resource"}}
@@ -2342,7 +2343,7 @@ def test_round6_unsupported_input_required_preserves_external_effect_unknown(
             client_factory=_UnsupportedInputFakeMcpClient,  # type: ignore[arg-type]
         )
         await supervisor.start()
-        await supervisor.wait_initial_readiness()
+        await finish_connection_attempts(supervisor)
         runtime = supervisor.install_pending_at_safe_point()
         assert runtime is not None
         try:
@@ -2382,7 +2383,7 @@ def test_round6_standard_remote_read_has_one_bounded_operation_timeout(
             client_factory=_SlowStandardReadFakeMcpClient,  # type: ignore[arg-type]
         )
         await supervisor.start()
-        await supervisor.wait_initial_readiness()
+        await finish_connection_attempts(supervisor)
         runtime = supervisor.install_pending_at_safe_point()
         assert runtime is not None
         try:
@@ -2424,7 +2425,7 @@ def test_round6_unsupported_schema_dialect_never_installs_candidate(
         )
         try:
             await supervisor.start()
-            await supervisor.wait_initial_readiness()
+            await finish_connection_attempts(supervisor)
             assert supervisor.catalog_snapshot().servers[0].status is McpServerState.FAILED_TERMINAL
             assert supervisor.install_pending_at_safe_point() is not None
             assert supervisor.catalog_snapshot().servers[0].exposed_tool_count == 0
@@ -2481,7 +2482,7 @@ def test_round6_dirty_candidate_cannot_publish_at_safe_point(
             client_factory=_FakeMcpClient,  # type: ignore[arg-type]
         )
         await supervisor.start()
-        await supervisor.wait_initial_readiness()
+        await finish_connection_attempts(supervisor)
         candidate = supervisor._pending["fixture"]  # noqa: SLF001
         candidate.slot_lease._slot.mark_dirty()  # noqa: SLF001
         try:
@@ -2509,7 +2510,7 @@ def test_round6_list_changed_storm_coalesces_and_installs_fresh_lease(
             client_factory=_FakeMcpClient,  # type: ignore[arg-type]
         )
         await supervisor.start()
-        await supervisor.wait_initial_readiness()
+        await finish_connection_attempts(supervisor)
         first = supervisor.install_pending_at_safe_point()
         assert first is not None
         old_executor = next(iter(first.executors.values()))
@@ -2595,7 +2596,7 @@ def test_round6_first_failure_releases_readiness_before_background_retry(
         try:
             await supervisor.start()
             first = supervisor._tasks["fixture"]
-            await asyncio.wait_for(supervisor.wait_initial_readiness(), 1)
+            await asyncio.wait_for(finish_connection_attempts(supervisor), 1)
             await asyncio.wait_for(retry_started.wait(), 1)
             assert first.result().state is McpServerState.FAILED_RETRYABLE
             assert len(attempts) == 2
@@ -2634,7 +2635,7 @@ def test_round6_permission_matrix_is_local_and_scope_surface_is_stable(
         port.bind_mcp_supervisor(supervisor)
         _seal_mcp_test_port(port)
         await supervisor.start()
-        await supervisor.wait_initial_readiness()
+        await finish_connection_attempts(supervisor)
         port.prepare_tool_surface_safe_point()
         surface = prepare_test_direct_tool_surface(
             port,
@@ -2711,7 +2712,7 @@ def test_round6_permission_matrix_is_local_and_scope_surface_is_stable(
             configs=(_config(tmp_path, scope_policy="ROOT_ONLY"),),
         )
         await root_only.start()
-        await root_only.wait_initial_readiness()
+        await finish_connection_attempts(root_only)
         runtime = root_only.install_pending_at_safe_point()
         assert runtime is not None
         try:
@@ -2831,7 +2832,7 @@ def _exercise_postgres_mcp_effect_and_reconnect(
         port.bind_mcp_supervisor(supervisor)
         _seal_mcp_test_port(port)
         await supervisor.start()
-        await supervisor.wait_initial_readiness()
+        await finish_connection_attempts(supervisor)
         port.prepare_tool_surface_safe_point()
         prepare_test_direct_tool_surface(
             port,
@@ -2965,7 +2966,7 @@ def test_round6_long_remote_name_exact_result_reaches_canonical_acceptance(
         port.bind_mcp_supervisor(supervisor)
         _seal_mcp_test_port(port)
         await supervisor.start()
-        await supervisor.wait_initial_readiness()
+        await finish_connection_attempts(supervisor)
         port.prepare_tool_surface_safe_point()
         prepare_test_direct_tool_surface(
             port,
@@ -3117,7 +3118,7 @@ def test_round6_config_disable_rebuilds_surface_and_old_borrow_drains(
         port.bind_mcp_supervisor(supervisor)
         _seal_mcp_test_port(port)
         await supervisor.start()
-        await supervisor.wait_initial_readiness()
+        await finish_connection_attempts(supervisor)
         port.prepare_tool_surface_safe_point()
         old_surface = prepare_test_direct_tool_surface(
             port,
@@ -3254,7 +3255,7 @@ def test_round6_config_disable_cancels_visible_uncommitted_confirmation(
         port.bind_mcp_supervisor(supervisor)
         _seal_mcp_test_port(port)
         await supervisor.start()
-        await supervisor.wait_initial_readiness()
+        await finish_connection_attempts(supervisor)
         port.prepare_tool_surface_safe_point()
         surface = prepare_test_direct_tool_surface(
             port,
@@ -3465,7 +3466,7 @@ def test_round6_mcp_confirmation_admits_before_publish_and_drains_dirty(
         port.bind_mcp_supervisor(supervisor)
         _seal_mcp_test_port(port)
         await supervisor.start()
-        await supervisor.wait_initial_readiness()
+        await finish_connection_attempts(supervisor)
         port.prepare_tool_surface_safe_point()
         surface = prepare_test_direct_tool_surface(
             port,
@@ -3785,7 +3786,7 @@ def test_round6_streamable_http_fixture(tmp_path: Path) -> None:
                 configs=(config,),
             )
             await supervisor.start()
-            await supervisor.wait_initial_readiness()
+            await finish_connection_attempts(supervisor)
             runtime = supervisor.install_pending_at_safe_point()
             assert runtime is not None
             try:
@@ -4253,7 +4254,7 @@ def test_mcp_identity_frozen_for_success_error_and_cancelled_dispatch(tmp_path: 
             workspace_root=tmp_path, configs=(_config(tmp_path),), client_factory=Client,
         )
         await supervisor.start()
-        await supervisor.wait_initial_readiness()
+        await finish_connection_attempts(supervisor)
         runtime = supervisor.install_pending_at_safe_point()
         assert runtime is not None
         try:
@@ -4332,9 +4333,9 @@ def test_mcp_supervisor_epoch_and_permits_are_owner_scoped(tmp_path: Path) -> No
         first = McpHostSupervisor(workspace_root=tmp_path, configs=(config,), client_factory=_TemplateResourceFakeMcpClient)
         second = McpHostSupervisor(workspace_root=tmp_path, configs=(config,), client_factory=_TemplateResourceFakeMcpClient)
         await first.start()
-        await first.wait_initial_readiness()
+        await finish_connection_attempts(first)
         await second.start()
-        await second.wait_initial_readiness()
+        await finish_connection_attempts(second)
         first_runtime = first.install_pending_at_safe_point()
         second_runtime = second.install_pending_at_safe_point()
         assert first_runtime is not None and second_runtime is not None

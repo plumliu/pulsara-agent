@@ -1,6 +1,7 @@
 """Real SDK discovery and error responses from a local protocol peer."""
 
 from __future__ import annotations
+from tests.support.mcp import finish_connection_attempts
 
 import asyncio
 from contextlib import asynccontextmanager
@@ -129,7 +130,7 @@ async def _runtime(tmp_path, **options):
     runtime = None
     try:
         await supervisor.start()
-        await supervisor.wait_initial_readiness()
+        await finish_connection_attempts(supervisor)
         runtime = supervisor.install_pending_at_safe_point()
         assert runtime is not None
         yield supervisor, runtime

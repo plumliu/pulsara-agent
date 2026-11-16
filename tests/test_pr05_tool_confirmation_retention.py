@@ -1,6 +1,7 @@
 """PR05: exercise the production coordinator with explicit physical I/O barriers."""
 
 from __future__ import annotations
+from tests.support.mcp import finish_connection_attempts
 from tests.support.model_config import scheduled_task_service
 from pulsara_agent.identity import derive_id
 
@@ -574,7 +575,7 @@ def test_r07_r14_cancel_real_mcp_tool_waiter_joins_and_releases(
         port.bind_mcp_supervisor(supervisor)
         _seal_mcp_test_port(port)
         await supervisor.start()
-        await supervisor.wait_initial_readiness()
+        await finish_connection_attempts(supervisor)
         port.prepare_tool_surface_safe_point()
         surface = prepare_test_direct_tool_surface(port, conversation_scope_kind=ModelInputScopeKind.ROOT)
         borrow = port.borrow_tool_surface(surface)

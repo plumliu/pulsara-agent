@@ -140,6 +140,7 @@ def encode_runtime_observation(
     if not body or source_kind in {
         ContextSourceKind.BASE_SYSTEM,
         ContextSourceKind.SKILL_CATALOG,
+        ContextSourceKind.MCP_CATALOG,
         ContextSourceKind.COMPACTION_RUNTIME_HANDOFF,
     }:
         raise ValueError("runtime observation requires its source and non-empty body")

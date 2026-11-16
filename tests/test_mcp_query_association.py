@@ -1,6 +1,7 @@
 """Public connection paths join actual local and Plugin source owners."""
 
 import asyncio
+from dataclasses import fields
 
 import pytest
 import yaml
@@ -9,7 +10,7 @@ from pulsara_agent.capability.mcp_management import LocalMcpTarget
 from pulsara_agent.conversation_kernel.capability_query import CapabilitySourceQuery
 from pulsara_agent.conversation_kernel.mcp.supervisor import McpHostSupervisor
 from pulsara_agent.conversation_kernel.mcp.contracts import McpServerState
-from pulsara_agent.mcp_config import LocalConfiguredMcpRuntimeSource, ManagedPackageMcpRuntimeSource, McpLocalConfigSourceKind, _parse_server
+from pulsara_agent.mcp_config import LocalConfiguredMcpRuntimeSource, ManagedPackageMcpRuntimeSource, McpLocalConfigSourceKind, _parse_server, freeze_mcp_server_config
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.plugins.mcp_adapter import framed_plugin_mcp_server_id
 from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
@@ -32,7 +33,11 @@ def supervisor_for(service,config):
 
 
 async def query(service,runtime,arguments,*,scope=ModelInputScopeKind.ROOT):
-    return await CapabilitySourceQuery(service,runtime=runtime,scope=scope,inspect_tool=None).execute(arguments)
+    return await CapabilitySourceQuery(service,runtime=runtime,scope=scope,inspect_tool=None,
+        mcp_configs=tuple(freeze_mcp_server_config(**{
+            field.name: getattr(server.configuration, field.name)
+            for field in fields(server.configuration)
+        }) for server in runtime.catalog_for_scope(scope).servers)).execute(arguments)
 
 
 def records(result):

@@ -813,7 +813,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     return sessions;
   }, [forgetSession, globalReads]);
 
-  const { suggestion, mcpReadiness, observeTitle } = useSessionEphemeralResults({
+  const { suggestion, observeTitle } = useSessionEphemeralResults({
     cache: suggestionCache, adapter, connection, projection,
     suggestionsEnabled: bootstrap?.local_settings.input_suggestions_enabled ?? true,
     binding: sessionList.find(session => session.id === activeSessionId)?.modelCallBinding,
@@ -2967,7 +2967,6 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           todo={projection.todo}
           activePlanMode={projection.planMode}
           providerRetry={projection.providerRetry}
-          mcpReadiness={mcpReadiness}
           isRunning={projection.isRunning}
           activeTurnId={projection.activeTurnId}
           manualCompactionCommandId={projection.manualCompactionCommandId}

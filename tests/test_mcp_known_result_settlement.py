@@ -1,4 +1,5 @@
 """Stop joins local media adaptation after the remote MCP outcome is known."""
+from tests.support.mcp import finish_connection_attempts
 
 import asyncio
 import base64
@@ -188,7 +189,7 @@ if __name__=='__main__': server.run()
             await session.reload_mcp_configs(
                 configs, deadline_monotonic=monotonic() + 20
             )
-            await session._mcp_supervisor.wait_initial_readiness()
+            await finish_connection_attempts(session._mcp_supervisor)
             session._tools.prepare_tool_surface_safe_point()
             running = asyncio.create_task(
                 session.run_turn(

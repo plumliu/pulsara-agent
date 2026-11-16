@@ -1,5 +1,7 @@
 # Pulsara 能力查询与刷新工具修订与使用教程草案
 
+MCP 在后台连接和发现，首条模型请求不等待其完成。关键词搜索仅在当前 scope／parent 内判断目录覆盖；已启用服务尚无当前配置对应的已接纳目录时，返回 ERROR 并说明未完成范围，即使已有命中也保留已知记录和可用调用引用。ERROR 不代表这些部分无效。已禁用及作用域外服务不影响覆盖；同语义重连保留已接纳目录的可搜索性，物理不可用只影响调用准入。查询不会自动等待或重试。
+
 共用规则见[原生工具修订草案索引](../PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 1、2 章；完整保存、原生 12k／NEXT、JS 完整返回及 Cell 输出沿[统一交付草案](../PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)，唯一正文及业务字段归属沿[数据库 hardcut 草案](../PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md)。
 
 状态：当前合同已接入生产代码，正在完成 hardcut 跨层验收；正常使用仍按实施计划停用。本文件确定 query_capabilities 的 SKILL、HOOK、MCP、PLUGIN 四类必填 kind、最小 Target、参数、返回字段、原生／JS 用法和失败语义、MCP 关键词搜索，以及 reload_capabilities 的无参数原生调用和精简结果。manage_capability 单列在[能力变更工具草案](manage_capability.md)，已确定的管理 action 及参数、结果以该草案为准，其他 action 不由本文件推定。SKILL、HOOK、PLUGIN 沿 ROOT 原生及 Code Mode JS 的来源查询边界，不因分类调整开放子代理的本地来源查询；MCP 保留原调用者的来源及运行目录范围。reload_capabilities 保持仅 ROOT 原生、bypass 权限调用，不提供 JS API。call_mcp_tool 及 read_mcp_resource 的参数、原生／JS 返回和用法见[MCP 接入草案](mcp.md)。
@@ -604,6 +606,8 @@ NEXT 和导出只读冻结记录，不重新发现 Hook、读取当前配置、�
 
 ## 3. query_capabilities：MCP 分支
 
+合法新上下文在 Skill 目录后提供当前作用域已启用 MCP 服务的轻量名称目录及固定发现指引，见[初始目录规范](../PULSARA_MCP_CATALOG_INCREMENTAL_IMPLEMENTATION_SPEC.zh.md)。名称来自公开连接 Target 的 server_id，Plugin 只补来源名称；启用不等于就绪，同名也不代表同一连接。实际 Target、工具接口和 invocation.target 仍由本查询取得。可直接按任务关键词搜索匹配工具；已有足够接口说明和有效引用时直接调用，不必重新逐层列服务、列工具、查详情。查询参数及返回类型不变。
+
 ### 3.1 查询层次、搜索与范围
 
 MCP 分支保留服务、工具目录、工具精确详情三层查询，并支持按关键词搜索，不把协议支持的全部对象都展开为模型目录：
@@ -1056,7 +1060,7 @@ directory 的 object.value 为 McpToolListRecord，inspected 的 object.value �
 
 正常服务列表为空时为 SUCCESS 和一句“没有找到符合条件的 MCP 服务。”。已完整观察的服务工具目录为空时为 SUCCESS 和一句“该服务当前没有可见工具。”。未关联运行目录、尚未发现目录或目录不可读取时如实说明未知／失败及已知服务状态，不用空列表断言远端没有工具。
 
-搜索正常完成但没有命中时为 SUCCESS 和一句“没有找到匹配的 MCP 服务或工具。”。未命中不表示服务未安装或工具目录为空。请求范围内目录尚未取得或不可完整读取时，沿实际未知／失败规则说明，不把不完整搜索称为完整无匹配。
+当前 scope／parent 中已启用连接的目录均已接纳且没有命中时，返回 SUCCESS 和一句“没有找到匹配的 MCP 工具或服务。”。未命中不表示服务未安装或工具目录为空。范围内任一已启用连接尚无当前配置对应的完整目录时，无论零命中还是已有命中均返回 ERROR，并以 text 列出未完成服务，说明搜索不完整；保留本次已知命中及有效 schema／REF，结果接受后这些引用仍可调用。禁用及范围外连接不影响覆盖；同名来源必须与实际配置来源相接，不能借用另一来源的目录。相同语义重连保留已接纳目录的可搜索性，物理不可用仅影响调用准入。
 
 新查询和新调用引用解析使用当前已接纳、当前范围内的目录，不依附 provider 冻结工具视图。继续复用现有 SDK 通知、完整刷新、已配置周期刷新及重连发现；收到变动通知先按原 owner 暂挡新准入，完整刷新后才确认具体增删。刷新失败或部分目录不可读不确认删除，也不要求每次查询或调用都重新 listing。
 
@@ -1486,7 +1490,7 @@ next: null
 ## 6. 当前生产实现参考
 
 - [当前 query_capabilities 参数与说明](../src/pulsara_agent/capability/builtin_catalog.py)
-- [待替换的分类、分支校验及目录分页](../src/pulsara_agent/capability/source_query.py)
+- [查询分类与分支参数校验](../src/pulsara_agent/capability/source_query.py)
 - [来源观察、Skill 列表和精确详情](../src/pulsara_agent/conversation_kernel/capability_query.py)
 - [独立 Skill 观察及管理 owner](../src/pulsara_agent/capability/local_skills.py)
 - [Plugin 观察及来源 owner](../src/pulsara_agent/plugins/management.py)
@@ -1496,8 +1500,8 @@ next: null
 - [Hook 状态与公共定义投影](../src/pulsara_agent/hooks/presentation.py)
 - [能力页用户级 Hook 后端](../src/pulsara_agent/desktop_app/session_capabilities.py)
 - [能力页常规规则及审阅展示](../frontend/components/hooks-panel.tsx)
-- [MCP 服务与工具目录投影](../src/pulsara_agent/conversation_kernel/mcp/directory.py)
-- [当前 META 工具描述投影](../src/pulsara_agent/capability/mcp_projection.py)
+- [MCP 目录接纳与作用域快照](../src/pulsara_agent/conversation_kernel/mcp/supervisor.py)
+- [MCP 工具详情及调用引用](../src/pulsara_agent/conversation_kernel/mcp/meta.py)
 - [能力页 MCP 服务与工具展示](../frontend/components/capability-view.tsx)
 - [Plugin 稳定实例及安装目录布局](../src/pulsara_agent/plugins/package_store.py)
 - [Hook 来源身份与配置路径](../src/pulsara_agent/hooks/contracts.py)
@@ -1505,7 +1509,7 @@ next: null
 - [现有内部 Host 配置覆盖入口](../src/pulsara_agent/mcp_config.py)
 - [能力全量刷新及已有采用生命周期](../src/pulsara_agent/conversation_kernel/host.py)
 - [当前刷新调用及结果适配](../src/pulsara_agent/conversation_kernel/tool_runtime_management.py)
-- [当前刷新结果预算前置检查](../src/pulsara_agent/conversation_kernel/capability_management_execution.py)
+- [能力管理执行与结果结算](../src/pulsara_agent/conversation_kernel/capability_management_execution.py)
 - [ROOT 与 bypass 刷新授权](../src/pulsara_agent/conversation_kernel/tool_runtime_authorization.py)
 
 这些接点用于核对现状，不表示生产代码已实现本草案。实施时接通四个 query_capabilities 分支及各自最小 Target，删除旧复合 Target 参数及其兼容入口、顶层 source_kind 输入和旧展示分页。MCP 搜索按第 3 章使用内存 bm25s、复用详情和引用 owner，并核对工具／服务混合命中、工具去重、描述原文摘录与完整 schema；同一搜索结果的原生、JS、NEXT 和导出保持一致。现有 Skill 页面 ID 不当作通用 Skill 身份；Plugin 稳定实例路径、Hook 配置路径、MCP 配置键及原始工具名由原 owner 解析，不新建 Target 登记表。公开 MCP 查询只接受连接及工具 Target，移除运行实例 Target 的公开 schema、返回字段与教学，不删除底层实例或生命周期。HOST_OVERRIDE 保留现有内部入口且不启用、不消费，不为其增加公开支持。

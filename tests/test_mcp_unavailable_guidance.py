@@ -1,4 +1,5 @@
 """Tool inspection preserves actual schemas rather than exposing source internals."""
+from tests.support.mcp import finish_connection_attempts
 
 import asyncio
 
@@ -22,7 +23,7 @@ def test_real_mcp_tool_query_preserves_package_named_schema_fields(tmp_path):
             port=_port(tmp_path,supervisor)
             try:
                 await supervisor.start()
-                await supervisor.wait_initial_readiness()
+                await finish_connection_attempts(supervisor)
                 port.prepare_tool_surface_safe_point()
                 result=await invoke(port,'query_capabilities',{'kind':'MCP',
                     'target':{'kind':'MCP_TOOL','server_id':'catalog','remote_tool_name':'inspect'}})

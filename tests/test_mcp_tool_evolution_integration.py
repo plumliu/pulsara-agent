@@ -1,4 +1,5 @@
 """Actual SDK refreshes invalidate only changed tools and retain builtin prefix."""
+from tests.support.mcp import finish_connection_attempts
 
 import asyncio
 
@@ -48,7 +49,7 @@ def test_actual_tool_refreshes_preserve_unaffected_ref_and_frozen_builtin_tools(
             port=_port(tmp_path,supervisor)
             try:
                 await supervisor.start()
-                await supervisor.wait_initial_readiness()
+                await finish_connection_attempts(supervisor)
                 port.prepare_tool_surface_safe_point()
                 cold=prepare_test_direct_tool_surface(port,effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
                 frozen=tuple(canonical_json_bytes(item.wire_tool) for item in cold.capability_exposure_plan.direct_projection_set.projections)

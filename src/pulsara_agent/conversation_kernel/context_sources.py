@@ -151,6 +151,48 @@ def _mcp_label(server):
     return server.display_name + suffix
 
 
+def _mcp_enabled_service_names(owner):
+    """Project the scoped owner's public connections, without probing readiness."""
+    servers = sorted(
+        (
+            server
+            for server in owner.catalog_snapshot.servers
+            if server.configuration is not None
+            and server.configuration.enabled
+            and server.connection_target is not None
+        ),
+        key=lambda server: (server.connection_target["server_id"], server.server_id),
+    )
+    seen = set()
+    names = []
+    for server in servers:
+        connection = canonical_json_bytes(server.connection_target)
+        if connection in seen:
+            continue
+        seen.add(connection)
+        origin = server.runtime_source
+        suffix = (
+            f"（来自插件 {origin.package_owner_key}）"
+            if isinstance(origin, ManagedPackageMcpRuntimeSource)
+            else ""
+        )
+        names.append(server.connection_target["server_id"] + suffix)
+    return tuple(names)
+
+
+def _mcp_catalog_text(owner):
+    if owner is None:
+        return "当前无法获取 MCP 服务目录；这不表示没有已安装的服务。需要时可通过 query_capabilities 的 MCP 分支查询。"
+    names = _mcp_enabled_service_names(owner)
+    if not names:
+        return "当前没有已启用的 MCP 服务。"
+    return (
+        "当前已启用的 MCP 服务：\n"
+        + "\n".join(f"- {name}" for name in names)
+        + "\n\n需要外部能力时，可通过 query_capabilities 的 MCP 分支，按任务关键词搜索工具，或查询服务列表。使用工具前，取得相应接口说明和调用引用。"
+    )
+
+
 def _mcp_tool_facts(owner, server_id):
     return {
         item.semantic.remote_tool_name: item
@@ -184,20 +226,18 @@ def _mcp_comparison_snapshot(previous, current):
 
 
 def _mcp_changes(previous, current):
+    if previous is None:
+        return (RuntimeObservationItem("MCP 服务目录已恢复；" + _mcp_catalog_text(current)),)
     new = {
         item.server_id: item
         for item in current.catalog_snapshot.servers
         if item.connection_target is not None
     }
-    old = (
-        {}
-        if previous is None
-        else {
-            item.server_id: item
-            for item in previous.catalog_snapshot.servers
-            if item.connection_target is not None
-        }
-    )
+    old = {
+        item.server_id: item
+        for item in previous.catalog_snapshot.servers
+        if item.connection_target is not None
+    }
     result = []
     for server_id, server in new.items():
         before = old.get(server_id)
@@ -207,11 +247,7 @@ def _mcp_changes(previous, current):
         ready = server.status.value == "READY"
         disabled = server.status.value == "DISABLED"
         if before is None:
-            notes.append(
-                "当前恢复可用"
-                if previous is None
-                else "已添加" + ("，目前停用" if disabled else "并启用")
-            )
+            notes.append("已添加" + ("，目前停用" if disabled else "并启用"))
         else:
             if (server.status.value == "DISABLED") != (
                 before.status.value == "DISABLED"
@@ -562,20 +598,12 @@ class KernelContextSourceCollector:
                 state = replace(
                     state,
                     skill_catalog=frozen.skill_owner_snapshot,
-                    mcp_catalog=_mcp_comparison_snapshot(
-                        None, frozen.mcp_owner_snapshot
-                    ),
-                    memory=None,
                 )
             else:
                 text = "当前无法获取技能目录。"
                 state = replace(
                     state,
                     skill_catalog=None,
-                    mcp_catalog=_mcp_comparison_snapshot(
-                        None, frozen.mcp_owner_snapshot
-                    ),
-                    memory=None,
                 )
             candidates.append(
                 ContextSourceCandidate(
@@ -584,6 +612,19 @@ class KernelContextSourceCollector:
                     text,
                     1,
                 )
+            )
+            candidates.append(
+                ContextSourceCandidate(
+                    ContextSourceKind.MCP_CATALOG,
+                    ContextChannel.CONTEXT_MESSAGE,
+                    _mcp_catalog_text(frozen.mcp_owner_snapshot),
+                    2,
+                )
+            )
+            state = replace(
+                state,
+                mcp_catalog=_mcp_comparison_snapshot(None, frozen.mcp_owner_snapshot),
+                memory=None,
             )
         elif eligible:
             if available:

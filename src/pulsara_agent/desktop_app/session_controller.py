@@ -1230,14 +1230,12 @@ class LocalSessionController(SessionCapabilities):
         async with self._lock:
             handle = self._by_session.get(session_id)
             if not self._closing and session_id not in self._operations and handle is not None:
-                return {**handle.session.read_ephemeral_results(),
-                        "mcp_readiness": handle.session.mcp_readiness_progress()}
+                return handle.session.read_ephemeral_results()
         return {
             'session_id': session_id, 'host_session_id': None,
             'suggestion': {'state': 'absent', 'origin_turn_id': None, 'turn_id': None,
                            'final_entry_id': None, 'model_call_binding': None, 'text': None},
             'title': {'state': 'absent'},
-            'mcp_readiness': None,
         }
 
     async def update_model_call_binding(

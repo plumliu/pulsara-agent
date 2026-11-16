@@ -1,6 +1,6 @@
 # Pulsara MCP 初始服务目录增量实施规范
 
-状态：待实施。本轮只编写实施文档，不修改代码、生产配置或数据库，不构建、安装或操作运行中的 Pulsara。
+状态：已接入生产代码，合同测试及真实 provider 验收记录见[实施报告](output/hardcut-20261116/mcp-catalog/REPORT.md)。本增量不修改生产配置或生产数据库，不构建、安装或操作运行中的 Pulsara。
 
 本文件补充 [MCP 统一 Meta 架构](PULSARA_MCP_META_ONLY_CALLING_ARCHITECTURE_DRAFT.zh.md)和 [Runtime Observation 修订草案](PULSARA_RUNTIME_OBSERVATION_REVISION_DRAFT.zh.md)：新上下文提供一份轻量的已启用 MCP 服务目录，后续继续发送既定净变化。涉及初始服务目录的口径以本文件为准；查询、调用引用、权限、工具结果和变化检测沿现有合同。
 
@@ -202,7 +202,7 @@ MCP 初始目录不放入 TODO／PCA，也不扩充 runtime observation 已确�
 - 不将这些既有服务称为新安装或新启用，不回写初始目录位置。
 - 输入安装成功后接受本次完整比较快照，之后恢复正常净变化规则。
 
-直接用既有比较状态的未知值区分这一分支，不新增初始化登记表、永久重试任务或通知回执。当前 `_mcp_changes(None, current)` 会将条目视为新增，实施时须在未知比较起点的恢复分支中先生成恢复说明，不能机械沿用该文案。
+直接用既有比较状态的未知值区分这一分支，不新增初始化登记表、永久重试任务或通知回执。`_mcp_changes(None, current)` 使用独立的目录恢复文案，不能沿用正常净变化中的新增文案。
 
 ### 5.4 时序例子
 
@@ -216,28 +216,28 @@ MCP 初始目录不放入 TODO／PCA，也不扩充 runtime observation 已确�
 
 ## 6. 生产接线位置
 
-以下接点按本轮读取的当前代码列出；实施前按函数定位，不依赖行号保持不变。
+以下接点描述当前实现及各 owner 的职责；按函数定位，不依赖行号保持不变。
 
-| 文件／接点 | 当前事实 | 实施动作 |
+| 文件／接点 | 当前实现 | 保持的边界 |
 | --- | --- | --- |
 | [MCP supervisor](src/pulsara_agent/conversation_kernel/mcp/supervisor.py)，`freeze_capability_source_snapshot_set`、`_catalog_from_candidates_locked` | 同一次锁内冻结配置目录及工具事实；目录包含配置声明和公开连接 Target | 直接复用。通常不需修改发现、连接或 supervisor；确认 scope、enabled 和公开连接筛选 |
 | [能力冻结载体](src/pulsara_agent/conversation_kernel/capability_composition.py)，`PreparedMcpCapabilitySourceSnapshotSet` | 已携带目录及 inspection inputs | 继续携带完整值，不加目录副本、DTO fingerprint 或版本字段 |
 | [Dispatch 准备](src/pulsara_agent/conversation_kernel/provider_dispatch.py)，MCP owner 冻结及 `new_context` 传递 | 已将同次 MCP owner 和上下文边界传给 collector | 沿现有冻结与边界传递，禁止为目录另调一次查询或重新读取配置 |
-| [来源定义](src/pulsara_agent/model_input/contracts.py)，`ContextSourceKind` | 当前只有 `MCP_CATALOG_CHANGES` | 增加初始说明的 `MCP_CATALOG`；使用 `CONTEXT_MESSAGE` 和既有 MUST_KEEP 类别 |
-| [来源采集](src/pulsara_agent/conversation_kernel/context_sources.py)，`complete_frozen_sources` | `new_context` 分支只生成 Skill 目录，同时初始化 MCP 比较状态 | 同时生成独立 MCP 初始目录候选，placement 紧随 Skill；从同一 MCP 快照设置比较候选状态。MCP 目录不依赖 Skill 采集成功 |
-| 同文件的 `_mcp_comparison_snapshot`、`_mcp_changes` | 已负责当前比较事实和变化正文 | 保留既有定义、策略及暂不可用处理；补齐未知起点恢复文案 |
-| [输入编译](src/pulsara_agent/model_input/compiler.py)，`catalogue`／`remaining` 分区 | 只将 `SKILL_CATALOG` 提前到新上下文前部 | 将两种初始目录一并分区，保持 Skill 后接 MCP 的顺序；已有 epoch 出现任何初始目录时继续拒绝前缀冲突 |
-| [消息编码及状态](src/pulsara_agent/model_input/continuity.py)，`encode_runtime_observation`、`InstalledObservationState` | 初始 Skill 目录不使用 observation 编码；MCP 比较状态已有落点 | 将初始 MCP 目录纳入同样的编码边界；复用已有状态，不新增单独“目录已发送”状态 |
+| [来源定义](src/pulsara_agent/model_input/contracts.py)，`ContextSourceKind` | `MCP_CATALOG` 提供初始说明，`MCP_CATALOG_CHANGES` 提供后续通知 | 初始说明使用 `CONTEXT_MESSAGE` 和既有 MUST_KEEP 类别 |
+| [来源采集](src/pulsara_agent/conversation_kernel/context_sources.py)，`complete_frozen_sources` | `new_context` 独立生成 Skill 与 MCP 两份初始目录 | MCP placement 紧随 Skill；目录及比较候选状态来自同一 MCP owner，MCP 目录不依赖 Skill 采集成功 |
+| 同文件的 `_mcp_comparison_snapshot`、`_mcp_changes` | 负责当前比较事实、净变化及未知起点恢复正文 | 保留完整定义、策略及暂不可用处理；未知恢复不伪称新增 |
+| [输入编译](src/pulsara_agent/model_input/compiler.py)，`catalogue`／`remaining` 分区 | 将 `SKILL_CATALOG` 与 `MCP_CATALOG` 一起放到新上下文前部 | 保持 Skill 后接 MCP 的顺序；已有 epoch 出现任何初始目录时拒绝前缀冲突 |
+| [消息编码及状态](src/pulsara_agent/model_input/continuity.py)，`encode_runtime_observation`、`InstalledObservationState` | 两份初始目录都不使用 observation 编码；MCP 比较状态使用既有落点 | 不新增单独“目录已发送”状态 |
 | [输入安装](src/pulsara_agent/conversation_kernel/input_continuity.py)，`install` | 候选消息和 `resulting_observation_state` 一起进入 epoch view | 保持现有接受边界，验证失败候选和未采用 successor 不改变已安装状态 |
 | [冷上下文装配](src/pulsara_agent/conversation_kernel/cold_epoch.py)及 [压缩链路](src/pulsara_agent/conversation_kernel/compaction/) | 共用输入编译和候选采用 | 通过公共来源及编译接线得到目录，不新增第二份压缩专用目录拼接 |
-| [默认提示词](src/pulsara_agent/ports/system_prompt.py)，ROOT／Subagent | 当前只泛指相关时发现能力 | 按第 7 节替换发现引导，保留当前调用及权限规则 |
+| [默认提示词](src/pulsara_agent/ports/system_prompt.py)，ROOT／Subagent | 外部需求先发现合适 MCP 工具，已知接口可复用，无合适工具可采用其他范围内方式 | 按第 7 节局部修改，保留当前调用、用户指定方式及权限规则 |
 
 初始目录的采集逻辑可放在 `context_sources.py` 的小型纯投影函数中。无需新建通用目录框架、额外 service owner 或注册表。
 
 ### 6.1 需要特别验证的现有分支
 
-1. 当前 `complete_frozen_sources` 的 MCP 初始化写在 Skill 正常／失败的两个分支内。本次应使 MCP 目录与其比较状态独立依据自己的冻结事实生成；Skill 失败不等于 MCP 失败，反之亦然。
-2. compiler 当前只识别 Skill 初始目录。只增加 source 而不修改分区，会把 MCP 目录放到输入附近，无法满足压缩后位于交接手册前的合同。
+1. `complete_frozen_sources` 的 MCP 目录与比较状态独立依据 MCP 冻结事实生成；Skill 失败不等于 MCP 失败，反之亦然。
+2. compiler 将两份初始目录一起分区，保证 MCP 紧随 Skill 且位于压缩交接手册前；已有 epoch 出现任一种初始目录时拒绝前缀冲突。
 3. 新上下文目录与后续通知分别处理，不能让已有 `eligible` 新 turn／真人入口判断在同次初始化之后再重复发新增通知。
 4. 上下文预览和 compaction 测量使用同一投影，但只有真正安装的候选状态可接受；不能在 projector 内修改 session owner。
 
@@ -259,7 +259,7 @@ For web search, page reading, or external-service tasks, discover suitable insta
 
 ## 8. 资源、存储与运行边界
 
-- 本次只消费已有冻结值，不新增 initialize、tools/list、resources/list、远端探测、连接等待或自动重试。既有冷启动 readiness 及当前发现／刷新语义保持；目录不得额外拉长其等待条件。
+- 本次只消费已有冻结值，不新增 initialize、tools/list、resources/list、远端探测、连接等待或自动重试。首请求不等待 MCP 握手或目录发现；后台发现／刷新继续由既有 owner 执行，详见 [非阻塞启动合同](PULSARA_MCP_NONBLOCKING_STARTUP_IMPLEMENTATION_SPEC.zh.md)。
 - 目录按实际完整正文参与 provider 输入估算和实际封装计量。没有独立数量、字符、token 或总量 cap，不恢复 FULL／COMPACT／REF_ONLY、工具名摘要预算或按目录大小分流。
 - 这是一条上下文来源，不是工具结果，不使用 12k／NEXT。实际 provider 输入无法容纳时沿现有真实准入／压缩规则处理，不静默截断服务名或假称清单完整。
 - 复用进程内冻结快照和输入安装状态，不新增数据库表、事件、消息登记、永久日志、指纹索引、代次或内部版本标签。现有 provider 前缀校验边界保持。
@@ -268,7 +268,7 @@ For web search, page reading, or external-service tasks, discover suitable insta
 
 ## 9. 实施时同步的合同
 
-本轮只新增本文件。实施变更时同步下列现有文档的具体口径，避免继续同时保留相反要求：
+以下现有文档与本规范同步，使用同一当前合同：
 
 | 文档 | 同步范围 |
 | --- | --- |
@@ -315,7 +315,7 @@ For web search, page reading, or external-service tasks, discover suitable insta
 - [provider 前缀连续性](tests/test_round3_1_provider_input_prefix_continuity.py)
 - [压缩首调用来源](tests/test_compaction_first_call_source_boundary.py)
 - [压缩后续输入边界](tests/test_compaction_suffix_boundary_integration.py)
-- [ROOT MCP 初次就绪](tests/test_mcp_first_request_readiness.py)和 [Subagent 初次就绪](tests/test_agent_mcp_first_readiness.py)
+- [ROOT MCP 非阻塞首请求](tests/test_mcp_first_request_readiness.py)和 [Subagent 非阻塞首请求](tests/test_agent_mcp_first_readiness.py)
 - [meta-only 集成](tests/test_mcp_meta_only_integration.py)
 
 ### 11.2 真实模型验证
