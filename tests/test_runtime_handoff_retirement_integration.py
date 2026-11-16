@@ -24,7 +24,6 @@ from pulsara_agent.identity import random_id
 from pulsara_agent.llm.input import PromptContent, text_part_values
 from pulsara_agent.llm.provider_replay import ProviderAssistantReplayCodecKind
 from pulsara_agent.model_input.compiler import estimate_runtime_handoff_pca_tokens
-from pulsara_agent.model_input.continuity import decode_runtime_observation
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.primitives.context import canonical_json_bytes, freeze_json, thaw_json
 from pulsara_agent.ports.live_agent_event import TextEndPayload, ToolCallEndPayload
@@ -36,7 +35,7 @@ from pulsara_agent.workspace_identity import HostWorkspaceInput
 from tests.support.model_config import test_model_binding, test_model_limits, test_model_runtime
 from tests.support.round3 import CallbackScriptedKernelModel
 from tests.support.model_stream import _text, _tool_call
-from tests.test_stage2_conversation_runner import _CompactionSummaryTransport, _context_snapshot_payload, _snapshot_carrier
+from tests.test_stage2_conversation_runner import _CompactionSummaryTransport, _snapshot_carrier
 
 
 pytestmark = pytest.mark.postgres
@@ -49,13 +48,18 @@ def handoff_database(stage2_migrated_postgres_database):
 
 
 def _observations(request):
-    found = {}
+    from types import SimpleNamespace as NS
+    found={}
     for message in request.compiled_input.messages:
-        try:
-            observation = decode_runtime_observation(message)
-        except ValueError:
+        text="".join(text_part_values(message.content))
+        if HANDOFF_CONTINUATION in text and text.startswith('{'):
+            found["COMPACTION_RUNTIME_HANDOFF"]=NS(body=text,source_kind=NS(value="COMPACTION_RUNTIME_HANDOFF"))
             continue
-        found[observation.source_kind.value] = observation
+        try:
+            value=json.loads(text)["pulsara_runtime_observation"]
+        except (ValueError,KeyError,TypeError):
+            continue
+        found[value["source"]]=NS(body=value["body"],source_kind=NS(value=value["source"]))
     return found
 
 
@@ -80,6 +84,8 @@ def _wire_observations(request):
             try:
                 value = json.loads(text)
             except (ValueError, TypeError):
+                if HANDOFF_CONTINUATION in text:
+                    found["COMPACTION_RUNTIME_HANDOFF"]=text
                 continue
             if isinstance(value, dict) and "pulsara_runtime_observation" in value:
                 observation = value["pulsara_runtime_observation"]
@@ -136,8 +142,8 @@ class _HostCompactionModel(CallbackScriptedKernelModel):
         self.todo_record_after_adoption = None
         self.idle_agent_id = None
         self.todo_arguments = {"items": [
-            {"text": f"{index:02d}" + '"' * 104, "status": "in_progress" if index == 0 else "pending"}
-            for index in range(16)
+            {"text": f"{index:02d}" + '"' * 500, "status": "in_progress" if index == 0 else "pending"}
+            for index in range(10)
         ]}
         # This is the production parser's legal quote-heavy aggregate, not an
         # invalid arbitrary FrozenTodoSnapshot manufactured by the test.
@@ -228,8 +234,7 @@ class _HostCompactionModel(CallbackScriptedKernelModel):
         owner = self.session._tools.current_work_owner
         prepared = owner.prepare_replace(scope_kind=ModelInputScopeKind.ROOT,
             exact_turn_id=request.turn_id, attempt_id=random_id("attempt"),
-            proposed_result_entry_id=random_id("entry"), candidate=self.todo_candidate,
-            acknowledgement=b'{"status":"updated"}')
+            proposed_result_entry_id=random_id("entry"), candidate=self.todo_candidate,)
         owner.commit(prepared)
         self.todo_record = owner._root
         self.todo_before = owner.freeze_compaction_handoff(scope_kind=ModelInputScopeKind.ROOT)
@@ -245,7 +250,7 @@ class _HostCompactionModel(CallbackScriptedKernelModel):
         self.root_calls.append(request)
         index = len(self.root_calls)
         if index == 1 and self.variant == "large_todo":
-            events = _tool_call("exec_cell", "call:existing-agent", {"code": 'console.log(await tools.run_agent([{"instruction": "Keep this existing Work active."}]));'})
+            events = _tool_call("exec_cell", "call:existing-agent", {"code": 'console.log(await tools.run_agent([{"work_title":"Existing Work","instruction": "Keep this existing Work active."}]));'})
         elif index == (2 if self.variant == "large_todo" else 1):
             if self.variant == "large_todo":
                 await asyncio.wait_for(self.child_started.wait(), 20)
@@ -314,7 +319,7 @@ def test_real_host_adopts_midturn_handoff_and_sends_exact_owner_state(tmp_path, 
                 return value
             session._runner.compaction._freeze_compaction_runtime_source = record_source
             if variant == "plan":
-                entered = await session.enter_plan(command_id=random_id("command"), entry_reason="Inspect safely",
+                entered = await session.enter_plan(command_id=random_id("command"),
                     resume_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
                 assert entered.status == "SUCCEEDED"
             result = await asyncio.wait_for(session.run_turn(PromptContent.text("p" * 40_000),
@@ -338,26 +343,18 @@ def test_real_host_adopts_midturn_handoff_and_sends_exact_owner_state(tmp_path, 
             record_property("wire", wire)
             record_property("variant", variant)
             handoff = observations.get("COMPACTION_RUNTIME_HANDOFF")
-            environment = _payload(observations["RUNTIME_ENVIRONMENT"].body)
-            assert environment["workspace_kind"] == "project"
-            assert "timezone" in environment
-            assert not ({"cell_index", "omitted_cell_index_entries", "code_cells", "omitted_code_cells"} & environment.keys())
-            # Every ordinary environment sample, including the pre-compaction
-            # epoch with live Cells, carries facts without inventory injection.
-            for request in model.root_calls:
-                for observation in _observations(request).values():
-                    if observation.source_kind.value == "RUNTIME_ENVIRONMENT":
-                        assert "cell_index" not in observation.body
+            environment=json.dumps(observations["TURN_CONTEXT"].body,ensure_ascii=False)
+            assert "project" in environment and "时区" in environment
+            assert "code_cells" not in environment
             if variant in {"large_todo", "todo_only"}:
                 # Inspect at the first post-adoption call, before ordinary turn
                 # completion legitimately settles the live TODO state.
                 assert model.todo_record_after_adoption is model.todo_record
                 assert model.todo_after_adoption == model.todo_before
                 assert handoff is not None
-                assert handoff.presence.value == "VALUE"
                 payload = _payload(handoff.body)
                 assert payload["todos"] == model.todo_arguments["items"]
-                assert payload["todo_counts"] == {"pending": 15, "in_progress": 1, "completed": 0, "total": 16}
+                assert payload["todo_counts"] == {"pending": 9, "in_progress": 1, "completed": 0, "total": 10}
                 assert HANDOFF_CONTINUATION in handoff.body
                 assert HANDOFF_BUDGET_OMISSION not in handoff.body
                 assert "omitted" not in payload
@@ -404,14 +401,19 @@ def test_real_host_adopts_midturn_handoff_and_sends_exact_owner_state(tmp_path, 
             else:
                 assert handoff is None
                 assert "COMPACTION_RUNTIME_HANDOFF" not in wire_observations
-                assert frozen_sources and all(source.absence_kind.value == "EXPLICIT_EMPTY" for source in frozen_sources)
+                assert frozen_sources and all(source is None for source in frozen_sources)
                 if variant == "plan":
-                    assert "Planning is active." in observations["PLAN_WORKFLOW"].body
-                    assert "Planning applies read-only permissions." in observations["RUN_PERMISSION"].body
+                    assert "当前仍处于计划模式" in json.dumps(observations["PLAN_MODE"].body,ensure_ascii=False)
+                    assert "read-only" in json.dumps(observations["TURN_CONTEXT"].body)
                     assert not (tmp_path / "must-not-exist.txt").exists()
                     transcript = "\n".join(text for request in model.root_calls[successor_index + 1:]
                         for message in request.compiled_input.messages for text in text_part_values(message.content))
-                    assert "PERMISSION_DENIED" in transcript or "permission_denied" in transcript
+                    assert "tool 'write_file' is not allowed by permission policy" in transcript
+                    from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
+                    with session.repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,
+                            deadline_monotonic=monotonic()+5) as connection:
+                        assert connection.execute("SELECT result_state FROM pulsara_v3.tool_results WHERE session_id=%s ORDER BY observed_at DESC LIMIT 1",
+                            (session.session_id,)).fetchone() == ("PERMISSION_DENIED",)
                     assert {"query_agents", "query_cells"} <= {tool.name for tool in successor.compiled_input.tools}
             # The first suffix after adoption keeps the successor's installed
             # SYSTEM/tools and its entire messages prefix, across actual calls.
@@ -470,11 +472,11 @@ class _SubagentCompactionModel(_HostCompactionModel):
         root = request.session_id == self.session.session_id
         if root:
             if index == 1:
-                events = _tool_call("exec_cell", "call:sibling", {"code": 'console.log(await tools.run_agent([{"instruction": "OTHER_WORK: remain active until released."}]));'})
+                events = _tool_call("exec_cell", "call:sibling", {"code": 'console.log(await tools.run_agent([{"work_title":"Other Work","instruction": "OTHER_WORK: remain active until released."}]));'})
             elif index == 2:
                 await asyncio.wait_for(self.sibling_ready.wait(), 20)
                 await self._process_for(self.session, request)
-                events = _tool_call("exec_cell", "call:compact-child", {"code": 'console.log(await tools.run_agent([{"instruction": "CURRENT_WORK: inspect with mid-turn compaction."}]));'})
+                events = _tool_call("exec_cell", "call:compact-child", {"code": 'console.log(await tools.run_agent([{"work_title":"Current Work","instruction": "CURRENT_WORK: inspect with mid-turn compaction."}]));'})
             else:
                 await asyncio.wait_for(self.target_finished.wait(), 60)
                 events = _text("text:root-finished", "ROOT_SCOPE_FINISHED")

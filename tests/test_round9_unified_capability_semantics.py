@@ -1,37 +1,26 @@
 from __future__ import annotations
 from tests.support.model_config import scheduled_task_service
 
-from dataclasses import fields, replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from pulsara_agent.mcp_config import LocalConfiguredMcpRuntimeSource
-from pulsara_agent.identity import derive_id
-from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 
 from pulsara_agent.capability.contracts import (
     CapabilityKind,
-    CapabilityRouteReasonCode,
     CapabilitySourceKind,
     CapabilitySourceRefreshMode,
     CapabilitySourceSnapshotDisposition,
     EmptyCapabilityEpochPredecessor,
     FrozenMcpCapabilityProjectionInput,
-    FrozenMcpRouteProjection,
-    FrozenNativeToolWireEligibilityQuote,
     FrozenSkillProjectionInput,
     InstalledCapabilityEpochPredecessor,
-    McpInspectEffectKind,
-    McpToolCapabilityRef,
     ToolCapabilityOrigin,
-    ToolCapabilityRouteKind,
     capability_identity,
     capability_source_ref,
     capability_source_registration,
     freeze_capability_source_snapshot,
-    freeze_mcp_inspectability_fact,
     freeze_tool_capability_fact,
     tool_capability_version_ref,
 )
@@ -50,70 +39,80 @@ from pulsara_agent.capability.registry import (
 )
 from pulsara_agent.conversation_kernel.capability_composition import (
     PreparedSkillCatalogSourceSnapshot,
-    PreparedMcpCapabilitySourceSnapshotSet,
     freeze_capability_registry_from_owner_snapshots,
     issue_skill_catalog_source_snapshot,
     issue_mcp_capability_source_snapshot_set,
     issue_sealed_builtin_capability_snapshot,
 )
 from pulsara_agent.conversation_kernel.mcp.contracts import (
-    McpDiscoverySnapshot,
-    McpPromptSemanticFact,
-    McpResourceSemanticFact,
-    McpResourceTemplateSemanticFact,
-    McpServerCatalogEntry,
     build_catalog_snapshot,
 )
-from pulsara_agent.conversation_kernel.mcp.directory import runtime_rows
-from pulsara_agent.capability.source_query import render_page, parse_query, CapabilityQueryError
-from pulsara_agent.conversation_kernel.mcp.meta import (
-    McpToolRefCapacityExceeded,
-    ProcessLocalNewMcpToolRefOwner,
-)
-from pulsara_agent.conversation_kernel.mcp.supervisor import McpServerState
+
 from pulsara_agent.llm.adapters.openai.function_tools import (
     freeze_openai_native_tool_eligibility,
     materialize_openai_native_tool_projection_set,
 )
 from pulsara_agent.model_input.contracts import FrozenToolSpec, ModelInputScopeKind
-from pulsara_agent.primitives.context import context_fingerprint, freeze_json, thaw_json
-from pulsara_agent.primitives.tool_observation import (
-    MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES,
-)
+from pulsara_agent.primitives.context import context_fingerprint, freeze_json
 
 
 def test_remember_is_main_only_in_frozen_and_model_surfaces(tmp_path):
     import asyncio
     from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
     from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
-    from pulsara_agent.conversation_kernel.tool_policy import DefaultToolDispatchAuthorizationPolicy
+    from pulsara_agent.conversation_kernel.tool_policy import (
+        DefaultToolDispatchAuthorizationPolicy,
+    )
     from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
     from tests.support.round3 import prepare_test_direct_tool_surface
     from pulsara_agent.primitives.permission import PermissionMode
 
     async def exercise():
-        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
-            workspace_root=tmp_path, host_owner_id='host:jx2n72tacopn3if4goyyza5ztm',
-            session_id='session:2wae56asyel532v3i7tvactdee', live_bus=LiveAgentEventBus(),
+        port = DirectKernelToolPort(
+            scheduled_tasks=scheduled_task_service(),
+            workspace_root=tmp_path,
+            host_owner_id="host:jx2n72tacopn3if4goyyza5ztm",
+            session_id="session:2wae56asyel532v3i7tvactdee",
+            live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
-        port.bind_memory_port(SimpleNamespace(tool_names=frozenset({"remember", "get_memory"})))
+        port.bind_memory_port(
+            SimpleNamespace(tool_names=frozenset({"remember", "query_memory"}))
+        )
         try:
             for scope, task, expected in (
                 (ModelInputScopeKind.ROOT, None, True),
-                (ModelInputScopeKind.SUBAGENT, 'task:t2ptfli5koch6nfrihpkwl3kvi', False),
+                (
+                    ModelInputScopeKind.SUBAGENT,
+                    "task:t2ptfli5koch6nfrihpkwl3kvi",
+                    False,
+                ),
             ):
                 surface = prepare_test_direct_tool_surface(
-                    port, conversation_scope_kind=scope,
+                    port,
+                    conversation_scope_kind=scope,
                 )
-                assert ("remember" in {s.name for s in surface.model_surface.tool_specs}) is expected
+                assert (
+                    "remember" in {s.name for s in surface.model_surface.tool_specs}
+                ) is expected
                 snapshot = port.sealed_builtin_capability_snapshot(
-                    conversation_scope_kind=scope, effective_permission_mode=PermissionMode.ASK_PERMISSIONS,
+                    conversation_scope_kind=scope,
+                    effective_permission_mode=PermissionMode.ASK_PERMISSIONS,
                 )
-                assert ("remember" in {b.tool_name for b in snapshot.executor_bindings}) is expected
-            assert len(builtin_tool_catalog_entry("remember").availability_requirement.allowed_invocation_owners) == 1
+                assert (
+                    "remember" in {b.tool_name for b in snapshot.executor_bindings}
+                ) is expected
+            assert (
+                len(
+                    builtin_tool_catalog_entry(
+                        "remember"
+                    ).availability_requirement.allowed_invocation_owners
+                )
+                == 1
+            )
         finally:
             await port.aclose()
+
     asyncio.run(exercise())
 
 
@@ -182,14 +181,8 @@ def _empty_skill_inspection() -> CompleteEffectiveSkillCatalogInspection:
     return CompleteEffectiveSkillCatalogInspection(
         root_policy=producer.prepare_root_policy(Path.cwd()),
         winners=(),
+        readable_skills=(),
         candidate_issues=(),
-    )
-
-
-def _directory_plan(routes, snapshots=()):
-    return SimpleNamespace(
-        mcp_catalog_route_projection=routes,
-        dispatch_view=SimpleNamespace(planning_input=SimpleNamespace(mcp=SimpleNamespace(source_snapshots=snapshots))),
     )
 
 
@@ -213,10 +206,16 @@ def _planning_view(
         _source_snapshot(
             source_kind=CapabilitySourceKind.MCP_SERVER,
             source_id=source_id,
-            facts=tuple(fact for fact in mcp_facts if fact.identity.source.stable_source_id == source_id),
+            facts=tuple(
+                fact
+                for fact in mcp_facts
+                if fact.identity.source.stable_source_id == source_id
+            ),
             conversation_scope_kind=conversation_scope_kind,
         )
-        for source_id in sorted({fact.identity.source.stable_source_id for fact in mcp_facts} or {"fixture"})
+        for source_id in sorted(
+            {fact.identity.source.stable_source_id for fact in mcp_facts} or {"fixture"}
+        )
     )
     skill_snapshot = _source_snapshot(
         source_kind=CapabilitySourceKind.LOCAL_SKILL_CATALOG,
@@ -230,7 +229,9 @@ def _planning_view(
         executor_bindings=(),
         builtin_composition_seal=object(),
     )
-    catalog = build_catalog_snapshot(owner_epoch="epoch:aaaaaaaaaaaaaaaaaaaaaaaaaa", catalog_revision=1, entries=())
+    catalog = build_catalog_snapshot(
+        owner_epoch="epoch:aaaaaaaaaaaaaaaaaaaaaaaaaa", catalog_revision=1, entries=()
+    )
     mcp_owner = issue_mcp_capability_source_snapshot_set(
         conversation_scope_kind=conversation_scope_kind,
         source_snapshots=mcp_snapshots,
@@ -250,7 +251,7 @@ def _planning_view(
         mcp=mcp_owner,
         skills=skill_owner,
     )
-    all_facts = (*builtin_facts, *mcp_facts)
+    all_facts = builtin_facts
     native = freeze_openai_native_tool_eligibility(
         conversation_scope_kind=conversation_scope_kind,
         wire_api=wire_api,
@@ -267,32 +268,9 @@ def _planning_view(
             )
         ),
     )
-    inspectability = tuple(
-        freeze_mcp_inspectability_fact(
-            target=McpToolCapabilityRef(
-                server_id=fact.identity.source.stable_source_id, remote_tool_name=fact.identity.stable_name
-            ),
-            version=tool_capability_version_ref(fact),
-            descriptor_payload_fingerprint=context_fingerprint(
-                "test:round9-inspect-descriptor:v1", fact.fact_semantic_fingerprint
-            ),
-            mcp_execution_policy_fingerprint=context_fingerprint(
-                "test:round9-inspect-policy:v1", fact.identity.stable_name
-            ),
-            effect_kind=McpInspectEffectKind.READ_ONLY,
-            conservative_logical_utf8_bytes=(
-                MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES + 1
-                if fact.identity.stable_name in inspect_overbound
-                else 1024
-            ),
-        )
-        for fact in mcp_facts
-    )
     mcp_input = FrozenMcpCapabilityProjectionInput(
         conversation_scope_kind=conversation_scope_kind,
         source_snapshots=mcp_snapshots,
-        catalog_semantic_fingerprint=catalog.semantic_fingerprint,
-        inspectability_facts=inspectability,
     )
     tools = freeze_tool_planning_input(
         predecessor=predecessor or EmptyCapabilityEpochPredecessor(0),
@@ -358,7 +336,9 @@ def test_round9_owner_snapshot_authenticity_rejects_same_shape_forgery() -> None
         conversation_scope_kind=ModelInputScopeKind.ROOT,
         source_snapshots=(),
         catalog_snapshot=build_catalog_snapshot(
-            owner_epoch="epoch:aaaaaaaaaaaaaaaaaaaaaaaaaa", catalog_revision=1, entries=()
+            owner_epoch="epoch:aaaaaaaaaaaaaaaaaaaaaaaaaa",
+            catalog_revision=1,
+            entries=(),
         ),
         inspection_inputs=(),
         owner_authenticity=object(),
@@ -403,47 +383,10 @@ def test_round9_duplicate_source_registration_is_idempotent_or_conflict() -> Non
     with pytest.raises(ValueError, match="conflicting registrations"):
         freeze_capability_registration_set(
             conversation_scope_kind=ModelInputScopeKind.ROOT,
-                builtin_registration=builtin,
+            builtin_registration=builtin,
             mcp_registrations=(mcp, conflicting),
             local_skill_catalog_registration=skill,
         )
-
-
-def test_round9_native_incompatible_mcp_routes_meta_without_poisoning_builtin() -> None:
-    builtin = _fact(
-        source_kind=CapabilitySourceKind.BUILTIN_REGISTRY,
-        source_id="builtin-registry",
-        name="builtin_echo",
-        origin=ToolCapabilityOrigin.BUILTIN,
-        schema={"type": "object", "properties": {}},
-    )
-    mcp = _fact(
-        source_kind=CapabilitySourceKind.MCP_SERVER,
-        source_id="fixture",
-        name="remote_union",
-        origin=ToolCapabilityOrigin.MCP,
-        schema={
-            "type": "object",
-            "properties": {
-                "value": {
-                    "oneOf": [{"type": "string"}],
-                    "anyOf": [{"type": "string"}],
-                }
-            },
-        },
-    )
-    plan = _finalized_plan(
-        view=_planning_view(builtin_facts=(builtin,), mcp_facts=(mcp,))
-    )
-    assert tuple(item.name for item in plan.direct_tool_surface.tool_specs) == (
-        "builtin_echo",
-    )
-    assert len(plan.mcp_catalog_route_projection.routes) == 1
-    route = plan.mcp_catalog_route_projection.routes[0]
-    assert route.route is ToolCapabilityRouteKind.NEW_MCP_META_ONLY
-    assert (
-        route.public_reason_code is CapabilityRouteReasonCode.NATIVE_WIRE_INCOMPATIBLE
-    )
 
 
 def test_round9_native_incompatible_builtin_fails_entire_dispatch() -> None:
@@ -490,608 +433,6 @@ def test_round9_parent_cut_rejects_overbound_planner_framing_before_plan(
         _planning_view(builtin_facts=(), mcp_facts=())
 
 
-def test_round9_inspect_overbound_is_typed_unavailable() -> None:
-    mcp = _fact(
-        source_kind=CapabilitySourceKind.MCP_SERVER,
-        source_id="fixture",
-        name="remote_union",
-        origin=ToolCapabilityOrigin.MCP,
-        schema={
-            "type": "object",
-            "properties": {
-                "value": {
-                    "oneOf": [{"type": "string"}],
-                    "anyOf": [{"type": "string"}],
-                }
-            },
-        },
-    )
-    plan = _finalized_plan(
-        view=_planning_view(
-            builtin_facts=(),
-            mcp_facts=(mcp,),
-            inspect_overbound=frozenset({"remote_union"}),
-        )
-    )
-    route = plan.mcp_catalog_route_projection.routes[0]
-    assert route.route is ToolCapabilityRouteKind.UNAVAILABLE
-    assert route.public_reason_code is CapabilityRouteReasonCode.DESCRIPTOR_OVERBOUND
-
-
-def test_round9_installed_epoch_keeps_native_surface_and_routes_late_mcp_meta() -> None:
-    builtin = _fact(
-        source_kind=CapabilitySourceKind.BUILTIN_REGISTRY,
-        source_id="builtin-registry",
-        name="builtin_echo",
-        origin=ToolCapabilityOrigin.BUILTIN,
-        schema={"type": "object", "properties": {}},
-    )
-    first = _fact(
-        source_kind=CapabilitySourceKind.MCP_SERVER,
-        source_id="fixture",
-        name="first",
-        origin=ToolCapabilityOrigin.MCP,
-        schema={"type": "object", "properties": {}},
-    )
-    cold = _finalized_plan(
-        view=_planning_view(builtin_facts=(builtin,), mcp_facts=(first,))
-    )
-    predecessor = InstalledCapabilityEpochPredecessor(
-        expected_continuity_revision=1,
-        continuity_epoch_nonce='epoch:f73un4csnfa5zhqolzezsotshe',
-        tool_surface=cold.direct_tool_surface,
-        direct_projection_set=cold.direct_projection_set,
-        mcp_route_projection=cold.mcp_catalog_route_projection,
-    )
-    late = _fact(
-        source_kind=CapabilitySourceKind.MCP_SERVER,
-        source_id="fixture",
-        name="late",
-        origin=ToolCapabilityOrigin.MCP,
-        schema={"type": "object", "properties": {}},
-    )
-    installed = _finalized_plan(
-        view=_planning_view(
-            builtin_facts=(builtin,),
-            mcp_facts=(first, late),
-            predecessor=predecessor,
-        )
-    )
-    assert installed.direct_tool_surface == cold.direct_tool_surface
-    assert installed.direct_projection_set == cold.direct_projection_set
-    routes = {
-        item.target.remote_tool_name: item
-        for item in installed.mcp_catalog_route_projection.routes
-    }
-    assert routes["first"].route is ToolCapabilityRouteKind.DIRECT
-    assert routes["late"].route is ToolCapabilityRouteKind.NEW_MCP_META_ONLY
-    assert (
-        routes["late"].public_reason_code
-        is CapabilityRouteReasonCode.NEW_NOT_IN_NATIVE_SURFACE
-    )
-
-
-def test_round9_provider_contract_reset_reprojects_only_installed_cohort() -> None:
-    builtin = _fact(
-        source_kind=CapabilitySourceKind.BUILTIN_REGISTRY,
-        source_id="builtin-registry",
-        name="builtin_echo",
-        origin=ToolCapabilityOrigin.BUILTIN,
-        schema={"type": "object", "properties": {}},
-    )
-    direct = _fact(
-        source_kind=CapabilitySourceKind.MCP_SERVER,
-        source_id="fixture",
-        name="direct",
-        origin=ToolCapabilityOrigin.MCP,
-        schema={"type": "object", "properties": {}},
-    )
-    cold = _finalized_plan(
-        view=_planning_view(builtin_facts=(builtin,), mcp_facts=(direct,))
-    )
-    predecessor = InstalledCapabilityEpochPredecessor(
-        expected_continuity_revision=1,
-        continuity_epoch_nonce='epoch:ukmrjw7k7wlnkvanlr7b3ck4km',
-        tool_surface=cold.direct_tool_surface,
-        direct_projection_set=cold.direct_projection_set,
-        mcp_route_projection=cold.mcp_catalog_route_projection,
-    )
-    late = _fact(
-        source_kind=CapabilitySourceKind.MCP_SERVER,
-        source_id="fixture",
-        name="late",
-        origin=ToolCapabilityOrigin.MCP,
-        schema={"type": "object", "properties": {}},
-    )
-    reset = _finalized_plan(
-        wire_api="openai_responses",
-        view=_planning_view(
-            builtin_facts=(builtin,),
-            mcp_facts=(direct, late),
-            predecessor=predecessor,
-            wire_api="openai_responses",
-        )
-    )
-    assert reset.direct_tool_surface == cold.direct_tool_surface
-    assert tuple(
-        item.provider_name for item in reset.direct_projection_set.tool_versions
-    ) == tuple(item.provider_name for item in cold.direct_projection_set.tool_versions)
-    assert tuple(
-        thaw_json(item.wire_tool)["name"]
-        for item in reset.direct_projection_set.projections
-    ) == tuple(
-        thaw_json(item.wire_tool)["function"]["name"]
-        for item in cold.direct_projection_set.projections
-    )
-    late_route = next(
-        item
-        for item in reset.mcp_catalog_route_projection.routes
-        if item.target.remote_tool_name == "late"
-    )
-    assert late_route.route is ToolCapabilityRouteKind.NEW_MCP_META_ONLY
-
-
-def test_round9_installed_schema_replacement_uses_meta_without_rewriting_native() -> None:
-    old = _fact(
-        source_kind=CapabilitySourceKind.MCP_SERVER,
-        source_id="fixture",
-        name="replace_me",
-        origin=ToolCapabilityOrigin.MCP,
-        schema={"type": "object", "properties": {"old": {"type": "string"}}},
-    )
-    cold = _finalized_plan(view=_planning_view(builtin_facts=(), mcp_facts=(old,)))
-    predecessor = InstalledCapabilityEpochPredecessor(
-        expected_continuity_revision=1,
-        continuity_epoch_nonce='epoch:f73un4csnfa5zhqolzezsotshe',
-        tool_surface=cold.direct_tool_surface,
-        direct_projection_set=cold.direct_projection_set,
-        mcp_route_projection=cold.mcp_catalog_route_projection,
-    )
-    replacement = _fact(
-        source_kind=CapabilitySourceKind.MCP_SERVER,
-        source_id="fixture",
-        name="replace_me",
-        origin=ToolCapabilityOrigin.MCP,
-        schema={"type": "object", "properties": {"new": {"type": "integer"}}},
-    )
-    plan = _finalized_plan(
-        view=_planning_view(
-            builtin_facts=(),
-            mcp_facts=(replacement,),
-            predecessor=predecessor,
-        )
-    )
-    assert plan.direct_tool_surface == cold.direct_tool_surface
-    assert plan.direct_projection_set == cold.direct_projection_set
-    assert len(plan.mcp_catalog_route_projection.routes) == 1
-    route = plan.mcp_catalog_route_projection.routes[0]
-    assert route.route is ToolCapabilityRouteKind.NEW_MCP_META_ONLY
-    assert route.public_reason_code is CapabilityRouteReasonCode.NATIVE_INPUT_CHANGED
-    assert route.native_spec == old.canonical_tool_spec
-
-
-def test_round9_cold_mcp_native_aggregate_is_all_direct_or_all_meta() -> None:
-    builtin = _fact(
-        source_kind=CapabilitySourceKind.BUILTIN_REGISTRY,
-        source_id="builtin-registry",
-        name="builtin_echo",
-        origin=ToolCapabilityOrigin.BUILTIN,
-        schema={"type": "object", "properties": {}},
-    )
-    mcp_facts = tuple(
-        _fact(
-            source_kind=CapabilitySourceKind.MCP_SERVER,
-            source_id="fixture",
-            name=f"remote_{index:03d}",
-            origin=ToolCapabilityOrigin.MCP,
-            schema={"type": "object", "properties": {}},
-        )
-        for index in range(129)
-    )
-    plan = _finalized_plan(
-        view=_planning_view(builtin_facts=(builtin,), mcp_facts=mcp_facts)
-    )
-    assert tuple(item.name for item in plan.direct_tool_surface.tool_specs) == (
-        "builtin_echo",
-    )
-    assert len(plan.mcp_catalog_route_projection.routes) == 129
-    assert {item.route for item in plan.mcp_catalog_route_projection.routes} == {
-        ToolCapabilityRouteKind.NEW_MCP_META_ONLY
-    }
-    assert {
-        item.public_reason_code for item in plan.mcp_catalog_route_projection.routes
-    } == {CapabilityRouteReasonCode.NEW_COLD_COHORT_META_FALLBACK}
-
-    predecessor = InstalledCapabilityEpochPredecessor(
-        expected_continuity_revision=1,
-        continuity_epoch_nonce='epoch:bsrg4gjfyl4eyhiftnis4ez7p4',
-        tool_surface=plan.direct_tool_surface,
-        direct_projection_set=plan.direct_projection_set,
-        mcp_route_projection=plan.mcp_catalog_route_projection,
-    )
-    successor = _finalized_plan(
-        view=_planning_view(
-            builtin_facts=(builtin,),
-            mcp_facts=mcp_facts,
-            predecessor=predecessor,
-        )
-    )
-    # A ref issued by inspect on the cold aggregate-fallback route remains
-    # usable on the next call in the exact same continuity epoch.  The route
-    # reason is identity-bearing and must not be recomputed as "late".
-    assert successor.mcp_catalog_route_projection.routes == (
-        plan.mcp_catalog_route_projection.routes
-    )
-
-
-def test_round9_new_mcp_ref_requires_exact_full_install_and_epoch() -> None:
-    owner = ProcessLocalNewMcpToolRefOwner()
-    prepared = owner.prepare(
-        conversation_scope_kind=ModelInputScopeKind.ROOT,
-        session_id="session:aaaaaaaaaaaaaaaaaaaaaaaaaa",
-        continuity_epoch_nonce='epoch:l7z2gzxlhyebe4jaidrsoamlca',
-        capability_identity=capability_identity(kind=CapabilityKind.TOOL, source=capability_source_ref(CapabilitySourceKind.MCP_SERVER, "fixture"), stable_name="identity"),
-        tool_semantic_fingerprint="sha256:semantic",
-        mcp_execution_policy_fingerprint="sha256:policy",
-        tool_route_fingerprint="sha256:route",
-        result_entry_id='entry:okwolwkgl3d2koiqkyi5mc5zj4',
-    )
-    owner.settle(
-        prepared=prepared,
-        committed=True,
-    )
-    with pytest.raises(LookupError, match="STALE_OR_DORMANT"):
-        owner.resolve_callable(
-            prepared.ref.opaque_token,
-            conversation_scope_kind=ModelInputScopeKind.ROOT,
-            session_id="session:aaaaaaaaaaaaaaaaaaaaaaaaaa",
-            continuity_epoch_nonce='epoch:l7z2gzxlhyebe4jaidrsoamlca',
-        )
-    assert owner.install_full_result(
-        result_entry_id='entry:okwolwkgl3d2koiqkyi5mc5zj4',
-        conversation_scope_kind=ModelInputScopeKind.ROOT,
-        session_id="session:aaaaaaaaaaaaaaaaaaaaaaaaaa",
-        continuity_epoch_nonce='epoch:l7z2gzxlhyebe4jaidrsoamlca',
-    )
-    resolved = owner.resolve_callable(
-        prepared.ref.opaque_token,
-        conversation_scope_kind=ModelInputScopeKind.ROOT,
-        session_id="session:aaaaaaaaaaaaaaaaaaaaaaaaaa",
-        continuity_epoch_nonce='epoch:l7z2gzxlhyebe4jaidrsoamlca',
-    )
-    assert resolved is prepared.ref
-    with pytest.raises(LookupError, match="STALE_OR_DORMANT"):
-        owner.resolve_callable(
-            prepared.ref.opaque_token,
-            conversation_scope_kind=ModelInputScopeKind.ROOT,
-            session_id="session:aaaaaaaaaaaaaaaaaaaaaaaaaa",
-            continuity_epoch_nonce='epoch:heb6jusirvxkuhyvcwlhgyqtbq',
-        )
-
-
-def test_round9_new_mcp_ref_capacity_is_closed_and_does_not_evict(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "pulsara_agent.conversation_kernel.mcp.meta."
-        "MAXIMUM_LIVE_NEW_MCP_TOOL_REFS_PER_EPOCH",
-        1,
-    )
-    owner = ProcessLocalNewMcpToolRefOwner()
-    first = owner.prepare(
-        conversation_scope_kind=ModelInputScopeKind.ROOT,
-        session_id="session:aaaaaaaaaaaaaaaaaaaaaaaaaa",
-        continuity_epoch_nonce='epoch:l7z2gzxlhyebe4jaidrsoamlca',
-        capability_identity=capability_identity(kind=CapabilityKind.TOOL, source=capability_source_ref(CapabilitySourceKind.MCP_SERVER, "fixture"), stable_name="identity-one"),
-        tool_semantic_fingerprint="sha256:semantic-one",
-        mcp_execution_policy_fingerprint="sha256:policy",
-        tool_route_fingerprint="sha256:route-one",
-        result_entry_id='entry:ja6ihq637wrsnc35ze6r5r3ezq',
-    )
-    with pytest.raises(McpToolRefCapacityExceeded):
-        owner.prepare(
-            conversation_scope_kind=ModelInputScopeKind.ROOT,
-            session_id="session:aaaaaaaaaaaaaaaaaaaaaaaaaa",
-            continuity_epoch_nonce='epoch:l7z2gzxlhyebe4jaidrsoamlca',
-            capability_identity=capability_identity(kind=CapabilityKind.TOOL, source=capability_source_ref(CapabilitySourceKind.MCP_SERVER, "fixture"), stable_name="identity-two"),
-            tool_semantic_fingerprint="sha256:semantic-two",
-            mcp_execution_policy_fingerprint="sha256:policy",
-            tool_route_fingerprint="sha256:route-two",
-            result_entry_id='entry:ov4rsdfxayf37gxhe3ehjugwoe',
-        )
-    owner.settle(
-        prepared=first,
-        committed=True,
-    )
-    assert owner.install_full_result(
-        result_entry_id='entry:ja6ihq637wrsnc35ze6r5r3ezq',
-        conversation_scope_kind=ModelInputScopeKind.ROOT,
-        session_id="session:aaaaaaaaaaaaaaaaaaaaaaaaaa",
-        continuity_epoch_nonce='epoch:l7z2gzxlhyebe4jaidrsoamlca',
-    )
-    assert (
-        owner.resolve_callable(
-            first.ref.opaque_token,
-            conversation_scope_kind=ModelInputScopeKind.ROOT,
-            session_id="session:aaaaaaaaaaaaaaaaaaaaaaaaaa",
-            continuity_epoch_nonce='epoch:l7z2gzxlhyebe4jaidrsoamlca',
-        )
-        == first.ref
-    )
-
-
-def test_round9_mcp_directory_offset_pages_preserve_catalog_join() -> None:
-    entries = tuple(
-        McpServerCatalogEntry(
-            runtime_source=LocalConfiguredMcpRuntimeSource(),
-            server_id=f"server-{index}",
-            display_name=f"Server {index}",
-            status=McpServerState.READY,
-            exposed_tool_count=0,
-            discovered_tool_count=0,
-            resource_count=0,
-            resource_template_count=0,
-            prompt_count=0,
-            bounded_tool_name_overview=(),
-            sanitized_instructions=None,
-            stable_failure_category=None,
-            tool_surface_semantic_fingerprint=context_fingerprint(
-                "test:round9-empty-tool-surface:v1", index
-            ),
-            catalog_semantic_fingerprint=context_fingerprint(
-                "test:round9-server-catalog:v1", index
-            ),
-            scope_subagents=True,
-        )
-        for index in range(3)
-    )
-    catalog = build_catalog_snapshot(owner_epoch="epoch:aaaaaaaaaaaaaaaaaaaaaaaaaa", catalog_revision=1, entries=entries)
-    routes = FrozenMcpRouteProjection(
-        routes=(),
-        joined_catalog_semantic_fingerprint=catalog.semantic_fingerprint,
-        projection_fingerprint=context_fingerprint(
-            "mcp-route-projection:v1",
-            {"routes": (), "catalog": catalog.semantic_fingerprint},
-        ),
-    )
-    runtime = SimpleNamespace(catalog_for_scope=lambda scope: catalog.for_scope(scope), candidates={})
-    plan = _directory_plan(routes)
-    rows, _, diagnostics = runtime_rows(runtime, plan, ModelInputScopeKind.ROOT)
-    assert diagnostics == []
-    first = render_page(rows, {"limit": 1}, fits_result=ToolResultPageBudget(derive_id("call", "capability-semantics-page")).fits)
-    assert len(first["items"]) == 1 and first["next"]["arguments"]["offset"] == 1
-    second = render_page(rows, first["next"]["arguments"], fits_result=ToolResultPageBudget(derive_id("call", "capability-semantics-page")).fits)
-    assert second["items"][0]["target"]["runtime_server_id"] == derive_id("mcp-server", "runtime-target", "server-1")
-    assert render_page(rows, {"offset": 99}, fits_result=ToolResultPageBudget(derive_id("call", "capability-semantics-page")).fits)["next"] is None
-    with pytest.raises(CapabilityQueryError):
-        parse_query({"cursor": "old-shape"})
-    child_plan = _directory_plan(replace(routes, joined_catalog_semantic_fingerprint=catalog.for_scope(ModelInputScopeKind.SUBAGENT).semantic_fingerprint, projection_fingerprint=context_fingerprint("mcp-route-projection:v1", {"routes": (), "catalog": catalog.for_scope(ModelInputScopeKind.SUBAGENT).semantic_fingerprint})))
-    child_rows, _, diagnostics = runtime_rows(runtime, child_plan, ModelInputScopeKind.SUBAGENT)
-    assert diagnostics == [] and len(child_rows) == 3
-    drifted_routes = replace(routes, joined_catalog_semantic_fingerprint="sha256:foreign-catalog", projection_fingerprint=context_fingerprint("mcp-route-projection:v1", {"routes": (), "catalog": "sha256:foreign-catalog"}))
-    stale_rows, _, diagnostics = runtime_rows(runtime, SimpleNamespace(mcp_catalog_route_projection=drifted_routes), ModelInputScopeKind.ROOT)
-    assert stale_rows == [] and diagnostics[0]["code"] == "MCP_CATALOG_STALE"
-
-
-def test_round9_mcp_item_directory_projects_metadata_and_offset_pages() -> None:
-    server_catalog_fingerprint = context_fingerprint(
-        "test:round9-item-server-catalog:v1",
-        "server",
-    )
-    snapshot = McpDiscoverySnapshot(
-        server_id="server",
-        display_name="Server",
-        protocol_version="2025-11-25",
-        sanitized_instructions="",
-        discovered_tool_count=0,
-        invalid_tool_count=0,
-        tools=(),
-        resources=tuple(
-            McpResourceSemanticFact(
-                server_id="server",
-                uri=f"fixture://resource/{index}",
-                name=f"Resource {index}",
-                description="",
-                mime_type="text/plain",
-                semantic_fingerprint=context_fingerprint(
-                    "test:round9-resource:v1", index
-                ),
-            )
-            for index in range(2)
-        ),
-        resource_templates=tuple(
-            McpResourceTemplateSemanticFact(
-                server_id="server",
-                uri_template=f"fixture://template/{index}/{{id}}",
-                name=f"Template {index}",
-                description="",
-                mime_type="text/plain",
-                semantic_fingerprint=context_fingerprint(
-                    "test:round9-resource-template:v1", index
-                ),
-            )
-            for index in range(2)
-        ),
-        prompts=tuple(
-            McpPromptSemanticFact(
-                server_id="server",
-                name=f"prompt-{index}",
-                description="Build a component",
-                arguments=(("component", "Component name", True),),
-                semantic_fingerprint=context_fingerprint(
-                    "test:round9-prompt:v1", index
-                ),
-            )
-            for index in range(2)
-        ),
-        tool_surface_semantic_fingerprint=context_fingerprint(
-            "test:round9-item-tool-surface:v1", ()
-        ),
-        catalog_semantic_fingerprint=server_catalog_fingerprint,
-        presentation_fingerprint=context_fingerprint(
-            "test:round9-item-presentation:v1", "server"
-        ),
-        sdk_conformance_contract_fingerprint=context_fingerprint(
-            "test:round9-item-sdk-contract:v1", "fixture"
-        ),
-    )
-    catalog = build_catalog_snapshot(
-        owner_epoch="epoch:aaaaaaaaaaaaaaaaaaaaaaaaaa",
-        catalog_revision=1,
-        entries=(
-            McpServerCatalogEntry(
-                runtime_source=LocalConfiguredMcpRuntimeSource(),
-                server_id="server",
-                display_name="Server",
-                status=McpServerState.READY,
-                exposed_tool_count=0,
-                discovered_tool_count=0,
-                resource_count=2,
-                resource_template_count=2,
-                prompt_count=2,
-                bounded_tool_name_overview=(),
-                sanitized_instructions="",
-                stable_failure_category=None,
-                tool_surface_semantic_fingerprint=(
-                    snapshot.tool_surface_semantic_fingerprint
-                ),
-                catalog_semantic_fingerprint=server_catalog_fingerprint,
-                scope_subagents=True,
-            ),
-        ),
-    )
-    candidates = {
-        "server": SimpleNamespace(
-            server_id="server",
-            discovery_snapshot=snapshot,
-        )
-    }
-    runtime = SimpleNamespace(catalog_for_scope=lambda scope: catalog.for_scope(scope), candidates=candidates)
-    plan = _directory_plan(SimpleNamespace(
-        joined_catalog_semantic_fingerprint=catalog.semantic_fingerprint, routes=()),
-        (_source_snapshot(source_kind=CapabilitySourceKind.MCP_SERVER, source_id="server", facts=()),))
-    rows, details, diagnostics = runtime_rows(runtime, plan, ModelInputScopeKind.ROOT)
-    assert diagnostics == []
-    resources = [item for item in rows if item["kind"] == "MCP_RESOURCE"]
-    first = render_page(resources, {"limit": 1}, fits_result=ToolResultPageBudget(derive_id("call", "capability-semantics-page")).fits)
-    assert first["items"][0]["target"]["uri"] == "fixture://resource/0"
-    assert first["next"]["arguments"]["offset"] == 1
-    second = render_page(resources, first["next"]["arguments"], fits_result=ToolResultPageBudget(derive_id("call", "capability-semantics-page")).fits)
-    assert second["items"][0]["target"]["uri"] == "fixture://resource/1"
-    assert details[("MCP_RESOURCE", "server", "fixture://resource/0")]["uri"] == "fixture://resource/0"
-    prompts = [item for item in rows if item["kind"] == "MCP_PROMPT"]
-    first_prompt = render_page(prompts, {"limit": 1}, fits_result=ToolResultPageBudget(derive_id("call", "capability-semantics-page")).fits)
-    prompt_target = {"kind": "MCP_PROMPT", "server_id": "server", "name": "prompt-0"}
-    assert first_prompt["items"][0]["target"] == prompt_target
-    assert first_prompt["items"][0]["description"] == "Build a component"
-    assert "arguments" not in first_prompt["items"][0]
-    assert render_page(prompts, first_prompt["next"]["arguments"], fits_result=ToolResultPageBudget(derive_id("call", "capability-semantics-page")).fits)["items"][0]["target"]["name"] == "prompt-1"
-    assert details[("MCP_PROMPT", "server", "prompt-0")] == {
-        "target": prompt_target, "source": None, "server_id": "server",
-        "name": "prompt-0", "description": "Build a component",
-        "arguments": [{"name": "component", "description": "Component name", "required": True}],
-    }
-    assert details[("MCP_SERVER", "server")]["prompt_count"] == 2
-    assert parse_query({"kind": "MCP_PROMPT"}) == {"kind": "MCP_PROMPT"}
-    assert parse_query({"target": prompt_target}) == {"target": prompt_target}
-    assert render_page(resources, {"offset": 99}, fits_result=ToolResultPageBudget(derive_id("call", "capability-semantics-page")).fits)["items"] == []
-    with pytest.raises(CapabilityQueryError):
-        parse_query({"kind": "MCP_RESOURCE", "cursor": "old-shape"})
-
-
-def test_round9_projection_wire_bytes_are_derived_not_caller_supplied() -> None:
-    fact = _fact(
-        source_kind=CapabilitySourceKind.BUILTIN_REGISTRY,
-        source_id="builtin-registry",
-        name="builtin_echo",
-        origin=ToolCapabilityOrigin.BUILTIN,
-        schema={"type": "object", "properties": {}},
-    )
-    eligibility = freeze_openai_native_tool_eligibility(
-        conversation_scope_kind=ModelInputScopeKind.ROOT,
-        wire_api="openai_chat_completions",
-        tool_facts=(fact,),
-    )
-    version = tool_capability_version_ref(fact)
-    projection_set = materialize_openai_native_tool_projection_set(
-        conversation_scope_kind=ModelInputScopeKind.ROOT,
-        wire_api="openai_chat_completions",
-        tool_versions=(version,),
-        tool_specs=(fact.canonical_tool_spec,),
-        eligibility=eligibility,
-    )
-    assert projection_set.projections[0].wire_utf8_bytes > 0
-    with pytest.raises(TypeError):
-        replace(projection_set.projections[0], wire_utf8_bytes=1)
-
-
-def test_round9_large_mcp_cohort_quotes_before_meta_fallback() -> None:
-    facts = tuple(
-        _fact(
-            source_kind=CapabilitySourceKind.MCP_SERVER,
-            source_id="fixture",
-            name=f"bulk_{index:03d}",
-            origin=ToolCapabilityOrigin.MCP,
-            schema={
-                "type": "object",
-                "properties": {
-                    "value": {
-                        "type": "string",
-                        "description": "x" * 4_096,
-                    }
-                },
-            },
-        )
-        for index in range(65)
-    )
-    view = _planning_view(builtin_facts=(), mcp_facts=facts)
-    eligibility = view.planning_input.native_wire
-    assert all(
-        isinstance(item, FrozenNativeToolWireEligibilityQuote)
-        and not hasattr(item, "wire_tool")
-        for item in eligibility.entries
-    )
-
-    selection = KernelToolCapabilityPlanner().select(view=view)
-    assert selection.direct_tool_versions == ()
-    assert len(selection.mcp_catalog_route_projection.routes) == 65
-    assert {item.route for item in selection.mcp_catalog_route_projection.routes} == {
-        ToolCapabilityRouteKind.NEW_MCP_META_ONLY
-    }
-    projection_set = materialize_openai_native_tool_projection_set(
-        conversation_scope_kind=ModelInputScopeKind.ROOT,
-        wire_api="openai_chat_completions",
-        tool_versions=selection.direct_tool_versions,
-        tool_specs=selection.direct_tool_surface.tool_specs,
-        eligibility=eligibility,
-    )
-    assert projection_set.projections == ()
-
-
-def test_round9_native_quote_loop_obeys_dispatch_deadline(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fact = _fact(
-        source_kind=CapabilitySourceKind.MCP_SERVER,
-        source_id="fixture",
-        name="deadline_probe",
-        origin=ToolCapabilityOrigin.MCP,
-        schema={"type": "object", "properties": {}},
-    )
-    ticks = iter((0.0, 2.0))
-    monkeypatch.setattr(
-        "pulsara_agent.llm.adapters.openai.function_tools.monotonic",
-        lambda: next(ticks),
-    )
-    with pytest.raises(TimeoutError, match="planning deadline"):
-        freeze_openai_native_tool_eligibility(
-            conversation_scope_kind=ModelInputScopeKind.ROOT,
-                wire_api="openai_chat_completions",
-            tool_facts=(fact,),
-            deadline_monotonic=1.0,
-        )
-
-
 def test_round9_installed_predecessor_rejects_foreign_scope() -> None:
     fact = _fact(
         source_kind=CapabilitySourceKind.BUILTIN_REGISTRY,
@@ -1104,15 +445,14 @@ def test_round9_installed_predecessor_rejects_foreign_scope() -> None:
         builtin_facts=(fact,),
         mcp_facts=(),
         conversation_scope_kind=ModelInputScopeKind.SUBAGENT,
-        scope_subagent_task_id='task:xf2km7nsw6mnh2uevbbikzaseu',
+        scope_subagent_task_id="task:xf2km7nsw6mnh2uevbbikzaseu",
     )
     first = _finalized_plan(view=child_a)
     predecessor = InstalledCapabilityEpochPredecessor(
         expected_continuity_revision=1,
-        continuity_epoch_nonce='epoch:jab4555mywnmhhu3736nwansui',
+        continuity_epoch_nonce="epoch:jab4555mywnmhhu3736nwansui",
         tool_surface=first.direct_tool_surface,
         direct_projection_set=first.direct_projection_set,
-        mcp_route_projection=first.mcp_catalog_route_projection,
     )
     with pytest.raises(ValueError, match="predecessor scope"):
         _planning_view(
@@ -1121,15 +461,6 @@ def test_round9_installed_predecessor_rejects_foreign_scope() -> None:
             predecessor=predecessor,
             conversation_scope_kind=ModelInputScopeKind.ROOT,
         )
-
-
-def test_round9_owner_carriers_do_not_retain_decorative_proof_fields() -> None:
-    assert "resolved_config_inventory_fingerprint" not in {
-        item.name for item in fields(PreparedMcpCapabilitySourceSnapshotSet)
-    }
-    assert "root_policy_fingerprint" not in {
-        item.name for item in fields(PreparedSkillCatalogSourceSnapshot)
-    }
 
 
 def test_round9_generic_capability_package_has_no_physical_authority_imports() -> None:
@@ -1164,189 +495,120 @@ def test_round9_production_has_no_pre_registry_tool_surface_bypass() -> None:
     assert "_compatibility_native_projection_set" not in direct_model
 
 
-
-
-@pytest.mark.parametrize("builtin_count", [0, 39, 64])
-@pytest.mark.parametrize("mcp_count", [128, 129])
-def test_mcp_native_count_budget_excludes_builtins(builtin_count, mcp_count):
-    builtins = tuple(
-        _fact(
-            source_kind=CapabilitySourceKind.BUILTIN_REGISTRY,
-            source_id="builtin-registry",
-            name=f"builtin_{i:03}",
-            origin=ToolCapabilityOrigin.BUILTIN,
-            schema={"type": "object", "properties": {}},
-        )
-        for i in range(builtin_count)
-    )
-    mcps = tuple(
-        _fact(
-            source_kind=CapabilitySourceKind.MCP_SERVER,
-            source_id="fixture",
-            name=f"remote_{i:03}",
-            origin=ToolCapabilityOrigin.MCP,
-            schema={"type": "object", "properties": {}},
-        )
-        for i in range(mcp_count)
-    )
-    plan = _finalized_plan(view=_planning_view(builtin_facts=builtins, mcp_facts=mcps))
-    assert len(plan.direct_tool_surface.tool_specs) == builtin_count + (
-        mcp_count if mcp_count == 128 else 0
-    )
-    assert {route.route for route in plan.mcp_catalog_route_projection.routes} == {
-        ToolCapabilityRouteKind.DIRECT
-        if mcp_count == 128
-        else ToolCapabilityRouteKind.NEW_MCP_META_ONLY
-    }
-
-
-@pytest.mark.parametrize("wire_api", ["openai_chat_completions", "openai_responses"])
-@pytest.mark.parametrize("tokens", [63_999, 64_000, 64_001])
-def test_mcp_native_token_boundary_uses_actual_wire_estimator_and_excludes_builtins(
-    wire_api, tokens
-):
-    def mcp(padding):
-        return _fact(
-            source_kind=CapabilitySourceKind.MCP_SERVER,
-            source_id="fixture",
-            name="remote",
-            origin=ToolCapabilityOrigin.MCP,
-            schema={
-                "type": "object",
-                "properties": {
-                    "value": {"type": "string", "description": "x" * padding}
-                },
-            },
-        )
-
-    initial = _planning_view(builtin_facts=(), mcp_facts=(mcp(0),), wire_api=wire_api)
-    base = initial.planning_input.native_wire.entries[0].wire_estimated_tokens
-    large = mcp(4 * (tokens - base))
-    builtin = _fact(
-        source_kind=CapabilitySourceKind.BUILTIN_REGISTRY,
-        source_id="builtin-registry",
-        name="builtin",
-        origin=ToolCapabilityOrigin.BUILTIN,
-        schema={
-            "type": "object",
-            "properties": {"value": {"type": "string", "description": "y" * 16_000}},
-        },
-    )
-    view = _planning_view(
-        builtin_facts=(builtin,), mcp_facts=(large,), wire_api=wire_api
-    )
-    quote = next(
-        q
-        for q in view.planning_input.native_wire.entries
-        if q.version.provider_name == large.canonical_tool_spec.name
-    )
-    assert quote.wire_estimated_tokens == tokens
-    plan = _finalized_plan(view=view, wire_api=wire_api)
-    assert len(plan.direct_tool_surface.tool_specs) == (2 if tokens < 64_000 else 1)
-    assert plan.mcp_catalog_route_projection.routes[0].route is (
-        ToolCapabilityRouteKind.DIRECT
-        if tokens < 64_000
-        else ToolCapabilityRouteKind.NEW_MCP_META_ONLY
-    )
-
-
-def test_mcp_native_token_budget_is_shared_across_servers_and_does_not_rebase_epoch():
-    def mcp(server, padding):
-        return _fact(
-            source_kind=CapabilitySourceKind.MCP_SERVER,
-            source_id=server,
-            name=f"mcp__{server}__remote",
-            origin=ToolCapabilityOrigin.MCP,
-            schema={
-                "type": "object",
-                "properties": {
-                    "value": {"type": "string", "description": "x" * padding}
-                },
-            },
-        )
-
-    facts = []
-    for server in ("first", "second"):
-        view = _planning_view(builtin_facts=(), mcp_facts=(mcp(server, 0),))
-        base = view.planning_input.native_wire.entries[0].wire_estimated_tokens
-        facts.append(mcp(server, 4 * (32_000 - base)))
-    cold = _finalized_plan(
-        view=_planning_view(builtin_facts=(), mcp_facts=tuple(facts))
-    )
-    assert len(cold.mcp_catalog_route_projection.routes) == 2
-    assert all(
-        route.route is ToolCapabilityRouteKind.NEW_MCP_META_ONLY
-        for route in cold.mcp_catalog_route_projection.routes
-    )
-    predecessor = InstalledCapabilityEpochPredecessor(
-        expected_continuity_revision=1,
-        continuity_epoch_nonce="epoch:bsrg4gjfyl4eyhiftnis4ez7p4",
-        tool_surface=cold.direct_tool_surface,
-        direct_projection_set=cold.direct_projection_set,
-        mcp_route_projection=cold.mcp_catalog_route_projection,
-    )
-    # Removing the second server fits the budget, but only a cold epoch may
-    # install native tools. The current epoch keeps its exact provider prefix.
-    warm = _finalized_plan(
-        view=_planning_view(
-            builtin_facts=(), mcp_facts=(facts[0],), predecessor=predecessor
-        )
-    )
-    assert warm.direct_tool_surface == cold.direct_tool_surface
-    assert warm.direct_projection_set == cold.direct_projection_set
-    assert (
-        warm.mcp_catalog_route_projection.routes[0].route
-        is ToolCapabilityRouteKind.NEW_MCP_META_ONLY
-    )
-    next_cold = _finalized_plan(
-        view=_planning_view(builtin_facts=(), mcp_facts=(facts[0],))
-    )
-    assert (
-        next_cold.mcp_catalog_route_projection.routes[0].route
-        is ToolCapabilityRouteKind.DIRECT
-    )
-
-
 def test_capability_identity_digest_vectors_sort_and_provider_wire_are_stable():
-    from pulsara_agent.capability.contracts import capability_identity_digest, capability_source_identity_digest, tool_capability_version_identity_digest
-    from pulsara_agent.primitives.context import canonical_json_bytes
+    from pulsara_agent.capability.contracts import (
+        capability_identity_digest,
+        capability_source_identity_digest,
+        tool_capability_version_identity_digest,
+    )
 
-    facts = tuple(_fact(source_kind=CapabilitySourceKind.MCP_SERVER, source_id="fixture", name=name,
-                        origin=ToolCapabilityOrigin.MCP, schema={"type": "object", "properties": {}})
-                  for name in ("a", "b"))
-    assert capability_source_identity_digest(facts[0].identity.source) == "sha256:97f68523f26809d00f0448fe9d8fc89417b5b36aa1c2bf5d093845f7ffedbccd"
-    assert capability_identity_digest(facts[0].identity) == "sha256:49a503a891efce74f13931075cb1782ee58ef521b5f7443922dd83006c6738da"
-    assert tool_capability_version_identity_digest(tool_capability_version_ref(facts[0])) == "sha256:fcc5ed38f35a417010c305bb73c4a9439d56c3d1c5418d9d19c749b8c58c848c"
+    facts = tuple(
+        _fact(
+            source_kind=CapabilitySourceKind.MCP_SERVER,
+            source_id="fixture",
+            name=name,
+            origin=ToolCapabilityOrigin.MCP,
+            schema={"type": "object", "properties": {}},
+        )
+        for name in ("a", "b")
+    )
+    assert (
+        capability_source_identity_digest(facts[0].identity.source)
+        == "sha256:97f68523f26809d00f0448fe9d8fc89417b5b36aa1c2bf5d093845f7ffedbccd"
+    )
+    assert (
+        capability_identity_digest(facts[0].identity)
+        == "sha256:49a503a891efce74f13931075cb1782ee58ef521b5f7443922dd83006c6738da"
+    )
+    assert (
+        tool_capability_version_identity_digest(tool_capability_version_ref(facts[0]))
+        == "sha256:fcc5ed38f35a417010c305bb73c4a9439d56c3d1c5418d9d19c749b8c58c848c"
+    )
     assert facts[0].identity.stable_name < facts[1].identity.stable_name
-    assert capability_identity_digest(facts[0].identity) > capability_identity_digest(facts[1].identity)
+    assert capability_identity_digest(facts[0].identity) > capability_identity_digest(
+        facts[1].identity
+    )
     plan = _finalized_plan(view=_planning_view(builtin_facts=(), mcp_facts=facts))
-    assert [f.identity.stable_name for f in plan.dispatch_view.registry_tool_facts] == ["b", "a"]
-    assert all(route.route is ToolCapabilityRouteKind.DIRECT for route in plan.mcp_catalog_route_projection.routes)
-    assert canonical_json_bytes([p.wire_tool for p in plan.direct_projection_set.projections]) == (b'[{"function":{"description":"Capability a","name":"a","parameters":{"properties":{},"type":"object"},"strict":false},"type":"function"},{"function":{"description":"Capability b","name":"b","parameters":{"properties":{},"type":"object"},"strict":false},"type":"function"}]')
-    assert all(version.identity is fact.identity for version, fact in zip(plan.direct_projection_set.tool_versions, facts, strict=True))
+    assert [f.identity.stable_name for f in plan.dispatch_view.registry_tool_facts] == [
+        "b",
+        "a",
+    ]
+    assert plan.direct_projection_set.projections == ()
 
 
 def test_capability_multisource_framing_uses_original_digest_bytes(monkeypatch):
     from pulsara_agent.capability import registry as registry_module
-    facts = tuple(_fact(source_kind=CapabilitySourceKind.MCP_SERVER, source_id=source, name=name,
-                        origin=ToolCapabilityOrigin.MCP, schema={"type": "object", "properties": {}})
-                  for source, name in (("server-a", "a"), ("server-b", "b")))
+
+    facts = tuple(
+        _fact(
+            source_kind=CapabilitySourceKind.MCP_SERVER,
+            source_id=source,
+            name=name,
+            origin=ToolCapabilityOrigin.MCP,
+            schema={"type": "object", "properties": {}},
+        )
+        for source, name in (("server-a", "a"), ("server-b", "b"))
+    )
     view = _planning_view(builtin_facts=(), mcp_facts=facts)
     cut = view.parent_dispatch_cut
     kwargs = dict(registry=cut.registry, tools=cut.tools, skills=cut.skills)
     low, high = 0, registry_module.MAXIMUM_CAPABILITY_PLANNER_FRAMING_BYTES
     while low < high:
         middle = (low + high) // 2
-        monkeypatch.setattr(registry_module, "MAXIMUM_CAPABILITY_PLANNER_FRAMING_BYTES", middle)
+        monkeypatch.setattr(
+            registry_module, "MAXIMUM_CAPABILITY_PLANNER_FRAMING_BYTES", middle
+        )
         try:
             registry_module._require_bounded_planner_framing(**kwargs)
         except ValueError:
             low = middle + 1
         else:
             high = middle
-    monkeypatch.setattr(registry_module, "MAXIMUM_CAPABILITY_PLANNER_FRAMING_BYTES", low)
+    monkeypatch.setattr(
+        registry_module, "MAXIMUM_CAPABILITY_PLANNER_FRAMING_BYTES", low
+    )
     registry_module._require_bounded_planner_framing(**kwargs)
-    monkeypatch.setattr(registry_module, "MAXIMUM_CAPABILITY_PLANNER_FRAMING_BYTES", low - 1)
+    monkeypatch.setattr(
+        registry_module, "MAXIMUM_CAPABILITY_PLANNER_FRAMING_BYTES", low - 1
+    )
     with pytest.raises(ValueError, match="framing"):
         registry_module._require_bounded_planner_framing(**kwargs)
-    assert low == 3218
+    assert low == 2174
+
+
+def test_mcp_discovery_never_changes_the_builtin_provider_tools_prefix():
+    builtin = _fact(
+        source_kind=CapabilitySourceKind.BUILTIN_REGISTRY,
+        source_id="builtin-registry",
+        name="builtin_echo",
+        origin=ToolCapabilityOrigin.BUILTIN,
+        schema={"type": "object", "properties": {}},
+    )
+    first = _finalized_plan(view=_planning_view(builtin_facts=(builtin,), mcp_facts=()))
+    remote = tuple(
+        _fact(
+            source_kind=CapabilitySourceKind.MCP_SERVER,
+            source_id="server",
+            name=f"remote_{index}",
+            origin=ToolCapabilityOrigin.MCP,
+            schema={"type": "array", "items": {"type": "string"}},
+        )
+        for index in range(140)
+    )
+    predecessor = InstalledCapabilityEpochPredecessor(
+        expected_continuity_revision=1,
+        continuity_epoch_nonce="epoch:jab4555mywnmhhu3736nwansui",
+        tool_surface=first.direct_tool_surface,
+        direct_projection_set=first.direct_projection_set,
+    )
+    successor = _finalized_plan(
+        view=_planning_view(
+            builtin_facts=(builtin,), mcp_facts=remote, predecessor=predecessor
+        )
+    )
+    assert successor.direct_tool_surface == first.direct_tool_surface
+    assert successor.direct_projection_set is first.direct_projection_set
+    assert [spec.name for spec in successor.direct_tool_surface.tool_specs] == [
+        "builtin_echo"
+    ]
+    assert len(successor.dispatch_view.registry_tool_facts) == 141

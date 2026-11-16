@@ -1,7 +1,7 @@
 import type { RequestExecution } from './request-execution';
 import type { PermissionMode } from './pulsara-types';
 export type ScheduleRule = (
-  | { kind: 'once'; run_at_utc: string }
+  | { kind: 'once'; run_at: string }
   | { kind: 'interval'; anchor_at_utc: string; seconds: number }
   | { kind: 'daily'; start_date: string; time: string }
   | { kind: 'weekly'; start_date: string; time: string; weekdays: number[] }
@@ -32,7 +32,7 @@ export class LocalScheduledTasksApi {
   listSessions(query = '', cursor?: string, signal?: AbortSignal) { const q = new URLSearchParams({query}); if (cursor) q.set('cursor', cursor); return this.request<ScheduledSessionPage>(`/sessions?${q}`, 'GET', undefined, signal); }
   get(id: string, signal?: AbortSignal) { return this.request<ScheduledTask>(`/${encodeURIComponent(id)}`, 'GET', undefined, signal); }
   create(session_id: string, values: ScheduledValues, status?: ScheduledTask['status'] | null) { return this.request<ScheduledTask>('', 'POST', { session_id, values, status }); }
-  update(task: ScheduledTask, values: ScheduledValues) { return this.request<ScheduledTask>(`/${encodeURIComponent(task.id)}`, 'PATCH', { expected_revision: task.revision, values }); }
+  update(task: ScheduledTask, values: Partial<ScheduledValues>) { return this.request<ScheduledTask>(`/${encodeURIComponent(task.id)}`, 'PATCH', { expected_revision: task.revision, values }); }
   action(task: ScheduledTask, action: 'pause' | 'resume' | 'delete') { return this.request<{task: ScheduledTask | null}>(`/${encodeURIComponent(task.id)}/${action}`, 'POST', { expected_revision: task.revision }); }
   switch(task: ScheduledTask, replacement: ScheduledReplacement) { return this.request<{paused: ScheduledTask; active: ScheduledTask}>(`/${encodeURIComponent(task.id)}/switch`, 'POST', { expected_revision: task.revision, replacement }); }
   runNow(request: ScheduledRunRequest) { return this.request<{queue_item_id: string; execution: RequestExecution | null; delivery_mode: 'NEW_TURN' | 'STEER_ACTIVE_TURN'; target_turn_id: string | null}>(`/${encodeURIComponent(request.task_id)}/run-now`, 'POST', request); }
@@ -41,7 +41,7 @@ export class LocalScheduledTasksApi {
 }
 export function scheduleLabel(task: ScheduledValues): string {
   const s = task.schedule;
-  if (s.kind === 'once') return `一次 · ${new Intl.DateTimeFormat('zh-CN', { timeZone: task.timezone, dateStyle: 'short', timeStyle: 'short' }).format(new Date(s.run_at_utc))}`;
+  if (s.kind === 'once') return `一次 · ${s.run_at.replace('T', ' ').slice(0, 16)}${task.timezone === 'Asia/Shanghai' ? '' : ` ${task.timezone}`}`;
   if (s.kind === 'interval') return `每 ${s.seconds % 3600 === 0 ? `${s.seconds / 3600} 小时` : s.seconds % 60 === 0 ? `${s.seconds / 60} 分钟` : `${s.seconds} 秒`}`;
   if (s.kind === 'daily') return `每天 ${s.time}`;
   if (s.kind === 'weekly') return `每周 ${s.weekdays.map(d => ['一','二','三','四','五','六','日'][d - 1]).join('、')} ${s.time}`;

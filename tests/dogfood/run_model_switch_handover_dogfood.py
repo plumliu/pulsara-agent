@@ -84,7 +84,6 @@ class _ReadOnlySettingsStore:
         return self.value
 
 
-
 class _RecordingExecution:
     def __init__(self, delegate: Any, record: dict[str, object]) -> None:
         self._delegate = delegate
@@ -170,7 +169,9 @@ class _RecordingTransport:
             "sequence": len(self._records) + 1,
             "purpose": call.fact.purpose.value,
             "resolved_model_call_id": call.resolved_model_call_id,
-            "provider_input": thaw_json(plan.materialization.context_bearing_projection),
+            "provider_input": thaw_json(
+                plan.materialization.context_bearing_projection
+            ),
             "connection_id": call.binding.connection_id.value,
             "reasoning": reasoning_selection_to_dict(call.binding.reasoning),
             "route_id": call.target.fact.route_id,
@@ -236,9 +237,13 @@ class _RecordingModelRuntime:
 
     def resolve_snapshot_target(self, binding, *, resolution_snapshot, timeout_policy):
         target = self._delegate.resolve_snapshot_target(
-            binding, resolution_snapshot=resolution_snapshot, timeout_policy=timeout_policy,
+            binding,
+            resolution_snapshot=resolution_snapshot,
+            timeout_policy=timeout_policy,
         )
-        return replace(target, transport=_RecordingTransport(target.transport, self._records))
+        return replace(
+            target, transport=_RecordingTransport(target.transport, self._records)
+        )
 
     def resolve_frozen_target_bundle(self, bundle, *, binding, timeout_policy):
         return self._delegate.resolve_frozen_target_bundle(
@@ -311,7 +316,10 @@ def _create_database(settings: LocalSettings) -> tuple[str, str, str, str]:
         runner = PostgresMigrationRunner(admin_dsn=admin, runtime_dsn=runtime)
         first = runner.migrate(deadline_monotonic=monotonic() + 240)
         second = runner.migrate(deadline_monotonic=monotonic() + 240)
-        if first.baseline_commit_confirmation != "FULL" or second.baseline_commit_confirmation != "FULL":
+        if (
+            first.baseline_commit_confirmation != "FULL"
+            or second.baseline_commit_confirmation != "FULL"
+        ):
             raise RuntimeError("ephemeral clean-v0 migration was not repeatable")
     except BaseException:
         _drop_database(settings, name)
@@ -342,23 +350,32 @@ async def _seed_completed_history(
     total_bytes = 0
     for index in range(segments):
         suffix = uuid4().hex
-        turn_id = derive_id("turn", "test-fixture", f"turn:model-switch-dogfood:{suffix}")
+        turn_id = derive_id(
+            "turn", "test-fixture", f"turn:model-switch-dogfood:{suffix}"
+        )
         body = (
             f"Historical user request {index}: preserve this exact advisory "
-            + (
-                "context for a later cross-model handover; "
-                f"segment={index:02d}. "
-            )
+            + (f"context for a later cross-model handover; segment={index:02d}. ")
             * repetitions
         )
         total_bytes += len(body.encode("utf-8"))
         intent = build_prepared_root_turn_intent(
             session_id=session.session_id,
-            command_id=derive_id("command", "test-fixture", f"command:model-switch-dogfood:{suffix}"),
+            command_id=derive_id(
+                "command", "test-fixture", f"command:model-switch-dogfood:{suffix}"
+            ),
             turn_id=turn_id,
-            entry_id=derive_id("entry", "test-fixture", f"entry:model-switch-dogfood:user:{suffix}"),
-            context_binding_revision_id=derive_id("binding", "test-fixture", f"revision:model-switch-dogfood:{suffix}"),
-            permission_snapshot_id=derive_id("permission", "test-fixture", f"permission:model-switch-dogfood:{suffix}"),
+            entry_id=derive_id(
+                "entry", "test-fixture", f"entry:model-switch-dogfood:user:{suffix}"
+            ),
+            context_binding_revision_id=derive_id(
+                "binding", "test-fixture", f"revision:model-switch-dogfood:{suffix}"
+            ),
+            permission_snapshot_id=derive_id(
+                "permission",
+                "test-fixture",
+                f"permission:model-switch-dogfood:{suffix}",
+            ),
             requested_permission_mode=DEFAULT_PERMISSION_MODE,
             canonical_prompt=freeze_canonical_prompt(FrozenPromptContent.text(body)),
             occurred_at=datetime.now(timezone.utc),
@@ -380,11 +397,16 @@ async def _seed_completed_history(
         repository.commit_assistant_message(
             guard,
             cut=cut,
-            entry_id=derive_id("entry", "test-fixture", f"entry:model-switch-dogfood:assistant:{suffix}"),
-            parent_content=InlineContent.from_bytes(assistant_text.encode("utf-8")),
+            entry_id=derive_id(
+                "entry",
+                "test-fixture",
+                f"entry:model-switch-dogfood:assistant:{suffix}",
+            ),
             blocks=(
                 AssistantTextBlock(
-                    block_id=derive_id("block", "test-fixture", f"block:model-switch-dogfood:{suffix}"),
+                    block_id=derive_id(
+                        "block", "test-fixture", f"block:model-switch-dogfood:{suffix}"
+                    ),
                     text=InlineContent.from_bytes(assistant_text.encode("utf-8")),
                 ),
             ),
@@ -456,7 +478,10 @@ def _scrub(value: object, secrets: tuple[str, ...]) -> object:
                 value = value.replace(secret, "<MODEL_API_KEY>")
         return value
     if isinstance(value, dict):
-        return {str(_scrub(key, secrets)): _scrub(item, secrets) for key, item in value.items()}
+        return {
+            str(_scrub(key, secrets)): _scrub(item, secrets)
+            for key, item in value.items()
+        }
     if isinstance(value, (list, tuple)):
         return [_scrub(item, secrets) for item in value]
     return value
@@ -473,8 +498,8 @@ async def _run(
     saved = LocalSettingsStore().read()
     source = _find_connection(saved, source_model)
     destination = _find_connection(saved, destination_model)
-    database_name, _admin_root, ephemeral_admin, ephemeral_runtime = (
-        _create_database(saved)
+    database_name, _admin_root, ephemeral_admin, ephemeral_runtime = _create_database(
+        saved
     )
     original_pulsara_home = os.environ.get("PULSARA_HOME")
     try:
@@ -502,12 +527,14 @@ async def _run(
             runtime = _RecordingModelRuntime(delegate, calls)
             source_binding = _binding(delegate, source)
             destination_binding = _binding(delegate, destination)
-            source_target = delegate.freeze_resolution_snapshot().validate(
-                source_binding
-            ).target
-            destination_target = delegate.freeze_resolution_snapshot().validate(
-                destination_binding
-            ).target
+            source_target = (
+                delegate.freeze_resolution_snapshot().validate(source_binding).target
+            )
+            destination_target = (
+                delegate.freeze_resolution_snapshot()
+                .validate(destination_binding)
+                .target
+            )
             core = KernelHostCore.production(model_runtime=runtime)  # type: ignore[arg-type]
             try:
                 session = await core.open_session(
@@ -538,13 +565,14 @@ async def _run(
                     automatic_enabled=False,
                     manual_enabled=False,
                     auto_trigger_ratio=0.85,
-
                 )
                 source_result = await session.run_turn(
-                    PromptContent.text("Call read_file exactly once on marker.txt with offset 1 and "
-                    "limit 200. After its result, reply briefly and include the "
-                    "exact marker MODEL_SWITCH_REAL_TOOL_OK."),
-                    command_id='command:47msqipdjde2ifg7gpur3nusv4',
+                    PromptContent.text(
+                        "Call read_file exactly once on marker.txt with offset 1 and "
+                        "limit 200. After its result, reply briefly and include the "
+                        "exact marker MODEL_SWITCH_REAL_TOOL_OK."
+                    ),
+                    command_id="command:47msqipdjde2ifg7gpur3nusv4",
                 )
                 seeded_bytes = await _seed_completed_history(
                     session,
@@ -554,11 +582,13 @@ async def _run(
                 before_switch_evidence = _database_evidence(session)
                 await session.update_model_call_binding(destination_binding)
                 destination_result = await session.run_turn(
-                    PromptContent.text("The model connection has changed. Call read_file exactly once on "
-                    "marker.txt with offset 1 and limit 20. After its result, answer "
-                    "exactly MODEL_SWITCH_DESTINATION_OK followed by one short sentence "
-                    "explaining what marker.txt contained."),
-                    command_id='command:azorlaqe35cirmg3ejllba4hny',
+                    PromptContent.text(
+                        "The model connection has changed. Call read_file exactly once on "
+                        "marker.txt with offset 1 and limit 20. After its result, answer "
+                        "exactly MODEL_SWITCH_DESTINATION_OK followed by one short sentence "
+                        "explaining what marker.txt contained."
+                    ),
+                    command_id="command:azorlaqe35cirmg3ejllba4hny",
                 )
                 presentation_notices = session.take_presentation_notices(controller_id)
                 evidence = _database_evidence(session)
@@ -584,7 +614,9 @@ async def _run(
                     if item["purpose"] == "agent_model_loop"
                     and item["model_id"] == destination_model
                 )
-                switch_outcomes = tuple(item.outcome.disposition.value for item in switch_results)
+                switch_outcomes = tuple(
+                    item.outcome.disposition.value for item in switch_results
+                )
                 destination_tool_call_count = sum(
                     1
                     for item in destination_calls
@@ -651,7 +683,6 @@ async def _run(
                     )
                     and destination_tool_call_count == 1
                     and destination_tool_result_count == 1
-
                 )
                 return report
             finally:

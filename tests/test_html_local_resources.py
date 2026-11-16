@@ -19,7 +19,6 @@ from pulsara_agent.conversation_kernel.visualization import materialize_visualiz
 from pulsara_agent.conversation_kernel.visualization_screenshot import (
     VisualizationScreenshotOwner,
 )
-from pulsara_agent.identity import random_id
 from pulsara_agent.tools.builtins.filesystem import ViewImageTool
 
 
@@ -240,19 +239,26 @@ def test_empty_css_js_allowed_bad_utf8_and_images_fail(tmp_path):
         asyncio.run(prepare(tmp_path / "index.html", b'<img src="broken.png">'))
 
 
-def test_final_budget_includes_duplicate_and_nested_base64(tmp_path, monkeypatch):
-    import pulsara_agent.conversation_kernel.html_resources as resources
-
-    (tmp_path / "image.png").write_bytes(png())
+def test_duplicate_stylesheets_keep_complete_nested_image_bytes(tmp_path):
+    payload = png()
+    (tmp_path / "image.png").write_bytes(payload)
     (tmp_path / "app.css").write_text("main{background:url(image.png)}")
-    monkeypatch.setattr(resources, "MAXIMUM_BLOB_BYTES", 350)
-    with pytest.raises(ValueError, match="TOO_LARGE"):
-        asyncio.run(
-            prepare(
-                tmp_path / "index.html",
-                b'<link rel="stylesheet" href="app.css"><link rel="stylesheet" href="app.css">',
-            )
+    frozen = asyncio.run(
+        prepare(
+            tmp_path / "index.html",
+            b'<link rel="stylesheet" href="app.css"><link rel="stylesheet" href="app.css">',
         )
+    )
+    (tmp_path / "image.png").unlink()
+    (tmp_path / "app.css").unlink()
+    stylesheets = [
+        decode(link.getAttribute("href")) for link in elements(frozen, "link")
+    ]
+    assert len(stylesheets) == 2 and stylesheets[0] == stylesheets[1]
+    encoded = (
+        stylesheets[0].decode().split("data:image/png;base64,", 1)[1].split('"', 1)[0]
+    )
+    assert base64.b64decode(encoded) == payload
 
 
 def test_publication_isolates_failed_items_and_cache_bases(tmp_path):
@@ -263,7 +269,9 @@ def test_publication_isolates_failed_items_and_cache_bases(tmp_path):
         try:
             shared = tmp_path / "shared.html"
             shared.write_text('<img src="image.png">')
-            (tmp_path / "bad.html").write_text('<link rel="stylesheet" href="missing.css">')
+            (tmp_path / "bad.html").write_text(
+                '<link rel="stylesheet" href="missing.css">'
+            )
             for directory, color in [("a", "red"), ("b", "blue")]:
                 folder = tmp_path / directory
                 folder.mkdir()
@@ -275,11 +283,15 @@ def test_publication_isolates_failed_items_and_cache_bases(tmp_path):
                 io=io,
                 validator=validator,
                 image_reader=None,
-                session_id=random_id("session"),
-                workspace_id=random_id("workspace"),
                 deadline_monotonic=monotonic() + 20,
             )
-            assert [x.state for x in result] == ["READY", "READY", "READY", "READY", "FAILED"]
+            assert [x.state for x in result] == [
+                "READY",
+                "READY",
+                "READY",
+                "READY",
+                "FAILED",
+            ]
             assert result[0].html == result[2].html != result[1].html
             return result[0].html
         finally:
@@ -499,47 +511,86 @@ def test_script_language_and_explicit_type_follow_browser_classification(tmp_pat
             browser.close()
 
 
-@pytest.mark.parametrize('source', [
-    b'<svg xmlns="http://www.w3.org/2000/svg" width="100000" height="100000"/>',
-    b'<svg xmlns="http://www.w3.org/2000/svg"><not-closed>',
-])
+@pytest.mark.parametrize(
+    "source",
+    [
+        b'<svg xmlns="http://www.w3.org/2000/svg" width="100000" height="100000"/>',
+        b'<svg xmlns="http://www.w3.org/2000/svg"><not-closed>',
+    ],
+)
 def test_svg_renderer_rejects_invalid_or_over_pixel_budget_instead_of_cropping(source):
-    from pulsara_agent.conversation_kernel.visualization_screenshot import VisualizationScreenshotError
+    from pulsara_agent.conversation_kernel.visualization_screenshot import (
+        VisualizationScreenshotError,
+    )
+
     async def exercise():
         owner = VisualizationScreenshotOwner()
         try:
-            with pytest.raises(VisualizationScreenshotError, match='PREVIEW_RENDER_FAILED'):
-                await owner.render(source, svg=True, deadline_monotonic=monotonic()+15)
+            with pytest.raises(
+                VisualizationScreenshotError, match="PREVIEW_RENDER_FAILED"
+            ):
+                await owner.render(
+                    source, svg=True, deadline_monotonic=monotonic() + 15
+                )
         finally:
             await owner.aclose()
         assert not owner._processes
+
     asyncio.run(exercise())
 
 
 def test_published_html_keeps_layout_code_and_current_media_references(tmp_path):
     from pulsara_agent.conversation_kernel.visualization import (
-        FrozenVisualizationOccurrence, VisualizationOccurrenceState,
-        VISUALIZATION_HTML_SNAPSHOT_MEDIA_TYPE, html_snapshot_content,
+        FrozenVisualizationOccurrence,
+        VisualizationOccurrenceState,
+        VISUALIZATION_HTML_SNAPSHOT_MEDIA_TYPE,
+        html_snapshot_content,
         local_media_reference,
     )
-    path = tmp_path / 'gallery.html'
-    (tmp_path / 'app.js').write_text('window.published=true')
-    (tmp_path / 'style.css').write_text('main{background:url(image.png)}')
+
+    path = tmp_path / "gallery.html"
+    (tmp_path / "app.js").write_text("window.published=true")
+    (tmp_path / "style.css").write_text("main{background:url(image.png)}")
     body = b'<link rel="stylesheet" href="style.css"><script src="app.js"></script><img src="missing.png"><video src="clip.mp4" poster="poster.png"></video><audio src="speech.mp3"></audio>'
+
     async def run():
         io = KernelSessionIO()
         try:
-            return await freeze_html_resources(body, path, io=io, validator=None,
-                deadline_monotonic=monotonic()+20, media_url=local_media_reference)
+            return await freeze_html_resources(
+                body,
+                path,
+                io=io,
+                validator=None,
+                deadline_monotonic=monotonic() + 20,
+                media_url=local_media_reference,
+            )
         finally:
-            await io.aclose(deadline_monotonic=monotonic()+20)
+            await io.aclose(deadline_monotonic=monotonic() + 20)
+
     frozen = asyncio.run(run())
-    assert elements(frozen, 'img')[0].getAttribute('src') == str(tmp_path / 'missing.png')
-    assert elements(frozen, 'video')[0].getAttribute('src') == str(tmp_path / 'clip.mp4')
-    assert elements(frozen, 'video')[0].getAttribute('poster') == str(tmp_path / 'poster.png')
-    assert elements(frozen, 'audio')[0].getAttribute('src') == str(tmp_path / 'speech.mp3')
-    assert b'window.published=true' in decode(elements(frozen, 'script')[0].getAttribute('src'))
-    assert str(tmp_path / 'image.png').encode() in decode(elements(frozen, 'link')[0].getAttribute('href'))
-    item = FrozenVisualizationOccurrence('gallery.html', VisualizationOccurrenceState.READY, html=frozen, html_path=str(path))
+    assert elements(frozen, "img")[0].getAttribute("src") == str(
+        tmp_path / "missing.png"
+    )
+    assert elements(frozen, "video")[0].getAttribute("src") == str(
+        tmp_path / "clip.mp4"
+    )
+    assert elements(frozen, "video")[0].getAttribute("poster") == str(
+        tmp_path / "poster.png"
+    )
+    assert elements(frozen, "audio")[0].getAttribute("src") == str(
+        tmp_path / "speech.mp3"
+    )
+    assert b"window.published=true" in decode(
+        elements(frozen, "script")[0].getAttribute("src")
+    )
+    assert str(tmp_path / "image.png").encode() in decode(
+        elements(frozen, "link")[0].getAttribute("href")
+    )
+    item = FrozenVisualizationOccurrence(
+        "gallery.html",
+        VisualizationOccurrenceState.READY,
+        html=frozen,
+        html_path=str(path),
+    )
     assert item.media_type == VISUALIZATION_HTML_SNAPSHOT_MEDIA_TYPE
     assert html_snapshot_content(item.content) == (frozen, path)

@@ -8,9 +8,9 @@ import unicodedata
 
 
 MEMORY_WRITE_HINT_BODY = (
-    'The following human input may contain durable, reusable information. Apply the memory'
-    ' contract independently. If appropriate, use remember before the final reply; '
-    'otherwise continue normally.'
+    "The following human input may contain durable, reusable information. Apply the memory"
+    " contract independently. If appropriate, use remember before the final reply; "
+    "otherwise continue normally."
 )
 
 _SEALED_WRITE_HINT_SIGNALS = (
@@ -139,7 +139,6 @@ def normalize_memory_trigger_text(value: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class MemoryWriteOptOut:
-
     def excludes(self, text: str) -> bool:
         normalized = normalize_memory_trigger_text(text)
         if any(
@@ -155,7 +154,6 @@ class MemoryWriteOptOut:
 
 @dataclass(frozen=True, slots=True)
 class TurnMemoryUseOptOut:
-
     def excludes(self, text: str) -> bool:
         normalized = normalize_memory_trigger_text(text)
         return bool(

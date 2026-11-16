@@ -9,7 +9,6 @@ import psycopg
 import pytest
 from psycopg.types.json import JsonbLoader
 
-from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.repository import AssistantToolCallBlock
 from pulsara_agent.identity import random_id
 from pulsara_agent.primitives.context import freeze_json
@@ -38,7 +37,7 @@ class ObservedConnection:
         cursor = self.connection.execute(query, *args, **kwargs)
         if kwargs.get("binary"):
             result = cursor.pgresult
-            assert result.nfields == 20
+            assert result.nfields == 22
             self.binary_row_bytes.extend(
                 1 + 4 + 2 + 4 * result.nfields + sum(
                     len(value) for column in range(result.nfields)
@@ -81,7 +80,7 @@ def _requests(repository, lease, commands, *, replay=False):
             )
         repository.commit_assistant_message(
             lease.guard, cut=cut, entry_id=entry_id,
-            parent_content=InlineContent.from_bytes(b"tool manifest"),
+
             blocks=(AssistantToolCallBlock(
                 block_id=random_id("block"), tool_call_id=call_id,
                 tool_name="exec_process", arguments=freeze_json({"command": command}),
@@ -113,7 +112,8 @@ def test_small_assistant_bodies_share_one_query_and_keep_exact_wire(repo):
         assert [entry.SerializeToString(deterministic=True) for entry in actual] == [
             entry.SerializeToString(deterministic=True) for entry in expected
         ]
-        assert len(observed.queries) == 4  # facts, physical quote, flat classification, raw body
+        assert sum("AS relation_entry_id" in query and "FROM pulsara_v3.transcript_entries" in query for query in observed.queries) == 1
+        assert sum("'BLOCK' AS relation_kind" in query for query in observed.queries) == 1
         assert len(observed.binary_row_bytes) == 16
 
 
@@ -310,12 +310,18 @@ def test_future_nonbatchable_body_cannot_preempt_byte_admission(
         else:
             # Preserve a genuine nested JSONB datum without TOAST compression
             # so the flat classifier, rather than compression, excludes it.
-            connection.execute("ALTER TABLE pulsara_v3.assistant_message_blocks ALTER COLUMN tool_arguments SET STORAGE EXTERNAL")
+            connection.execute("ALTER TABLE pulsara_v3.content_parts ALTER COLUMN tool_arguments SET STORAGE EXTERNAL")
             payload = '{"nested":' * 1800 + '0' + '}' * 1800
+        # Deliberately corrupt an old canonical argument to exercise bounded
+        # candidate reads; ordinary writes cannot mutate content occurrences.
+        connection.execute("ALTER TABLE pulsara_v3.content_parts DISABLE TRIGGER trg_pulsara_v3_content_part_seal")
+        connection.execute("ALTER TABLE pulsara_v3.content_parts DISABLE TRIGGER trg_pulsara_v3_content_part_transfer")
         connection.execute(
-            "UPDATE pulsara_v3.assistant_message_blocks SET tool_arguments=%s::jsonb "
-            "WHERE session_id=%s AND assistant_entry_id=%s", (payload, lease.guard.session_id, ids[0]),
+            "UPDATE pulsara_v3.content_parts SET tool_arguments=%s::jsonb "
+            "WHERE session_id=%s AND entry_id=%s AND type='tool_call'", (payload, lease.guard.session_id, ids[0]),
         )
+        connection.execute("ALTER TABLE pulsara_v3.content_parts ENABLE TRIGGER trg_pulsara_v3_content_part_seal")
+        connection.execute("ALTER TABLE pulsara_v3.content_parts ENABLE TRIGGER trg_pulsara_v3_content_part_transfer")
     bounded = reader.snapshot(**common, maximum_entries=256, maximum_serialized_bytes=budget,
                               deadline_monotonic=monotonic()+30)
     assert bounded.SerializeToString(deterministic=True) == tail.SerializeToString(deterministic=True)

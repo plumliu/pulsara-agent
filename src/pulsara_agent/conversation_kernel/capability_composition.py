@@ -12,9 +12,9 @@ from pulsara_agent.capability.contracts import (
     FrozenCapabilityRegistrySnapshot,
     FrozenCapabilitySourceSnapshot,
     FrozenToolCapabilityFact,
-    McpProviderNameCollisionFact,
 )
 from pulsara_agent.capability.resolver import EffectiveSkillCatalogInspection
+from pulsara_agent.capability.types import ResolvedSkillCatalogEntry
 from pulsara_agent.capability.registry import (
     freeze_capability_registration_set,
     freeze_capability_registry_snapshot,
@@ -64,7 +64,6 @@ class PreparedMcpCapabilitySourceSnapshotSet:
     inspection_inputs: tuple["PreparedMcpInspectionInput", ...] = field(repr=False)
     owner_authenticity: object = field(repr=False, compare=False)
     _issuer: object = field(repr=False, compare=False)
-    provider_name_collision_facts: tuple[McpProviderNameCollisionFact, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +81,7 @@ class PreparedSkillCatalogSourceSnapshot:
     inspection: EffectiveSkillCatalogInspection = field(repr=False)
     owner_authenticity: object = field(repr=False, compare=False)
     _issuer: object = field(repr=False, compare=False)
+    disabled_entries: tuple[ResolvedSkillCatalogEntry, ...] = ()
 
 
 def issue_sealed_builtin_capability_snapshot(
@@ -107,7 +107,6 @@ def issue_mcp_capability_source_snapshot_set(
     catalog_snapshot: "McpCatalogSnapshot",
     inspection_inputs: tuple[PreparedMcpInspectionInput, ...],
     owner_authenticity: object,
-    provider_name_collision_facts: tuple[McpProviderNameCollisionFact, ...] = (),
 ) -> PreparedMcpCapabilitySourceSnapshotSet:
     return PreparedMcpCapabilitySourceSnapshotSet(
         conversation_scope_kind=conversation_scope_kind,
@@ -116,7 +115,6 @@ def issue_mcp_capability_source_snapshot_set(
         inspection_inputs=inspection_inputs,
         owner_authenticity=owner_authenticity,
         _issuer=_MCP_ISSUER,
-        provider_name_collision_facts=provider_name_collision_facts,
     )
 
 
@@ -126,6 +124,7 @@ def issue_skill_catalog_source_snapshot(
     source_snapshot: FrozenCapabilitySourceSnapshot,
     inspection: EffectiveSkillCatalogInspection,
     owner_authenticity: object,
+    disabled_entries: tuple[ResolvedSkillCatalogEntry, ...] = (),
 ) -> PreparedSkillCatalogSourceSnapshot:
     return PreparedSkillCatalogSourceSnapshot(
         conversation_scope_kind=conversation_scope_kind,
@@ -133,6 +132,7 @@ def issue_skill_catalog_source_snapshot(
         inspection=inspection,
         owner_authenticity=owner_authenticity,
         _issuer=_SKILL_ISSUER,
+        disabled_entries=disabled_entries,
     )
 
 

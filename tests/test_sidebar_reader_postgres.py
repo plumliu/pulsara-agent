@@ -44,7 +44,7 @@ def test_reader_attaches_existing_agent_without_resuming_and_recovers_cold(
                 events = _text('ROOT_FINISHED')
             elif self.agent_id is None:
                 events = _delegate(self, random_id('call'), {
-                    'instruction': 'CHILD_FIRST', 'context': {'mode': 'last_n', 'turns': 1}})
+                    'instruction': 'CHILD_FIRST', 'materials': [{'kind': 'CONTEXT_MATERIAL', 'turns': 1}]})
             else:
                 events = _delegate(self, random_id('call'), {
                     'instruction': 'CHILD_SECOND', 'target': {'kind': 'AGENT', 'agent_id': self.agent_id}})
@@ -144,10 +144,11 @@ def test_reader_attaches_existing_agent_without_resuming_and_recovers_cold(
             with reader._connection(monotonic()+10) as connection:
                 turns = connection.execute("""SELECT t.id,t.initial_entry_id FROM pulsara_v3.turns t
                     WHERE t.session_id=%s ORDER BY t.accepted_at,t.id""", (agent_id,)).fetchall()
-                origins = connection.execute("""SELECT input_origin FROM pulsara_v3.transcript_entries
+                origins = connection.execute("""SELECT id,input_origin FROM pulsara_v3.transcript_entries
                     WHERE session_id=%s AND turn_id=%s AND entry_kind='USER_MESSAGE' ORDER BY entry_sequence""",
                     (agent_id, turns[0]['id'])).fetchall()
-            assert [row['input_origin'] for row in origins] == ['AGENT_MATERIAL', 'AGENT_INSTRUCTION']
+            assert [row['input_origin'] for row in origins] == ['AGENT_INSTRUCTION', 'AGENT_MATERIAL']
+            assert turns[0]['initial_entry_id'] == origins[0]['id']
             facts = await asyncio.to_thread(reader.browser_history_context, session_id=agent_id,
                 memory_domain_id=controller.memory_domain_id,
                 entry_ids=[turns[0]['initial_entry_id'], turns[1]['initial_entry_id']],

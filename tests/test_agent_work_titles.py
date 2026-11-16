@@ -177,9 +177,8 @@ def test_message_activity_does_not_create_or_replace_current_work(source, api_so
         repository._consume_plan_terminal_inputs(connection, lease.guard, turn_id=message_turn,
             workspace_id=_state(repository, child.agent_id)['workspace_id'])
     target = {'kind': 'AGENT', 'agent_id': child.agent_id}
-    idle_arguments = {'agents': [target], 'until': 'idle', 'timeout_seconds': 0}
-    busy = dict(state='timeout', until='idle',
-        observations=[dict(target=target, condition='pending')], pending_targets=[target])
+    idle_arguments = {'agents': [target], 'timeout_seconds': 0}
+    busy={'meta':{'status':'SUCCESS','wait_reason':'timeout'},'content':[{'type':'object','value':{'agent':target,'is_idle':False}}]}
     consumed = _state(repository, child.agent_id)
     assert consumed['current_work_id'] == expected_work_id and consumed['has_running_turn']
     assert not consumed['has_pending_work'] and consumed['queued_count'] == 0

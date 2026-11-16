@@ -1302,7 +1302,6 @@ def test_cell_output_is_owned_once_and_ingress_confirmation_reads_consumed_entry
     source, record, delivery
 ):
     from pulsara_agent.conversation_kernel.steer import PreparedCellOutputIngress
-    from pulsara_agent.ports.terminal_observation import CellOutputContent
     from pulsara_agent.conversation_kernel._repository.queue_content import (
         read_input_owner,
     )
@@ -1329,12 +1328,24 @@ def test_cell_output_is_owned_once_and_ingress_confirmation_reads_consumed_entry
             actor_id="test",
             deadline_monotonic=deadline(),
         )
-    value = CellOutputContent(
-        random_id("cell"),
-        origin["turn_id"],
-        origin["id"],
-        1,
-        record,
+    if record.get("kind") in {"log", "return"}:
+        record = {
+            "kind": record["kind"],
+            "values": [{"type": "text", "value": record["text"]}],
+        }
+    elif record.get("kind") == "tool_result":
+        record = {
+            "kind": "tool_result",
+            "tool_name": record["tool_name"],
+            "value": record["result"],
+        }
+    value = repository.prepare_cell_output_content(
+        cell_id=random_id("cell"),
+        source_turn_id=origin["turn_id"],
+        source_exec_attempt_id=origin["id"],
+        record_sequence=1,
+        record=record,
+        deadline_monotonic=deadline(),
     )
     ingress = PreparedCellOutputIngress(
         root.guard.session_id, origin["workspace_id"], value, now(), "test"
@@ -1343,9 +1354,12 @@ def test_cell_output_is_owned_once_and_ingress_confirmation_reads_consumed_entry
         root.guard, candidate=ingress, deadline_monotonic=deadline()
     )
     assert accepted.queue_item_id == ingress.queue_item_id
-    if record == {"kind": "log", "text": "\ud800"}:
-        alias = replace(value, record={"kind": "log", "text": r"\ud800"})
-        assert alias.body == value.body and alias.storage_text != value.storage_text
+    if record == {"kind": "log", "values": [{"type": "text", "value": "\ud800"}]}:
+        alias = replace(
+            value,
+            record={"kind": "log", "content": [{"type": "text", "value": r"\ud800"}]},
+        )
+        assert alias.body == value.body and alias.storage_parts != value.storage_parts
         assert alias != value
         conflict = repository.confirm_cell_output_ingress(
             candidate=replace(ingress, content=alias), deadline_monotonic=deadline()
@@ -1358,7 +1372,7 @@ def test_cell_output_is_owned_once_and_ingress_confirmation_reads_consumed_entry
     ) as connection:
         before = read_content_parts(connection, queue_item_id=ingress.queue_item_id)
         assert len(before) == 1 and before[0].type == "text"
-        assert before[0].value == value.storage_text
+        assert before[0].value == value.storage_parts[0]["value"]
     if delivery == "steer":
         facts = repository.read_pending_prompt_steer_facts(
             session_id=root.guard.session_id,
@@ -1430,3 +1444,233 @@ def test_cell_output_is_owned_once_and_ingress_confirmation_reads_consumed_entry
     )
     assert confirmed.kind.value == "FULL_COMPATIBLE"
     assert confirmed.status == "CONSUMED"
+
+
+def test_work_wait_reads_exact_ids_in_one_ordered_metadata_snapshot(
+    source, monkeypatch
+):
+    repository, root, admit = source
+    first = request()
+    queued = request(agent_id=first.agent_id, create=False)
+    admit(first, queued)
+    lease, candidate = start(repository, first)
+    monkeypatch.setattr(
+        repository,
+        "_agent_work_value",
+        lambda *args: pytest.fail("wait hydrated a Work body"),
+    )
+    rows = repository.read_work_wait_states(
+        root_session_id=root.guard.session_id,
+        work_ids=(queued.work_id, first.work_id),
+        deadline_monotonic=deadline(),
+    )
+    assert rows == (
+        {"agent_id": first.agent_id, "work_id": queued.work_id, "status": "queued"},
+        {"agent_id": first.agent_id, "work_id": first.work_id, "status": "running"},
+    )
+
+
+def test_query_scope_reads_all_retained_works_without_a_source_display_page(source):
+    repository, root, admit = source
+    first = request()
+    admit(first)
+    requests = [request(agent_id=first.agent_id, create=False) for _ in range(70)]
+    for offset in range(0, len(requests), 16):
+        admit(*requests[offset : offset + 16])
+    rows = repository.list_query_agent_works(
+        root_session_id=root.guard.session_id,
+        observer_session_id=root.guard.session_id,
+        agent_id=first.agent_id,
+        limit=None,
+        deadline_monotonic=deadline(),
+    )
+    assert [row["work_id"] for row in rows] == [
+        first.work_id,
+        *[item.work_id for item in requests],
+    ]
+
+
+@pytest.mark.parametrize("large_image", [False,True])
+def test_real_node_explicit_images_normalize_once_and_transfer_with_cell_sources(
+    source,large_image,
+):
+    import asyncio
+    from io import BytesIO
+    from PIL import Image
+    from pulsara_agent.code_mode.host import CodeModeHost
+    from pulsara_agent.code_mode.contracts import CodeModeToolResult
+    from pulsara_agent.conversation_kernel.prompt_content import freeze_canonical_prompt
+    from pulsara_agent.conversation_kernel.prompt_storage import publish_prompt_images
+    from pulsara_agent.conversation_kernel.steer import PreparedCellOutputIngress
+    from pulsara_agent.llm.input import LLMImagePart
+
+    repository, root, _ = source
+    buffer = BytesIO()
+    if large_image:
+        import random
+        width,height=2048,1536
+        Image.frombytes("RGB",(width,height),random.Random(0).randbytes(width*height*3)).save(buffer,format="PNG")
+        assert len(buffer.getvalue()) > 8<<20
+    else:
+        width,height=8,6
+        Image.new("RGB",(width,height),"navy").save(buffer,format="PNG")
+    prompt = freeze_canonical_prompt(
+        FrozenPromptContent((LLMImagePart("image/png", buffer.getvalue(), width, height),))
+    )
+    with repository._writer_transaction(
+        root.guard, deadline_monotonic=deadline()
+    ) as connection:
+        publish_prompt_images(connection, prompt=prompt)
+        origin = connection.execute(
+            """SELECT a.id,i.turn_id,s.workspace_id FROM pulsara_v3.tool_execution_attempts a
+            JOIN pulsara_v3.tool_invocations i ON i.session_id=a.session_id AND i.id=a.invocation_id
+            JOIN pulsara_v3.sessions s ON s.id=i.session_id WHERE i.session_id=%s AND i.source_kind='MODEL_TOOL_CALL' """,
+            (root.guard.session_id,),
+        ).fetchone()
+    image = {
+        "type": "image",
+        "value": {
+            "kind": "IMAGE_REF",
+            "image_ref": prompt.image_occurrences[0].image.image_ref,
+        },
+    }
+    missing = {
+        "type": "image",
+        "value": {"kind": "IMAGE_REF", "image_ref": random_id("image")},
+    }
+    business = {
+        "meta": {"status": "SUCCESS"},
+        "content": [{"type": "object", "value": {"nested": [image, missing, image]}}],
+    }
+
+    async def scenario():
+        host = CodeModeHost()
+        prepared = []
+
+        async def prepare(lease):
+            content = await asyncio.to_thread(
+                repository.prepare_cell_output_content,
+                cell_id=lease.cell_id,
+                source_turn_id=lease.source_turn_id,
+                source_exec_attempt_id=lease.source_exec_attempt_id,
+                record_sequence=lease.record_sequence,
+                record=lease.record,
+                deadline_monotonic=deadline(),
+            )
+            prepared.append(content)
+            return content
+
+        quoted=[]
+        async def quote(lease):
+            value=await asyncio.to_thread(repository.quote_cell_output_content,record=lease.record,deadline_monotonic=deadline())
+            quoted.append(value)
+            return value
+        host.set_output_preparer(prepare,quote=quote)
+
+        async def invoke(_):
+            return CodeModeToolResult(value=business)
+
+        try:
+            cell = await host.start(
+                source="const value=await tools.sample({}); console.log(value);",
+                source_exec_attempt_id=origin["id"],
+                turn_id=origin["turn_id"],
+                snapshot=object(),
+                decision_available=False,
+                tool_catalog={
+                    "decide": {"parameters": {}},
+                    "sample": {"parameters": {}},
+                },
+                invoke=invoke,
+            )
+            await host.wait_state(cell, 30_000)
+            lease = await host.lease_output(cell)
+            assert lease is not None and lease.content is prepared[0]
+            assert await host.lease_output(cell) is lease
+            assert len(prepared) == 1
+            content = lease.content
+            assert len(quoted)==1
+            assert quoted[0]==content.resource_quote.canonical_expanded_bytes
+            if large_image:
+                assert quoted[0]>16<<20
+            assert [
+                part["value"]
+                for part in content.storage_parts
+                if part["type"] == "image"
+            ] == [image["value"], image["value"]]
+            text = "".join(
+                part["value"]
+                for part in content.storage_parts
+                if part["type"] == "text"
+            )
+            assert (
+                missing["value"]["image_ref"] in text
+                and "不可用" in text
+                and "nested" in text
+            )
+            candidate = PreparedCellOutputIngress(
+                root.guard.session_id, origin["workspace_id"], content, now(), "test"
+            )
+            repository.enqueue_cell_output(
+                root.guard, candidate=candidate, deadline_monotonic=deadline()
+            )
+            from pulsara_agent.conversation_kernel.steer_consumption import SteerConsumptionCoordinator
+            from types import SimpleNamespace
+            pending=repository.read_pending_prompt_steer_facts(session_id=root.guard.session_id,
+                target_turn_id=origin["turn_id"],deadline_monotonic=deadline())
+            selected=tuple(item for item in pending if item.queue_item_id==candidate.queue_item_id)
+            assert len(selected)==1
+            async def actual_io(operation,*args,**kwargs):
+                return await asyncio.to_thread(operation,*args,**kwargs)
+            hydrator=SteerConsumptionCoordinator.__new__(SteerConsumptionCoordinator)
+            hydrator._repository=repository
+            hydrator._io=SimpleNamespace(run=actual_io)
+            hydrated=await hydrator.hydrate_pending(selected,deadline=deadline())
+            assert len(hydrated)==1
+            assert hydrated[0][1].body==content.body
+            assert hydrated[0][1].resource_quote==content.resource_quote
+            if large_image:
+                assert hydrated[0][1].resource_quote.canonical_expanded_bytes>16<<20
+            with repository._writer_transaction(
+                root.guard, deadline_monotonic=deadline()
+            ) as connection:
+                before = read_content_parts(
+                    connection, queue_item_id=candidate.queue_item_id
+                )
+                assert [part.type for part in before].count("image") == 2
+                repository._consume_plan_terminal_inputs(
+                    connection,
+                    root.guard,
+                    turn_id=origin["turn_id"],
+                    workspace_id=origin["workspace_id"],
+                )
+                row = connection.execute(
+                    "SELECT * FROM pulsara_v3.prompt_queue_items WHERE id=%s",
+                    (candidate.queue_item_id,),
+                ).fetchone()
+                assert (
+                    read_content_parts(
+                        connection, queue_item_id=candidate.queue_item_id
+                    )
+                    == ()
+                )
+                assert (
+                    read_content_parts(connection, entry_id=row["consumed_entry_id"])
+                    == before
+                )
+                assert (
+                    row["source_cell_id"] == cell
+                    and row["source_record_sequence"] == 1
+                    and row["cell_output_kind"] == "log"
+                )
+            assert (
+                repository.confirm_cell_output_ingress(
+                    candidate=candidate, deadline_monotonic=deadline()
+                ).kind.value
+                == "FULL_COMPATIBLE"
+            )
+            await host.acknowledge_output(lease)
+        finally:
+            await host.aclose()
+
+    asyncio.run(scenario())

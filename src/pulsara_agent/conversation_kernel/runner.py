@@ -6,17 +6,14 @@ coroutine, interaction, terminal process, or subagent execution after a crash.
 
 from __future__ import annotations
 
-from pulsara_agent.conversation_kernel.prompt_content import MAXIMUM_PROMPT_MULTIPART_BYTES
 
-from pulsara_agent.tools.builtins.media import IMAGE_TOOL_NAMES, parse_image_tool_source
 from pulsara_agent.identity import derive_id
 
 from pulsara_agent.identity import random_id
 
 import asyncio
-from dataclasses import dataclass, field as dataclass_field, replace
+from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime, timezone
-from functools import partial
 from hashlib import sha256
 from time import monotonic
 from typing import Awaitable, Callable, Protocol
@@ -44,10 +41,8 @@ from pulsara_agent.conversation_kernel.visualization import (
 from pulsara_agent.conversation_kernel.context_sources import (
     ContextSourceCollectorPort,
 )
-from pulsara_agent.capability.render import MAX_SKILL_CATALOG_UTF8_BYTES
 from pulsara_agent.conversation_kernel.prompt_content import (
     FrozenCanonicalPrompt,
-    freeze_canonical_prompt,
 )
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionDisposition,
@@ -63,7 +58,6 @@ from pulsara_agent.conversation_kernel.compaction.coordinator import (
     CompactionAttemptToken as CompactionAttemptToken,
     CompactionCoordinator,
     CompactionExecutionResult,
-    PendingToolBatchCompaction,
     ModelSwitchCompactionTriggerCandidate,
     ModelSwitchDirectPrecompileDecision,
     OrdinaryPrecompileDecision,
@@ -86,31 +80,16 @@ from pulsara_agent.conversation_kernel.direct_model import (
     PreparedKernelModelTarget,
     PreparedKernelModelExecution,
     KernelProviderModelExecutionFailed,
-    ProviderFollowupWireResourceQuote,
-    quote_provider_followup_wire_resources,
 )
 from pulsara_agent.capability.planner import KernelToolCapabilityPlanner
 from pulsara_agent.llm.input import (
-    FrozenPromptContent,
-    LLMImagePart,
     LLMMessage,
-    LLMTextPart,
     LLMToolCall,
-    MessageRole,
-    frozen_tool_result_public_text,
-)
-from pulsara_agent.model_input.lowering import (
-    image_reference_id_part,
-    ordinary_tool_result_minimum_upper,
 )
 from pulsara_agent.llm.request import (
-    FrozenProviderWireInputPlan,
     FrozenProviderWireInputQuote,
-    ProviderInputUsageAnchor,
-    MAXIMUM_PROVIDER_WIRE_INPUT_BYTES,
     provider_assistant_public_projection_fingerprint,
 )
-from pulsara_agent.llm.resolution import ResolvedModelCall
 from pulsara_agent.llm.provider_replay import (
     PreparedDurableProviderAssistantReplay,
 )
@@ -150,31 +129,18 @@ from pulsara_agent.conversation_kernel.extensions import (
     OperationalHookOffer,
     OperationalHookType,
 )
-from pulsara_agent.conversation_kernel.limits import (
-    PLAN_CONTROL_RESULT_INLINE_HARD_BYTES,
-)
 from pulsara_agent.conversation_kernel.memory.contracts import (
     MemoryUsePolicy,
-)
-from pulsara_agent.conversation_kernel.mcp.contracts import (
-    MAXIMUM_MCP_CATALOG_FULL_BYTES,
 )
 from pulsara_agent.conversation_kernel.tool_outputs import (
     ToolOutputProcessor,
 )
 from pulsara_agent.conversation_kernel.tool_contracts import (
-    FrozenImageToolResourceAllowance,
-    FrozenImageToolResourceIncrement,
     ToolInvocationPort,
     ToolSurfacePlanningPort,
 )
-from pulsara_agent.conversation_kernel.tool_surface import BuiltinExecutionPolicyRef
 from pulsara_agent.conversation_kernel.workspace import WorkspaceExecutionGate
-from pulsara_agent.conversation_kernel.tool_execution import ToolBatchExecutor, ToolBatchExecutionResult
-from pulsara_agent.tools.builtins.filesystem import (
-    ViewImageSource,
-    ViewImageSourceKind,
-)
+from pulsara_agent.conversation_kernel.tool_execution import ToolBatchExecutor
 from pulsara_agent.conversation_kernel.repository import (
     AssistantBlock,
     AssistantDataBlock,
@@ -192,7 +158,7 @@ from pulsara_agent.conversation_kernel.plan_runtime import (
     PlanToolBatchCoordinator,
 )
 from pulsara_agent.conversation_kernel.memory.dispatch import (
-    MemoryContextProjectionPort,
+    MemoryObservationProjectionPort,
     MemoryDispatchSupport,
 )
 from pulsara_agent.conversation_kernel.provider_dispatch import (
@@ -226,29 +192,19 @@ from pulsara_agent.conversation_kernel.safe_point import (
 )
 from pulsara_agent.model_input.compiler import (
     StructuredModelInputCompiler,
-    tool_image_attachment_message,
 )
 from pulsara_agent.model_input.diagnostics import (
     project_model_input_compile_observation,
 )
 from pulsara_agent.model_input.contracts import (
-    CanonicalModelInputIdentity,
-    FrozenCanonicalCompileSnapshot,
     FrozenCompiledModelInput,
-    ContextSourceKind,
-    ContextTrustClass,
     ModelInputCompileFailureKind,
     ModelInputScopeKind,
     StructuredModelInputCompileError,
-    ProviderToolResultClosureKind,
-    STRUCTURED_MODEL_INPUT_LIMITS,
 )
 from pulsara_agent.model_input.continuity import (
-    ProviderInputContinuityScope,
+    RuntimeObservationItem,
     ProcessLocalProviderInputInstallPermit,
-    SourceObservationLifecycle,
-    SourceObservationPresence,
-    encode_runtime_observation,
 )
 
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE, PermissionMode
@@ -260,12 +216,10 @@ from pulsara_agent.primitives.context import (
 )
 from pulsara_agent.conversation_kernel.tool_surface import (
     ProcessLocalToolSurfaceBorrow,
-    PreparedToolExecutionBinding,
 )
 from pulsara_agent.hooks.context import (
     HookContextOwner,
     PendingHookContextReservation,
-    maximum_hook_context_provider_body_bytes,
 )
 from pulsara_agent.hooks.contracts import (
     ContinuationDecision,
@@ -274,7 +228,6 @@ from pulsara_agent.hooks.contracts import (
     GateOutcome as GateOutcome,
     HookDispatchEnvelope,
     HookDispatchScopeRef,
-    HookEventType,
     SessionStartInput,
     SessionStartRef,
     SubagentStartInput as SubagentStartInput,
@@ -285,12 +238,6 @@ from pulsara_agent.hooks.contracts import (
 )
 from pulsara_agent.hooks.dispatcher import KernelHookDispatcher
 from pulsara_agent.hooks.matcher import event_matcher_subject as event_matcher_subject
-from pulsara_agent.primitives.tool_result_projection import (
-    ToolResultLogicalMessageKind,
-    conservative_tool_result_logical_message,
-    provider_neutral_message_logical_bytes,
-)
-from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 
 from pulsara_agent.conversation_kernel.runner_hooks import (
     _SessionStartAttemptToken as _SessionStartAttemptToken,
@@ -369,80 +316,8 @@ class KernelRunResult:
     final_source: AcceptedProviderFinalSource | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class FrozenPostResponseResourceQuote:
-    current_canonical_expanded_bytes: int
-    actual_assistant_canonical_bytes: int
-    bounded_followup_canonical_bytes: int
-    canonical_upper_after: int
-    current_epoch_logical_bytes: int
-    actual_assistant_logical_bytes: int
-    bounded_followup_logical_bytes: int
-    logical_upper_after: int
-    current_canonical_items: int
-    bounded_followup_items: int
-    item_upper_after: int
-    followup_wire: ProviderFollowupWireResourceQuote | None = dataclass_field(
-        default=None,
-        repr=False,
-    )
-    image_call_allowances: tuple[FrozenImageToolResourceAllowance, ...] = (
-        dataclass_field(default=(), repr=False)
-    )
-    result_page_budgets: tuple[ToolResultPageBudget, ...] = dataclass_field(
-        default=(), repr=False
-    )
-
-    def __post_init__(self) -> None:
-        values = (
-            self.current_canonical_expanded_bytes,
-            self.actual_assistant_canonical_bytes,
-            self.bounded_followup_canonical_bytes,
-            self.canonical_upper_after,
-            self.current_epoch_logical_bytes,
-            self.actual_assistant_logical_bytes,
-            self.bounded_followup_logical_bytes,
-            self.logical_upper_after,
-            self.current_canonical_items,
-            self.bounded_followup_items,
-            self.item_upper_after,
-        )
-        if min(values) < 0:
-            raise ValueError("post-response resource quote is invalid")
-        if self.canonical_upper_after != sum(values[:3]):
-            raise ValueError("post-response canonical quote is inconsistent")
-        if self.logical_upper_after != sum(values[4:7]):
-            raise ValueError("post-response logical quote is inconsistent")
-        # The accepted assistant is one item; each bounded follow-up item is
-        # the exact result/closure/late occurrence counted by the reader.
-        if self.item_upper_after != (
-            self.current_canonical_items + 1 + self.bounded_followup_items
-        ):
-            raise ValueError("post-response item quote is inconsistent")
-        if tuple(item.call_ordinal for item in self.image_call_allowances) != tuple(
-            sorted(item.call_ordinal for item in self.image_call_allowances)
-        ) or len({item.tool_call_id for item in self.image_call_allowances}) != len(
-            self.image_call_allowances
-        ):
-            raise ValueError("post-response image allowances are not ordered")
-        if len({item.tool_call_id for item in self.result_page_budgets}) != len(
-            self.result_page_budgets
-        ):
-            raise ValueError("post-response result budgets contain duplicate calls")
 
 
-class OutputResourceInterruption(RuntimeError):
-    """A complete provider response cannot be settled before its effects."""
-
-    def __init__(self, reason: str, quote: FrozenPostResponseResourceQuote) -> None:
-        self.reason = reason
-        self.quote = quote
-        super().__init__(
-            "provider output resource interruption: "
-            f"{reason}; canonical={quote.canonical_upper_after}, "
-            f"logical={quote.logical_upper_after}, "
-            f"items={quote.item_upper_after}"
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -454,380 +329,10 @@ class _CollectedModelResponse:
     )
 
 
-@dataclass(frozen=True, slots=True)
-class _ToolResultResourceQuoteOwner:
-    plan: FrozenProviderWireInputPlan = dataclass_field(repr=False)
-    call: ResolvedModelCall = dataclass_field(repr=False)
-    assistant: LLMMessage = dataclass_field(repr=False)
-    provider_replay: PreparedDurableProviderAssistantReplay | None = dataclass_field(
-        repr=False
-    )
-    base_suffix_messages: tuple[LLMMessage, ...] = dataclass_field(repr=False)
-    base_wire: ProviderFollowupWireResourceQuote = dataclass_field(repr=False)
-    result_message_indexes: tuple[tuple[str, int], ...] = dataclass_field(repr=False)
-    usage_anchor: ProviderInputUsageAnchor | None = dataclass_field(
-        default=None, repr=False
-    )
-
-    def result_suffix(
-        self, *, tool_call_id: str, body: str,
-        model_visible_memory_fact_ids: tuple[str, ...] = (),
-    ) -> tuple[LLMMessage, ...]:
-        index = next((position for call_id, position in self.result_message_indexes
-                      if call_id == tool_call_id), None)
-        if index is None:
-            raise ValueError("result quote does not own this response call")
-        messages = list(self.base_suffix_messages)
-        messages[index] = ordinary_tool_result_minimum_upper(
-            tool_call_id, body=body,
-            model_visible_memory_fact_ids=model_visible_memory_fact_ids,
-        )
-        return tuple(messages)
-
-    def _quote_suffix(
-        self, messages: tuple[LLMMessage, ...]
-    ) -> ProviderFollowupWireResourceQuote:
-        quoted = quote_provider_followup_wire_resources(
-            plan=self.plan, call=self.call,
-            actual_assistant_message=self.assistant,
-            provider_replay=self.provider_replay,
-            bounded_suffix_messages=messages,
-            usage_anchor=self.usage_anchor,
-        )
-        # Both suffixes extend the identical installed prefix.  The existing
-        # usage owner must therefore apply the same affine anchor correction.
-        if (quoted.budget_input_tokens - quoted.raw_final_wire_estimated_input_tokens
-                != self.base_wire.budget_input_tokens
-                - self.base_wire.raw_final_wire_estimated_input_tokens):
-            raise ValueError("result quote changed its provider usage anchor")
-        return quoted
-
-    def accepts_result_body(
-        self, body: str, model_visible_memory_fact_ids: tuple[str, ...], *,
-        tool_call_id: str, wire_bytes: int, input_tokens: int,
-    ) -> bool:
-        quoted = self._quote_suffix(self.result_suffix(
-            tool_call_id=tool_call_id, body=body,
-            model_visible_memory_fact_ids=model_visible_memory_fact_ids,
-        ))
-        # This replaces one existing result carrier; it is not an appended
-        # second body. D1 estimates each lowered wire item independently, and
-        # the provider wire owner preserves that item partition on replacement.
-        # Thus disjoint call-slot increments compose exactly, including JSON
-        # separators; image success uses the same slot as its text receipt.
-        return (
-            quoted.final_wire_utf8_bytes - self.base_wire.final_wire_utf8_bytes
-            <= wire_bytes
-            and quoted.budget_input_tokens - self.base_wire.budget_input_tokens
-            <= input_tokens
-        )
-
-    def quote(
-        self,
-        *,
-        tool_call_id: str,
-        tool_name: str = "view_image",
-        source: ViewImageSource,
-        content: FrozenPromptContent,
-        model_visible_memory_fact_ids: tuple[str, ...] = (),
-    ) -> FrozenImageToolResourceIncrement:
-        images = tuple(part for part in content.parts if isinstance(part, LLMImagePart))
-        if not images:
-            raise ValueError("image Tool quote requires validated images")
-        carrier = tool_image_attachment_message(tuple((tool_call_id, source, image) for image in images))
-        quoted = self._quote_suffix((*self.result_suffix(
-            tool_call_id=tool_call_id, body=frozen_tool_result_public_text(content, tool_name=tool_name),
-            model_visible_memory_fact_ids=model_visible_memory_fact_ids,
-        ), carrier))
-        return FrozenImageToolResourceIncrement(
-            canonical_bytes=freeze_canonical_prompt(
-                content
-            ).resource_quote.canonical_expanded_bytes,
-            logical_bytes=provider_neutral_message_logical_bytes(carrier),
-            wire_bytes=(
-                quoted.final_wire_utf8_bytes - self.base_wire.final_wire_utf8_bytes
-            ),
-            input_tokens=(
-                quoted.budget_input_tokens - self.base_wire.budget_input_tokens
-            ),
-        )
 
 
-def _tool_result_resource_share(total: int, index: int, count: int) -> int:
-    quotient, remainder = divmod(total, count)
-    return quotient + (1 if index < remainder else 0)
 
 
-def _remaining_tool_result_resources(
-    *,
-    followup_wire: ProviderFollowupWireResourceQuote, effective_input_budget_tokens: int,
-) -> tuple[int, int, int, int]:
-    return tuple(max(0, value) for value in (
-        MAXIMUM_PROMPT_MULTIPART_BYTES,
-        MAXIMUM_PROMPT_MULTIPART_BYTES,
-        MAXIMUM_PROVIDER_WIRE_INPUT_BYTES - followup_wire.final_wire_utf8_bytes,
-        effective_input_budget_tokens - followup_wire.budget_input_tokens,
-    ))
-
-
-def refresh_tool_result_page_resources(
-    *,
-    original_quote: FrozenPostResponseResourceQuote,
-    prepared_call: PreparedKernelModelCall,
-    compiled_input: FrozenCompiledModelInput,
-    wire_input_plan: FrozenProviderWireInputPlan,
-) -> tuple[tuple[FrozenImageToolResourceAllowance, ...], tuple[ToolResultPageBudget, ...]]:
-    """Quote the same pending batch against a dry successor's exact prefix.
-
-    This creates no executable request and adopts no epoch. Accepted results still settle
-    against their original invocation, and final adoption revalidates the real
-    complete suffix rather than treating these call-local shares as authority.
-    """
-    if (
-        wire_input_plan.context_id != compiled_input.context_id
-        or wire_input_plan.compiled_semantic_fingerprint != compiled_input.compiled_semantic_fingerprint
-    ):
-        raise ValueError("pending wire plan differs from its compiled prefix")
-    originals = original_quote.image_call_allowances
-    if not originals:
-        raise ValueError("image resource refresh requires the original pending image batch")
-    owner = originals[0].quote_owner
-    if not isinstance(owner, _ToolResultResourceQuoteOwner) or any(
-        allowance.quote_owner is not owner for allowance in originals
-    ):
-        raise ValueError("pending image allowances do not share their original quote owner")
-    budgets = original_quote.result_page_budgets
-    if tuple(budget.tool_call_id for budget in budgets) != tuple(
-        call_id for call_id, _position in owner.result_message_indexes
-    ):
-        raise ValueError("pending result slots differ from the original call budgets")
-    for allowance in originals:
-        if not 0 <= allowance.call_ordinal < len(budgets) or (
-            budgets[allowance.call_ordinal].tool_call_id != allowance.tool_call_id
-        ):
-            raise ValueError("pending image allowance has lost its original call ordinal")
-    wire = quote_provider_followup_wire_resources(
-        plan=wire_input_plan, call=prepared_call.call,
-        actual_assistant_message=owner.assistant,
-        provider_replay=owner.provider_replay,
-        bounded_suffix_messages=owner.base_suffix_messages,
-        usage_anchor=None,
-    )
-    refreshed_owner = _ToolResultResourceQuoteOwner(
-        plan=wire_input_plan, call=prepared_call.call,
-        assistant=owner.assistant, provider_replay=owner.provider_replay,
-        base_suffix_messages=owner.base_suffix_messages, base_wire=wire,
-        result_message_indexes=owner.result_message_indexes, usage_anchor=None,
-    )
-    remaining = _remaining_tool_result_resources(
-        followup_wire=wire,
-        effective_input_budget_tokens=wire_input_plan.quote.effective_input_budget_tokens,
-    )
-    refreshed_budgets = tuple(
-        replace(budget, accepts_provider_body=partial(
-            refreshed_owner.accepts_result_body,
-            tool_call_id=budget.tool_call_id,
-            wire_bytes=_tool_result_resource_share(remaining[2], index, len(budgets)),
-            input_tokens=_tool_result_resource_share(remaining[3], index, len(budgets)),
-        ))
-        for index, budget in enumerate(budgets)
-    )
-    refreshed_allowances = tuple(
-        replace(allowance,
-            canonical_bytes=remaining[0],
-            logical_bytes=remaining[1],
-            wire_bytes=_tool_result_resource_share(remaining[2], allowance.call_ordinal, len(budgets)),
-            input_tokens=_tool_result_resource_share(remaining[3], allowance.call_ordinal, len(budgets)),
-            quote_owner=refreshed_owner,
-        )
-        for index, allowance in enumerate(originals)
-    )
-    return refreshed_allowances, refreshed_budgets
-
-
-_PLAN_CONTROL_TOOL_NAMES = frozenset({"enter_plan", "ask_plan_question", "exit_plan"})
-_MCP_ONLY_CAPABILITY_ACTIONS = frozenset(
-    {
-        "ADD_LOCAL_MCP",
-        "UPDATE_LOCAL_MCP",
-        "REMOVE_LOCAL_MCP",
-        "CONFIGURE_PLUGIN_MCP_CONNECTION",
-        "AUTHORIZE_MCP",
-        "CLEAR_MCP_AUTHORIZATION",
-    }
-)
-_LONGEST_TOOL_RESULT_STATE = "CANCELLED_BEFORE_DISPATCH"
-_MINIMUM_TOOL_RESULT_BODY = canonical_json_bytes(
-    {"status": _LONGEST_TOOL_RESULT_STATE}
-).decode("utf-8")
-_LONGEST_TOOL_CLOSURE = (
-    ProviderToolResultClosureKind.INTERRUPTED_MAY_HAVE_PARTIALLY_EXECUTED
-)
-
-
-def _completed_assistant_semantic_message(
-    completed: CompletedAssistantMessage,
-) -> LLMMessage:
-    text = "".join(
-        block.text
-        if isinstance(block, CompletedTextBlock)
-        else block.data
-        if isinstance(block, CompletedDataBlock)
-        else ""
-        for block in completed.blocks
-    )
-    calls = tuple(
-        LLMToolCall(
-            id=block.tool_call_id,
-            name=block.tool_name,
-            arguments=canonical_json_bytes(thaw_json(block.arguments)).decode("utf-8"),
-        )
-        for block in completed.blocks
-        if isinstance(block, CompletedToolCallBlock)
-    )
-    return LLMMessage.assistant_turn(text=text or None, tool_calls=calls)
-
-
-def _completed_assistant_canonical_bytes(
-    completed: CompletedAssistantMessage,
-) -> int:
-    total = 0
-    for block in completed.blocks:
-        if isinstance(block, CompletedTextBlock):
-            total += len(block.text.encode("utf-8"))
-        elif isinstance(block, CompletedDataBlock):
-            total += len(block.data.encode("utf-8"))
-        elif isinstance(block, CompletedToolCallBlock):
-            total += len(canonical_json_bytes(thaw_json(block.arguments)))
-    return total
-
-
-def _tool_result_closure_storage_text(tool_call_id: str) -> str:
-    return canonical_json_bytes(
-        {
-            "tool_call_id": tool_call_id,
-            "disposition": _LONGEST_TOOL_CLOSURE.value,
-        }
-    ).decode("utf-8")
-
-
-def _tool_result_closure_message(tool_call_id: str) -> LLMMessage:
-    return LLMMessage.tool_result(
-        canonical_json_bytes({"disposition": _LONGEST_TOOL_CLOSURE.value}).decode(
-            "utf-8"
-        ),
-        tool_call_id=tool_call_id,
-    )
-
-
-def _ordinary_result_followup_upper(
-    call: CompletedToolCallBlock,
-) -> tuple[int, int, int, tuple[LLMMessage, ...]]:
-    """Quote the larger result versus closure+late branch for one call."""
-
-    late = conservative_tool_result_logical_message(
-        message_kind=ToolResultLogicalMessageKind.LATE_TOOL_OUTCOME,
-        tool_call_id=call.tool_call_id,
-    ).message
-    closure = _tool_result_closure_message(call.tool_call_id)
-    logical = provider_neutral_message_logical_bytes(closure) + (
-        provider_neutral_message_logical_bytes(late)
-    )
-    canonical = len(_tool_result_closure_storage_text(call.tool_call_id).encode("utf-8"))
-    return canonical, logical, 2, (closure, late)
-
-
-def _plan_result_followup_upper(
-    call: CompletedToolCallBlock,
-) -> tuple[int, int, int, tuple[LLMMessage, ...]]:
-    result = conservative_tool_result_logical_message(
-        message_kind=ToolResultLogicalMessageKind.TOOL_RESULT,
-        tool_call_id=call.tool_call_id,
-    ).message
-    return (
-        PLAN_CONTROL_RESULT_INLINE_HARD_BYTES,
-        provider_neutral_message_logical_bytes(result),
-        1,
-        (result,),
-    )
-
-
-def _entered_plan_continuation_followup_upper(
-    *, exiting: bool = False, resume_permission_mode: PermissionMode | None = None
-) -> tuple[int, int, int, tuple[LLMMessage, ...]]:
-    """Quote the closed continuation carrier for an automatic Plan turn boundary."""
-
-    transition = "EXITED_PLAN" if exiting else "ENTERED_PLAN"
-    workflow_id_shape = "plan:" + ("a" * 26)
-    storage = {"transition": transition, "workflow_id": workflow_id_shape}
-    projected = {"status": "EXITED" if exiting else "ACTIVE", "transition": transition}
-    if exiting:
-        storage["resume_permission_mode"] = resume_permission_mode.value
-        projected["resume_permission_mode"] = resume_permission_mode.value
-    canonical = canonical_json_bytes(storage)
-    message = LLMMessage.user(
-        canonical_json_bytes({"pulsara_plan_continuation": projected}).decode("utf-8")
-    )
-    return (
-        len(canonical),
-        provider_neutral_message_logical_bytes(message),
-        1,
-        (message,),
-    )
-
-
-def _runtime_source_message_upper(
-    *,
-    source_kind: ContextSourceKind,
-    trust_class: ContextTrustClass,
-    lifecycle: SourceObservationLifecycle,
-    maximum_body_utf8_bytes: int,
-    serialized_json_body: bool = False,
-) -> LLMMessage:
-    """Build the escaping maximum for one existing bounded source body."""
-
-    if (
-        not 0
-        <= maximum_body_utf8_bytes
-        <= (STRUCTURED_MODEL_INPUT_LIMITS.maximum_single_source_variant_bytes)
-    ):
-        raise ValueError("runtime source upper exceeds the compiler source bound")
-    return encode_runtime_observation(
-        source_kind=source_kind,
-        trust_class=trust_class,
-        lifecycle=lifecycle,
-        presence=SourceObservationPresence.VALUE,
-        # Catalog owners return compact canonical JSON. Its body has no literal
-        # control chars: those were already escaped before the byte bound. Every
-        # remaining character expands at most 2x in the observation JSON; the
-        # all-backslash body owns that upper. Raw Hook context still needs 6x.
-        body=("\\" if serialized_json_body else "\x01") * maximum_body_utf8_bytes,
-    )
-
-
-def _capability_catalog_source_kinds(
-    call: CompletedToolCallBlock,
-) -> tuple[ContextSourceKind, ...]:
-    """Return catalogs that a valid capability call can change before follow-up."""
-
-    if call.tool_name == "reload_capabilities":
-        return (ContextSourceKind.SKILL_CATALOG, ContextSourceKind.MCP_CATALOG)
-    if call.tool_name != "manage_capability":
-        return ()
-    arguments = thaw_json(call.arguments)
-    action = arguments.get("action")
-    if action in _MCP_ONLY_CAPABILITY_ACTIONS:
-        return (ContextSourceKind.MCP_CATALOG,)
-    if action == "INSTALL_PLUGIN" and arguments.get("replace") is not True:
-        # First installs publish disabled instances. The enabled-view owner
-        # skips them before observing components, so neither routing catalog
-        # can change. Replacement can disable an existing active instance.
-        return ()
-    if action in {"INSTALL_PLUGIN", "SET_PLUGIN_ENABLED", "REMOVE_PLUGIN"}:
-        return (ContextSourceKind.SKILL_CATALOG, ContextSourceKind.MCP_CATALOG)
-    # The closed capability intent parser rejects unknown actions before any
-    # mutation or adoption, so they cannot change a subsequent source.
-    return ()
 
 
 
@@ -860,7 +365,7 @@ class ConversationKernelRunner:
         safe_point: ProviderSafePointCoordinator | None = None,
         before_provider_preparation: Callable[[], Awaitable[bool]] | None = None,
         workspace_gate: WorkspaceExecutionGate | None = None,
-        take_user_actions: Callable[[], Awaitable[str | None]] | None = None,
+        take_user_actions: Callable[[], Awaitable[tuple[RuntimeObservationItem, ...] | None]] | None = None,
         content_publisher: CanonicalContentPublisher | None = None,
         io_owner: KernelSessionIO | None = None,
         context_source_collector: ContextSourceCollectorPort,
@@ -877,7 +382,7 @@ class ConversationKernelRunner:
         launch_permission_mode: PermissionMode = DEFAULT_PERMISSION_MODE,
         maximum_input_tokens_per_call: int | None = None,
         deadline_factory: KernelExecutionDeadlineFactory | None = None,
-        memory_projection: MemoryContextProjectionPort | None = None,
+        memory_projection: MemoryObservationProjectionPort | None = None,
         assistant_settlement_owner: AssistantMessageSettlementOwner | None = None,
         root_work_admission_finalizer: RootWorkAdmissionFinalizer | None = None,
         compaction_owner: HostCompactionRuntimeOwner | None = None,
@@ -1271,130 +776,6 @@ class ConversationKernelRunner:
                 admitted_writer=admitted_writer,
             )
 
-    async def _execute_tool_batch_with_page_recovery(
-        self,
-        *,
-        turn_id: str,
-        assistant_entry_id: str,
-        calls: tuple[CompletedToolCallBlock, ...],
-        canonical_facts: FrozenCanonicalCompileSnapshot,
-        canonical_identity: CanonicalModelInputIdentity,
-        request: KernelModelExecutionRequest,
-        agent_invocation_snapshot,
-        continuity_scope: ProviderInputContinuityScope,
-        surface_borrow: ProcessLocalToolSurfaceBorrow,
-        output_quote: FrozenPostResponseResourceQuote,
-        intent: ActiveTurnCancellationIntent,
-        model_call_index: int,
-        inherited_memory_use_policy: MemoryUsePolicy,
-    ) -> tuple[ToolBatchExecutionResult, CompactionExecutionResult | None]:
-        """Refresh page shares on the ROOT task; adopt only the settled batch.
-
-        Decode tasks can ask for a new quote but cannot run ROOT compaction.
-        The disposable queue retains no execution authority or durable state.
-        """
-        arguments = dict(
-            turn_id=turn_id, assistant_entry_id=assistant_entry_id, calls=calls,
-            canonical_facts=canonical_facts, canonical_identity=canonical_identity,
-            request=request, agent_invocation_snapshot=agent_invocation_snapshot,
-            continuity_scope=continuity_scope, surface_borrow=surface_borrow,
-            hook_scope=self._hook_scope,
-            image_call_allowances=output_quote.image_call_allowances,
-            result_page_budgets=output_quote.result_page_budgets,
-        )
-        if not output_quote.image_call_allowances:
-            return await self._tool_batches.execute(**arguments), None
-
-        resources = asyncio.Queue()
-        pending: PendingToolBatchCompaction | None = None
-        attempted = False
-        fresh = {}
-
-        async def refresh(call_id):
-            future = asyncio.get_running_loop().create_future()
-            resources.put_nowait((call_id, future))
-            return await future
-
-        task = asyncio.create_task(self._tool_batches.execute(
-            **arguments, image_resource_refresh=refresh,
-        ))
-        waiting = None
-        execution = None
-        try:
-            while not task.done():
-                waiting = asyncio.create_task(resources.get())
-                done, _ = await asyncio.wait(
-                    (task, waiting), return_when=asyncio.FIRST_COMPLETED,
-                )
-                if task in done:
-                    break
-                call_id, future = waiting.result()
-                waiting = None
-                if future.cancelled():
-                    continue
-                try:
-                    if not attempted:
-                        attempted = True
-                        pending = await self.compaction.prepare_pending_tool_batch(
-                            turn_id=turn_id, model_call_index=model_call_index,
-                            inherited_memory_use_policy=inherited_memory_use_policy,
-                            closed_source_cut=request.cut,
-                            assistant_entry_id=assistant_entry_id,
-                            ordered_tool_call_ids=tuple(call.tool_call_id for call in calls),
-                            hook_scope=self._hook_scope,
-                            session_start_compact_port=self._compact_session_start_port(intent),
-                            session_start_boundary_port=self._compact_session_start_boundary_port(intent),
-                        )
-                        if pending is not None:
-                            allowances, budgets = refresh_tool_result_page_resources(
-                                original_quote=output_quote,
-                                prepared_call=pending.prepared_call,
-                                compiled_input=pending.compiled_input,
-                                wire_input_plan=pending.wire_input_plan,
-                            )
-                            by_id = {budget.tool_call_id: budget for budget in budgets}
-                            fresh = {
-                                allowance.tool_call_id: (allowance, by_id[allowance.tool_call_id])
-                                for allowance in allowances
-                            }
-                    if not future.done():
-                        future.set_result(fresh.get(call_id))
-                except BaseException as error:
-                    if not future.done():
-                        future.cancel()
-                    # This is ROOT orchestration, not a media argument error.
-                    # Cancel/drain the batch before surfacing the original cause.
-                    raise error
-            batch = await task
-            execution = None if pending is None else await pending.finalize()
-            return batch, execution
-        finally:
-            cleanup_cancel = None
-            try:
-                cleanup_tasks = [task]
-                if waiting is not None:
-                    waiting.cancel()
-                    cleanup_tasks.append(waiting)
-                if not task.done():
-                    task.cancel()
-                drain = asyncio.gather(*cleanup_tasks, return_exceptions=True)
-                while not drain.done():
-                    try:
-                        await asyncio.shield(drain)
-                    except asyncio.CancelledError as error:
-                        cleanup_cancel = error
-            finally:
-                while not resources.empty():
-                    _, future = resources.get_nowait()
-                    if not future.done():
-                        future.cancel()
-                if pending is not None:
-                    pending.close()
-                if cleanup_cancel is not None and execution is not None:
-                    if execution.successor_dispatch is not None:
-                        execution.successor_dispatch.close()
-            if cleanup_cancel is not None:
-                raise cleanup_cancel
 
     async def run_accepted_turn(
         self,
@@ -1824,6 +1205,13 @@ class ConversationKernelRunner:
                             dispatch,
                             deadline=planning_deadline,
                         )
+                    if wire_decision is not None and wire_decision.wire_input_plan is None:
+                        unavailable = await self._provider_dispatch.measure_with_unavailable_tool_pages(
+                            dispatch, deadline=planning_deadline
+                        )
+                        if unavailable is not None:
+                            dispatch.select_wire_candidate(unavailable.candidate)
+                            wire_decision = unavailable
                 except BaseException:
                     if dispatch.owns_execution_authority:
                         dispatch.close()
@@ -1915,34 +1303,6 @@ class ConversationKernelRunner:
                         for item in completed.blocks
                         if isinstance(item, CompletedToolCallBlock)
                     )
-                    try:
-                        output_quote = self._quote_post_response_resources(
-                            request=request,
-                            permit=permit,
-                            collected=collected,
-                            canonical_facts=canonical_facts,
-                        )
-                        self._require_post_response_resources(
-                            output_quote,
-                            effective_input_budget_tokens=request.wire_input_plan.quote.effective_input_budget_tokens,
-                            allow_image_page_recovery=(
-                                bool(output_quote.image_call_allowances)
-                                and self.compaction.automatic_allowed(scope_kind=intent.scope_kind)
-                            ),
-                        )
-                    except OutputResourceInterruption as exc:
-                        self._live_bus.offer_settlement_nowait(
-                            kind=LiveSettlementKind.ABORTED,
-                            session_id=request.session_id,
-                            turn_id=turn_id,
-                            draft_identity=entry_id,
-                            reason_code=f"OUTPUT_RESOURCE_{exc.reason}",
-                            scope_kind=(identity.conversation_scope_kind.value),
-                            channel_kind=LiveChannelKind.MODEL_OUTPUT,
-                            generation_id=derive_id("generation", "draft", entry_id),
-                            proposed_entry_id=entry_id,
-                        )
-                        raise
                     provider_replay_reservation = (
                         None
                         if collected.provider_replay is None
@@ -2246,28 +1606,20 @@ class ConversationKernelRunner:
                     raise RuntimeError("Tool batch lost its execution-backed borrow")
                 batch_borrow = active_surface_borrow
                 active_surface_borrow = None
-                batch, page_compaction = await self._execute_tool_batch_with_page_recovery(
+                batch = await self._tool_batches.execute(
                     turn_id=turn_id,
                     assistant_entry_id=accepted.entry_id,
                     calls=calls,
                     canonical_facts=canonical_facts,
                     canonical_identity=identity,
                     request=request,
-                    agent_invocation_snapshot=(provider_open.agent_invocation_snapshot),
+                    agent_invocation_snapshot=provider_open.agent_invocation_snapshot,
                     continuity_scope=planning.scope,
                     surface_borrow=batch_borrow,
-                    output_quote=output_quote,
-                    intent=intent,
-                    model_call_index=model_call_count + 1,
-                    inherited_memory_use_policy=current_memory_use_policy,
+                    hook_scope=self._hook_scope,
                 )
                 tool_call_count += batch.tool_call_count
                 completed_tool_batch = True
-                if page_compaction is not None:
-                    self._require_active_compaction_continuation(page_compaction)
-                    successor_dispatch = page_compaction.successor_dispatch
-                    successor_wire_decision = page_compaction.successor_wire_decision
-                    completed_tool_batch = False
         except BaseException as error:
             try:
                 if successor_dispatch is not None:
@@ -2607,372 +1959,9 @@ class ConversationKernelRunner:
         except Exception:
             return
 
-    def _hook_output_source_upper(
-        self,
-        *,
-        call_count: int,
-        scope_kind: ModelInputScopeKind,
-    ) -> LLMMessage | None:
-        if (
-            self._hook_dispatcher is None
-            or self._hook_context_owner is None
-            or self._hook_scope is None
-        ):
-            return None
-        view = self._hook_dispatcher.capture_view()
-        event_occurrences = (
-            (
-                (HookEventType.PRE_TOOL_USE_EVENT, call_count, False),
-                (HookEventType.PERMISSION_REQUEST_EVENT, call_count, False),
-                (HookEventType.POST_TOOL_USE_EVENT, call_count, False),
-            )
-            if call_count
-            else (
-                (
-                    HookEventType.STOP_EVENT,
-                    1,
-                    True,
-                ),
-            )
-        )
-        if not call_count and scope_kind is ModelInputScopeKind.SUBAGENT:
-            event_occurrences += ((HookEventType.SUBAGENT_STOP_EVENT, 1, True),)
-        body_bytes = maximum_hook_context_provider_body_bytes(
-            view,
-            event_occurrences=event_occurrences,
-        )
-        if not body_bytes:
-            return None
-        return _runtime_source_message_upper(
-            source_kind=ContextSourceKind.HOOK_CONTEXT,
-            trust_class=ContextTrustClass.UNTRUSTED_OBSERVATION,
-            lifecycle=SourceObservationLifecycle.ONE_SHOT,
-            maximum_body_utf8_bytes=body_bytes,
-        )
 
-    def _quote_post_response_resources(
-        self,
-        *,
-        request: KernelModelExecutionRequest,
-        permit: ProcessLocalProviderInputInstallPermit,
-        collected: _CollectedModelResponse,
-        canonical_facts: FrozenCanonicalCompileSnapshot,
-    ) -> FrozenPostResponseResourceQuote:
-        completed = collected.completed
-        assistant = _completed_assistant_semantic_message(completed)
-        calls = tuple(
-            item
-            for item in completed.blocks
-            if isinstance(item, CompletedToolCallBlock)
-        )
-        plan_batch = any(call.tool_name in _PLAN_CONTROL_TOOL_NAMES for call in calls)
-        canonical_followup = 0
-        logical_followup = 0
-        followup_items = 0
-        suffix_messages: list[LLMMessage] = []
-        result_message_indexes: list[tuple[str, int]] = []
-        for call in calls:
-            quote = (
-                _plan_result_followup_upper(call)
-                if plan_batch
-                else _ordinary_result_followup_upper(call)
-            )
-            canonical_followup += quote[0]
-            logical_followup += quote[1]
-            followup_items += quote[2]
-            # Retain physical canonical/epoch maxima, but reserve only a known
-            # small receipt on the provider wire. Domain owners admit their
-            # actual required facts against their allocated page budget.
-            if plan_batch:
-                suffix_messages.extend(quote[3])
-            else:
-                result_message_indexes.append((call.tool_call_id, len(suffix_messages) + 1))
-                suffix_messages.extend((
-                    _tool_result_closure_message(call.tool_call_id),
-                    ordinary_tool_result_minimum_upper(
-                        call.tool_call_id, body=_MINIMUM_TOOL_RESULT_BODY
-                    ),
-                ))
 
-        image_calls: list[tuple[int, CompletedToolCallBlock, str]] = []
-        for call_ordinal, call in enumerate(calls):
-            if plan_batch or call.tool_name not in IMAGE_TOOL_NAMES:
-                continue
-            try:
-                binding = request.prepared_call.tool_surface.binding(call.tool_name)
-            except KeyError:
-                continue
-            if not isinstance(binding, PreparedToolExecutionBinding) or not isinstance(
-                binding.execution_policy, BuiltinExecutionPolicyRef
-            ):
-                continue
-            arguments = thaw_json(call.arguments)
-            if not isinstance(arguments, dict):
-                continue
-            try:
-                image_source = parse_image_tool_source(call.tool_name, arguments)
-            except ValueError:
-                continue
-            image_calls.append(
-                (call_ordinal, call, binding.executor_binding_fingerprint)
-            )
-            reference_upper = (
-                image_source.value
-                if image_source.kind
-                in {
-                    ViewImageSourceKind.IMAGE_REF,
-                }
-                else "image:" + ("a" * 26)
-            )
-            image_source_upper = LLMMessage(
-                role=MessageRole.USER,
-                content=(
-                    LLMTextPart(
-                        canonical_json_bytes(
-                            {
-                                "tool_image_source": {
-                                    "tool_call_id": call.tool_call_id,
-                                    **image_source.provider_value(),
-                                }
-                            }
-                        ).decode("utf-8")
-                    ),
-                    image_reference_id_part(reference_upper),
-                ),
-            )
-            logical_followup += provider_neutral_message_logical_bytes(
-                image_source_upper
-            )
-            suffix_messages.append(image_source_upper)
 
-        selected_plan_call = next(
-            (call for call in calls if call.tool_name in _PLAN_CONTROL_TOOL_NAMES),
-            None,
-        )
-        fresh_enter_plan = (
-            selected_plan_call is not None
-            and selected_plan_call.tool_name == "enter_plan"
-            and canonical_facts.plan_workflow_fact is None
-        )
-        raw_exit_plan = (
-            thaw_json(selected_plan_call.arguments).get("plan")
-            if selected_plan_call is not None
-            and selected_plan_call.tool_name == "exit_plan"
-            else None
-        )
-        fresh_exit_plan = (
-            selected_plan_call is not None
-            and selected_plan_call.tool_name == "exit_plan"
-            and canonical_facts.plan_workflow_fact is not None
-            and (
-                raw_exit_plan is None
-                or (isinstance(raw_exit_plan, str) and not raw_exit_plan.strip())
-            )
-        )
-        resume_permission_mode = (
-            canonical_facts.plan_workflow_fact.resume_permission_mode
-            if fresh_exit_plan
-            else None
-        )
-        if fresh_enter_plan or fresh_exit_plan:
-            continuation_quote = _entered_plan_continuation_followup_upper(
-                exiting=fresh_exit_plan,
-                resume_permission_mode=resume_permission_mode,
-            )
-            canonical_followup += continuation_quote[0]
-            logical_followup += continuation_quote[1]
-            followup_items += continuation_quote[2]
-            suffix_messages.extend(continuation_quote[3])
-
-        epoch = self._continuity.current_view(permit.scope)
-        if (
-            epoch is None
-            or epoch.epoch_nonce != permit.epoch_nonce
-            or epoch.epoch_revision != permit.epoch_revision
-            or epoch.wire_input_plan is not request.wire_input_plan
-        ):
-            raise ConversationKernelConflict(
-                "provider output resource quote lost its installed prefix"
-            )
-        canonical_input = canonical_facts.canonical_input
-        if canonical_input.identity != request.compiled_input.canonical_input_identity:
-            raise ConversationKernelConflict(
-                "provider output resource quote lost its canonical input"
-            )
-        assistant_canonical = _completed_assistant_canonical_bytes(completed)
-        assistant_logical = provider_neutral_message_logical_bytes(assistant)
-        identity = canonical_input.identity
-        source_messages: list[LLMMessage] = []
-        changed_catalogs = {
-            source_kind
-            for call in calls
-            for source_kind in _capability_catalog_source_kinds(call)
-        }
-        if ContextSourceKind.SKILL_CATALOG in changed_catalogs:
-            source_messages.append(
-                _runtime_source_message_upper(
-                    source_kind=ContextSourceKind.SKILL_CATALOG,
-                    trust_class=ContextTrustClass.UNTRUSTED_OBSERVATION,
-                    lifecycle=SourceObservationLifecycle.SNAPSHOT,
-                    maximum_body_utf8_bytes=MAX_SKILL_CATALOG_UTF8_BYTES,
-                    serialized_json_body=True,
-                )
-            )
-        if ContextSourceKind.MCP_CATALOG in changed_catalogs:
-            source_messages.append(
-                _runtime_source_message_upper(
-                    source_kind=ContextSourceKind.MCP_CATALOG,
-                    trust_class=ContextTrustClass.UNTRUSTED_OBSERVATION,
-                    lifecycle=SourceObservationLifecycle.SNAPSHOT,
-                    maximum_body_utf8_bytes=MAXIMUM_MCP_CATALOG_FULL_BYTES,
-                    serialized_json_body=True,
-                )
-            )
-        catalog_messages = tuple(source_messages)
-        if fresh_exit_plan:
-            source_messages.extend(
-                self._context_source_collector.freeze_exited_plan_source_upper(
-                    resume_permission_mode
-                )
-            )
-        elif fresh_enter_plan:
-            source_messages.extend(
-                self._context_source_collector.freeze_fresh_entered_plan_source_upper(
-                    canonical_facts.run_permission_snapshot
-                )
-            )
-        hook_source = self._hook_output_source_upper(
-            call_count=len(calls),
-            scope_kind=identity.conversation_scope_kind,
-        )
-        if hook_source is not None:
-            source_messages.append(hook_source)
-        needs_followup = (
-            bool(calls) or hook_source is not None
-        )
-        if needs_followup:
-            source_messages.extend(
-                self._context_source_collector.freeze_post_response_call_source_upper()
-            )
-        if any(not isinstance(message, LLMMessage) for message in source_messages):
-            raise TypeError("context source upper returned a foreign message")
-        logical_followup += sum(
-            provider_neutral_message_logical_bytes(message)
-            for message in source_messages
-        )
-        # Dynamic catalog observations are frozen only at the next safe point.
-        # Their maximum serialized bytes cannot decide whether this mutation
-        # is allowed for a model's token window. The ordinary next-dispatch planner admits the actual catalog
-        # and invokes existing compaction when needed, without rebasing prefixes.
-        suffix_messages.extend(
-            message for message in source_messages if message not in catalog_messages
-        )
-        usage_anchor = self._continuity.current_usage_anchor(permit.scope)
-        wire = (
-            quote_provider_followup_wire_resources(
-                plan=request.wire_input_plan, call=request.prepared_call.call,
-                actual_assistant_message=assistant,
-                provider_replay=collected.provider_replay,
-                bounded_suffix_messages=tuple(suffix_messages),
-                usage_anchor=usage_anchor,
-            )
-            if needs_followup
-            else None
-        )
-        allowances: tuple[FrozenImageToolResourceAllowance, ...] = ()
-        page_budgets: tuple[ToolResultPageBudget, ...] = ()
-        if calls and not plan_batch:
-            if wire is None:
-                raise ValueError("response calls require a follow-up wire quote")
-            remaining = _remaining_tool_result_resources(
-                followup_wire=wire,
-                effective_input_budget_tokens=request.wire_input_plan.quote.effective_input_budget_tokens,
-            )
-            quote_owner = _ToolResultResourceQuoteOwner(
-                plan=request.wire_input_plan, call=request.prepared_call.call,
-                assistant=assistant,
-                provider_replay=collected.provider_replay,
-                base_suffix_messages=tuple(suffix_messages),
-                base_wire=wire,
-                result_message_indexes=tuple(result_message_indexes),
-                usage_anchor=usage_anchor,
-            )
-
-            share = _tool_result_resource_share
-
-            # Every call owns one disjoint wire/token share. An image's
-            # success receipt and attachment are quoted together; its error
-            # receipt instead uses the text predicate, never both at once.
-            page_budgets = tuple(
-                ToolResultPageBudget(
-                    tool_call_id=call.tool_call_id,
-                    accepts_provider_body=partial(
-                        quote_owner.accepts_result_body,
-                        tool_call_id=call.tool_call_id,
-                        wire_bytes=share(remaining[2], index, len(calls)),
-                        input_tokens=share(remaining[3], index, len(calls)),
-                    ),
-                )
-                for index, call in enumerate(calls)
-            )
-            allowances = tuple(
-                FrozenImageToolResourceAllowance(
-                    call_ordinal=call_ordinal,
-                    tool_call_id=call.tool_call_id,
-                    executor_binding_fingerprint=binding_fingerprint,
-                    canonical_bytes=remaining[0],
-                    logical_bytes=remaining[1],
-                    wire_bytes=share(remaining[2], call_ordinal, len(calls)),
-                    input_tokens=share(remaining[3], call_ordinal, len(calls)),
-                    quote_owner=quote_owner,
-                )
-                for index, (call_ordinal, call, binding_fingerprint) in enumerate(
-                    image_calls
-                )
-            )
-        return FrozenPostResponseResourceQuote(
-            current_canonical_expanded_bytes=(canonical_input.canonical_expanded_bytes),
-            actual_assistant_canonical_bytes=assistant_canonical,
-            bounded_followup_canonical_bytes=canonical_followup,
-            canonical_upper_after=(
-                canonical_input.canonical_expanded_bytes
-                + assistant_canonical
-                + canonical_followup
-            ),
-            current_epoch_logical_bytes=epoch.logical_bytes,
-            actual_assistant_logical_bytes=assistant_logical,
-            bounded_followup_logical_bytes=logical_followup,
-            logical_upper_after=(
-                epoch.logical_bytes + assistant_logical + logical_followup
-            ),
-            current_canonical_items=len(canonical_input.items),
-            bounded_followup_items=followup_items,
-            item_upper_after=(len(canonical_input.items) + 1 + followup_items),
-            followup_wire=wire,
-            image_call_allowances=allowances,
-            result_page_budgets=page_budgets,
-        )
-
-    @staticmethod
-    def _require_post_response_resources(
-        quote: FrozenPostResponseResourceQuote,
-        *,
-        effective_input_budget_tokens: int,
-        allow_image_page_recovery: bool = False,
-    ) -> None:
-        wire = quote.followup_wire
-        if wire is None:
-            return
-        # The accepted assistant still belongs to its original epoch. A
-        # call-local image page may prepare a dry compacted prefix before its
-        # result is accepted; only then can the settled batch adopt it. This
-        # never grants provider dispatch or relaxes canonical/physical bounds.
-        if allow_image_page_recovery and quote.image_call_allowances:
-            return
-        if wire.final_wire_utf8_bytes > MAXIMUM_PROVIDER_WIRE_INPUT_BYTES:
-            raise OutputResourceInterruption("FOLLOWUP_WIRE_BYTES", quote)
-        if wire.budget_input_tokens > effective_input_budget_tokens:
-            raise OutputResourceInterruption("FOLLOWUP_INPUT_TOKENS", quote)
 
     async def _canonical_blocks(
         self,
@@ -3073,20 +2062,17 @@ def _model_input_terminal_reason(error: BaseException) -> str | None:
         return "HOOK_SESSION_START_BLOCKED"
     if isinstance(error, CompactionContinuationBlocked):
         return "HOOK_COMPACTION_BLOCKED"
-    if isinstance(error, OutputResourceInterruption):
-        return "PROVIDER_OUTPUT_RESOURCE_EXHAUSTED"
     if not isinstance(error, StructuredModelInputCompileError):
         return None
     if error.kind in {
-        ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED,
+        ModelInputCompileFailureKind.PROVIDER_INPUT_WIRE_BYTES_EXCEEDED,
         ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED,
         ModelInputCompileFailureKind.PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET,
         ModelInputCompileFailureKind.PREFIX_EPOCH_BUDGET_EXHAUSTED,
-        ModelInputCompileFailureKind.STATEFUL_SOURCE_REPLACEMENT_OVER_BUDGET,
+
         ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET,
         ModelInputCompileFailureKind.TOOL_SCHEMA_EXCEEDS_BUDGET,
-        ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_NOT_INLINEABLE,
-        ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET,
+
     }:
         return "PROVIDER_INPUT_RESOURCE_EXHAUSTED"
     return None
@@ -3098,7 +2084,5 @@ def _json_digest(value: FrozenJsonObjectFact) -> str:
 
 __all__ = [
     "ConversationKernelRunner",
-    "FrozenPostResponseResourceQuote",
     "KernelRunResult",
-    "OutputResourceInterruption",
 ]

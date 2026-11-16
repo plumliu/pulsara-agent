@@ -1,6 +1,9 @@
 """Physical Tool batch execution and exact canonical result settlement."""
 
 from __future__ import annotations
+
+from pulsara_agent.ports.tool_execution import ToolBusinessValue
+from pulsara_agent.conversation_kernel.content_parts import ResultPart
 from pulsara_agent.identity import derive_id
 
 from pulsara_agent.identity import random_id
@@ -14,18 +17,16 @@ from .tool_surface import CodeModeToolDirectory
 from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 from pulsara_agent.ports.session_content import SessionContentRange
 from .memory.contracts import FrozenModelCallMemoryContext
-from pulsara_agent.ports.tool_execution import ToolOutputSourceFormatHint
 
 from dataclasses import dataclass, replace
 
 from datetime import datetime, timezone
 
-import json
 
 
 from threading import Lock
 
-from typing import Awaitable, Callable, Mapping
+from typing import Callable, Mapping
 
 
 from psycopg import Error as PostgresError
@@ -35,7 +36,6 @@ from pulsara_agent.conversation_kernel.assembler import (
     CompletedToolCallBlock,
 )
 from pulsara_agent.llm.input import (
-    FrozenPromptContent,
     LLMTextPart,
 )
 
@@ -59,9 +59,6 @@ from pulsara_agent.conversation_kernel.input_continuity import (
 from pulsara_agent.conversation_kernel.contracts import (
     CanonicalContent,
     WriterLease,
-)
-from pulsara_agent.conversation_kernel.prompt_content import (
-    freeze_canonical_prompt,
 )
 
 from pulsara_agent.conversation_kernel.live import (
@@ -105,7 +102,6 @@ from pulsara_agent.ports.tool_execution import thaw_tool_json_object
 from pulsara_agent.conversation_kernel.tool_contracts import (
     AcceptedCanonicalToolResultSettlement,
     FrozenAgentInvocationSnapshot,
-    FrozenImageToolResourceAllowance,
     KernelToolAuthorization,
     KernelToolAuthorizationKind,
     KernelToolInvocationContext,
@@ -135,15 +131,14 @@ from pulsara_agent.conversation_kernel.repository import (
 
 
 from pulsara_agent.conversation_kernel.memory.dispatch import (
-    MemoryContextProjectionPort,
+    MemoryObservationProjectionPort,
 )
 
 from pulsara_agent.capability.builtin_catalog import execution_catalog_entry
-from pulsara_agent.tools.builtins.media import IMAGE_TOOL_NAMES, parse_image_tool_source
+from pulsara_agent.tools.builtins.media import IMAGE_TOOL_NAMES
 
 
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
-from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 
 
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
@@ -153,11 +148,8 @@ from pulsara_agent.model_input.contracts import (
     CanonicalModelInputIdentity,
     FrozenCanonicalCompileSnapshot,
     ModelInputScopeKind,
-    FrozenProviderInputItem,
-    FrozenProviderInputItemKind,
 )
 from pulsara_agent.ports.session_content import SESSION_QUERY_TOOL_NAMES
-from pulsara_agent.model_input.lowering import project_tool_result_public_value
 
 from pulsara_agent.model_input.continuity import (
     ProviderInputContinuityScope,
@@ -165,17 +157,14 @@ from pulsara_agent.model_input.continuity import (
 
 
 from pulsara_agent.primitives.context import (
-    canonical_json_bytes,
     freeze_json,
     FrozenJsonObjectFact,
     thaw_json,
 )
 
 from pulsara_agent.conversation_kernel.tool_surface import (
-    BuiltinExecutionPolicyRef,
     McpEffectKind,
     McpToolExecutionPolicyFact,
-    PreparedToolExecutionBinding,
     ProcessLocalToolSurfaceBorrow,
     tool_observation_origin_for_binding,
 )
@@ -385,7 +374,7 @@ class ToolBatchExecutor:
         content_publisher: CanonicalContentPublisher,
         tool_output_processor: ToolOutputProcessor,
         continuity_owner: HostProviderInputContinuityOwner,
-        memory_projection: MemoryContextProjectionPort | None,
+        memory_projection: MemoryObservationProjectionPort | None,
         extensions: KernelExtensionHost | None,
         workspace_resolver: SessionWorkspaceResolver,
         deadline_factory: KernelExecutionDeadlineFactory,
@@ -487,35 +476,51 @@ class ToolBatchExecutor:
                 raise RuntimeError("program invocation did not settle exactly one result")
             result, settlement = captured[0]
             metadata = settlement.public_projection.metadata
-            accepted_value = await self._io.run(
-                self._repository.read_accepted_tool_result_observation,
-                session_id=metadata.session_id, result_id=metadata.result_id,
-                deadline_monotonic=self._canonical_deadline(),
-            )
-            value = accepted_value["value"]
+            projection_error = None
+            try:
+                accepted_value = await self._io.run(
+                    self._repository.read_accepted_tool_result_observation,
+                    session_id=metadata.session_id, result_id=metadata.result_id,
+                    deadline_monotonic=self._canonical_deadline(),
+                )
+            except StaleHostWriter:
+                raise
+            except Exception as error:
+                # Acceptance already established this exact complete value.
+                # A subsequent read failure cannot erase its known effects or
+                # turn its real result identity into an unknown bridge error.
+                projection_error = AcceptedToolResultProjectionError(
+                    known_value=result.public_value(),
+                    result_state=settlement.result_state,
+                    result_id=settlement.result_id,
+                    result_entry_id=settlement.result_entry_id,
+                    cause=error,
+                )
+                value = thaw_tool_json_object(projection_error.known_value)
+            else:
+                value = accepted_value["value"]
             async def delivered():
                 callback = result.delivery_succeeded
                 if callback is not None:
-                    returned = await asyncio.to_thread(callback)
+                    returned = callback()
                     if returned is not None:
                         await returned
             accepted_result_id = settlement.result_id
             accepted_session_id = snapshot.request.session_id
-            accepted_sequence = invocation.sequence
-            accepted_tool_name = invocation.tool_name
             async def read_undelivered():
                 payload = await self._io.run(self._repository.read_accepted_tool_result_observation,
                     session_id=accepted_session_id, result_id=accepted_result_id,
                     deadline_monotonic=self._canonical_deadline())
-                return {"sequence": accepted_sequence, "tool_name": accepted_tool_name, **payload}
+                return payload["value"]
             success = settlement.result_state == "SUCCESS"
-            failure_message = (value.get("message") or value.get("error") or settlement.result_state) if isinstance(value, dict) else value
+            failure_message = next((part["value"] for part in value["content"]
+                if part["type"] == "text"), settlement.result_state)
             return CodeModeToolResult(value=value, state=settlement.result_state,
                 result_id=settlement.result_id, result_entry_id=settlement.result_entry_id,
-                output_available=metadata.output_unavailability_reason is None,
-                output_unavailability_reason=(None if metadata.output_unavailability_reason is None else metadata.output_unavailability_reason.value),
-                error_code=None if success else settlement.result_state,
-                error_message=None if success else str(failure_message),
+                error_code=("RESULT_PROJECTION_FAILED" if projection_error is not None
+                    else None if success else settlement.result_state),
+                error_message=(str(projection_error) if projection_error is not None
+                    else None if success else str(failure_message)),
                 delivery_succeeded=delivered, read_undelivered=read_undelivered)
         except ToolResultSaveError as error:
             return CodeModeToolResult(
@@ -530,7 +535,6 @@ class ToolBatchExecutor:
                 state=error.result_state,
                 result_id=error.result_id,
                 result_entry_id=error.result_entry_id,
-                output_available=True,
                 error_code="RESULT_PROJECTION_FAILED",
                 error_message=str(error),
             )
@@ -757,8 +761,10 @@ class ToolBatchExecutor:
             return
         if prepared.requested_tool_name == "run_agent" and _member_index is None:
             from .subagents.collaboration_contracts import parse_batch_members
-            values = _code_result.get()
-            business = values[0][0].public_value() if values else None
+            accepted = await self._io.run(self._repository.read_accepted_tool_result_observation,
+                session_id=request.session_id, result_id=settlement.result_id,
+                deadline_monotonic=self._canonical_deadline())
+            business = accepted['value']
             arguments = thaw_json(prepared.resolved_arguments)
             try:
                 parse_batch_members(arguments)
@@ -772,9 +778,11 @@ class ToolBatchExecutor:
             for index, member in enumerate(arguments["members"]):
                 member_args = freeze_json(member["parameters"])
                 member_response = business
-                if isinstance(business, dict) and all(key in business for key in ("agents", "works", "details")):
-                    member_response = {"agent": business["agents"][index], "work": business["works"][index],
-                                       **business["details"][index]}
+                if isinstance(business, dict) and business.get('meta', {}).get('status') == 'SUCCESS':
+                    records = business['content']
+                    if len(records) != len(arguments['members']) or any(part['type'] != 'object' for part in records):
+                        raise RuntimeError('accepted run_agent result does not match its batch')
+                    member_response = {'meta':business['meta'], 'content':[records[index]]}
                 try:
                     await self._dispatch_post_tool(view=view, scope=scope,
                         prepared=PreparedResolvedToolInvocation("run_agent", "run_agent", member_args),
@@ -803,26 +811,17 @@ class ToolBatchExecutor:
                 else None
             ),
         )
-        captured = _code_result.get()
-        if snapshot is not None:
-            response_value = (captured[0][0].public_value() if captured
-                              else settlement.public_projection.canonical_body)
+        arguments=thaw_json(prepared.resolved_arguments)
+        target=arguments.get("target") if isinstance(arguments,dict) else None
+        if _member_index is not None:
+            response_value=_member_response
+        elif isinstance(target,dict) and target.get("kind")=="NEXT":
+            response_value=settlement.public_projection.canonical_body
         else:
-            projection_input = settlement.public_projection
-            item = FrozenProviderInputItem(
-                item_kind=FrozenProviderInputItemKind.TOOL_RESULT,
-                source_entry_id=settlement.result_entry_id,
-                source_entry_sequence=settlement.accepted_entry_sequence,
-                source_turn_id=settlement.turn_id,
-                content=(LLMTextPart(projection_input.canonical_body),),
-                tool_call_id=settlement.tool_call_id,
-                tool_request_entry_id=settlement.assistant_entry_id,
-                tool_result_context=projection_input.metadata,
-                tool_result_body_text=projection_input.canonical_body,
-                tool_result_delivery=projection_input.delivery,
-            )
-            projected = project_tool_result_public_value(item)
-            response_value = projected.value
+            accepted=await self._io.run(self._repository.read_accepted_tool_result_observation,
+                session_id=request.session_id,result_id=settlement.result_id,
+                deadline_monotonic=self._canonical_deadline())
+            response_value=accepted["value"]
         causal_ref = PostToolRef(
             settlement.turn_id,
             settlement.tool_call_id,
@@ -885,6 +884,16 @@ class ToolBatchExecutor:
         canonical_facts: FrozenCanonicalCompileSnapshot,
         continuity_scope: ProviderInputContinuityScope,
     ) -> None:
+        if settlement.assistant_entry_id is not None:
+            from pulsara_agent.conversation_kernel.tool_outputs import prepare_native_tool_observation, project_native_settlement
+            modalities = (request.input_modalities if isinstance(request, CodeModeToolRequest)
+                else request.prepared_call.call.target.fact.input_modalities)
+            page = await self._io.run(prepare_native_tool_observation,
+                self._repository, self._writer_lease.guard,
+                workspace_id=await self._resolved_workspace_id(), result_entry_id=settlement.result_entry_id,
+                supports_images=modalities is None or "image" in modalities,
+                deadline_monotonic=self._canonical_deadline())
+            settlement = project_native_settlement(settlement, page)
         reservations = _batch_reservations.get()
         if reservations:
             for reservation in reservations:
@@ -892,8 +901,15 @@ class ToolBatchExecutor:
             reservations.clear()
         capture = _code_result.get()
         if capture is not None and not capture:
+            accepted = await self._io.run(self._repository.read_accepted_tool_result_observation,
+                session_id=request.session_id, result_id=settlement.result_id,
+                deadline_monotonic=self._canonical_deadline())
+            value = thaw_tool_json_object(accepted["value"])
+            fields = {key: item for key, item in value.items() if key != "content"}
+            fields["meta"] = {key: item for key, item in fields["meta"].items() if key != "status"}
             capture.append((KernelToolResult(state=settlement.result_state,
-                content=settlement.public_projection.canonical_body.encode("utf-8")), settlement))
+                content=ToolBusinessValue(fields, tuple(ResultPart(part["type"], part["value"])
+                    for part in value["content"]))), settlement))
         if pre_context_reservation is not None:
             pre_context_reservation.commit()
         if view is None or scope is None:
@@ -942,48 +958,6 @@ class ToolBatchExecutor:
             for _, definition in view.selected_definitions(event_type)
         )
 
-    @staticmethod
-    def _validate_image_call_allowances(
-        *,
-        calls: tuple[CompletedToolCallBlock | PreparedToolExecutionCall, ...],
-        call_ordinal_offset: int,
-        surface_borrow: ProcessLocalToolSurfaceBorrow,
-        allowances: tuple[FrozenImageToolResourceAllowance, ...],
-    ) -> None:
-        expected: list[tuple[int, str, str]] = []
-        for call_ordinal, call in enumerate(calls, start=call_ordinal_offset):
-            if call.tool_name not in IMAGE_TOOL_NAMES:
-                continue
-            try:
-                binding = surface_borrow.execution_binding(call.tool_name)
-            except KeyError:
-                continue
-            arguments = thaw_json(call.arguments)
-            if not isinstance(binding, PreparedToolExecutionBinding) or not isinstance(
-                binding.execution_policy, BuiltinExecutionPolicyRef
-            ) or not isinstance(arguments, dict):
-                continue
-            try:
-                parse_image_tool_source(call.tool_name, arguments)
-            except ValueError:
-                continue
-            expected.append(
-                (
-                    call_ordinal,
-                    call.tool_call_id,
-                    binding.executor_binding_fingerprint,
-                )
-            )
-        actual = [
-            (
-                item.call_ordinal,
-                item.tool_call_id,
-                item.executor_binding_fingerprint,
-            )
-            for item in allowances
-        ]
-        if actual != expected:
-            raise RuntimeError("image Tool resource allowances do not exact-join calls")
 
     async def execute(
         self,
@@ -998,9 +972,6 @@ class ToolBatchExecutor:
         continuity_scope: ProviderInputContinuityScope,
         surface_borrow: ProcessLocalToolSurfaceBorrow,
         hook_scope: HookDispatchScopeRef | None = None,
-        image_call_allowances: tuple[FrozenImageToolResourceAllowance, ...] = (),
-        result_page_budgets: tuple[ToolResultPageBudget, ...] = (),
-        image_resource_refresh: Callable[[str], Awaitable[tuple[FrozenImageToolResourceAllowance, ToolResultPageBudget] | None]] | None = None,
         _partition_batch: bool = True,
         _call_ordinal_offset: int = 0,
         _close_surface_borrow: bool = True,
@@ -1033,13 +1004,6 @@ class ToolBatchExecutor:
                 self._workspace_gate is not None and self._workspace_gate.observe().outcome != "AVAILABLE"
             ):
                 _partition_batch = False
-            if _partition_batch:
-                self._validate_image_call_allowances(
-                    calls=calls,
-                    call_ordinal_offset=_call_ordinal_offset,
-                    surface_borrow=surface_borrow,
-                    allowances=image_call_allowances,
-                )
             hook_view = (
                 self._hooks.capture_view()
                 if self._hooks is not None and hook_scope is not None
@@ -1062,9 +1026,6 @@ class ToolBatchExecutor:
                     agent_invocation_snapshot=agent_invocation_snapshot,
                     continuity_scope=continuity_scope,
                     surface_borrow=surface_borrow,
-                    image_call_allowances=image_call_allowances,
-                    result_page_budgets=result_page_budgets,
-                    image_resource_refresh=image_resource_refresh,
                     call_ordinal_offset=_call_ordinal_offset,
                     hook_scope=hook_scope,
                     hook_view=hook_view,
@@ -1440,24 +1401,16 @@ class ToolBatchExecutor:
                             self._admission_lock.release()
                             admission_held = False
                         continue
-                    result = KernelToolResult(
-                        state=authorization.kind.value,
-                        content=(
-                            authorization.public_message
-                            or authorization.kind.value.lower().replace("_", " ")
-                        ).encode("utf-8"),
-                    )
-                    if authorization.kind is KernelToolAuthorizationKind.TOOL_UNAVAILABLE:
-                        result = replace(result, public_format=ToolOutputSourceFormatHint.JSON, content=json.dumps({
-                            "error": "TOOL_UNAVAILABLE",
-                            "guidance": result.content.decode("utf-8"),
-                        }, ensure_ascii=False).encode("utf-8"))
+                    denial_text = (authorization.public_message
+                        or authorization.kind.value.lower().replace("_", " "))
+                    result = KernelToolResult(state=authorization.kind.value,
+                        content=ToolBusinessValue(content=(ResultPart("text", denial_text),)))
                     if (
                         machine_policy_kind
                         is KernelToolAuthorizationKind.PERMISSION_DENIED
                     ):
                         denial_content = await self._content(
-                            result.content, deadline=self._canonical_deadline()
+                            denial_text.encode("utf-8"), deadline=self._canonical_deadline()
                         )
                         denial_observed_at = datetime.now(timezone.utc)
                         accepted_denial = await self._io.run(
@@ -1506,7 +1459,7 @@ class ToolBatchExecutor:
                                 ),
                                 result_state="PERMISSION_DENIED",
                                 result_origin_kind="POLICY_NO_ATTEMPT",
-                                canonical_body=result.content.decode("utf-8"),
+                                canonical_body=denial_text,
                                 observed_at=denial_observed_at,
                                 observation_origin=ToolObservationOrigin.POLICY,
                             )
@@ -1643,17 +1596,6 @@ class ToolBatchExecutor:
                         else None
                     )
                     workspace_id = await self._resolved_workspace_id()
-                    image_allowance = next(
-                        (
-                            item
-                            for item in image_call_allowances
-                            if item.call_ordinal == call_ordinal
-                            and item.tool_call_id == call.tool_call_id
-                            and item.executor_binding_fingerprint
-                            == binding.executor_binding_fingerprint
-                        ),
-                        None,
-                    )
                     invocation_context = KernelToolInvocationContext(
                         session_id=request.session_id,
                         workspace_id=workspace_id,
@@ -1700,18 +1642,6 @@ class ToolBatchExecutor:
                             request.input_modalities if isinstance(request, CodeModeToolRequest)
                             else request.prepared_call.call.target.fact.input_modalities
                         ),
-                        image_resource_allowance=image_allowance,
-                        refresh_image_resources=(
-                            (lambda call_id=call.tool_call_id: image_resource_refresh(call_id))
-                            if image_resource_refresh is not None and call.tool_name in IMAGE_TOOL_NAMES and not code_call
-                            else None
-                        ),
-                        page_budget=replace(
-                            next((item for item in result_page_budgets if item.tool_call_id == call.tool_call_id),
-                                 ToolResultPageBudget(tool_call_id=call.tool_call_id)),
-                            result_target={"kind": "SESSION_ENTRY", "session_id": request.session_id,
-                                           "entry_id": result_entry_id},
-                        ),
                         session_content_range=(
                             self._session_content_range(canonical_facts)
                             if call.tool_name in SESSION_QUERY_TOOL_NAMES else None
@@ -1721,7 +1651,7 @@ class ToolBatchExecutor:
                     admission_held = False
                     try:
                         if self._workspace_gate is not None and self._workspace_gate.observe().outcome != "AVAILABLE":
-                            result = KernelToolResult(state="APPLICATION_ERROR", content="工作目录不可用，此工具未执行。".encode("utf-8"))
+                            result = KernelToolResult(state="APPLICATION_ERROR", content=ToolBusinessValue(content=(ResultPart("text", "工作目录不可用，此工具未执行。"),)))
                         else:
                             result = await self._tools.invoke(
                                 tool_name=call.tool_name,
@@ -1826,14 +1756,6 @@ class ToolBatchExecutor:
                     _physical_complete()
                 if _settlement_gate is not None:
                     await _settlement_gate.wait()
-                assigned_budget = next((item for item in result_page_budgets
-                                        if item.tool_call_id == call.tool_call_id),
-                                       ToolResultPageBudget(tool_call_id=call.tool_call_id))
-                result = replace(result, page_budget=replace(
-                    assigned_budget,
-                    result_target={"kind": "SESSION_ENTRY", "session_id": request.session_id,
-                                   "entry_id": result_entry_id},
-                ))
                 unsettled_process_local_effect = result.process_local_settlement
                 if (
                     result.physical_observation is not None
@@ -1872,6 +1794,8 @@ class ToolBatchExecutor:
                         live_sink=live_sink,
                         tool_result_block_id=tool_result_block_id,
                         live_attribution=live_attribution,
+                        input_modalities=(request.input_modalities if isinstance(request, CodeModeToolRequest)
+                            else request.prepared_call.call.target.fact.input_modalities),
                     ),
                     name=f"kernel-tool-result-settlement:{result_entry_id}",
                 )
@@ -1948,9 +1872,6 @@ class ToolBatchExecutor:
         | None,
         continuity_scope: ProviderInputContinuityScope,
         surface_borrow: ProcessLocalToolSurfaceBorrow,
-        image_call_allowances: tuple[FrozenImageToolResourceAllowance, ...],
-        result_page_budgets: tuple[ToolResultPageBudget, ...],
-        image_resource_refresh: Callable[[str], Awaitable[tuple[FrozenImageToolResourceAllowance, ToolResultPageBudget] | None]] | None,
         call_ordinal_offset: int,
         hook_scope: HookDispatchScopeRef | None,
         hook_view: FrozenHookDefinitionView | None,
@@ -1973,9 +1894,6 @@ class ToolBatchExecutor:
                     continuity_scope=continuity_scope,
                     surface_borrow=surface_borrow,
                     hook_scope=hook_scope,
-                    image_call_allowances=image_call_allowances,
-                    result_page_budgets=result_page_budgets,
-                    image_resource_refresh=image_resource_refresh,
                     _partition_batch=False,
                     _call_ordinal_offset=call_ordinal_offset + index,
                     _close_surface_borrow=False,
@@ -2016,9 +1934,6 @@ class ToolBatchExecutor:
                     agent_invocation_snapshot=agent_invocation_snapshot,
                     continuity_scope=continuity_scope,
                     surface_borrow=surface_borrow,
-                    image_call_allowances=image_call_allowances,
-                    result_page_budgets=result_page_budgets,
-                    image_resource_refresh=image_resource_refresh,
                     call_ordinal_offset=call_ordinal_offset + allowed_offset,
                 )
                 allowed_calls = []
@@ -2070,9 +1985,6 @@ class ToolBatchExecutor:
                     continuity_scope=continuity_scope,
                     surface_borrow=surface_borrow,
                     hook_scope=None,
-                    image_call_allowances=image_call_allowances,
-                    result_page_budgets=result_page_budgets,
-                    image_resource_refresh=image_resource_refresh,
                     _partition_batch=False,
                     _call_ordinal_offset=call_ordinal_offset + index + relative,
                     _close_surface_borrow=False,
@@ -2105,9 +2017,6 @@ class ToolBatchExecutor:
         | None,
         continuity_scope: ProviderInputContinuityScope,
         surface_borrow: ProcessLocalToolSurfaceBorrow,
-        image_call_allowances: tuple[FrozenImageToolResourceAllowance, ...],
-        result_page_budgets: tuple[ToolResultPageBudget, ...],
-        image_resource_refresh: Callable[[str], Awaitable[tuple[FrozenImageToolResourceAllowance, ToolResultPageBudget] | None]] | None,
         call_ordinal_offset: int,
     ) -> ToolBatchExecutionResult:
         if len(preauthorizations) != len(calls) or any(
@@ -2143,9 +2052,6 @@ class ToolBatchExecutor:
                         continuity_scope=continuity_scope,
                         surface_borrow=surface_borrow,
                             hook_scope=None,
-                        image_call_allowances=image_call_allowances,
-                    result_page_budgets=result_page_budgets,
-                    image_resource_refresh=image_resource_refresh,
                         _partition_batch=False,
                         _call_ordinal_offset=(call_ordinal_offset + position),
                         _close_surface_borrow=False,
@@ -2220,6 +2126,7 @@ class ToolBatchExecutor:
         live_sink: _ToolResultLiveSink | None,
         tool_result_block_id: str | None,
         live_attribution: Mapping[str, object] | None,
+        input_modalities: tuple[str, ...] | None = None,
     ) -> _KnownToolResultSettlementOutcome:
         if live_sink is not None:
             await asyncio.shield(live_sink.close())
@@ -2233,61 +2140,38 @@ class ToolBatchExecutor:
                 actor_id=tool_name,
             )
             await self._publish_tool_remote_identity_exact(remote_identity_candidate)
-        from pulsara_agent.conversation_kernel.content_parts import ResultPart
-        from pulsara_agent.conversation_kernel.prompt_storage import publish_prompt_images
         from pulsara_agent.conversation_kernel.tool_outputs import (
             assemble_tool_business_value, project_tool_result_export,
         )
-        from pulsara_agent.llm.input import LLMImagePart
         from pulsara_agent.ports.tool_execution import ToolBusinessValue
-        from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
-        from psycopg.rows import dict_row
 
+        from pulsara_agent.conversation_kernel.native_tool_delivery import (
+            NativeResultPosition, failed_native_tool_page, render_native_tool_page,
+        )
+        from pulsara_agent.conversation_kernel.tool_outputs import PostgresToolOutputReadPort, prepare_native_tool_observation
+        from pulsara_agent.ports.tool_output import NativeToolContinuation
+
+        native = assistant_entry_id is not None
+        continuation = result.native_continuation
+        if continuation is not None and (not native or not isinstance(continuation, NativeToolContinuation)):
+            raise ValueError("NEXT is only a native frozen-result read")
         canonical_content = None
-        if isinstance(result.content, ToolBusinessValue):
-            business_value = result.content
-        elif isinstance(result.content, FrozenPromptContent):
-            # The image owner publishes immutable assets. A detached asset does
-            # not make a result readable; the result transaction owns acceptance.
-            prompt = freeze_canonical_prompt(result.content)
-            def publish_images() -> None:
-                with self._repository.connection_provider.connection(
-                    lane=PostgresConnectionLane.ARTIFACT, row_factory=dict_row,
-                    deadline_monotonic=self._canonical_deadline(),
-                ) as connection:
-                    publish_prompt_images(connection, prompt=prompt)
-            parts = []
-            for item in prompt.content.parts:
-                if isinstance(item, LLMTextPart):
-                    parts.append(ResultPart("text", item.text))
-                elif isinstance(item, LLMImagePart):
-                    parts.append(ResultPart("image", {"kind": "IMAGE_REF", "image_ref": item.image_ref}))
-                else:
-                    raise TypeError("tool output contains unsupported non-business content")
-            business_value = ToolBusinessValue(content=tuple(parts))
-            canonical_content = prompt.content
+        pending_images = result.pending_images
+        page = None
+        source = None
+        port = PostgresToolOutputReadPort(self._repository.connection_provider,
+            session_id=session_id, workspace_id=workspace_id)
+        if continuation is not None:
+            business_value = ToolBusinessValue()
+            source = continuation.source
             try:
-                await self._io.run(publish_images)
-            except StaleHostWriter:
-                raise
+                page = await self._io.run(port.select_native_page, source,
+                    position=continuation.position, supports_images=input_modalities is None or "image" in input_modalities)
             except Exception as error:
-                from psycopg import InterfaceError, OperationalError
-                from pulsara_agent.ports.tool_output import ToolOutputUnavailableReason
-                known_value = assemble_tool_business_value(public_fields=business_value.public_fields,
-                    content_parts=business_value.content, result_state=result.state)
-                reason = (ToolOutputUnavailableReason.BODY_PUBLICATION_UNCONFIRMED
-                    if isinstance(error, (TimeoutError, ConnectionError, InterfaceError, OperationalError))
-                    else ToolOutputUnavailableReason.BODY_PUBLICATION_FAILED)
-                raise ToolResultSaveError(reason=reason, known_value=known_value,
-                    result_state=result.state, cause=error) from error
-
+                page = failed_native_tool_page(session_id=session_id, entry_id=source.target["entry_id"],
+                    start=NativeResultPosition(*continuation.position), value=source.value, error=error)
         else:
-            # An explicitly supplied complete physical observation takes
-            # precedence over a producer's display string. Serialized JSON is
-            # text here; E producers supply their declared fields directly.
-            text = (result.output_body_candidate.text if result.output_body_candidate is not None
-                    else result.content.decode("utf-8"))
-            business_value = ToolBusinessValue(content=(ResultPart("text", text),))
+            business_value = result.content
         public_value = assemble_tool_business_value(public_fields=business_value.public_fields,
             content_parts=business_value.content, result_state=result.state)
         try:
@@ -2305,7 +2189,11 @@ class ToolBatchExecutor:
                 result_state=result.state,
                 public_fields=prepared_output.public_fields,
                 content_parts=prepared_output.content_parts,
-                result_facts=prepared_output.result_facts,
+                result_facts=({**dict(prepared_output.result_facts), "native_start":list(continuation.position)}
+                    if continuation is not None else prepared_output.result_facts),
+                source_result_entry_id=None if source is None else source.target["entry_id"],
+                native_projection=None,
+                pending_images=tuple(pending_images),
                 observed_at=observed_at,
                 observation_duration_microseconds=(
                     None
@@ -2319,7 +2207,6 @@ class ToolBatchExecutor:
                     else result.trusted_observation.duration_microseconds
                 ),
                 actor_id=tool_name,
-                model_visible_memory_fact_ids=result.model_visible_memory_fact_ids,
             )
         except StaleHostWriter:
             raise
@@ -2364,15 +2251,37 @@ class ToolBatchExecutor:
                     "canonical ToolResult did not install its process-local effect"
                 )
             effect_committed = True
+        if result.acceptance_succeeded is not None:
+            returned = await asyncio.to_thread(result.acceptance_succeeded)
+            if returned is not None:
+                await returned
         projection_error = None
         try:
-            result_text = project_tool_result_export(public_value).decode("utf-8")
+            if native:
+                if source is None:
+                    page = await self._io.run(prepare_native_tool_observation,
+                        self._repository, self._writer_lease.guard, workspace_id=workspace_id,
+                        result_entry_id=result_entry_id,
+                        supports_images=input_modalities is None or "image" in input_modalities,
+                        deadline_monotonic=self._canonical_deadline())
+                result_text = render_native_tool_page(page, observed_at=observed_at,
+                    duration_microseconds=prepared_acceptance.observation_duration_microseconds,
+                    continuation=continuation is not None)
+                if page.images:
+                    canonical_content = (LLMTextPart(result_text), *page.images)
+            else:
+                result_text = project_tool_result_export(public_value).decode("utf-8")
         except StaleHostWriter:
             raise
         except Exception as error:
+            from pulsara_agent.conversation_kernel.native_tool_delivery import next_tool_result_target
+            source_entry_id = result_entry_id if continuation is None else continuation.source.target["entry_id"]
+            start = NativeResultPosition(0) if continuation is None else NativeResultPosition(*continuation.position)
             projection_error = AcceptedToolResultProjectionError(
                 known_value=public_value, result_state=result.state,
                 result_id=result_id, result_entry_id=accepted.entry_id, cause=error,
+                source_result_entry_id=source_entry_id,
+                next_target=next_tool_result_target(session_id=session_id,entry_id=source_entry_id,position=start) if native else None,
             )
             result_text = str(projection_error)
         if attempt_id is not None:
@@ -2469,8 +2378,8 @@ class ToolBatchExecutor:
             ),
             observation_origin=prepared_acceptance.observation_origin_kind,
             output_unavailability_reason=prepared_acceptance.output_unavailability_reason,
-            model_visible_memory_fact_ids=prepared_acceptance.model_visible_memory_fact_ids,
             canonical_content=canonical_content,
+            public_fields=prepared_acceptance.public_fields,
         )
         capture = _code_result.get()
         if capture is not None:
@@ -2570,24 +2479,19 @@ class ToolBatchExecutor:
 def _tool_invocation_failure(error: Exception, effect_class: str) -> KernelToolResult:
     """Observe a physical failure without claiming rollback or safe retry."""
     read_only = effect_class in {"read_only", "TERMINAL_OBSERVATION"}
-    facts = {
-        "error": type(error).__name__,
-        "physical_outcome": "NO_RELIABLE_OBSERVATION" if read_only else "UNKNOWN",
-        "retry_performed": False,
-        "guidance": (
-            "The tool could not provide a reliable result. This does not "
-            "prove the resource is absent. Use the error to choose the next step."
-            if read_only else
-            "The operation may have partially or fully executed. Do not assume "
-            "success, no changes, or rollback. Check the actual state or "
-            "idempotency before repeating it; otherwise ask the user. "
-            "You may continue with independent work."
-        ),
-    }
+    guidance = (
+        "未取得可靠结果，不能据此判断资源不存在。本次未自动重试。"
+        if read_only else
+        "操作可能已部分或全部执行，实际结果未确认，不能假设未生效或已回滚。"
+        "本次未自动重试；再次操作前请核对实际状态。"
+    )
     return KernelToolResult(
-        state="SYSTEM_ERROR", public_format=ToolOutputSourceFormatHint.JSON,
-        content=canonical_json_bytes({**facts, "message": str(error)}),
-        required_facts=facts, effect_class=effect_class,
+        state="SYSTEM_ERROR",
+        content=ToolBusinessValue(content=(
+            ResultPart("text", f"{type(error).__name__}: {error}"),
+            ResultPart("text", guidance),
+        )),
+        effect_class=effect_class,
     )
 
 
@@ -2599,11 +2503,12 @@ def _tool_effect_class(
     if result_effect_class is not None:
         return result_effect_class
     if tool_name == "manage_process":
+        from .tool_runtime_bindings import _TERMINAL_PROCESS_ACTION_EFFECTS
+
         action = arguments.get("action")
-        if action in {"poll", "wait"}:
-            return "TERMINAL_OBSERVATION"
-        if action in {"write", "submit", "close_stdin", "kill"}:
-            return "TERMINAL_EFFECT"
+        for candidate, effect_class in _TERMINAL_PROCESS_ACTION_EFFECTS:
+            if action == candidate:
+                return effect_class
         raise RuntimeError("manage_process action escaped its closed catalog")
     if tool_name == "exec_process":
         return "TERMINAL_EFFECT"

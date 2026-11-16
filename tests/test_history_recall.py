@@ -1,11 +1,9 @@
 """History search contracts against the real pg_search engine and canonical owners."""
 
-from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 from uuid import uuid4
 from pulsara_agent.identity import derive_id
 
 from time import monotonic
-import json
 import pytest
 from pulsara_agent.conversation_kernel.history_search import (
     FrozenHistoryReadScope,
@@ -28,10 +26,6 @@ from pulsara_agent.conversation_kernel.repository import ConversationKernelRepos
 from pulsara_agent.storage.schema_verification_service import (
     acquire_verified_postgres_access_sync,
 )
-
-
-def _cursor(page):
-    return None if page["next"] is None else page["next"]["arguments"]["cursor"]
 
 
 @pytest.fixture
@@ -70,8 +64,11 @@ def search(repo, scope, query, **kwargs):
             for r in found
             if (
                 value := refetch_history(
-                    c, r, scope=scope, include_tools=kwargs.get("include_tools", False),
-                    automatic=kwargs.get("automatic", False)
+                    c,
+                    r,
+                    scope=scope,
+                    include_tools=kwargs.get("include_tools", False),
+                    automatic=kwargs.get("automatic", False),
                 )
             )
             is not None
@@ -110,19 +107,20 @@ def test_engine_actual_fields_byte_positions_and_shared_tool_results(repo, query
         repo, session_id=caller.guard.session_id, memory_domain_id=domain
     ).invoke(
         "search_session_content",
-        {'target': {'kind': 'SESSION', 'session_id': target.guard.session_id}, 'query': query},
+        {
+            "target": {"kind": "SESSION", "session_id": target.guard.session_id},
+            "query": query,
+        },
         current_range=scope.current_range,
-        tool_call_id="call:history",
-        page_budget=ToolResultPageBudget(tool_call_id="call:history"),
         deadline_monotonic=monotonic() + 30,
     )
-    assert tool["items"][0]["messages"] == [
-        {"target": {"kind": "SESSION_ENTRY", "session_id": target.guard.session_id, "entry_id": m["entry_id"]},
-         "read": {"tool": "read_session_content", "arguments": {
-             "target": {"kind": "SESSION_ENTRY", "session_id": target.guard.session_id, "entry_id": m["entry_id"]}, "limit": 1}},
-         **{k: m[k] for k in ("role", "label", "at", "text")}}
-        for m in candidates[0].messages
-    ]
+    assert tool.content[0].value["target"] == {
+        "kind": "SESSION_ENTRY",
+        "entry_id": candidates[0].q1_entry_id,
+    }
+    text = tool.content[0].value["text"]
+    starts = [text.index(message["text"]) for message in candidates[0].messages]
+    assert starts == sorted(starts)
     if query == "runs":
         assert found[0]["hits"] is None and found[0]["hits_tech"] is None
         assert found[0]["hits_en"]
@@ -186,7 +184,7 @@ def test_fork_exact_copy_folded_before_limit_parent_delete_and_rebuild(repo):
     # Discard only the disposable copy, then reconcile through its production owner.
     with repo.connection_provider.connection(
         lane=PostgresConnectionLane.BACKGROUND_WORK,
-        deadline_monotonic=monotonic()+30,
+        deadline_monotonic=monotonic() + 30,
     ) as connection:
         connection.execute("DELETE FROM pulsara_v3.history_search_documents")
     maintain_history(repo)
@@ -245,55 +243,6 @@ def test_project_scope_and_visible_precise_fork_exclusion(repo):
     assert len(candidates) == 1 and all(
         x.session_id != other.guard.session_id for x in candidates
     )
-
-
-def test_relevance_cursor_lossless_and_old_cursor_rejected(repo, stage2_migrated_postgres_database):
-    domain = uuid4().hex.replace(":", "_")
-    caller = new(repo, domain)
-    target = new(repo, domain)
-    for i in range(7):
-        turn(
-            repo,
-            target.guard,
-            f"page-keyword question {i}",
-            answer=f"page-keyword answer {i}",
-        )
-    # This test promises fixed scoring statistics. Prior tests and these turns
-    # leave deleted projection versions; VACUUM/merge can otherwise change BM25
-    # scores mid-page without any new logical writes. Rebuild this test index
-    # from live rows before checking exact keyset continuity.
-    maintain_history(repo)
-    import psycopg
-    with psycopg.connect(stage2_migrated_postgres_database.admin_dsn, autocommit=True) as connection:
-        connection.execute("REINDEX INDEX pulsara_v3.idx_pulsara_v3_history_bm25")
-    owner = SessionContentQuery(
-        repo, session_id=caller.guard.session_id, memory_domain_id=domain
-    )
-
-    def invoke(args):
-        return owner.invoke(
-            "search_session_content",
-            args,
-            current_range=SessionContentRange(0),
-            tool_call_id="call:history",
-            page_budget=ToolResultPageBudget(tool_call_id="call:history"),
-            deadline_monotonic=monotonic() + 30,
-        )
-
-    all_items = invoke(
-        {'target': {'kind': 'SESSION', 'session_id': target.guard.session_id}, 'query': 'page-keyword'}
-    )["items"]
-    page = invoke(
-        {'target': {'kind': 'SESSION', 'session_id': target.guard.session_id}, 'query': 'page-keyword', 'limit': 2}
-    )
-    items = list(page["items"])
-    while _cursor(page):
-        page = invoke({"cursor": _cursor(page), "limit": 2})
-        items.extend(page["items"])
-    assert [(x["target"]["entry_id"], x["score"]) for x in items] == [
-        (x["target"]["entry_id"], x["score"]) for x in all_items
-    ]
-    assert len({x["target"]["entry_id"] for x in items}) == 7
 
 
 def doc(texts):
@@ -418,7 +367,10 @@ def test_annotation_labels_do_not_consume_exact_body_budget_and_no_soft_extra():
     start = d["body"].encode().index("注".encode())
     result = excerpt_history(d, ([[start, start + 3]], None, None))
     assert len(result) == 1
-    assert result[0]["text"] == "[truncated]\n" + d["messages"][1]["text"] + "\n[truncated]"
+    assert (
+        result[0]["text"]
+        == "[truncated]\n" + d["messages"][1]["text"] + "\n[truncated]"
+    )
     d["messages"][1]["body_ranges"] = [
         [len("PACKAGING:") - 1, len(d["messages"][1]["text"])]
     ]
@@ -451,87 +403,159 @@ def test_visible_Q2_selects_QA_and_its_words_never_enter_score(repo):
     assert search(repo, scope, "exclusiveq2identifier", automatic=True)[0] == []
 
 
-def test_automatic_invalid_excerpts_do_not_fetch_the_twenty_first_unit(repo, monkeypatch):
+def test_automatic_invalid_excerpts_do_not_fetch_the_twenty_first_unit(
+    repo, monkeypatch
+):
     from pulsara_agent.conversation_kernel import history_search
 
-    domain = uuid4().hex.replace(':', '_')
+    domain = uuid4().hex.replace(":", "_")
     caller = new(repo, domain)
-    workspace = rows(repo, 'SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s', (caller.guard.session_id,))[0]['workspace_id']
+    workspace = rows(
+        repo,
+        "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s",
+        (caller.guard.session_id,),
+    )[0]["workspace_id"]
     target = new(repo, domain, workspace)
     for i in range(21):
-        turn(repo, target.guard, f'budgetprobe question {i}', answer=f'budgetprobe answer {i}')
+        turn(
+            repo,
+            target.guard,
+            f"budgetprobe question {i}",
+            answer=f"budgetprobe answer {i}",
+        )
     maintain_history(repo)
-    scope = FrozenHistoryReadScope(caller.guard.session_id, domain, SessionContentRange(0))
-    with repo.connection_provider.connection(lane=PostgresConnectionLane.MEMORY_QUERY, row_factory=dict_row, deadline_monotonic=monotonic()+30) as connection:
-        assert len(search_history(connection, scope=scope, query='budgetprobe', limit=21, automatic=True)) == 21
+    scope = FrozenHistoryReadScope(
+        caller.guard.session_id, domain, SessionContentRange(0)
+    )
+    with repo.connection_provider.connection(
+        lane=PostgresConnectionLane.MEMORY_QUERY,
+        row_factory=dict_row,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        assert (
+            len(
+                search_history(
+                    connection,
+                    scope=scope,
+                    query="budgetprobe",
+                    limit=21,
+                    automatic=True,
+                )
+            )
+            == 21
+        )
     admissions = []
     original = history_search.search_history
+
     def observe(connection, **kwargs):
         admitted = original(connection, **kwargs)
-        admissions.append((kwargs['limit'], len(admitted)))
+        admissions.append((kwargs["limit"], len(admitted)))
         return admitted
-    monkeypatch.setattr(history_search, 'search_history', observe)
-    monkeypatch.setattr(history_search, 'excerpt_history', lambda *_: None)
-    result = history_search.PostgresHistoryQuery(repo.connection_provider).automatic_candidates(scope=scope, query='budgetprobe', deadline_monotonic=monotonic()+30)
+
+    monkeypatch.setattr(history_search, "search_history", observe)
+    monkeypatch.setattr(history_search, "excerpt_history", lambda *_: None)
+    result = history_search.PostgresHistoryQuery(
+        repo.connection_provider
+    ).automatic_candidates(
+        scope=scope, query="budgetprobe", deadline_monotonic=monotonic() + 30
+    )
     assert result == ()
     assert admissions == [(20, 20)]
 
 
 def test_unrestorable_Q2_selects_complete_QA_without_its_query_terms(repo, monkeypatch):
     from pulsara_agent.conversation_kernel import history_projection
-    domain = uuid4().hex.replace(':', '_')
+
+    domain = uuid4().hex.replace(":", "_")
     caller = new(repo, domain)
     target = new(repo, domain)
-    turn(repo, target.guard, 'restorablequestion', answer='restorableanswer')
-    turn(repo, target.guard, 'unrestorableq2sentinel', answer='later answer')
-    q2 = rows(repo, "SELECT id FROM pulsara_v3.transcript_entries WHERE session_id=%s AND entry_kind='USER_MESSAGE' ORDER BY entry_sequence DESC LIMIT 1", (target.guard.session_id,))[0]['id']
+    turn(repo, target.guard, "restorablequestion", answer="restorableanswer")
+    turn(repo, target.guard, "unrestorableq2sentinel", answer="later answer")
+    q2 = rows(
+        repo,
+        "SELECT id FROM pulsara_v3.transcript_entries WHERE session_id=%s AND entry_kind='USER_MESSAGE' ORDER BY entry_sequence DESC LIMIT 1",
+        (target.guard.session_id,),
+    )[0]["id"]
     original = history_projection.canonical_history_message
+
     def unavailable(connection, entry, **kwargs):
-        if entry['id'] == q2:
-            raise RuntimeError('canonical Q2 restoration unavailable')
+        if entry["id"] == q2:
+            raise RuntimeError("canonical Q2 restoration unavailable")
         return original(connection, entry, **kwargs)
-    monkeypatch.setattr(history_projection, 'canonical_history_message', unavailable)
+
+    monkeypatch.setattr(history_projection, "canonical_history_message", unavailable)
     maintain_history(repo, allow_build_failure=True)
-    scope = FrozenHistoryReadScope(caller.guard.session_id, domain, SessionContentRange(0))
-    found, candidates = search(repo, scope, 'restorableanswer', target_session_id=target.guard.session_id)
-    assert len(candidates) == 1 and found[0]['variant'] == 'QA'
-    assert all(m['region'] != 'Q2' for m in candidates[0].messages)
-    assert search(repo, scope, 'unrestorableq2sentinel', target_session_id=target.guard.session_id)[0] == []
+    scope = FrozenHistoryReadScope(
+        caller.guard.session_id, domain, SessionContentRange(0)
+    )
+    found, candidates = search(
+        repo, scope, "restorableanswer", target_session_id=target.guard.session_id
+    )
+    assert len(candidates) == 1 and found[0]["variant"] == "QA"
+    assert all(m["region"] != "Q2" for m in candidates[0].messages)
+    assert (
+        search(
+            repo,
+            scope,
+            "unrestorableq2sentinel",
+            target_session_id=target.guard.session_id,
+        )[0]
+        == []
+    )
 
 
-def test_explicit_pagination_continues_after_a_full_page_of_invalid_excerpts(repo, monkeypatch):
-    from pulsara_agent.conversation_kernel import history_search
-    domain = uuid4().hex.replace(':', '_')
+def test_complete_search_continues_past_invalid_excerpts(repo, monkeypatch):
+    from pulsara_agent.conversation_kernel import session_content
+
+    domain = uuid4().hex
     caller, target = new(repo, domain), new(repo, domain)
     for i in range(4):
-        turn(repo, target.guard, f'continueprobe question {i}', answer='continueprobe answer')
+        turn(
+            repo,
+            target.guard,
+            f"continueprobe question {i}",
+            answer="continueprobe answer",
+        )
     maintain_history(repo)
-    owner = SessionContentQuery(repo, session_id=caller.guard.session_id, memory_domain_id=domain)
-    original = history_search.refetch_history
+    original = session_content.refetch_history
     skipped = []
-    def reject_first_page(connection, row, **kwargs):
+
+    def reject_first(connection, row, **kwargs):
         if len(skipped) < 2:
-            skipped.append(row['q1_entry_id'])
+            skipped.append(row["q1_entry_id"])
             return None
         return original(connection, row, **kwargs)
-    monkeypatch.setattr(history_search, 'refetch_history', reject_first_page)
-    def invoke(arguments):
-        return owner.invoke('search_session_content', arguments, current_range=SessionContentRange(0), tool_call_id='call:pagination', page_budget=ToolResultPageBudget(tool_call_id='call:pagination'), deadline_monotonic=monotonic()+30)
-    page = invoke({'target': {'kind': 'SESSION', 'session_id': target.guard.session_id}, 'query': 'continueprobe', 'limit': 1})
-    assert page['items'] == [] and _cursor(page) is not None
-    following = invoke({'cursor':_cursor(page),'limit':1})
-    assert following['items'] and following['items'][0]["target"]["entry_id"] not in skipped
+
+    monkeypatch.setattr(session_content, "refetch_history", reject_first)
+    owner = SessionContentQuery(
+        repo, session_id=caller.guard.session_id, memory_domain_id=domain
+    )
+    value = owner.invoke(
+        "search_session_content",
+        {
+            "target": {"kind": "SESSION", "session_id": target.guard.session_id},
+            "query": "continueprobe",
+        },
+        current_range=SessionContentRange(0),
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert len(value.content) == 2
+    assert all(
+        part.value["target"]["entry_id"] not in skipped for part in value.content
+    )
 
 
 @pytest.mark.parametrize("quote_length", [20, 700])
 def test_center_annotation_expands_both_sides_and_redistributes_budget(quote_length):
-    d = doc([
-        ("Q1", "问", False),
-        ("A", "前" * 2000, False),
-        ("A", "注" * quote_length + "needle", True),
-        ("A", "后" * 2000, False),
-        ("Q2", "追", False),
-    ])
+    d = doc(
+        [
+            ("Q1", "问", False),
+            ("A", "前" * 2000, False),
+            ("A", "注" * quote_length + "needle", True),
+            ("A", "后" * 2000, False),
+            ("Q2", "追", False),
+        ]
+    )
     start = d["body"].encode().index(b"needle")
     result = excerpt_history(d, ([[start, start + 6]], None, None))
     texts = [m["text"] for m in result]
@@ -544,7 +568,9 @@ def test_center_annotation_expands_both_sides_and_redistributes_budget(quote_len
 
 def _failed_publication(repo, session_id, q1_id, failure):
     import psycopg
-    from pulsara_agent.conversation_kernel.history_publication import HistoryProjectionRepository
+    from pulsara_agent.conversation_kernel.history_publication import (
+        HistoryProjectionRepository,
+    )
     from tests.test_history_publication import _ObservedProvider
 
     def after(query, connection, _params):
@@ -557,42 +583,99 @@ def _failed_publication(repo, session_id, q1_id, failure):
             connection.execute("SELECT pg_sleep(0.02)")
         raise ValueError("injected post-insert publication failure")
 
-    store = HistoryProjectionRepository(_ObservedProvider(repo.connection_provider, after=after))
+    store = HistoryProjectionRepository(
+        _ObservedProvider(repo.connection_provider, after=after)
+    )
     with pytest.raises((psycopg.Error, ValueError)):
-        store.maintain_question(session_id, q1_id, deadline_monotonic=monotonic()+30)
+        store.maintain_question(session_id, q1_id, deadline_monotonic=monotonic() + 30)
 
 
 @pytest.mark.parametrize("failure", ["postgres", "statement_timeout", "after_insert"])
-def test_projection_failure_preserves_canonical_turn_and_later_maintenance(repo, failure):
+def test_projection_failure_preserves_canonical_turn_and_later_maintenance(
+    repo, failure
+):
     domain = uuid4().hex.replace(":", "_")
     source = new(repo, domain)
-    caller = new(repo, domain, rows(repo, "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s", (source.guard.session_id,))[0]["workspace_id"])
-    owner, _, final = turn(repo, source.guard, "projection-failure-needle", answer="canonical answer")
-    q1 = rows(repo, "SELECT initial_entry_id FROM pulsara_v3.turns WHERE id=%s", (owner,))[0]['initial_entry_id']
-    assert rows(repo, "SELECT id FROM pulsara_v3.transcript_entries WHERE id=%s", (final,))
+    caller = new(
+        repo,
+        domain,
+        rows(
+            repo,
+            "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s",
+            (source.guard.session_id,),
+        )[0]["workspace_id"],
+    )
+    owner, _, final = turn(
+        repo, source.guard, "projection-failure-needle", answer="canonical answer"
+    )
+    q1 = rows(
+        repo, "SELECT initial_entry_id FROM pulsara_v3.turns WHERE id=%s", (owner,)
+    )[0]["initial_entry_id"]
+    assert rows(
+        repo, "SELECT id FROM pulsara_v3.transcript_entries WHERE id=%s", (final,)
+    )
     _failed_publication(repo, source.guard.session_id, q1, failure)
-    assert rows(repo, "SELECT id FROM pulsara_v3.history_search_documents WHERE session_id=%s", (source.guard.session_id,)) == []
+    assert (
+        rows(
+            repo,
+            "SELECT id FROM pulsara_v3.history_search_documents WHERE session_id=%s",
+            (source.guard.session_id,),
+        )
+        == []
+    )
     # An ordinary write is independent; explicit maintenance uses the sole owner.
     turn(repo, source.guard, "next question", answer="next answer")
     maintain_history(repo)
-    scope = FrozenHistoryReadScope(caller.guard.session_id, domain, SessionContentRange(0))
+    scope = FrozenHistoryReadScope(
+        caller.guard.session_id, domain, SessionContentRange(0)
+    )
     assert search(repo, scope, "projection-failure-needle", automatic=True)[1]
 
 
 @pytest.mark.parametrize("failure", ["postgres", "statement_timeout", "after_insert"])
 def test_projection_failure_does_not_prevent_canonical_fork(repo, failure):
     source = new(repo, "u_local")
-    turn(repo, source.guard, "fork-projection-failure", answer="canonical child content")
+    turn(
+        repo, source.guard, "fork-projection-failure", answer="canonical child content"
+    )
     maintain_history(repo)
-    anchor = rows(repo, "SELECT final_entry_id FROM pulsara_v3.turns WHERE session_id=%s", (source.guard.session_id,))[0]['final_entry_id']
+    anchor = rows(
+        repo,
+        "SELECT final_entry_id FROM pulsara_v3.turns WHERE session_id=%s",
+        (source.guard.session_id,),
+    )[0]["final_entry_id"]
     child = fork(repo, source.guard.session_id, anchor)
     assert child.created, child.public_code
-    assert len(rows(repo, "SELECT id FROM pulsara_v3.transcript_entries WHERE session_id=%s", (child.child_session_id,))) == 2
-    q1 = rows(repo, "SELECT id FROM pulsara_v3.transcript_entries WHERE session_id=%s AND entry_kind='USER_MESSAGE'", (child.child_session_id,))[0]['id']
+    assert (
+        len(
+            rows(
+                repo,
+                "SELECT id FROM pulsara_v3.transcript_entries WHERE session_id=%s",
+                (child.child_session_id,),
+            )
+        )
+        == 2
+    )
+    q1 = rows(
+        repo,
+        "SELECT id FROM pulsara_v3.transcript_entries WHERE session_id=%s AND entry_kind='USER_MESSAGE'",
+        (child.child_session_id,),
+    )[0]["id"]
     _failed_publication(repo, child.child_session_id, q1, failure)
-    assert rows(repo, "SELECT id FROM pulsara_v3.history_search_documents WHERE session_id=%s", (child.child_session_id,)) == []
+    assert (
+        rows(
+            repo,
+            "SELECT id FROM pulsara_v3.history_search_documents WHERE session_id=%s",
+            (child.child_session_id,),
+        )
+        == []
+    )
     maintain_history(repo)
-    assert rows(repo, "SELECT id FROM pulsara_v3.history_search_documents WHERE session_id=%s", (child.child_session_id,))
+    assert rows(
+        repo,
+        "SELECT id FROM pulsara_v3.history_search_documents WHERE session_id=%s",
+        (child.child_session_id,),
+    )
 
 
 def test_failed_publication_keeps_old_cut_searchable_after_canonical_append(repo):
@@ -602,181 +685,163 @@ def test_failed_publication_keeps_old_cut_searchable_after_canonical_append(repo
 
     domain = uuid4().hex.replace(":", "_")
     source = new(repo, domain)
-    workspace = rows(repo, "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s", (source.guard.session_id,))[0]["workspace_id"]
+    workspace = rows(
+        repo,
+        "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s",
+        (source.guard.session_id,),
+    )[0]["workspace_id"]
     caller = new(repo, domain, workspace)
-    turn_id, _, _ = turn(repo, source.guard, "old-cut-needle", answer="old progress", complete=False)
-    q1 = rows(repo, "SELECT initial_entry_id FROM pulsara_v3.turns WHERE id=%s", (turn_id,))[0]['initial_entry_id']
+    turn_id, _, _ = turn(
+        repo, source.guard, "old-cut-needle", answer="old progress", complete=False
+    )
+    q1 = rows(
+        repo, "SELECT initial_entry_id FROM pulsara_v3.turns WHERE id=%s", (turn_id,)
+    )[0]["initial_entry_id"]
     maintain_history(repo)
-    scope = FrozenHistoryReadScope(caller.guard.session_id, domain, SessionContentRange(0))
+    scope = FrozenHistoryReadScope(
+        caller.guard.session_id, domain, SessionContentRange(0)
+    )
     before, candidates = search(repo, scope, "old-cut-needle", automatic=True)
     old = candidates[0].document
-    cut = repo.prepare_provider_input_cut(source.guard, turn_id=turn_id, deadline_monotonic=monotonic()+30)
+    cut = repo.prepare_provider_input_cut(
+        source.guard, turn_id=turn_id, deadline_monotonic=monotonic() + 30
+    )
     repo.commit_assistant_message(
-        source.guard, cut=cut, entry_id=identity("entry"),
-        parent_content=InlineContent.from_bytes(b"manifest"),
-        blocks=(AssistantTextBlock(identity("block"), InlineContent.from_bytes(b"new canonical answer")),),
-        complete_turn=True, occurred_at=datetime.now(timezone.utc),
-        actor_id="model:test", deadline_monotonic=monotonic()+30,
+        source.guard,
+        cut=cut,
+        entry_id=identity("entry"),
+
+        blocks=(
+            AssistantTextBlock(
+                identity("block"), InlineContent.from_bytes(b"new canonical answer")
+            ),
+        ),
+        complete_turn=True,
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="model:test",
+        deadline_monotonic=monotonic() + 30,
     )
     _failed_publication(repo, source.guard.session_id, q1, "postgres")
     found, candidates = search(repo, scope, "old-cut-needle", automatic=True)
-    assert found[0]['covered_entry_sequence'] == before[0]['covered_entry_sequence']
+    assert found[0]["covered_entry_sequence"] == before[0]["covered_entry_sequence"]
     assert len(candidates) == 1 and candidates[0].document == old
-    assert 'new canonical answer' not in candidates[0].document['body']
+    assert "new canonical answer" not in candidates[0].document["body"]
     maintain_history(repo)
-    assert 'new canonical answer' in search(repo, scope, "old-cut-needle", automatic=True)[1][0].document['body']
+    assert (
+        "new canonical answer"
+        in search(repo, scope, "old-cut-needle", automatic=True)[1][0].document["body"]
+    )
 
 
-def test_relevance_paging_survives_corpus_score_drift(isolated_history_repo):
-    """Unrelated canonical writes must not strand results above an old score."""
-    repo = isolated_history_repo
-    domain = uuid4().hex.replace(':', '_')
-    caller, target = new(repo, domain), new(repo, domain)
-    for i in range(2):
-        turn(repo, target.guard, f'scoredriftneedle question {i}', answer='scoredriftneedle answer')
-    maintain_history(repo)
-    owner = SessionContentQuery(repo, session_id=caller.guard.session_id, memory_domain_id=domain)
-
-    def invoke(args):
-        return owner.invoke('search_session_content', args, current_range=SessionContentRange(0), tool_call_id='call:drift', page_budget=ToolResultPageBudget(tool_call_id='call:drift'), deadline_monotonic=monotonic()+30)
-
-    args = {'target': {'kind': 'SESSION', 'session_id': target.guard.session_id}, 'query': 'scoredriftneedle'}
-    before = invoke(args)['items']
-    first = invoke({**args, 'limit': 1})
-    assert len(before) == 2 and _cursor(first)
-    unrelated = new(repo, uuid4().hex.replace(':', '_'))
-    for i in range(20):
-        turn(repo, unrelated.guard, f'unrelated corpus document {i}', answer='independent background material ' * 400)
-    maintain_history(repo)
-    now = invoke(args)['items']
-    assert [item["target"]["entry_id"] for item in now] == [item["target"]["entry_id"] for item in before]
-    # This is the actual failure condition, not merely a mock score change:
-    # the old score cursor would now exclude *both* unchanged source units.
-    assert min(item['score'] for item in now) > first['items'][0]['score']
-    second = invoke({'cursor': _cursor(first), 'limit': 1})
-    assert [item["target"]["entry_id"] for item in first['items'] + second['items']] == [item["target"]["entry_id"] for item in before]
-    assert _cursor(second) is None
-
-
-def test_relevance_cursor_does_not_consume_budget_rejected_item(repo):
-    domain = uuid4().hex.replace(':', '_')
-    caller, target = new(repo, domain), new(repo, domain)
-    for i in range(3):
-        turn(repo, target.guard, f'pagebudgetneedle question {i}', answer='pagebudgetneedle answer')
-    maintain_history(repo)
-    owner = SessionContentQuery(repo, session_id=caller.guard.session_id, memory_domain_id=domain)
-    budget = ToolResultPageBudget(tool_call_id="call:budget")
-
-    def invoke(args):
-        return owner.invoke('search_session_content', args, current_range=SessionContentRange(0), tool_call_id='call:budget', page_budget=budget, deadline_monotonic=monotonic()+30)
-
-    args = {'target': {'kind': 'SESSION', 'session_id': target.guard.session_id}, 'query': 'pagebudgetneedle'}
-    expected = [i["target"]["entry_id"] for i in invoke(args)['items']]
-    budget = ToolResultPageBudget(tool_call_id="call:budget", accepts_provider_body=
-        lambda body, _ids: len(json.loads(body).get("items", [])) <= 1)
-    page = invoke({**args, 'limit': 2})
-    items = list(page['items'])
-    while _cursor(page):
-        page = invoke({'cursor': _cursor(page), 'limit': 2})
-        items.extend(page['items'])
-    assert [i["target"]["entry_id"] for i in items] == expected
-
-
-def test_relevance_paging_reorders_unseen_results_and_replays_prior_cursor(repo, monkeypatch):
-    from pulsara_agent.conversation_kernel import history_search
-    from pulsara_agent.conversation_kernel.session_content import _decode, _encode, SessionQueryError
-    domain = uuid4().hex.replace(':', '_')
-    caller, target = new(repo, domain), new(repo, domain)
-    for i in range(4):
-        turn(repo, target.guard, f'reorderneedle question {i}', answer='reorderneedle answer')
-    maintain_history(repo)
-    owner = SessionContentQuery(repo, session_id=caller.guard.session_id, memory_domain_id=domain)
-
-    def invoke(args, query_owner=owner):
-        return query_owner.invoke('search_session_content', args, current_range=SessionContentRange(0), tool_call_id='call:reorder', page_budget=ToolResultPageBudget(tool_call_id='call:reorder'), deadline_monotonic=monotonic()+30)
-
-    args = {'target': {'kind': 'SESSION', 'session_id': target.guard.session_id}, 'query': 'reorderneedle'}
-    expected = [i["target"]["entry_id"] for i in invoke(args)['items']]
-    first = invoke({**args, 'limit': 1})
-    first_cursor = _cursor(first)
-    original = history_search.search_history
-    # Force the relative order to change, independent of engine statistics.
-    # The real SQL still owns qualification, consumed-ID exclusion and refetch.
-    def changed_order(connection, **kwargs):
-        limit = kwargs.pop('limit')
-        found = original(connection, **kwargs, limit=20)
-        return sorted(found, key=lambda row: expected.index(row['q1_entry_id']), reverse=True)[:limit]
-    monkeypatch.setattr(history_search, 'search_history', changed_order)
-    second = invoke({'cursor': first_cursor, 'limit': 1})
-    assert second['items'][0]["target"]["entry_id"] == expected[-1]
-    replay = invoke({'cursor': first_cursor, 'limit': 1})
-    assert replay['items'] == second['items']
-    items = first['items'] + second['items']
-    page = second
-    while _cursor(page):
-        page = invoke({'cursor': _cursor(page), 'limit': 1})
-        items.extend(page['items'])
-    assert len(items) == len(expected)
-    assert {i["target"]["entry_id"] for i in items} == set(expected)
-    # No cross-restart recovery or cursor authority: restart explicitly, and
-    # never permit a real continuation to be paired with changed query values.
-    restarted = SessionContentQuery(repo, session_id=caller.guard.session_id, memory_domain_id=domain)
-    with pytest.raises(SessionQueryError) as error:
-        invoke({'cursor': first_cursor}, restarted)
-    assert error.value.code == 'CURSOR_EXPIRED'
-    token = _decode(first_cursor, 'search_session_content')
-    for key, value in [('query', 'another'), ('session_id', caller.guard.session_id), ('include_tools', True)]:
-        with pytest.raises(SessionQueryError) as error:
-            invoke({'cursor': _encode(dict(token, **{key: value}))})
-        assert error.value.code == 'CURSOR_INVALID'
-    token['operation'] = 'search_session_content.bm25.v1'
-    token['after'] = ['0x1.0p+0', target.guard.session_id, expected[0]]
-    del token['consumed_page']
-    with pytest.raises(SessionQueryError) as error:
-        invoke({'cursor': _encode(token)})
-    assert error.value.code == 'CURSOR_INVALID'
-
-
-@pytest.mark.parametrize('query', ['的 了 和 是', 'the is and to', '的 the 了 IS and', '啊 呀 呢 吧 嘛 么 嗯', 'a an am was were being', '的啊 the BE', '呗 嘞 喽 噢 哟 唷 嘿 呵 哇', 'please PLEASE'])
+@pytest.mark.parametrize(
+    "query",
+    [
+        "的 了 和 是",
+        "the is and to",
+        "的 the 了 IS and",
+        "啊 呀 呢 吧 嘛 么 嗯",
+        "a an am was were being",
+        "的啊 the BE",
+        "呗 嘞 喽 噢 哟 唷 嘿 呵 哇",
+        "please PLEASE",
+    ],
+)
 def test_shared_lexical_analyzer_stopwords_do_not_match_any_field(repo, query):
-    domain = uuid4().hex.replace(':', '_')
+    domain = uuid4().hex.replace(":", "_")
     caller = new(repo, domain)
     target = new(repo, domain)
-    turn(repo, target.guard, '的 了 和 是 the is and to 啊 呀 呢 吧 嘛 么 嗯 a an am was were being BE 呗 嘞 喽 噢 哟 唷 嘿 呵 哇 please PLEASE', answer='没有相关实词')
+    turn(
+        repo,
+        target.guard,
+        "的 了 和 是 the is and to 啊 呀 呢 吧 嘛 么 嗯 a an am was were being BE 呗 嘞 喽 噢 哟 唷 嘿 呵 哇 please PLEASE",
+        answer="没有相关实词",
+    )
     maintain_history(repo)
-    scope = FrozenHistoryReadScope(caller.guard.session_id, domain, SessionContentRange(0))
-    assert search(repo, scope, query, target_session_id=target.guard.session_id)[0] == []
+    scope = FrozenHistoryReadScope(
+        caller.guard.session_id, domain, SessionContentRange(0)
+    )
+    assert (
+        search(repo, scope, query, target_session_id=target.guard.session_id)[0] == []
+    )
 
 
 def test_stopword_filter_keeps_body_positions_and_removes_unrelated_matches(repo):
-    domain = uuid4().hex.replace(':', '_')
+    domain = uuid4().hex.replace(":", "_")
     caller = new(repo, domain)
     target = new(repo, domain)
-    turn(repo, target.guard, '的 了 the 哇 please', answer='无关旧任务')
-    turn(repo, target.guard, '的 了 the 哇 please 紫色纸船', answer='中文检索 running API_key /src/my-file.py')
+    turn(repo, target.guard, "的 了 the 哇 please", answer="无关旧任务")
+    turn(
+        repo,
+        target.guard,
+        "的 了 the 哇 please 紫色纸船",
+        answer="中文检索 running API_key /src/my-file.py",
+    )
     maintain_history(repo)
-    scope = FrozenHistoryReadScope(caller.guard.session_id, domain, SessionContentRange(0))
-    found, candidates = search(repo, scope, '的 了 the 哇 please API_key', target_session_id=target.guard.session_id)
+    scope = FrozenHistoryReadScope(
+        caller.guard.session_id, domain, SessionContentRange(0)
+    )
+    found, candidates = search(
+        repo,
+        scope,
+        "的 了 the 哇 please API_key",
+        target_session_id=target.guard.session_id,
+    )
     assert len(candidates) == 1
-    raw = found[0]['body'].encode()
+    raw = found[0]["body"].encode()
     terms = {
         raw[start:end].decode()
-        for key in ('hits', 'hits_en', 'hits_tech')
+        for key in ("hits", "hits_en", "hits_tech")
         for start, end in found[0][key] or ()
     }
-    assert 'API_key' in terms
-    assert not terms.intersection({'的', '了', 'the', '哇', 'please', ' '})
-    assert earliest_hit(candidates[0].document, (found[0]['hits'], found[0]['hits_en'], found[0]['hits_tech'])) is not None
+    assert "API_key" in terms
+    assert not terms.intersection({"的", "了", "the", "哇", "please", " "})
+    assert (
+        earliest_hit(
+            candidates[0].document,
+            (found[0]["hits"], found[0]["hits_en"], found[0]["hits_tech"]),
+        )
+        is not None
+    )
 
 
-@pytest.mark.parametrize('query', ['不', '没有', '可以', '当前', '之前', '2026', 'not', 'if', 'can', 'one', '我', 'you', '得', '都', '只有', '必须', '就', 'no', 'or', 'all', 'we', 'this'])
+@pytest.mark.parametrize(
+    "query",
+    [
+        "不",
+        "没有",
+        "可以",
+        "当前",
+        "之前",
+        "2026",
+        "not",
+        "if",
+        "can",
+        "one",
+        "我",
+        "you",
+        "得",
+        "都",
+        "只有",
+        "必须",
+        "就",
+        "no",
+        "or",
+        "all",
+        "we",
+        "this",
+    ],
+)
 def test_query_analyzer_preserves_task_bearing_words(repo, query):
-    domain = uuid4().hex.replace(':', '_')
+    domain = uuid4().hex.replace(":", "_")
     caller = new(repo, domain)
     target = new(repo, domain)
-    turn(repo, target.guard, query, answer='保留原文')
+    turn(repo, target.guard, query, answer="保留原文")
     maintain_history(repo)
-    scope = FrozenHistoryReadScope(caller.guard.session_id, domain, SessionContentRange(0))
-    found, candidates = search(repo, scope, query, target_session_id=target.guard.session_id)
+    scope = FrozenHistoryReadScope(
+        caller.guard.session_id, domain, SessionContentRange(0)
+    )
+    found, candidates = search(
+        repo, scope, query, target_session_id=target.guard.session_id
+    )
     assert len(candidates) == 1
-    assert candidates[0].messages[0]['text'] == query
+    assert candidates[0].messages[0]["text"] == query

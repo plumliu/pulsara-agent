@@ -26,7 +26,7 @@ from pulsara_agent.conversation_kernel.steer import (
 )
 from pulsara_agent.llm.input import FrozenPromptContent
 from pulsara_agent.ports.terminal_observation import CellOutputContent
-from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
+from pulsara_agent.conversation_kernel.content_parts import ResultPart
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
@@ -101,7 +101,6 @@ def source(isolated_migrated_postgres_database):
         guard,
         cut=cut,
         entry_id=assistant,
-        parent_content=InlineContent.from_bytes(b"exec script"),
         blocks=(
             AssistantToolCallBlock(
                 random_id("block"),
@@ -162,12 +161,8 @@ def source(isolated_migrated_postgres_database):
         tool_call_id=call,
         attempt_id=attempt,
         result_state="SUCCESS",
-        canonical_preview_content=InlineContent.from_bytes(b'{"accepted":true}'),
-        output_body=InlineContent.from_bytes(b'{"accepted":true}'),
-        source_coverage=ToolOutputSourceCoverage.COMPLETE,
-        output_omitted=False,
-        source_coverage_reason=None,
-        output_unavailability_reason=None,
+        public_fields={},
+        content_parts=(ResultPart("text","已接纳脚本执行。"),),
         observed_at=now(),
         observation_duration_microseconds=1,
         observation_origin_kind=ToolObservationOrigin.BUILTIN,
@@ -187,7 +182,7 @@ def candidate(case, sequence, text="same"):
             case.turn,
             case.attempt,
             sequence,
-            {"kind": "console", "text": text},
+            {"kind":"log","content":[{"type":"text","value":text}]},
         ),
         now(),
         "runtime",
@@ -222,7 +217,6 @@ def finish_source(case):
         case.guard,
         cut=cut,
         entry_id=random_id("entry"),
-        parent_content=InlineContent.from_bytes(b"script accepted"),
         blocks=(
             AssistantTextBlock(
                 random_id("block"), InlineContent.from_bytes(b"script accepted")
@@ -310,7 +304,11 @@ def test_idle_records_stay_independent_new_turns_and_cancel_only_one(source):
     )
     assert rows[0]["entry_kind"] == "TERMINAL_OBSERVATION"
     assert rows[0]["input_origin"] == "CELL_OUTPUT"
-    assert CellOutputContent.from_bytes(bytes(rows[0]["inline_content"])) == b.content
+    from pulsara_agent.conversation_kernel._repository.queue_content import read_input_owner
+    with source.repo.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,row_factory=dict_row,deadline_monotonic=deadline()) as connection:
+        queue_row=connection.execute("SELECT * FROM pulsara_v3.prompt_queue_items WHERE id=%s",(b.queue_item_id,)).fetchone()
+        assert read_input_owner(connection,row=queue_row) == b.content
+    assert (queue_row["source_cell_id"],queue_row["source_record_sequence"],queue_row["cell_output_kind"]) == (source.cell,2,'log')
     assert (
         source.repo.confirm_prepared_prompt_head_consumption(
             candidate=prepared, deadline_monotonic=deadline()
@@ -430,7 +428,6 @@ def test_final_fence_and_plan_terminal_drain_keep_each_runtime_record(source):
             source.guard,
             cut=cut,
             entry_id=random_id("entry"),
-            parent_content=InlineContent.from_bytes(b"done"),
             blocks=(
                 AssistantTextBlock(
                     random_id("block"), InlineContent.from_bytes(b"done")
@@ -558,7 +555,6 @@ def test_cell_new_turn_permissions_follow_current_plan_after_preparation(source)
         source.guard,
         command_id=random_id("command"),
         workflow_id=random_id("plan"),
-        entry_reason="review safely",
         resume_permission_mode=DEFAULT_PERMISSION_MODE,
         occurred_at=now(),
         actor_id="user",
@@ -594,13 +590,12 @@ def test_cell_codec_preserves_javascript_nul_and_lone_surrogate_values():
         random_id("turn"),
         random_id("attempt"),
         1,
-        {"kind": "console", "text": "zero\x00 lone\ud800 汉字"},
+        {"kind":"log","content":[{"type":"text","value":"zero\x00 lone\ud800 汉字"}]},
     )
-    decoded = CellOutputContent.from_bytes(value.body)
-    assert decoded.canonical_mapping()["record"]["text"] == "zero\x00 lone\ud800 汉字"
-    assert decoded == value
+    assert value.storage_parts[0]["value"] == "zero\x00 lone\ud800 汉字"
+    assert value.content.parts[0].text == "zero\x00 lone\\ud800 汉字"
     with pytest.raises(TypeError, match="immutable"):
-        value.record["text"] = "changed"
+        value.record["content"][0]["value"] = "changed"
 
 
 def test_scheduled_steer_keeps_provenance_through_shared_plan_drain(source):
@@ -653,7 +648,7 @@ def test_scheduled_steer_keeps_provenance_through_shared_plan_drain(source):
         permission_snapshot_id=random_id("permission"),
         requested_permission_mode=PermissionMode.READ_ONLY,
         canonical_prompt=freeze_canonical_prompt(
-            FrozenPromptContent.text("独立提醒"), workspace_id=source.workspace
+            FrozenPromptContent.text("独立提醒")
         ),
         scheduled=admission,
     )

@@ -6,19 +6,13 @@ Host-scoped TODO owner only after the canonical ToolResult is confirmed.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 import unicodedata
 
 from pulsara_agent.ports.tool_execution import ToolCall, ToolExecutionResult
-from pulsara_agent.primitives.todo import (
-    MAXIMUM_TODO_CANONICAL_JSON_BYTES,
-    MAXIMUM_TODO_ITEMS,
-    MAXIMUM_TODO_TEXT_UTF8_BYTES,
-    todo_snapshot_canonical_json,
-)
-
+from pulsara_agent.primitives.todo import MAXIMUM_TODO_ITEMS
 
 
 class TodoStatus(StrEnum):
@@ -50,16 +44,13 @@ class FrozenTodoCandidate:
     pending_count: int
     in_progress_count: int
     completed_count: int
-    canonical_json_utf8_bytes: int
 
     def __post_init__(self) -> None:
         if (
             self.pending_count + self.in_progress_count + self.completed_count
             != len(self.ordered_items)
             or self.in_progress_count > 1
-            or not 0
-            <= self.canonical_json_utf8_bytes
-            <= MAXIMUM_TODO_CANONICAL_JSON_BYTES
+            or len(self.ordered_items) > MAXIMUM_TODO_ITEMS
         ):
             raise ValueError("frozen TODO candidate is invalid")
 
@@ -108,27 +99,11 @@ def parse_todo_replacement(arguments: Mapping[str, object]) -> FrozenTodoCandida
     if counts[TodoStatus.IN_PROGRESS] > 1:
         raise TodoValidationError("todo accepts at most one in_progress item")
 
-    canonical = todo_candidate_canonical_json(tuple(frozen))
-    size = len(canonical)
-    if size > MAXIMUM_TODO_CANONICAL_JSON_BYTES:
-        raise TodoValidationError(
-            "todo snapshot exceeds "
-            f"{MAXIMUM_TODO_CANONICAL_JSON_BYTES // 1024} KiB"
-        )
     return FrozenTodoCandidate(
         ordered_items=tuple(frozen),
         pending_count=counts[TodoStatus.PENDING],
         in_progress_count=counts[TodoStatus.IN_PROGRESS],
         completed_count=counts[TodoStatus.COMPLETED],
-        canonical_json_utf8_bytes=size,
-    )
-
-
-def todo_candidate_canonical_json(items: Sequence[FrozenTodoItem]) -> bytes:
-    """Return the unique aggregate-byte quote used by every TODO path."""
-
-    return todo_snapshot_canonical_json(
-        tuple((item.text, item.status.value) for item in items)
     )
 
 
@@ -141,10 +116,7 @@ def _validate_text(text: str) -> None:
         raise TodoValidationError(
             "todo item text must not have surrounding whitespace"
         )
-    if len(text.encode("utf-8")) > MAXIMUM_TODO_TEXT_UTF8_BYTES:
-        raise TodoValidationError(
-            f"todo item text exceeds {MAXIMUM_TODO_TEXT_UTF8_BYTES} UTF-8 bytes"
-        )
+    text.encode("utf-8")
     if any(
         character in {"\n", "\r", "\u2028", "\u2029"}
         or ord(character) == 0
@@ -168,12 +140,9 @@ class TodoTool:
 __all__ = [
     "FrozenTodoCandidate",
     "FrozenTodoItem",
-    "MAXIMUM_TODO_CANONICAL_JSON_BYTES",
     "MAXIMUM_TODO_ITEMS",
-    "MAXIMUM_TODO_TEXT_UTF8_BYTES",
     "TodoStatus",
     "TodoTool",
     "TodoValidationError",
     "parse_todo_replacement",
-    "todo_candidate_canonical_json",
 ]

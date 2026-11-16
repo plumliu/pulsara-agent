@@ -1,5 +1,5 @@
 // Evaluated only by QuickJS; potentially user-controlled getters/toJSON stay timed.
-((invokeHost, prepareHost, discardHost, outputHost, names, valueLimit, diagnosticChars, decisionAvailable, runAgentFields, nameHintHost) => {
+((invokeHost, prepareHost, discardHost, outputHost, names, diagnosticChars, decisionAvailable, runAgentFields, nameHintHost) => {
   'use strict';
   if (typeof decisionAvailable !== 'boolean') throw new TypeError('Code Mode Decision availability must be a boolean');
   const stringify = JSON.stringify, parse = JSON.parse, apply = Reflect.apply;
@@ -20,18 +20,6 @@
   const each = (array, callback) => {
     for(let index=0;index<array.length;index++) callback(array[index], index);
   };
-  // ECMAScript has no UTF-8 encoder. Count before SDK toString copies across WASM;
-  // lone surrogates become the same three-byte replacement character as in Node.
-  function bounded(text) {
-    let bytes = 0;
-    for (let i=0;i<text.length;i++) {
-      const code = apply(codePointAt, text, [i]);
-      bytes += code <= 0x7f ? 1 : code <= 0x7ff ? 2 : code <= 0xffff ? 3 : 4;
-      if(code > 0xffff) i++;
-      if(bytes > valueLimit) throw new NativeRangeError('Code Mode bridge value boundary exceeded');
-    }
-    return text;
-  }
   function argumentString(value) {
     for(let i=0;i<value.length;i++) {
       const code = apply(codePointAt,value,[i]);
@@ -78,14 +66,15 @@
     apply(setDelete, seen, [value]);
     return copy;
   }
-  const encode = value => bounded(stringify(jsonClone(value)));
-  function render(value) {
-    if(typeof value === 'string') return bounded(value);
-    if(value === undefined) return 'undefined';
-    const text = stringify(value);
-    if(text === undefined) throw new NativeTypeError('Output value is not JSON serializable');
-    return bounded(text);
+  const encode = value => stringify(jsonClone(value));
+  function outputValue(value) {
+    if(typeof value === 'string') return {type:'text',value};
+    if(value === undefined) return {type:'text',value:'undefined'};
+    const encoded = stringify(value);
+    if(encoded === undefined) throw new NativeTypeError('Output value is not JSON serializable');
+    return {type:'value',value:parse(encoded)};
   }
+  function render(value) { return stringify([outputValue(value)]); }
   function freezeTree(value) {
     if(value && typeof value === 'object') {
       each(keys(value), key => freezeTree(value[key]));
@@ -108,7 +97,7 @@
   }
   const tools = create(null);
   each(names, name => tools[name] = parameters => call(name, parameters));
-  defineProperty(tools.decide, 'available', {value: freeze(() => decisionAvailable), enumerable: true});
+  defineProperty(tools.decide, 'available', {value: freeze(function() { if(arguments.length) throw new NativeTypeError('decide.available takes no arguments'); return decisionAvailable; }), enumerable: true});
   if(tools.run_agent) {
     if(!arrayIsArray(runAgentFields)) throw new NativeTypeError('Missing run_agent assignment fields');
     const allowedFields = new NativeSet(runAgentFields);
@@ -195,9 +184,9 @@
     return freeze(() => rejectUnknownName('tool', name));
   }})});
   defineProperty(globalThis, 'console', {value: freeze({log(...values) {
-    const rendered = [];
-    each(values, value => rendered[rendered.length] = render(value));
-    outputHost('log', bounded(apply(join, rendered, [' '])));
+    const frozen = [];
+    each(values, value => frozen[frozen.length] = outputValue(value));
+    outputHost('log', stringify(frozen));
   }})});
   return {
     render, parse,
@@ -208,37 +197,21 @@
     },
     error: value => {
       const error = new NativeError(value.message);
-      error.name='ToolError';error.code=value.code;error.state=value.state;
-      error.result=value.result;error.result_id=value.result_id;
-      error.result_entry_id=value.result_entry_id;error.read=value.read;error.output_available=value.output_available;error.required_facts=value.required_facts;
-      error.source_coverage=value.source_coverage;error.source_coverage_reason=value.source_coverage_reason;
-      error.output_unavailability_reason=value.output_unavailability_reason;
+      error.name='ToolError';error.code=value.code;
+      if(hasOwn(value, 'result')) error.result=value.result;
       return error;
     },
     diagnose: value => {
       if(value !== null && (typeof value === 'object' || typeof value === 'function')) {
         const result = {name:NativeString(value.name ?? 'Error'),message:NativeString(value.message ?? value)};
         if(value.stack !== undefined) result.stack=NativeString(value.stack);
-        if(value.name === 'ToolError') {
-          result.code=value.code;result.state=value.state;result.result=value.result;
-          result.read=value.read;result.output_available=value.output_available;result.required_facts=value.required_facts;
-          result.source_coverage=value.source_coverage;result.source_coverage_reason=value.source_coverage_reason;
-          result.output_unavailability_reason=value.output_unavailability_reason;result.result_id=value.result_id;
-          result.result_entry_id=value.result_entry_id;
-        }
+        if(value.name === 'ToolError') result.code=value.code;
         const encoded = stringify(result);
         if(encoded.length <= diagnosticChars) return encoded;
         const trimmed = {name:apply(slice,result.name,[0,80]),
           message:apply(slice,result.message,[0,diagnosticChars]),diagnostic_truncated:true};
-        each(['code','state','result_id','result_entry_id','read','output_available','source_coverage','source_coverage_reason','output_unavailability_reason','required_facts'], field => {
-          if(result[field] !== undefined) trimmed[field]=result[field];
-        });
-        let compact = stringify(trimmed);
-        if(compact.length <= diagnosticChars + 1024) return compact;
-        // Keep the accepted result's reading route when its business facts
-        // exceed this existing diagnostic allowance. The source owns the facts.
-        delete trimmed.required_facts;
-        compact = stringify(trimmed);
+        if(result.code !== undefined) trimmed.code=result.code;
+        const compact = stringify(trimmed);
         if(compact.length <= diagnosticChars + 1024) return compact;
         return stringify({name:trimmed.name,message:trimmed.message,diagnostic_truncated:true});
       }

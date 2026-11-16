@@ -1,4 +1,5 @@
 """Real successor publication keeps one stoppable settlement owner."""
+
 from __future__ import annotations
 
 import asyncio
@@ -19,13 +20,17 @@ def _terminal_turn(session, turn_id):
 
 
 def test_automatic_plan_handoff_stops_successor_before_cell_join(
-    tmp_path: Path, monkeypatch, stage2_migrated_postgres_database,
+    tmp_path: Path,
+    monkeypatch,
+    stage2_migrated_postgres_database,
 ):
     async def scenario():
         monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "home"))
         model = _EnterPlanThenTextModel()
         core, session = await _open_test_session(
-            tmp_path=tmp_path, model=model, monkeypatch=monkeypatch,
+            tmp_path=tmp_path,
+            model=model,
+            monkeypatch=monkeypatch,
             postgres_dsn=stage2_migrated_postgres_database.runtime_dsn,
         )
         handoff_entered, handoff_release = asyncio.Event(), asyncio.Event()
@@ -36,8 +41,13 @@ def test_automatic_plan_handoff_stops_successor_before_cell_join(
         stop_fences = []
 
         def capture_stop_fence(turn_id):
-            stop_fences.append((turn_id, session._active_task.cancelling(),
-                                session._active_cancellation_intent.cause))
+            stop_fences.append(
+                (
+                    turn_id,
+                    session._active_task.cancelling(),
+                    session._active_cancellation_intent.cause,
+                )
+            )
             original_mark(turn_id)
 
         async def held_handoff(result, cancellation_intent):
@@ -54,7 +64,9 @@ def test_automatic_plan_handoff_stops_successor_before_cell_join(
         monkeypatch.setattr(session, "_finish_root_chain", held_handoff)
         monkeypatch.setattr(session._code_mode, "stop_turn", held_physical_cancel)
         monkeypatch.setattr(session._code_mode, "mark_turn_stopped", capture_stop_fence)
-        running = asyncio.create_task(session.run_turn(PromptContent.text("Enter Plan.")))
+        running = asyncio.create_task(
+            session.run_turn(PromptContent.text("Enter Plan."))
+        )
         try:
             await asyncio.wait_for(handoff_entered.wait(), 10)
             pending = session._pending_root_successor
@@ -62,7 +74,8 @@ def test_automatic_plan_handoff_stops_successor_before_cell_join(
             successor_id = pending.successor_turn_id
             assert _terminal_turn(session, successor_id)["status"] == "RUNNING"
             outcome = await session.request_stop_turn(
-                command_id=random_id("command"), target_turn_id=pending.origin_turn_id,
+                command_id=random_id("command"),
+                target_turn_id=pending.origin_turn_id,
                 admission_deadline_ms=session.control_admission_deadline_ms(),
                 expected_session_id=session.session_id,
                 expected_host_session_id=session.host_session_id,
@@ -78,12 +91,18 @@ def test_automatic_plan_handoff_stops_successor_before_cell_join(
 
             async def settled():
                 return _terminal_turn(session, successor_id)["status"] != "RUNNING"
+
             await eventually(settled)
-            assert _terminal_turn(session, successor_id)["terminal_reason"] == "USER_STOPPED"
+            assert (
+                _terminal_turn(session, successor_id)["terminal_reason"]
+                == "USER_STOPPED"
+            )
             assert len(model.requests) == 1
             assert session._pending_root_successor is None
             cancel_release.set()
-            await asyncio.wait_for(session._user_control_attempts[outcome.command_id].task, 10)
+            await asyncio.wait_for(
+                session._user_control_attempts[outcome.command_id].task, 10
+            )
             with pytest.raises(asyncio.CancelledError):
                 await running
         finally:
@@ -91,4 +110,5 @@ def test_automatic_plan_handoff_stops_successor_before_cell_join(
             cancel_release.set()
             await asyncio.gather(running, return_exceptions=True)
             await core.shutdown()
+
     asyncio.run(scenario())

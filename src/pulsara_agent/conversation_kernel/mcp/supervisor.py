@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import random
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from importlib import import_module
 from pathlib import Path
 from threading import RLock
@@ -18,35 +18,27 @@ from pulsara_agent.capability.contracts import (
     CapabilitySourceSnapshotDisposition,
     FrozenMcpCapabilityProjectionInput,
     FrozenToolCapabilityFact,
-    McpInspectEffectKind,
-    McpProviderNameCollisionFact,
-    McpProviderNameCollisionMember,
-    McpToolCapabilityRef,
     ToolCapabilityOrigin,
     capability_identity,
     capability_source_ref,
     capability_source_registration,
     freeze_capability_source_snapshot,
-    freeze_mcp_inspectability_fact,
     freeze_tool_capability_fact,
-    tool_capability_version_ref,
 )
-from pulsara_agent.capability.mcp_projection import (
-    McpInspectionDescriptorValues,
-    conservative_mcp_inspection_logical_utf8_bytes,
-    mcp_inspection_descriptor_payload_fingerprint,
-)
+
 from pulsara_agent.conversation_kernel.capability_composition import (
     PreparedMcpCapabilitySourceSnapshotSet,
     PreparedMcpInspectionInput,
     issue_mcp_capability_source_snapshot_set,
 )
 from pulsara_agent.identity import random_id
+from pulsara_agent.conversation_kernel.capability_targets import mcp_connection_target
 from pulsara_agent.mcp_config import (
     LocalConfiguredMcpRuntimeSource,
     ManagedPackageMcpRuntimeSource,
     McpScopePolicy,
     McpServerConfig,
+    McpServerDeclaration,
 )
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.primitives.context import (
@@ -58,7 +50,6 @@ from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
 from ..tool_surface import (
     McpEffectKind,
     McpToolExecutionPolicyFact,
-    PreparedToolExecutionBinding,
     execution_policy_fingerprint,
 )
 from .contracts import (
@@ -125,7 +116,6 @@ from .results import (
     _mcp_invocation_failure as _mcp_invocation_failure,
     _mcp_remote_identity as _mcp_remote_identity,
     _mcp_standard_operation_identity as _mcp_standard_operation_identity,
-    mcp_failure_required_facts as mcp_failure_required_facts,
 )
 from .standard_operations import (
     _get_prompt_result as _get_prompt_result,
@@ -226,7 +216,7 @@ class McpBoundToolExecutor:
         except _McpDispatchCancelledBeforeStart:
             permit.release()
             return McpKnownToolResult(
-                "CANCELLED_BEFORE_DISPATCH", "Cell 已停止".encode("utf-8"),
+                "TEXT", "CANCELLED_BEFORE_DISPATCH", "Cell 已停止，本次请求未发送。".encode("utf-8"),
                 remote_identity, remote_identity_verification,
             )
         except BaseException:
@@ -380,6 +370,7 @@ class McpBoundToolExecutor:
                         message=self.lease._slot.client.diagnostic_message(exc),  # noqa: SLF001
                     )
                 return McpKnownToolResult(
+                    kind="TOOL",
                     state="APPLICATION_ERROR" if result.is_error else "SUCCESS",
                     content=body,
                     remote_identity=remote_identity,
@@ -396,8 +387,7 @@ class McpInstalledRuntimeGeneration:
     runtime_generation_id: int
     root_tool_specs: tuple[McpToolSemanticFact, ...]
     subagent_tool_specs: tuple[McpToolSemanticFact, ...]
-    execution_bindings: tuple[PreparedToolExecutionBinding, ...]
-    executors: Mapping[str, McpBoundToolExecutor] = field(repr=False, compare=False)
+    executors: Mapping[tuple[str, str], McpBoundToolExecutor] = field(repr=False, compare=False)
     catalog_snapshot: McpCatalogSnapshot
     subagent_catalog_snapshot: McpCatalogSnapshot
     slot_leases: tuple[McpSlotLease, ...] = field(repr=False, compare=False)
@@ -407,13 +397,6 @@ class McpInstalledRuntimeGeneration:
     candidates: Mapping[str, McpInstallationCandidate] = field(
         repr=False, compare=False
     )
-    root_provider_name_collision_facts: tuple[
-        McpProviderNameCollisionFact, ...
-    ] = ()
-    subagent_provider_name_collision_facts: tuple[
-        McpProviderNameCollisionFact, ...
-    ] = ()
-
     def catalog_for_scope(
         self, scope: ModelInputScopeKind
     ) -> McpCatalogSnapshot:
@@ -421,15 +404,6 @@ class McpInstalledRuntimeGeneration:
             self.catalog_snapshot
             if scope is ModelInputScopeKind.ROOT
             else self.subagent_catalog_snapshot
-        )
-
-    def provider_name_collisions_for_scope(
-        self, scope: ModelInputScopeKind
-    ) -> tuple[McpProviderNameCollisionFact, ...]:
-        return (
-            self.root_provider_name_collision_facts
-            if scope is ModelInputScopeKind.ROOT
-            else self.subagent_provider_name_collision_facts
         )
 
     def release(self) -> None:
@@ -546,7 +520,7 @@ class McpInstalledRuntimeGeneration:
         except _McpDispatchCancelledBeforeStart:
             permit.release()
             return McpKnownToolResult(
-                "CANCELLED_BEFORE_DISPATCH", "Cell 已停止".encode("utf-8"),
+                "TEXT", "CANCELLED_BEFORE_DISPATCH", "Cell 已停止，本次请求未发送。".encode("utf-8"),
                 remote_identity, remote_identity_verification,
             )
         except BaseException:
@@ -655,9 +629,7 @@ class McpInstalledRuntimeGeneration:
                     by_alias=True, mode="json", exclude_none=True
                 )
                 payload.pop("_meta", None)
-                body = canonical_json_bytes(
-                    {"trust": "UNTRUSTED_OBSERVATION", "result": payload}
-                )
+                body = canonical_json_bytes(payload)
                 if len(body) > MAXIMUM_MCP_REMOTE_BODY_BYTES:
                     raise RuntimeError("MCP_REMOTE_BODY_BOUND_EXCEEDED")
             except MemoryError:
@@ -673,6 +645,7 @@ class McpInstalledRuntimeGeneration:
                     message=client.diagnostic_message(exc),
                 )
             return McpKnownToolResult(
+                kind="RESOURCE",
                 state="SUCCESS",
                 content=body,
                 remote_identity=remote_identity,
@@ -681,67 +654,16 @@ class McpInstalledRuntimeGeneration:
 
 
 
-def _aggregate_provider_projection(
-    candidates: tuple[McpInstallationCandidate, ...],
-    scope: ModelInputScopeKind,
-) -> tuple[
-    tuple[McpToolSemanticFact, ...],
-    tuple[McpProviderNameCollisionFact, ...],
-]:
-    visible_semantics = tuple(
-        semantic
-        for candidate in candidates
-        for semantic in candidate.discovery_snapshot.tools
-        if (
-            semantic.root_visible
-            if scope is ModelInputScopeKind.ROOT
-            else semantic.subagent_visible
-        )
-    )
-    return _provider_projection_from_semantics(visible_semantics)
-
-
-def _provider_projection_from_semantics(
-    semantics: tuple[McpToolSemanticFact, ...],
-) -> tuple[
-    tuple[McpToolSemanticFact, ...],
-    tuple[McpProviderNameCollisionFact, ...],
-]:
-    groups: dict[str, list[McpToolSemanticFact]] = {}
-    for semantic in semantics:
-        groups.setdefault(semantic.provider_tool_name, []).append(semantic)
-    survivors: list[McpToolSemanticFact] = []
-    collisions: list[McpProviderNameCollisionFact] = []
-    for provider_name in sorted(groups):
-        members = groups[provider_name]
-        if len(members) == 1:
-            survivors.append(members[0])
-            continue
-        collisions.append(
-            McpProviderNameCollisionFact(
-                provider_name=provider_name,
-                members=tuple(
-                    sorted(
-                        (
-                            McpProviderNameCollisionMember(
-                                server_id=item.server_id,
-                                remote_tool_name=item.remote_tool_name,
-                                discovered_tool_identity=(
-                                    item.descriptor_fingerprint
-                                ),
-                            )
-                            for item in members
-                        ),
-                        key=lambda item: (
-                            item.server_id,
-                            item.remote_tool_name,
-                            item.discovered_tool_identity,
-                        ),
-                    )
-                ),
-            )
-        )
-    return tuple(survivors), tuple(collisions)
+def _aggregate_tool_directory(candidates, scope):
+    return tuple(sorted(
+        (semantic for candidate in candidates for semantic in candidate.discovery_snapshot.tools
+         if semantic.root_visible if scope is ModelInputScopeKind.ROOT),
+        key=lambda item: (item.server_id, item.remote_tool_name),
+    )) if scope is ModelInputScopeKind.ROOT else tuple(sorted(
+        (semantic for candidate in candidates for semantic in candidate.discovery_snapshot.tools
+         if semantic.subagent_visible),
+        key=lambda item: (item.server_id, item.remote_tool_name),
+    ))
 
 
 def _mcp_config_source_kind(config: McpServerConfig) -> str:
@@ -783,6 +705,8 @@ class McpHostSupervisor:
         workspace_root: Path,
         configs: tuple[McpServerConfig, ...],
         credential_boundary: ProcessCredentialBoundary,
+        pulsara_home: Path | None = None,
+        user_config_path: Path | None = None,
         client_factory: type[BoundedMcpSdkClient] | None = None,
         connect_attempt_timeout_seconds: float = DEFAULT_MCP_CONNECT_ATTEMPT_TIMEOUT_SECONDS,
         configuration_change: asyncio.Event | None = None,
@@ -791,6 +715,9 @@ class McpHostSupervisor:
         if len(configs) > MAXIMUM_CONFIGURED_MCP_SERVERS:
             raise ValueError("too many configured MCP servers")
         self.workspace_root = workspace_root.resolve()
+        from pulsara_agent.capability.pulsara_home import require_pulsara_home
+        self._pulsara_home = (pulsara_home if pulsara_home is not None else require_pulsara_home()).resolve()
+        self._user_config_path = (user_config_path if user_config_path is not None else self._pulsara_home / "mcp.yaml").resolve()
         self.configs = tuple(sorted(configs, key=lambda item: item.server_id))
         self._config_by_id = {item.server_id: item for item in self.configs}
         self._client_factory = client_factory
@@ -1723,10 +1650,10 @@ class McpHostSupervisor:
                 # Keep all pending catalogs owned until a complete runtime can
                 # be published; never reopen or rewrite that old lease here.
                 return None
-            root, root_collisions = _aggregate_provider_projection(
+            root = _aggregate_tool_directory(
                 candidates, ModelInputScopeKind.ROOT
             )
-            child, child_collisions = _aggregate_provider_projection(
+            child = _aggregate_tool_directory(
                 candidates, ModelInputScopeKind.SUBAGENT
             )
             execution_semantics = tuple(
@@ -1735,7 +1662,7 @@ class McpHostSupervisor:
                         (item.server_id, item.remote_tool_name): item
                         for item in (*root, *child)
                     }.values(),
-                    key=lambda item: item.provider_tool_name,
+                    key=lambda item: (item.server_id, item.remote_tool_name),
                 )
             )
             lease_by_server: dict[str, McpSlotLease] = {}
@@ -1771,32 +1698,13 @@ class McpHostSupervisor:
             for candidate in candidates
             for policy in candidate.ordered_tool_execution_policies
         }
-        bindings: list[PreparedToolExecutionBinding] = []
-        executors: dict[str, McpBoundToolExecutor] = {}
+        executors: dict[tuple[str, str], McpBoundToolExecutor] = {}
         for semantic in execution_semantics:
             policy = policy_by_target[
                 (semantic.server_id, semantic.remote_tool_name)
             ]
             lease = lease_by_server[semantic.server_id]
-            executor_fp = context_fingerprint(
-                "mcp-tool-executor-binding:v1",
-                {
-                    "provider_tool_name": semantic.provider_tool_name,
-                    "descriptor_fingerprint": semantic.descriptor_fingerprint,
-                    "policy_fingerprint": execution_policy_fingerprint(policy),
-                    "slot_lease_identity": lease.lease_identity,
-                    "runtime_generation": runtime_generation,
-                },
-            )
-            bindings.append(
-                PreparedToolExecutionBinding(
-                    tool_name=semantic.provider_tool_name,
-                    descriptor_fingerprint=semantic.descriptor_fingerprint,
-                    executor_binding_fingerprint=executor_fp,
-                    execution_policy=policy,
-                )
-            )
-            executors[semantic.provider_tool_name] = McpBoundToolExecutor(
+            executors[(semantic.server_id, semantic.remote_tool_name)] = McpBoundToolExecutor(
                 runtime_generation_id=runtime_generation,
                 semantic=semantic,
                 policy=policy,
@@ -1819,15 +1727,12 @@ class McpHostSupervisor:
             runtime_generation_id=runtime_generation,
             root_tool_specs=root,
             subagent_tool_specs=child,
-            execution_bindings=tuple(bindings),
             executors=executors,
             catalog_snapshot=catalog,
             subagent_catalog_snapshot=subagent_catalog,
             slot_leases=leases,
             slot_lease_by_server=lease_by_server,
             candidates={item.server_id: item for item in candidates},
-            root_provider_name_collision_facts=root_collisions,
-            subagent_provider_name_collision_facts=child_collisions,
         )
 
     def catalog_snapshot(self) -> McpCatalogSnapshot:
@@ -1994,7 +1899,7 @@ class McpHostSupervisor:
                     ))
                 ):
                     candidates[config.server_id] = candidate
-            semantics, _collisions = _aggregate_provider_projection(
+            semantics = _aggregate_tool_directory(
                 tuple(candidates[key] for key in sorted(candidates)),
                 scope,
             )
@@ -2069,7 +1974,7 @@ class McpHostSupervisor:
                 raise RuntimeError("MCP supervisor is closed")
             snapshots = []
             inspection_inputs: list[PreparedMcpInspectionInput] = []
-            scoped_semantics, collision_facts = _aggregate_provider_projection(
+            scoped_semantics = _aggregate_tool_directory(
                 tuple(self._installed[key] for key in sorted(self._installed)),
                 conversation_scope_kind,
             )
@@ -2195,81 +2100,14 @@ class McpHostSupervisor:
                     )
                 ),
                 owner_authenticity=self._capability_owner_authenticity,
-                provider_name_collision_facts=collision_facts,
             )
 
-    def freeze_capability_projection_input(
-        self, owner: PreparedMcpCapabilitySourceSnapshotSet
-    ) -> FrozenMcpCapabilityProjectionInput:
+    def freeze_capability_projection_input(self, owner):
         if owner.owner_authenticity is not self._capability_owner_authenticity:
             raise ValueError("foreign MCP capability source snapshot")
-        catalog = owner.catalog_snapshot
-        inspectability = []
-        for item in owner.inspection_inputs:
-            semantic = item.semantic
-            policy = item.policy
-            source_snapshot = item.source_snapshot
-            fact = item.tool_fact
-            if not any(
-                source_snapshot is candidate for candidate in owner.source_snapshots
-            ):
-                raise ValueError("MCP inspection source snapshot is absent")
-            if not any(fact is candidate for candidate in source_snapshot.facts):
-                raise ValueError("MCP inspection Tool fact is absent")
-            if (
-                semantic.server_id
-                != fact.identity.source.stable_source_id
-                or semantic.remote_tool_name != fact.identity.stable_name
-                or semantic.provider_spec() != fact.canonical_tool_spec
-                or policy.provider_tool_name
-                != fact.canonical_tool_spec.name
-                or policy.tool_semantic_fingerprint
-                != fact.canonical_tool_spec.descriptor_fingerprint
-            ):
-                raise ValueError("MCP inspection owner input drifted")
-            values = McpInspectionDescriptorValues(
-                server_id=semantic.server_id,
-                remote_tool_name=semantic.remote_tool_name,
-                provider_tool_name=semantic.provider_tool_name,
-                description=semantic.description,
-                input_schema=semantic.input_schema,
-                output_schema=semantic.output_schema,
-                effect_kind=policy.effect_kind.value,
-            )
-            inspectability.append(
-                freeze_mcp_inspectability_fact(
-                    target=McpToolCapabilityRef(
-                        server_id=semantic.server_id,
-                        remote_tool_name=semantic.remote_tool_name,
-                    ),
-                    version=tool_capability_version_ref(fact),
-                    descriptor_payload_fingerprint=(
-                        mcp_inspection_descriptor_payload_fingerprint(values)
-                    ),
-                    mcp_execution_policy_fingerprint=execution_policy_fingerprint(policy),
-                    effect_kind=McpInspectEffectKind(policy.effect_kind.value),
-                    conservative_logical_utf8_bytes=(
-                        conservative_mcp_inspection_logical_utf8_bytes(values)
-                    ),
-                )
-            )
-        ordered_inspectability = tuple(
-            sorted(
-                inspectability,
-                key=lambda item: (
-                    item.target.server_id,
-                    item.target.remote_tool_name,
-                ),
-            )
-        )
         return FrozenMcpCapabilityProjectionInput(
             conversation_scope_kind=owner.conversation_scope_kind,
             source_snapshots=owner.source_snapshots,
-            catalog_semantic_fingerprint=catalog.semantic_fingerprint,
-            inspectability_facts=ordered_inspectability,
-            provider_name_collision_facts=(
-                owner.provider_name_collision_facts
-            ),
         )
 
     def _catalog_locked(self, scope: ModelInputScopeKind) -> McpCatalogSnapshot:
@@ -2283,15 +2121,10 @@ class McpHostSupervisor:
         live: bool = False,
     ) -> McpCatalogSnapshot:
         entries: list[McpServerCatalogEntry] = []
-        _semantics, collision_facts = _aggregate_provider_projection(
+        _semantics = _aggregate_tool_directory(
             tuple(candidates[key] for key in sorted(candidates)),
             scope,
         )
-        collision_targets = {
-            (member.server_id, member.remote_tool_name)
-            for fact in collision_facts
-            for member in fact.members
-        }
         for config in self.configs:
             if (
                 scope is ModelInputScopeKind.SUBAGENT
@@ -2315,21 +2148,24 @@ class McpHostSupervisor:
             visible_tools = (
                 ()
                 if snapshot is None
-                else tuple(
-                    item
-                    for item in snapshot.tools
-                    if (item.server_id, item.remote_tool_name)
-                    not in collision_targets
-                )
+                else snapshot.tools
             )
             entries.append(
                 McpServerCatalogEntry(
                     server_id=config.server_id,
+                    configuration=McpServerDeclaration(**{
+                        item.name: getattr(config, item.name) for item in fields(McpServerDeclaration)
+                    }),
                     runtime_source=(
                         candidate.slot_lease._slot.client.config.runtime_source
                         if candidate is not None
                         else config.runtime_source
                     ),
+                    connection_target=mcp_connection_target(server_id=config.server_id,
+                        runtime_source=(candidate.slot_lease._slot.client.config.runtime_source
+                            if candidate is not None else config.runtime_source),
+                        workspace_root=self.workspace_root, pulsara_home=self._pulsara_home,
+                        user_config_path=self._user_config_path),
                     display_name=config.display_name,
                     status=state,
                     exposed_tool_count=len(visible_tools),
@@ -2366,7 +2202,6 @@ class McpHostSupervisor:
             owner_epoch=self._epoch,
             catalog_revision=self._catalog_revision,
             entries=tuple(entries),
-            provider_name_collision_facts=collision_facts,
         )
 
     def _live_state_locked(
@@ -2580,5 +2415,4 @@ __all__ = [
     "McpKnownToolResult",
     "McpSlotLease",
     "McpSnapshotStale",
-    "mcp_failure_required_facts",
 ]

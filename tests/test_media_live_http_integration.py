@@ -64,7 +64,7 @@ def test_actual_read_live_snapshot_http_preview_reconnect_and_idle(
                 if len(self.requests) == 1:
                     events = _tool_call('read_video_frames', random_id('call'), {
                         'target': {'kind': 'PATH', 'path': str(media)},
-                        'from': 0, 'to': 1, 'mode': 'detail'})
+                        'from': 0, 'to': 1})
                 else:
                     self.read_finished.set()
                     await self.finish.wait()

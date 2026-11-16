@@ -56,7 +56,24 @@ def publish_queue_input(
     start_ordinal=None,
 ):
     if isinstance(value, CellOutputContent):
-        drafts = (ContentPartDraft("text", value.storage_text),)
+        from pulsara_agent.conversation_kernel.blob import PostgresCanonicalBlobStore
+        from pulsara_agent.conversation_kernel.prompt_content import (
+            PROMPT_IMAGE_BLOB_CODEC,
+        )
+
+        for image in value.images:
+            PostgresCanonicalBlobStore.publish_in_connection(
+                connection,
+                workspace_id=None,
+                content=image.immutable_bytes,
+                media_type=image.media_type,
+                codec=PROMPT_IMAGE_BLOB_CODEC,
+                validated_image=image,
+            )
+        drafts = tuple(
+            ContentPartDraft(part["type"], part["value"])
+            for part in value.storage_parts
+        )
     else:
         publish_prompt_images(connection, prompt=value)
         drafts = prompt_to_content_drafts(value)
@@ -110,25 +127,105 @@ def read_input_owner(
             and (ordinal_stop is None or x.ordinal < ordinal_stop)
         )
     if row["input_origin"] == "CELL_OUTPUT":
-        if len(parts) != 1 or parts[0].type != "text":
-            raise ValueError("Cell output owner must contain its complete text payload")
         source = row
-        if "source_cell_id" not in source:
+        if "source_tool_attempt_id" not in source:
             source = connection.execute(
                 "SELECT * FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND consumed_entry_id=%s AND input_origin='CELL_OUTPUT'",
                 (str(row["session_id"]), transcript_entry_id),
             ).fetchone()
             if source is None:
                 raise ValueError("Cell output entry lacks its accepted queue source")
-        return CellOutputContent.from_storage(
+            source = {
+                **source,
+                **{
+                    name: row[name]
+                    for name in (
+                        "source_cell_id",
+                        "source_record_sequence",
+                        "cell_output_kind",
+                    )
+                },
+            }
+        images = tuple(_read_cell_images(connection, parts).values())
+        return CellOutputContent(
             cell_id=str(source["source_cell_id"]),
             source_turn_id=str(source["source_turn_id"]),
             source_exec_attempt_id=str(source["source_tool_attempt_id"]),
             record_sequence=int(source["source_record_sequence"]),
-            kind=str(source["cell_output_kind"]),
-            text=parts[0].value,
+            record={
+                "kind": source["cell_output_kind"],
+                "content": [{"type": part.type, "value": part.value} for part in parts],
+            },
+            images=images,
         )
     return content_parts_to_prompt(connection, parts)
+
+
+def _read_cell_images(connection, parts):
+    from pulsara_agent.conversation_kernel.prompt_storage import (
+        CanonicalImageReferenceUnavailable,
+        read_image_reference_payload_in_connection,
+        read_image_reference_metadata_in_connection,
+    )
+    from pulsara_agent.conversation_kernel.repository_errors import (
+        ConversationKernelConflict,
+    )
+    from pulsara_agent.conversation_kernel.native_tool_delivery import _image_error
+    from pulsara_agent.ports.terminal_observation import CellOutputImageReadFailure
+
+    loaded = {}
+    for part in parts:
+        if part.type != "image":
+            continue
+        image_ref = part.value["image_ref"]
+        if image_ref in loaded:
+            continue
+        # Owner/metadata failures are not a payload observation and must escape.
+        descriptor = read_image_reference_metadata_in_connection(
+            connection, image_ref=image_ref
+        )
+        try:
+            image = read_image_reference_payload_in_connection(
+                connection, descriptor=descriptor
+            )
+        except (
+            TimeoutError,
+            CanonicalImageReferenceUnavailable,
+            ValueError,
+            ConversationKernelConflict,
+        ) as error:
+            reason = _image_error(error)
+            if str(error):
+                reason += "\n" + str(error)
+            image = CellOutputImageReadFailure(
+                descriptor.image_ref,
+                descriptor.digest,
+                descriptor.encoded_bytes,
+                descriptor.media_type,
+                descriptor.width,
+                descriptor.height,
+                reason,
+            )
+        loaded[image_ref] = image
+    return loaded
+
+
+def read_cell_entry_provider_parts(connection, *, session_id, entry_id):
+    """Hydrate one self-contained accepted Cell entry, including imported history."""
+    from pulsara_agent.llm.input import LLMTextPart
+    from pulsara_agent.ports.terminal_observation import cell_output_provider_text
+
+    parts = read_content_parts(connection, session_id=session_id, entry_id=entry_id)
+    loaded = _read_cell_images(connection, parts)
+    result = []
+    for part in parts:
+        if part.type == "text":
+            result.append(LLMTextPart(cell_output_provider_text(part.value)))
+        elif part.type == "image":
+            result.append(loaded[part.value["image_ref"]])
+        else:
+            raise ValueError("Cell output requires text and image parts")
+    return tuple(result)
 
 
 def input_owner_metadata(
@@ -136,13 +233,54 @@ def input_owner_metadata(
 ):
     """Quote a pending owner before materializing any image payload."""
     if row["input_origin"] == "CELL_OUTPUT":
-        value = read_input_owner(
-            connection,
-            row=row,
-            queue_item_id=queue_item_id,
-            transcript_entry_id=transcript_entry_id,
+        from pulsara_agent.ports.terminal_observation import (
+            cell_output_provider_text,
+            cell_output_canonical_body,
         )
-        return input_body_storage(value), value.resource_quote.canonical_expanded_bytes
+        from pulsara_agent.llm.input import LLMTextPart
+        from pulsara_agent.conversation_kernel.prompt_content import (
+            CanonicalPromptImageDescriptor,
+        )
+
+        parts = read_content_parts(
+            connection,
+            session_id=str(row["session_id"]),
+            queue_item_id=queue_item_id,
+            entry_id=transcript_entry_id,
+        )
+        metadata = []
+        for part in parts:
+            if part.type == "text":
+                metadata.append(LLMTextPart(cell_output_provider_text(part.value)))
+            elif part.type == "image":
+                ref = part.value["image_ref"]
+                image = connection.execute(
+                    "SELECT logical_digest,logical_size,media_type,width,height FROM pulsara_v3.blobs WHERE id=%s",
+                    (ref,),
+                ).fetchone()
+                if image is None:
+                    raise ValueError("Cell output image asset is unavailable")
+                metadata.append(
+                    CanonicalPromptImageDescriptor(
+                        ref,
+                        image["logical_digest"],
+                        int(image["logical_size"]),
+                        image["media_type"],
+                        int(image["width"]),
+                        int(image["height"]),
+                    )
+                )
+            else:
+                raise ValueError("Cell output requires text and image parts")
+        body, expanded = cell_output_canonical_body(metadata)
+        content = InlineContent(
+            canonical_bytes=body,
+            digest="sha256:" + sha256(body).hexdigest(),
+            size=len(body),
+            media_type=CELL_OUTPUT_MEDIA_TYPE,
+            codec=CELL_OUTPUT_CODEC,
+        )
+        return content, expanded
     from pulsara_agent.conversation_kernel.prompt_storage import (
         validate_canonical_prompt_owner_metadata,
     )

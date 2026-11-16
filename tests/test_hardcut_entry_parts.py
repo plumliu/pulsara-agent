@@ -219,7 +219,7 @@ def test_scheduled_manual_confirmation_and_inspector_follow_consumed_content(rep
         status="PAUSED", session_id=lease.guard.session_id, memory_domain_id="u_local",
         guard=lease.guard,
         values={"name": "report", "prompt": "任务\r\n\n原文\n", "schedule": {
-            "kind": "interval", "anchor_at_utc": "2020-01-01T00:00:00+00:00", "seconds": 60,
+            "kind": "interval", "anchor_at_utc": "2020-01-01T00:00:00+00:00", "seconds": 900,
         }, "timezone": "Asia/Shanghai", "permission_mode": DEFAULT_PERMISSION_MODE.value},
         model_resolution_snapshot=resolution, deadline_monotonic=monotonic() + 30,
     )

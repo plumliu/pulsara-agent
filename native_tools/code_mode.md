@@ -2,7 +2,7 @@
 
 共用规则见[原生工具修订草案索引](../PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 1、2 章；完整结果保存、原生 12k 分页及 NEXT 沿[统一交付草案](../PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)。
 
-状态：讨论草案，未实施。本族包括 exec_cell、query_cells、manage_cell，均为 ROOT 原生控制工具，不提供 JS API，继续沿现有 bypass_permissions 权限规则开放。本文件确定三个工具的参数、精简返回值、原生示例及错误边界。TypeScript 只描述合同，不表示存在脚本入口。本轮只改文档。
+状态：当前合同已接入生产代码，正在完成 hardcut 跨层验收；正常使用仍按实施计划停用。本族包括 exec_cell、query_cells、manage_cell，均为 ROOT 原生控制工具，不提供 JS API，继续沿现有 bypass_permissions 权限规则开放。本文件确定三个工具的参数、精简返回值、原生示例及错误边界。TypeScript 只描述合同，不表示存在脚本入口。
 
 ## 1. exec_cell：启动独立 JavaScript 脚本
 
@@ -148,7 +148,7 @@ exec_cell 只返回本次启动结果。脚本内部工具返回值保留在 JS 
 
 脚本接纳后的语法错误、运行异常或未处理的工具调用异常，由后续 Cell 状态及诊断表达，不反向改写已成功接纳的启动结果。脚本捕获并处理的工具异常不因其曾发生就自动变为整段脚本失败。调用取消及执行效果结算仍沿现有 owner，不因精简公开字段改变实际停止或清理语义。
 
-删除启动前因接纳确认放不进展示页预算而拒绝启动的旧检查。真实源码读取、运行环境或资源失败仍如实报告；既定 4 MiB 单值限制的删除及 16/64 MiB 暂存额度实验沿 unified，不在本工具另定数值。
+删除启动前因接纳确认放不进展示页预算而拒绝启动的旧检查。真实源码读取、运行环境或资源失败仍如实报告；在途资源采用本文件末尾的当前物理 profile，不以单值展示限制代替资源准入。
 
 本次启动结果完整保存后按原生 12k 规则交付，NEXT 只读取这份冻结结果，不重新读取脚本文件、启动或继续执行 Cell，也不读取 Cell steer。保存或交付失败时如实说明已知效果，不自动重提脚本；只有完整结果实际保存且可读时才提供 tool_result 及适用的 NEXT，不提供假引用。
 
@@ -611,4 +611,10 @@ next: null
 - [脚本控制台输出](../src/pulsara_agent/code_mode/node/guest.js)
 - [脚本执行与顶层 return](../src/pulsara_agent/code_mode/node/worker.mjs)
 
-这些链接用于核对实施接点，不表示当前代码已经符合本草案。
+这些链接用于核对当前生产接点，实际验收状态见实施计划。
+
+## 5. 当前执行工作集
+
+Code Mode 当前物理 profile 为每 Cell 32MiB 在途数据、Host 合计 128MiB，最多四个活动 QuickJS VM；每个 VM 的 guest heap 为 64MiB。额度覆盖源码、参数、待返回传输和尚未确认入队的输出；图片先读全局资产 metadata 预留同一额度，再加载实际 payload。它们约束同时占用，不限制累计输出、调用次数、任务历史或脚本寿命；没有余量时明确报告实际资源失败，不能截断成功返回或偷偷分页。
+
+接纳确认、永久拒绝与停止释放原 reservation；未知接纳结果保留原输出直至确认。完整 JS 返回与 ROOT 独立 steer 交付保持分离。资源实验和实测峰值见[统一交付合同第 9.1 节](../PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md#91-code-mode-的执行内存与暂存数据)。

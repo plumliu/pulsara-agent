@@ -28,10 +28,8 @@ from pulsara_agent.model_input.contracts import (
 )
 from pulsara_agent.ports.tool_execution import ToolCall, ToolInvocationOwnerKind, thaw_tool_json_object
 from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.primitives.context import thaw_json
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
-from pulsara_agent.primitives.tool_result_projection import (
-    classify_tool_result_delivery, ToolResultDeliveryRequirement, ToolResultFullDeliveryReason,
-)
 from pulsara_agent.tool_permission import (
     AllowAllPermissionGate, PolicyPermissionGate, PermissionDecisionKind,
     preset_to_policy, TerminalAccess,
@@ -47,54 +45,43 @@ WORK = target("WORK", "work_id", "queue")
 PROCESS = target("PROCESS", "process_id", "process")
 CELL = target("CELL", "cell_id", "cell")
 SCHEDULE = target("SCHEDULE", "task_id", "schedule")
-MCP = {"kind": "MCP_TOOL", "server_id": "fixture", "tool_name": "read"}
+MCP = {"kind": "MCP_TOOL", "server_id": "fixture", "remote_tool_name": "read"}
 ENTRY = {"kind": "SESSION_ENTRY", "entry_id": derive_id("entry", "query-catalog-test", "saved-result")}
 MEMORY = target("MEMORY", "memory_id", "memory")
 SCHEDULE_VALUES = {
     "name": "readout", "prompt": "Summarize the current status.",
-    "timezone": "Asia/Shanghai", "permission_mode": "read-only",
-    "schedule": {"kind": "interval",
-                 "anchor_at_utc": "2026-10-30T00:00:00Z", "seconds": 60},
+    "timezone": "Asia/Shanghai",
+    "schedule": {"kind": "interval", "seconds": 900},
 }
-
-
+PATH = {"kind": "PATH", "path": "script.js"}
+NEXT = {"kind": "NEXT", "token": "opaque"}
 LEGAL = [
-    ("query_capabilities", {}),
-    ("query_capabilities", {"kind": "MCP_TOOL", "offset": 0, "limit": 2}),
-    ("query_capabilities", {"target": MCP}),
-    ("query_agents", {}),
-    ("query_agents", {"target": AGENT, "max_items": 2}),
-    ("query_agents", {"target": WORK}),
+    ("query_capabilities", {"kind": "SKILL"}),
+    ("query_capabilities", {"kind": "MCP", "query": "documents"}),
+    ("query_capabilities", {"kind": "MCP", "target": MCP}),
+    ("query_agents", {}), ("query_agents", {"target": AGENT}), ("query_agents", {"target": WORK}),
     ("exec_process", {"command": "true"}),
-    ("query_processes", {}),
-    ("query_processes", {"include_finished": False}),
-    ("query_processes", {"target": PROCESS}),
-    ("manage_process", {"action": "poll", "target": PROCESS, "since_cursor": None}),
+    ("query_processes", {}), ("query_processes", {"target": PROCESS}),
     ("manage_process", {"action": "wait", "target": PROCESS, "timeout_seconds": 2}),
     ("manage_process", {"action": "write", "target": PROCESS, "data": "x"}),
-    ("manage_process", {"action": "submit", "target": PROCESS, "data": "x"}),
     ("manage_process", {"action": "close_stdin", "target": PROCESS}),
     ("manage_process", {"action": "kill", "target": PROCESS}),
-    ("exec_cell", {"code": ""}),
-    ("exec_cell", {"path": "script.js"}),
-    ("query_cells", {"max_items": 10000}),
-    ("query_cells", {"cursor": CELL["cell_id"]}),
-    ("query_cells", {"target": CELL, "offset_chars": 0, "max_chars": 2}),
+    ("exec_cell", {"code": ""}), ("exec_cell", {"target": PATH}),
+    ("query_cells", {}), ("query_cells", {"target": CELL}),
     ("manage_cell", {"action": "wait", "target": CELL}),
     ("manage_cell", {"action": "stop", "target": CELL}),
-    ("query_schedules", {"session": None, "status": "PAUSED"}),
-    ("query_schedules", {"target": SCHEDULE}),
-    ("manage_schedule", {"action": "create", "values": SCHEDULE_VALUES, "status": None}),
-    ("manage_schedule", {"action": "update", "target": SCHEDULE, "expected_revision": 1, "values": SCHEDULE_VALUES}),
-    *[("manage_schedule", {"action": action, "target": SCHEDULE, "expected_revision": 1}) for action in ("pause", "resume", "delete")],
-    ("manage_schedule", {"action": "switch", "target": SCHEDULE, "expected_revision": 1,
-                         "replacement": {"kind": "existing", "target": {"kind": "SCHEDULE", "task_id": derive_id("schedule", "query-catalog-test", "replacement")}, "expected_revision": 1}}),
-    ("manage_schedule", {"action": "switch", "target": SCHEDULE, "expected_revision": 1,
-                         "replacement": {"kind": "create", "values": SCHEDULE_VALUES}}),
-    ("read_file", {"target": ENTRY}),
-    ("write_file", {"target": {"kind": "PATH", "path": "saved-output.txt"}, "source": ENTRY}),
-    ("get_memory", {"target": MEMORY}),
-    ("search_memory", {"query": "project preferences"}),
+    ("query_schedules", {"status": "ALL"}), ("query_schedules", {"target": SCHEDULE}),
+    ("manage_schedule", {"action": "create", "values": SCHEDULE_VALUES}),
+    ("manage_schedule", {"action": "update", "target": SCHEDULE, "values":{"schedule": {"kind":"daily","start_date":"2026-11-16","time":"09:00"}}}),
+    *[("manage_schedule", {"action": action, "target": SCHEDULE}) for action in ("pause", "resume", "delete")],
+    ("manage_schedule", {"action": "switch", "target": SCHEDULE, "replacement": {"kind":"existing", "target": {"kind": "SCHEDULE", "task_id": derive_id("schedule", "query-catalog-test", "replacement")}}}),
+    ("manage_schedule", {"action": "switch", "target": SCHEDULE, "replacement": {"kind":"create", "values": SCHEDULE_VALUES}}),
+    ("read_file", {"target": PATH}), ("read_file", {"target": NEXT}),
+    ("write_file", {"target": PATH, "tool_result_target": ENTRY}),
+    ("read_session_content", {"target":{"kind":"SESSION","session_id":AGENT["agent_id"]}, "limit":-2}),
+    ("read_session_content", {"target": ENTRY, "limit":2}),
+    ("query_memory", {"target": MEMORY}),
+    ("query_memory", {"query": "project preferences", "limit": 5}),
 ]
 
 
@@ -125,6 +112,8 @@ def test_canonical_calls_survive_both_actual_wire_serializers(name, arguments):
     ("query_cells", {"target": CELL, "max_chars": "2"}),
     ("query_schedules", {"target": SCHEDULE, "session": None}),
     ("query_schedules", {"status": None}),
+    ("read_session_content", {"target":{"kind":"SESSION","session_id":AGENT["agent_id"]},"limit":1}),
+    ("read_session_content", {"target":ENTRY,"limit":0}),
     ("exec_cell", {}),
     ("exec_cell", {"code": "return 1", "path": "script.js"}),
     ("manage_cell", {"action": "stop", "target": CELL, "yield_time_ms": 1}),
@@ -141,17 +130,17 @@ def test_merged_branches_reject_cross_branch_fields(name, arguments):
 
 
 @pytest.mark.parametrize("name,arguments,read_only", [
-    ("query_capabilities", {}, True), ("query_agents", {}, True),
+    ("query_capabilities", {"kind":"SKILL"}, True), ("query_agents", {}, True),
     ("query_processes", {}, True),
     ("query_cells", {}, True), ("query_schedules", {}, True),
-    ("manage_process", {"action": "poll"}, True),
+
     ("manage_process", {"action": "wait"}, True),
     ("manage_process", {"action": "write"}, False),
     ("manage_process", {"action": "kill"}, False),
     ("manage_cell", {"action": "wait"}, True),
     ("manage_cell", {"action": "stop"}, False),
     ("manage_schedule", {"action": "pause"}, False),
-    ("read_file", {"target": ENTRY}, True), ("write_file", {"target": {"kind": "PATH", "path": "saved.txt"}, "source": ENTRY}, False),
+    ("read_file", {"target": NEXT}, True), ("write_file", {"target": {"kind": "PATH", "path": "saved.txt"}, "tool_result_target": ENTRY}, False),
 ])
 def test_permission_classifier_follows_selected_action(name, arguments, read_only):
     classification = DefaultBuiltinToolCallClassifier().classify_builtin(ToolCall("test", name, arguments))
@@ -159,12 +148,12 @@ def test_permission_classifier_follows_selected_action(name, arguments, read_onl
 
 
 @pytest.mark.parametrize("name,arguments,allowed", [
-    ("query_capabilities", {}, True),
+    ("query_capabilities", {"kind":"SKILL"}, True),
     ("query_schedules", {}, True),
     ("manage_schedule", {"action": "delete", "target": SCHEDULE}, False),
-    ("manage_process", {"action": "poll", "target": PROCESS}, True),
+    ("manage_process", {"action": "wait", "target": PROCESS}, True),
     ("manage_process", {"action": "write", "target": PROCESS, "data": "x"}, False),
-    ("write_file", {"target": {"kind": "PATH", "path": "saved.txt"}, "source": ENTRY}, False),
+    ("write_file", {"target": {"kind": "PATH", "path": "saved.txt"}, "tool_result_target": ENTRY}, False),
     ("query_agents", {}, False),
 ])
 def test_read_only_permission_gate_uses_new_catalog(name, arguments, allowed, tmp_path):
@@ -203,8 +192,11 @@ def test_actual_js_directory_keeps_shared_calls_and_excludes_native_owners(tmp_p
             names = {spec.name for spec in directory.tool_specs}
             assert {"query_capabilities", "query_agents", "exec_process", "query_processes", "manage_process", "read_file", "write_file", "decide", "run_agent", "wait_agent"} <= names
             assert not names & {"wait_work", "exec_cell", "query_cells", "manage_cell", "query_monitors", "manage_monitor", "query_schedules", "manage_schedule", "search_memory", "get_memory"}
-            for name in names & {spec.name for spec in prepared.model_surface.tool_specs}:
+            for name in (names & {spec.name for spec in prepared.model_surface.tool_specs}) - {"read_file"}:
                 assert directory.binding(name) == prepared.binding(name)
+            script_read = next(spec for spec in directory.tool_specs if spec.name == "read_file")
+            assert Draft202012Validator(thaw_json(script_read.parameters)).is_valid({"target":PATH})
+            assert not Draft202012Validator(thaw_json(script_read.parameters)).is_valid({"target":NEXT})
             for name in ("exec_process", "query_processes", "manage_process"):
                 assert tool_observation_origin_for_binding(prepared.binding(name)) is ToolObservationOrigin.TERMINAL_PROCESS
         finally:
@@ -230,21 +222,6 @@ def test_old_public_names_have_no_catalog_or_classifier_path(name):
         DefaultBuiltinToolCallClassifier().classify_builtin(ToolCall("test", name, {}))
 
 
-@pytest.mark.parametrize("name,arguments,reason", [
-    ("exec_cell", {}, ToolResultFullDeliveryReason.RESULT_PROJECTION),
-    ("manage_cell", {"action": "wait"}, ToolResultFullDeliveryReason.RESULT_PROJECTION),
-    ("manage_cell", {"action": "stop"}, ToolResultFullDeliveryReason.RESULT_PROJECTION),
-    ("query_cells", {}, ToolResultFullDeliveryReason.RESULT_PROJECTION),
-    ("query_cells", {"target": CELL}, ToolResultFullDeliveryReason.RESULT_PROJECTION),
-    ("query_capabilities", {}, ToolResultFullDeliveryReason.RESULT_PROJECTION),
-    ("query_capabilities", {"target": MCP}, ToolResultFullDeliveryReason.RESULT_PROJECTION),
-    ("query_capabilities", {"target": {"kind": "SKILL", "skill_path": "/fixture/SKILL.md"}}, ToolResultFullDeliveryReason.RESULT_PROJECTION),
-])
-def test_full_delivery_depends_on_new_query_and_management_branch(name, arguments, reason):
-    delivery = classify_tool_result_delivery(tool_name=name, result_state="SUCCESS", public_arguments=arguments)
-    assert delivery.reason is reason
-    assert delivery.requirement is ToolResultDeliveryRequirement.FULL_REQUIRED
-    assert classify_tool_result_delivery(tool_name=name, result_state="SYSTEM_ERROR", public_arguments=arguments).requirement is ToolResultDeliveryRequirement.FULL_REQUIRED
 
 
 def test_terminal_result_contracts_match_executor_shapes():
@@ -305,3 +282,12 @@ def test_native_subagent_query_binding_and_authorization_keep_management_closed(
         finally:
             await port.aclose()
     asyncio.run(scenario())
+
+
+def test_code_mode_read_file_contract_is_path_only():
+    from pulsara_agent.capability.builtin_catalog import execution_catalog_entry
+    native=thaw_tool_json_object(builtin_tool_catalog_entry("read_file").descriptor.input_schema)
+    script=thaw_tool_json_object(execution_catalog_entry("read_file",code_mode=True).descriptor.input_schema)
+    assert Draft202012Validator(native).is_valid({"target":NEXT})
+    assert Draft202012Validator(script).is_valid({"target":PATH})
+    assert not Draft202012Validator(script).is_valid({"target":NEXT})

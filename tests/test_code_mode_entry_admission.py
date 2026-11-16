@@ -11,9 +11,10 @@ from pulsara_agent.conversation_kernel.tool_policy import DefaultToolDispatchAut
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.primitives.permission import PermissionMode
-from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 from tests.support.round3 import prepare_test_direct_tool_surface
 from pulsara_agent.identity import random_id
+from pulsara_agent.ports.tool_execution import ToolBusinessValue
+from pulsara_agent.conversation_kernel.content_parts import ResultPart
 
 COLLABORATION = frozenset({'run_agent', 'query_agents', 'send_agent_message', 'wait_message', 'wait_agent', 'stop_agent'})
 
@@ -125,7 +126,7 @@ def _source(name, arguments):
 @pytest.mark.parametrize('name,arguments', [
     ('run_agent', {'members': [{'agent_id': random_id('session'), 'work_id': random_id('queue'), 'parameters': {'instruction': 'do this'}}]}),
     ('wait_agent', {'agents': [{'kind': 'AGENT', 'agent_id': random_id('session')}]}),
-    ('wait_agent', {'agents': [{'kind': 'AGENT', 'agent_id': random_id('session')}], 'until': 'work_end', 'settle': 'first', 'timeout_seconds': 0}),
+    ('wait_agent', {'works':[{'kind':'WORK','work_id':random_id('queue')}], 'settle':'first','timeout_seconds':0}),
     ('decide', {'condition': 'contains x', 'inputs': []}),
 ])
 def test_code_entry_requires_both_host_source_and_cell_borrow(tmp_path, name, arguments):
@@ -167,7 +168,7 @@ def test_native_controls_dispatch_directly_without_touching_code_runtime(tmp_pat
         calls = []
         async def invoke(**kwargs):
             calls.append((kwargs['tool_name'], kwargs['arguments']))
-            return KernelToolResult('SUCCESS', b'completed by collaboration owner')
+            return KernelToolResult('SUCCESS', ToolBusinessValue(content=(ResultPart('text','completed by collaboration owner'),)))
         port._subagent.invoke = invoke
         runtime = None
         release = asyncio.Event()
@@ -208,7 +209,7 @@ def test_native_controls_dispatch_directly_without_touching_code_runtime(tmp_pat
                     authorization_reference=auth.reference, permission_snapshot_fingerprint=permission.snapshot_fingerprint,
                     effective_permission_mode=permission.effective_mode,
                     attempt_permission_snapshot_fingerprint=permission.snapshot_fingerprint, surface_borrow=borrow,
-                    page_budget=ToolResultPageBudget('call'))
+                    )
                 result = await port.invoke(tool_name=name, arguments=arguments, tool_call_id='call', turn_id='turn',
                     assistant_entry_id='entry', attempt_id='attempt', invocation_context=context)
                 assert result.state == 'SUCCESS'
@@ -289,7 +290,7 @@ def test_wait_schema_is_projected_per_entry_and_old_targets_are_rejected(tmp_pat
             work = {'kind': 'WORK', 'work_id': random_id('queue')}
             for name, owner, accepted, rejected in (
                 ('wait_message', child, {}, [{'agents': [agent]}, {'works': [work]}, {'settle': 'all'}]),
-                ('wait_agent', directory, {'agents': [agent], 'until': 'work_end'}, [{}, {'works': [work]}, {'agents': [agent], 'works': [work]}, {'agents': [{'kind':'AGENT','agent_id':'ROOT'}]}, {'agents': [agent], 'until':'next'}]),
+                ('wait_agent', directory, {'works':[work]}, [{}, {'agents': [agent], 'works': [work]}, {'agents': [{'kind':'AGENT','agent_id':'ROOT'}]}]),
             ):
                 specs = owner.model_surface.tool_specs if name == 'wait_message' else owner.tool_specs
                 spec = next(item for item in specs if item.name == name)
@@ -369,7 +370,9 @@ def test_native_inventory_and_script_apis_have_distinct_role_owners():
     assert script.availability_requirement.allowed_invocation_owners == (ToolInvocationOwnerKind.HOST_MAIN_RUN,)
     assert native.descriptor.is_model_callable and not script.descriptor.is_model_callable
     assert 'works' not in thaw_tool_json_object(native.descriptor.input_schema)['properties']
-    assert thaw_tool_json_object(script.descriptor.input_schema)['properties']['until']['default'] == 'idle'
+    branches=thaw_tool_json_object(script.descriptor.input_schema)['oneOf']
+    assert {tuple(branch['required']) for branch in branches}=={('works',),('agents',)}
+    assert all(branch['properties']['settle']['default']=='all' for branch in branches)
     assert not any(text in DEFAULT_SYSTEM_PROMPT for text in ('Subagents keep their native', 'native wait_agent'))
     assert not any(text in DEFAULT_SUBAGENT_SYSTEM_PROMPT for text in ('tools.run_agent', 'tools.decide', 'exec_cell'))
 

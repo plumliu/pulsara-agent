@@ -94,7 +94,6 @@ class PreparedTodoReplacement:
     attempt_id: str
     proposed_result_entry_id: str
     candidate: FrozenTodoCandidate
-    acknowledgement: bytes
     token_id: str
 
 
@@ -325,7 +324,6 @@ class CurrentWorkStateOwner:
         attempt_id: str,
         proposed_result_entry_id: str,
         candidate: FrozenTodoCandidate,
-        acknowledgement: bytes,
     ) -> PreparedTodoReplacement:
         with self._lock:
             record = self._record(scope_kind)
@@ -348,7 +346,6 @@ class CurrentWorkStateOwner:
                 attempt_id=attempt_id,
                 proposed_result_entry_id=proposed_result_entry_id,
                 candidate=candidate,
-                acknowledgement=acknowledgement,
                 token_id=token_id,
             )
             existing = record.pending_settlements.get(token_id)
@@ -536,7 +533,6 @@ def _new_record(
         pending_count=0,
         in_progress_count=0,
         completed_count=0,
-        canonical_json_utf8_bytes=len(b'{"items":[]}'),
     )
     return _CurrentWorkRecord(
         run_identity=identity,

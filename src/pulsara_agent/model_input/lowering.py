@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 from pulsara_agent.identity import require_id
-from pulsara_agent.primitives.permission import PermissionMode
 
 from dataclasses import dataclass
 import json
-from typing import Mapping
 
 from pulsara_agent.llm.input import (
     LLMContentPart,
@@ -17,82 +15,22 @@ from pulsara_agent.llm.input import (
     LLMTextPart,
     LLMToolCall,
     MessageRole,
-    text_part_values,
     image_reference_text,
 )
 from pulsara_agent.model_input.contracts import (
     CompactionSnapshotCarrier,
-    ContextChannel,
-    ContextRenderMode,
-    ContextSourceCandidate,
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
     provider_input_item_text,
-    ToolResultProviderRenderMode,
-    StructuredModelInputCompileError,
-    ModelInputCompileFailureKind,
 )
-from pulsara_agent.model_input.continuity import (
-    SourceObservationLifecycle,
-    SourceObservationPresence,
-    encode_runtime_observation,
-)
+
 from pulsara_agent.primitives.context import canonical_json_bytes
-from pulsara_agent.primitives.tool_observation import (
-    MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES,
-)
-from pulsara_agent.primitives.tool_result_projection import (
-    ToolResultLogicalMessageKind,
-    decode_provider_tool_result_observation,
-    provider_neutral_message_logical_bytes,
-    render_provider_tool_result_logical_message,
-    _maximum_tool_result_page_timing,
-)
-
-
-@dataclass(frozen=True, slots=True)
-class LoweredToolResultVariant:
-    mode: ToolResultProviderRenderMode
-    message: LLMMessage
-    utf8_bytes: int
-
-    def __post_init__(self) -> None:
-        if self.utf8_bytes != provider_neutral_message_logical_bytes(self.message):
-            raise ValueError("tool-result variant logical quote mismatch")
-        if (
-            self.mode is ToolResultProviderRenderMode.FULL
-            and self.utf8_bytes > MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
-        ):
-            raise ValueError("FULL tool-result variant exceeds its logical bound")
 
 
 @dataclass(frozen=True, slots=True)
 class LoweredCanonicalItem:
     source: FrozenProviderInputItem
-    fixed_message: LLMMessage | None
-    tool_result_variants: tuple[LoweredToolResultVariant, ...] = ()
-
-    def __post_init__(self) -> None:
-        is_tool_result = self.source.item_kind in {
-            FrozenProviderInputItemKind.TOOL_RESULT,
-            FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
-        }
-        if is_tool_result:
-            if self.fixed_message is not None or not self.tool_result_variants:
-                raise ValueError("lowered canonical item carrier union is invalid")
-        elif self.fixed_message is None or self.tool_result_variants:
-            raise ValueError("lowered canonical item carrier union is invalid")
-        if self.tool_result_variants and tuple(
-            item.mode for item in self.tool_result_variants
-        ) != (ToolResultProviderRenderMode.FULL,):
-            raise ValueError("frozen tool projection requires one FULL representation")
-
-
-@dataclass(frozen=True, slots=True)
-class ProjectedToolResultPublicValue:
-    render_mode: ToolResultProviderRenderMode
-    value: object
-    body: str = ""
+    message: LLMMessage
 
 
 def image_reference_id_part(image_ref: str) -> LLMTextPart:
@@ -139,30 +77,10 @@ def image_referenced_content(
     return tuple(rendered)
 
 
-def project_tool_result_public_value(
-    item: FrozenProviderInputItem,
-) -> ProjectedToolResultPublicValue:
-    """Return the frozen native body for Hook/compiler reuse."""
-
-    lowered = lower_canonical_item(item)
-    if not lowered.tool_result_variants:
-        raise ValueError("public ToolResult projection requires a ToolResult item")
-    selected = lowered.tool_result_variants[0]
-    payload = decode_provider_tool_result_observation(
-        text_part_values(selected.message.content)[0]
-    )
-    body = payload["body"]
-    if not isinstance(body, str):
-        raise TypeError("public ToolResult body is not text")
-    try:
-        value: object = json.loads(body)
-    except json.JSONDecodeError:
-        value = body
-    return ProjectedToolResultPublicValue(selected.mode, value, body)
-
-
 def lower_canonical_item(
     item: FrozenProviderInputItem,
+    *,
+    supports_images: bool = True,
 ) -> LoweredCanonicalItem:
     kind = item.item_kind
     if kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT:
@@ -190,21 +108,34 @@ def lower_canonical_item(
         FrozenProviderInputItemKind.TOOL_RESULT,
         FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
     }:
-        return LoweredCanonicalItem(
-            item,
-            None,
-            _tool_result_variants(
-                item,
-            ),
-        )
-    text = provider_input_item_text(item)
+        if item.tool_result_body_text is None or item.tool_result_context is None or item.tool_call_id is None:
+            raise ValueError("tool result lowering lacks its frozen observation")
+        return LoweredCanonicalItem(item,_tool_result_message(item,item.tool_result_body_text))
     if kind is FrozenProviderInputItemKind.TERMINAL_OBSERVATION:
-        return LoweredCanonicalItem(item, LLMMessage.user(text))
+        from pulsara_agent.ports.terminal_observation import CellOutputImageReadFailure, cell_output_provider_text
+        from pulsara_agent.conversation_kernel.native_tool_delivery import IMAGE_INPUT_UNSUPPORTED_TEXT
+
+        source = item.cell_output_source
+        if source is None:
+            raise ValueError("Cell output lowering lost its source facts")
+        parts = [LLMTextPart(
+            f"Cell {source.cell_id} 输出（{source.kind}，第 {source.record_sequence} 条）：\n"
+        )]
+        for part in item.content:
+            if isinstance(part, LLMTextPart):
+                parts.append(LLMTextPart(cell_output_provider_text(part.text)))
+            else:
+                parts.append(image_reference_id_part(part.image_ref))
+                if not supports_images:
+                    parts.append(LLMTextPart(IMAGE_INPUT_UNSUPPORTED_TEXT))
+                elif isinstance(part, CellOutputImageReadFailure):
+                    parts.append(LLMTextPart(part.reason))
+                else:
+                    parts.append(part)
+        return LoweredCanonicalItem(item,LLMMessage(role=MessageRole.USER,content=tuple(parts)))
     if kind is FrozenProviderInputItemKind.PLAN_CONTINUATION:
-        return LoweredCanonicalItem(
-            item,
-            LLMMessage.user(_project_plan_continuation(text)),
-        )
+        raise ValueError("internal Plan control entries are not provider messages")
+    text = provider_input_item_text(item)
     if kind is FrozenProviderInputItemKind.ASSISTANT:
         return LoweredCanonicalItem(item, LLMMessage.assistant(text))
     if kind is FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST:
@@ -279,112 +210,13 @@ def compaction_snapshot_provider_content(
     )
 
 
-def source_variant_message(
-    candidate: ContextSourceCandidate,
-    text: str,
-    *,
-    mode: ContextRenderMode | None = None,
-) -> LLMMessage:
-    if candidate.channel is ContextChannel.SYSTEM:
-        raise ValueError("SYSTEM source is not an ordered message")
-    selected_mode = mode
-    if selected_mode is None:
-        matches = tuple(
-            variant.mode for variant in candidate.variants if variant.text == text
-        )
-        selected_mode = matches[0] if len(matches) == 1 else ContextRenderMode.FULL
-    if selected_mode is ContextRenderMode.UNAVAILABLE_MINIMAL:
-        if text:
-            raise ValueError("minimal unavailable source has a non-empty body")
-        return encode_runtime_observation(
-            source_kind=candidate.source_kind,
-            trust_class=candidate.trust_class,
-            lifecycle=SourceObservationLifecycle.UNAVAILABLE,
-            presence=SourceObservationPresence.UNAVAILABLE,
-            body="",
-        )
-    lifecycle = {
-        "SNAPSHOT_ON_CHANGE": SourceObservationLifecycle.SNAPSHOT,
-        "CALL_APPEND": SourceObservationLifecycle.CALL,
-        "TURN_APPEND": SourceObservationLifecycle.TURN,
-        "TURN_SNAPSHOT": SourceObservationLifecycle.TURN,
-        "ACTIVATION_SNAPSHOT": SourceObservationLifecycle.ACTIVATION,
-        "ONE_SHOT": SourceObservationLifecycle.ONE_SHOT,
-    }.get(candidate.lifecycle.value)
-    if lifecycle is None:
-        raise ValueError("source lifecycle cannot be lowered as an observation")
-    return encode_runtime_observation(
-        source_kind=candidate.source_kind,
-        trust_class=candidate.trust_class,
-        lifecycle=lifecycle,
-        presence=SourceObservationPresence.VALUE,
-        body=text,
-    )
 
 
-def ordinary_tool_result_minimum_upper(
-    tool_call_id: str, *, body: str, model_visible_memory_fact_ids: tuple[str, ...] = (),
-) -> LLMMessage:
-    """Quote a known necessary receipt before execution, never an invented preview.
-
-    The caller owns the actual receipt facts. This function only covers their
-    fixed carrier, closed timing maximum and normal/late delivery. Business
-    owners still validate the actual minimum before any physical effect.
-    """
-    messages = tuple(render_provider_tool_result_logical_message(
-        message_kind=kind,
-        tool_call_id=tool_call_id,
-        body=body,
-        result_state="CANCELLED_BEFORE_DISPATCH",
-        timing=_maximum_tool_result_page_timing(),
-        model_visible_memory_ids=model_visible_memory_fact_ids,
-    ).message for kind in ToolResultLogicalMessageKind)
-    return max(messages, key=lambda message: len(canonical_json_bytes(
-        text_part_values(message.content)[0]
-    )))
-
-
-def _tool_result_variants(
-    item: FrozenProviderInputItem,
-) -> tuple[LoweredToolResultVariant, ...]:
-    if (item.tool_result_context is None or item.tool_result_body_text is None
-            or item.tool_call_id is None):
-        raise ValueError("tool result lowering lacks typed metadata")
-    message = _tool_result_message(item, item.tool_result_body_text)
-    logical_bytes = provider_neutral_message_logical_bytes(message)
-    if logical_bytes > MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES:
-        raise StructuredModelInputCompileError(
-            ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_NOT_INLINEABLE
-        )
-    return (LoweredToolResultVariant(
-        ToolResultProviderRenderMode.FULL, message, logical_bytes,
-    ),)
-
-
-def _tool_result_message(
-    item: FrozenProviderInputItem,
-    body: str,
-) -> LLMMessage:
+def _tool_result_message(item: FrozenProviderInputItem, body: str) -> LLMMessage:
     assert item.tool_call_id is not None
-    metadata = item.tool_result_context
-    assert metadata is not None
-    rendered = render_provider_tool_result_logical_message(
-        message_kind=(
-            ToolResultLogicalMessageKind.TOOL_RESULT
-            if item.item_kind is FrozenProviderInputItemKind.TOOL_RESULT
-            else ToolResultLogicalMessageKind.LATE_TOOL_OUTCOME
-        ),
-        tool_call_id=item.tool_call_id,
-        body=body,
-        result_state=metadata.result_state,
-        timing=metadata.timing,
-        model_visible_memory_ids=metadata.model_visible_memory_fact_ids,
-    )
-    return rendered.message
-
-
-def decode_tool_result_observation(text: str) -> Mapping[str, object]:
-    return decode_provider_tool_result_observation(text)
+    if item.item_kind is FrozenProviderInputItemKind.TOOL_RESULT:
+        return LLMMessage.tool_result(body, tool_call_id=item.tool_call_id)
+    return LLMMessage.user("tool_call_id: " + item.tool_call_id + "\n" + body)
 
 
 def _project_tool_result_closure(text: str) -> str:
@@ -401,61 +233,11 @@ def _project_tool_result_closure(text: str) -> str:
     return canonical_json_bytes({"disposition": disposition}).decode("utf-8")
 
 
-def _project_plan_continuation(text: str) -> str:
-    try:
-        value = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ValueError("Plan continuation storage carrier is invalid") from exc
-    if not isinstance(value, dict) or set(value) != {"pulsara_plan_continuation"}:
-        raise ValueError("Plan continuation provider carrier is not closed")
-    projected = value["pulsara_plan_continuation"]
-    if not isinstance(projected, dict):
-        raise ValueError("Plan continuation provider payload is not an object")
-    transition = str(projected.get("transition") or "")
-    if transition not in {"ENTERED_PLAN", "APPROVED_PLAN", "EXITED_PLAN"}:
-        raise ValueError("Plan continuation transition is invalid")
-    expected_keys = {
-        "ENTERED_PLAN": {"status", "transition"},
-        "EXITED_PLAN": {"status", "transition", "resume_permission_mode"},
-        "APPROVED_PLAN": {"status", "transition"},
-    }[transition]
-    if transition == "APPROVED_PLAN":
-        valid_keys = (
-            expected_keys,
-            {*expected_keys, "approved_plan"},
-        )
-    else:
-        valid_keys = (expected_keys,)
-    if set(projected) not in valid_keys:
-        raise ValueError("Plan continuation provider members are invalid")
-    if (
-        projected.get("status")
-        != (
-            {
-                "APPROVED_PLAN": "APPROVED",
-                "ENTERED_PLAN": "ACTIVE",
-                "EXITED_PLAN": "EXITED",
-            }[transition]
-        )
-    ):
-        raise ValueError("Plan continuation provider status is invalid")
-    if transition == "EXITED_PLAN":
-        PermissionMode(projected.get("resume_permission_mode"))
-    if "approved_plan" in projected and not isinstance(projected["approved_plan"], str):
-        raise ValueError("approved Plan body is invalid")
-    encoded = canonical_json_bytes(value).decode("utf-8")
-    if encoded != text:
-        raise ValueError("Plan continuation provider carrier is not canonical")
-    return encoded
-
 
 __all__ = [
-    "decode_tool_result_observation",
     "image_reference_id_part",
     "image_reference_part",
     "image_referenced_content",
     "LoweredCanonicalItem",
-    "LoweredToolResultVariant",
     "lower_canonical_item",
-    "source_variant_message",
 ]

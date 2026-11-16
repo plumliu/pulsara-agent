@@ -50,6 +50,7 @@ from pulsara_agent.capability.types import (
     ShadowedSkillCandidateIssue,
     SkillManifest,
     SkillProjectionResolveContext,
+    ResolvedSkillCatalogEntry,
 )
 from pulsara_agent.capability.user_skill_config import (
     UserSkillConfigSnapshot,
@@ -132,6 +133,7 @@ class KernelSkillProjectionComposer:
             raise TypeError(
                 "workspace Skill config provider returned a foreign snapshot"
             )
+        all_loose = loose
         loose = _apply_skill_configs(
             loose,
             user_config=user_skill_config,
@@ -201,6 +203,9 @@ class KernelSkillProjectionComposer:
             source_snapshot=snapshot,
             inspection=inspection,
             owner_authenticity=self._owner_authenticity,
+            disabled_entries=tuple(ResolvedSkillCatalogEntry(item.name, item.description,
+                item.skill_path, item.origin) for item in all_loose.candidates
+                if item not in loose.candidates),
         )
 
     def freeze_projection_input(
@@ -269,14 +274,6 @@ def _skill_fact(source, skill: SkillManifest) -> FrozenSkillCapabilityFact:
         source=source,
         stable_name=skill.name,
     )
-    catalog = context_fingerprint(
-        "local-skill-catalog-semantic:v2-agent-skills",
-        {
-            "name": skill.name,
-            "description": skill.description,
-            "skill_path": skill.skill_path,
-        },
-    )
     activation = context_fingerprint(
         "local-skill-activation-semantic:v2-agent-skills",
         {
@@ -288,7 +285,8 @@ def _skill_fact(source, skill: SkillManifest) -> FrozenSkillCapabilityFact:
     )
     fact_fingerprint = skill_capability_fact_fingerprint(
         identity=identity,
-        catalog_semantic_fingerprint=catalog,
+        description=skill.description,
+        skill_path=skill.skill_path,
         activation_semantic_fingerprint=activation,
         origin=skill.origin,
     )
@@ -298,7 +296,6 @@ def _skill_fact(source, skill: SkillManifest) -> FrozenSkillCapabilityFact:
         description=skill.description,
         skill_path=skill.skill_path,
         origin=skill.origin,
-        catalog_semantic_fingerprint=catalog,
         activation_semantic_fingerprint=activation,
         fact_semantic_fingerprint=fact_fingerprint,
     )

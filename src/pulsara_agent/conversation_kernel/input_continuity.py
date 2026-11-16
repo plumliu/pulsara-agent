@@ -12,6 +12,7 @@ from pulsara_agent.identity import random_id
 from dataclasses import dataclass, field as dataclass_field, replace
 from enum import StrEnum
 from threading import RLock
+from typing import Callable
 
 from pulsara_agent.capability.contracts import FrozenToolCapabilityExposurePlan
 from pulsara_agent.conversation_kernel.contracts import (
@@ -1191,6 +1192,7 @@ class HostProviderInputContinuityOwner:
         *,
         candidate: PreparedProviderInputAppendCandidate,
         execution: object,
+        before_install: Callable[[], None] | None = None,
     ) -> ProcessLocalProviderInputInstallPermit:
         self._require_scope(candidate.scope)
         with self._lock:
@@ -1213,7 +1215,7 @@ class HostProviderInputContinuityOwner:
                 wire_input_plan=candidate.wire_input_plan,
                 tool_exposure_plan=candidate.tool_exposure_plan,
                 canonical_frontier=candidate.resulting_canonical_frontier,
-                source_heads=candidate.resulting_source_heads,
+                observation_state=candidate.resulting_observation_state,
                 logical_bytes=provider_input_logical_bytes(
                     system_prompt=compiled.system_prompt,
                     tools=compiled.tools,
@@ -1232,19 +1234,6 @@ class HostProviderInputContinuityOwner:
                 ),
                 tool_result_decisions=compiled.tool_result_decisions,
             )
-            if (
-                slot.installed is None
-                or slot.installed.view.epoch_nonce != view.epoch_nonce
-            ):
-                slot.usage_anchor = None
-            slot.installed = InstalledEpochRuntimeCohort(
-                view=view,
-                target_bundle=candidate.call_target.target_bundle,
-            )
-            slot.bootstrap_lease = None
-            slot.empty_reservation = None
-            slot.prepared = None
-            slot.state = _SlotState.INSTALLED
             permit_nonce = random_id("permit")
             while permit_nonce in self._issued_permits:
                 permit_nonce = random_id("permit")
@@ -1254,13 +1243,26 @@ class HostProviderInputContinuityOwner:
                 epoch_revision=view.epoch_revision,
                 permit_nonce=permit_nonce,
             )
-            self._issued_permits[permit.permit_nonce] = (
-                _IssuedProviderInputInstallPermit(
-                    permit=permit,
-                    candidate=candidate,
-                    execution=execution,
-                )
+            cohort = InstalledEpochRuntimeCohort(
+                view=view,
+                target_bundle=candidate.call_target.target_bundle,
             )
+            issued = _IssuedProviderInputInstallPermit(
+                permit=permit, candidate=candidate, execution=execution,
+            )
+            # All fallible preparation and exact ownership checks precede the
+            # accepted native range transaction. The remaining assignments
+            # publish this already constructed cohort under the same lock.
+            if before_install is not None:
+                before_install()
+            if slot.installed is None or slot.installed.view.epoch_nonce != view.epoch_nonce:
+                slot.usage_anchor = None
+            slot.installed = cohort
+            slot.bootstrap_lease = None
+            slot.empty_reservation = None
+            slot.prepared = None
+            slot.state = _SlotState.INSTALLED
+            self._issued_permits[permit.permit_nonce] = issued
             return permit
 
     def reserve_assistant_replay_fragment(

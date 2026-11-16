@@ -18,15 +18,11 @@ from pulsara_agent.model_input.contracts import (
     FrozenToolSpec,
     ModelInputScopeKind,
     MAXIMUM_BUILTIN_NATIVE_TOOL_COUNT,
-    MAXIMUM_MCP_NATIVE_TOOL_COUNT,
 )
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
     canonical_json_bytes,
     context_fingerprint,
-)
-from pulsara_agent.primitives.tool_observation import (
-    MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES,
 )
 
 if TYPE_CHECKING:
@@ -36,7 +32,6 @@ if TYPE_CHECKING:
 MAXIMUM_CAPABILITY_MCP_SOURCES = 64
 MAXIMUM_CAPABILITY_SOURCE_REGISTRATIONS = 66
 MAXIMUM_CAPABILITY_PLANNER_FRAMING_BYTES = 4 * 1024 * 1024
-MCP_NATIVE_TOOL_TOKEN_THRESHOLD = 64_000
 MAXIMUM_NATIVE_TOOL_BYTES = 1024 * 1024
 
 
@@ -439,7 +434,7 @@ class FrozenNativeToolProjectionSet:
                 raise ValueError("native projection does not exact-join version")
         # Derived composition bound: builtins and MCP have separate admissions.
         if len(self.tool_versions) > (
-            MAXIMUM_BUILTIN_NATIVE_TOOL_COUNT + MAXIMUM_MCP_NATIVE_TOOL_COUNT
+            MAXIMUM_BUILTIN_NATIVE_TOOL_COUNT
         ):
             raise ValueError("native tool count bound exceeded")
         if sum(item.wire_utf8_bytes for item in self.projections) > (
@@ -494,7 +489,6 @@ class FrozenSkillCapabilityFact:
     description: str
     skill_path: str
     origin: "SkillDefinitionOrigin"
-    catalog_semantic_fingerprint: str
     activation_semantic_fingerprint: str
     fact_semantic_fingerprint: str
 
@@ -522,7 +516,8 @@ class FrozenSkillCapabilityFact:
             raise ValueError("bundled Skill fact origin/name join conflicts")
         expected = skill_capability_fact_fingerprint(
             identity=self.identity,
-            catalog_semantic_fingerprint=self.catalog_semantic_fingerprint,
+            description=self.description,
+            skill_path=self.skill_path,
             activation_semantic_fingerprint=self.activation_semantic_fingerprint,
             origin=self.origin,
         )
@@ -533,16 +528,21 @@ class FrozenSkillCapabilityFact:
 def skill_capability_fact_fingerprint(
     *,
     identity: CapabilityIdentity,
-    catalog_semantic_fingerprint: str,
+    description: str,
+    skill_path: str,
     activation_semantic_fingerprint: str,
     origin: "SkillDefinitionOrigin",
 ) -> str:
     origin_digest = _skill_origin_provenance_fingerprint(origin)
+    catalog = context_fingerprint(
+        "local-skill-catalog-semantic:v2-agent-skills",
+        {"name": identity.stable_name, "description": description, "skill_path": skill_path},
+    )
     return context_fingerprint(
         "skill-capability-fact:v1",
         {
             "identity_fingerprint": capability_identity_digest(identity),
-            "catalog_semantic_fingerprint": catalog_semantic_fingerprint,
+            "catalog_semantic_fingerprint": catalog,
             "activation_semantic_fingerprint": activation_semantic_fingerprint,
             "winning_root_provenance_fingerprint": (
                 origin_digest
@@ -735,7 +735,7 @@ class FrozenCapabilityRegistrySnapshot:
                 if fact.identity in identities:
                     raise ValueError("registry capability identity is duplicated")
                 identities.add(fact.identity)
-                if isinstance(fact, FrozenToolCapabilityFact):
+                if isinstance(fact, FrozenToolCapabilityFact) and fact.origin is ToolCapabilityOrigin.BUILTIN:
                     if fact.canonical_tool_spec.name in provider_names:
                         raise ValueError("registry provider tool name is duplicated")
                     provider_names.add(fact.canonical_tool_spec.name)
@@ -759,211 +759,32 @@ class FrozenCapabilityRegistrySnapshot:
         )
 
 
-class CapabilityRouteReasonCode(StrEnum):
-    DIRECT_NATIVE_SURFACE = "DIRECT_NATIVE_SURFACE"
-    NEW_NOT_IN_NATIVE_SURFACE = "NEW_NOT_IN_NATIVE_SURFACE"
-    NEW_COLD_COHORT_META_FALLBACK = "NEW_COLD_COHORT_META_FALLBACK"
-    NATIVE_WIRE_INCOMPATIBLE = "NATIVE_WIRE_INCOMPATIBLE"
-    SOURCE_UNAVAILABLE = "SOURCE_UNAVAILABLE"
-    SCOPE_INVISIBLE = "SCOPE_INVISIBLE"
-    DIRTY_FENCED = "DIRTY_FENCED"
-    NATIVE_INPUT_CHANGED = "NATIVE_INPUT_CHANGED"
-    NATIVE_OUTPUT_CHANGED = "NATIVE_OUTPUT_CHANGED"
-    NATIVE_COMPATIBILITY_UNCONFIRMED = "NATIVE_COMPATIBILITY_UNCONFIRMED"
-    REMOVED = "REMOVED"
-    UNKNOWN_TARGET = "UNKNOWN_TARGET"
-    AMBIGUOUS_LEGACY_TARGET = "AMBIGUOUS_LEGACY_TARGET"
-    DESCRIPTOR_OVERBOUND = "DESCRIPTOR_OVERBOUND"
 
 
-@dataclass(frozen=True, slots=True)
-class McpToolCapabilityRef:
-    server_id: str
-    remote_tool_name: str
-
-    def __post_init__(self) -> None:
-        if not self.server_id or not self.remote_tool_name:
-            raise ValueError("MCP capability target is incomplete")
 
 
-class ToolCapabilityRouteKind(StrEnum):
-    DIRECT = "DIRECT"
-    NEW_MCP_META_ONLY = "NEW_MCP_META_ONLY"
-    UNAVAILABLE = "UNAVAILABLE"
 
 
-@dataclass(frozen=True, slots=True)
-class FrozenMcpToolExposure:
-    target: McpToolCapabilityRef
-    version: ToolCapabilityVersionRef
-    route: ToolCapabilityRouteKind
-    public_reason_code: CapabilityRouteReasonCode
-    route_fingerprint: str
-    native_spec: FrozenToolSpec | None = field(default=None, repr=False)
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.route, ToolCapabilityRouteKind) or not isinstance(
-            self.public_reason_code, CapabilityRouteReasonCode
-        ):
-            raise TypeError("MCP route vocabulary is not closed")
-        expected = context_fingerprint(
-            "mcp-tool-exposure-route:v1",
-            {
-                "server_id": self.target.server_id,
-                "remote_tool_name": self.target.remote_tool_name,
-                "version": tool_capability_version_identity_digest(self.version),
-                "route": self.route.value,
-                "reason": self.public_reason_code.value,
-            },
-        )
-        if self.route_fingerprint != expected:
-            raise ValueError("MCP tool route fingerprint mismatch")
 
 
-@dataclass(frozen=True, slots=True)
-class FrozenMcpRouteProjection:
-    routes: tuple[FrozenMcpToolExposure, ...]
-    joined_catalog_semantic_fingerprint: str
-    projection_fingerprint: str
-    # Epoch-local choice, retained even while a tool/server is absent. This is
-    # not another public catalog/version identity or a durable change log.
-    native_meta_identities: frozenset[CapabilityIdentity] = frozenset()
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.native_meta_identities, frozenset):
-            raise TypeError("native meta choices must be frozen")
-        keys = tuple(
-            (item.target.server_id, item.target.remote_tool_name)
-            for item in self.routes
-        )
-        if keys != tuple(sorted(keys)) or len(keys) != len(set(keys)):
-            raise ValueError("MCP routes are not sorted and unique")
-        expected = context_fingerprint(
-            "mcp-route-projection:v1",
-            {
-                "routes": tuple(item.route_fingerprint for item in self.routes),
-                "catalog": self.joined_catalog_semantic_fingerprint,
-            },
-        )
-        if self.projection_fingerprint != expected:
-            raise ValueError("MCP route projection fingerprint mismatch")
 
 
-class McpInspectEffectKind(StrEnum):
-    READ_ONLY = "READ_ONLY"
-    EXTERNAL_EFFECT = "EXTERNAL_EFFECT"
 
 
-class McpInspectDeliveryDisposition(StrEnum):
-    FULL_ELIGIBLE = "FULL_ELIGIBLE"
-    DESCRIPTOR_OVERBOUND = "DESCRIPTOR_OVERBOUND"
 
 
-@dataclass(frozen=True, slots=True)
-class FrozenMcpInspectabilityFact:
-    """Owner-issued, schema-free proof that one exact inspect DTO fits.
-
-    The MCP owner quotes the complete provider-neutral descriptor while it owns
-    the input/output schemas and execution policy.  The generic planner only
-    receives the mechanical quote and fingerprints; it never receives a second
-    schema copy or physical executor authority.
-    """
-
-    target: McpToolCapabilityRef
-    version: ToolCapabilityVersionRef
-    descriptor_payload_fingerprint: str
-    mcp_execution_policy_fingerprint: str
-    effect_kind: McpInspectEffectKind
-    conservative_logical_utf8_bytes: int
-    disposition: McpInspectDeliveryDisposition
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.effect_kind, McpInspectEffectKind):
-            raise TypeError("MCP inspect effect kind is not closed")
-        if not isinstance(self.disposition, McpInspectDeliveryDisposition):
-            raise TypeError("MCP inspect disposition is not closed")
-        if (
-            not self.descriptor_payload_fingerprint
-            or not self.mcp_execution_policy_fingerprint
-            or self.conservative_logical_utf8_bytes < 0
-        ):
-            raise ValueError("MCP inspectability fact is incomplete")
-        fits = (
-            self.conservative_logical_utf8_bytes
-            <= MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
-        )
-        if fits != (self.disposition is McpInspectDeliveryDisposition.FULL_ELIGIBLE):
-            raise ValueError("MCP inspectability disposition conflicts with quote")
 
 
-def freeze_mcp_inspectability_fact(
-    *,
-    target: McpToolCapabilityRef,
-    version: ToolCapabilityVersionRef,
-    descriptor_payload_fingerprint: str,
-    mcp_execution_policy_fingerprint: str,
-    effect_kind: McpInspectEffectKind,
-    conservative_logical_utf8_bytes: int,
-) -> FrozenMcpInspectabilityFact:
-    disposition = (
-        McpInspectDeliveryDisposition.FULL_ELIGIBLE
-        if conservative_logical_utf8_bytes
-        <= MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
-        else McpInspectDeliveryDisposition.DESCRIPTOR_OVERBOUND
-    )
-    return FrozenMcpInspectabilityFact(
-        target=target,
-        version=version,
-        descriptor_payload_fingerprint=descriptor_payload_fingerprint,
-        mcp_execution_policy_fingerprint=mcp_execution_policy_fingerprint,
-        effect_kind=effect_kind,
-        conservative_logical_utf8_bytes=conservative_logical_utf8_bytes,
-        disposition=disposition,
-    )
 
 
-@dataclass(frozen=True, slots=True)
-class McpProviderNameCollisionMember:
-    server_id: str
-    remote_tool_name: str
-    discovered_tool_identity: str
-
-    def __post_init__(self) -> None:
-        if not all(
-            (self.server_id, self.remote_tool_name, self.discovered_tool_identity)
-        ):
-            raise ValueError("MCP provider-name collision member is incomplete")
 
 
-@dataclass(frozen=True, slots=True)
-class McpProviderNameCollisionFact:
-    provider_name: str
-    members: tuple[McpProviderNameCollisionMember, ...]
-
-    def __post_init__(self) -> None:
-        if not self.provider_name:
-            raise ValueError("MCP provider-name collision is unnamed")
-        keys = tuple(
-            (item.server_id, item.remote_tool_name, item.discovered_tool_identity)
-            for item in self.members
-        )
-        targets = tuple((item.server_id, item.remote_tool_name) for item in self.members)
-        if (
-            len(self.members) < 2
-            or keys != tuple(sorted(keys))
-            or len(targets) != len(set(targets))
-        ):
-            raise ValueError("MCP provider-name collision members are invalid")
 
 
 @dataclass(frozen=True, slots=True)
 class FrozenMcpCapabilityProjectionInput:
     conversation_scope_kind: ModelInputScopeKind
     source_snapshots: tuple[FrozenCapabilitySourceSnapshot, ...] = field(repr=False)
-    catalog_semantic_fingerprint: str
-    inspectability_facts: tuple[FrozenMcpInspectabilityFact, ...]
-    provider_name_collision_facts: tuple[McpProviderNameCollisionFact, ...] = ()
-
     def __post_init__(self) -> None:
         _validate_scope(self.conversation_scope_kind)
         source_ids = tuple(
@@ -979,36 +800,6 @@ class FrozenMcpCapabilityProjectionInput:
             for item in self.source_snapshots
         ):
             raise ValueError("MCP source snapshot scope or kind conflicts")
-        inspect_keys = tuple(
-            (item.target.server_id, item.target.remote_tool_name)
-            for item in self.inspectability_facts
-        )
-        if inspect_keys != tuple(sorted(inspect_keys)) or len(inspect_keys) != len(
-            set(inspect_keys)
-        ):
-            raise ValueError("MCP inspectability facts are not sorted and unique")
-        collision_names = tuple(
-            item.provider_name for item in self.provider_name_collision_facts
-        )
-        if collision_names != tuple(sorted(collision_names)) or len(
-            collision_names
-        ) != len(set(collision_names)):
-            raise ValueError("MCP provider-name collision facts are not sorted and unique")
-        collided_targets = {
-            (member.server_id, member.remote_tool_name)
-            for fact in self.provider_name_collision_facts
-            for member in fact.members
-        }
-        if collided_targets & set(inspect_keys):
-            raise ValueError("collided MCP tool has an inspectability route")
-        source_tool_targets = {
-            (fact.identity.source.stable_source_id, fact.identity.stable_name)
-            for snapshot in self.source_snapshots
-            for fact in snapshot.facts
-            if isinstance(fact, FrozenToolCapabilityFact)
-        }
-        if collided_targets & source_tool_targets:
-            raise ValueError("collided MCP tool was published as a source fact")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1052,7 +843,6 @@ class InstalledCapabilityEpochPredecessor:
     continuity_epoch_nonce: str
     tool_surface: FrozenModelToolSurface
     direct_projection_set: FrozenNativeToolProjectionSet
-    mcp_route_projection: FrozenMcpRouteProjection
 
     def __post_init__(self) -> None:
         if self.expected_continuity_revision < 1 or not self.continuity_epoch_nonce:
@@ -1162,17 +952,12 @@ class FrozenToolCapabilityExposureSelection:
     dispatch_view: FrozenToolCapabilityDispatchView = field(repr=False)
     direct_tool_surface: FrozenModelToolSurface
     direct_tool_versions: tuple[ToolCapabilityVersionRef, ...]
-    mcp_catalog_route_projection: FrozenMcpRouteProjection
     reusable_direct_projection_set: FrozenNativeToolProjectionSet | None = field(
         default=None, repr=False
     )
 
     def __post_init__(self) -> None:
         native = self.dispatch_view.planning_input.native_wire
-        if not self.mcp_catalog_route_projection.native_meta_identities <= {
-            item.identity for item in self.direct_tool_versions
-        }:
-            raise ValueError("native meta choices escaped the installed cohort")
         _validate_scope(native.conversation_scope_kind)
         if (
             self.direct_tool_surface.conversation_scope_kind
@@ -1212,17 +997,6 @@ class FrozenToolCapabilityExposurePlan:
             is not self.direct_projection_set.conversation_scope_kind
         ):
             raise ValueError("capability exposure plan scopes conflict")
-        native_by_name = {item.name: item for item in self.direct_tool_surface.tool_specs}
-        direct_versions = set(self.direct_projection_set.tool_versions)
-        if any(
-            (
-                route.route is ToolCapabilityRouteKind.DIRECT
-                and route.version not in direct_versions
-                and (route.native_spec is None or route.native_spec != native_by_name.get(route.version.provider_name))
-            )
-            for route in self.selection.mcp_catalog_route_projection.routes
-        ):
-            raise ValueError("MCP route conflicts with the selected native cohort")
 
     @property
     def dispatch_view(self) -> FrozenToolCapabilityDispatchView:
@@ -1232,39 +1006,8 @@ class FrozenToolCapabilityExposurePlan:
     def direct_tool_surface(self) -> FrozenModelToolSurface:
         return self.selection.direct_tool_surface
 
-    @property
-    def mcp_catalog_route_projection(self) -> FrozenMcpRouteProjection:
-        return self.selection.mcp_catalog_route_projection
 
 
-@dataclass(frozen=True, slots=True)
-class PreparedUnavailableDirectMcpGate:
-    capability_identity: CapabilityIdentity
-    tool_semantic_fingerprint: str
-    provider_tool_name: str
-    unavailable_reason_code: str
-    target: McpToolCapabilityRef
-    supervisor_authority_identity: object = field(repr=False, compare=False)
-
-    @property
-    def tool_name(self) -> str:
-        return self.provider_tool_name
-
-    @property
-    def descriptor_fingerprint(self) -> str:
-        return self.tool_semantic_fingerprint
-
-    @property
-    def executor_binding_fingerprint(self) -> str:
-        return context_fingerprint(
-            "unavailable-direct-mcp-gate:v1",
-            {
-                "identity": capability_identity_digest(self.capability_identity),
-                "semantic": self.tool_semantic_fingerprint,
-                "provider_name": self.provider_tool_name,
-                "reason": self.unavailable_reason_code,
-            },
-        )
 
 
 def frozen_tool_spec_fingerprint(spec: FrozenToolSpec) -> str:

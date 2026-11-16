@@ -2,7 +2,7 @@
 
 日期：2026-11-12。
 
-状态：各工具族的逐项合同讨论已完成，包含 read_file 原生 NEXT 续读与 write_file 完整结果导出，已定合同未实施。本文件记录已确定的参数、业务返回值、原生交付形状及 Code Mode 用法，也作为后续 bundled skill 的教程底稿。本轮只写文档，不修改工具、数据库、SDK、提示词或 bundled skill。
+状态：各工具族的当前合同已接入生产代码，包含 read_file 原生 NEXT 续读与 write_file 完整结果导出，已完成 hardcut 跨层及真实 provider 验收；正常应用尚未重启，完成范围见实施计划。本文件记录已确定的参数、业务返回值、原生交付形状及 Code Mode 用法，也作为后续 bundled skill 的教程底稿。工具、数据库、SDK、提示词和 bundled skill 使用同一当前合同。
 
 ## 1. 范围与阅读方式
 
@@ -73,7 +73,7 @@
 
 `write_file` 的 tool_result_target 分支与 content 二选一，按完整 SESSION_ENTRY 结果 Target 导出全部保存内容，与模型已读页数无关；原生与 ROOT JS 共用参数、返回值和错误语义，详见[文件工具草案第 2 章](native_tools/filesystem.md#2-write_file创建文本或导出完整工具结果)。`read_file` 的 NEXT 分支仅原生，唯一 target 参数原样传递运行时返回的 NEXT，不公开内部定位；每次交付原冻结结果的一页，tool_result 指向原完整结果，next 指原结果再下一页，详见[第 1.10 节](native_tools/filesystem.md#110-next-target仅原生续读冻结结果)。JS 的 tools.read_file 只接受 PATH。
 
-实施先按[有序内容统一存储 hardcut](PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md#10-数据库优先与停用期间的分步实施)落实数据库结构与存储基础，允许停用 Pulsara 后先重建新库，再按已确定的各工具合同逐步接通并验收消费者。合同讨论完成不表示生产代码或存储已经实施。
+实施先按[有序内容统一存储 hardcut](PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md#10-数据库优先与停用期间的分步实施)落实数据库结构与存储基础，允许停用 Pulsara 后先重建新库，再按已确定的各工具合同逐步接通并验收消费者。已接通路径的聚焦验证记录与完整产品验收状态见实施计划。
 
 本文件与[统一工具结果交付与分页草案](PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)配合使用：该草案定义完整保存、原生 12k 分页、JS 完整返回及 Cell 图文 steer；本文件细化工具本身的合同。这里已明确的工具参数、字段、meta/content 形状及状态表达，以本文件为准。
 

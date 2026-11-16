@@ -622,8 +622,8 @@ async def test_plugin_mcp_scope_is_reviewed_at_enable_and_configured_after_insta
     review = connection_review(initial.mcp_connection_overlays, connections.settings.read().mcp_secret,
                               servers=summary.mcp.mcp_servers, identity=edit.identity)
     assert len(review) == 1
-    assert review[0].overlay.scope_policy is McpScopePolicy.ROOT_ONLY
-    selected = replace(edit.overlay, scope_policy=McpScopePolicy.ROOT_AND_SUBAGENTS)
+    assert review[0].overlay.scope_policy is McpScopePolicy.ROOT_AND_SUBAGENTS
+    selected = replace(edit.overlay, scope_policy=McpScopePolicy.ROOT_ONLY)
     await service.replace_plugin_mcp_connection_overlay(replace(edit, overlay=selected), connections=connections)
     state = store.read_state(layout)
     current = connection_review(state.mcp_connection_overlays, connections.settings.read().mcp_secret,
@@ -637,15 +637,15 @@ async def test_plugin_mcp_scope_is_reviewed_at_enable_and_configured_after_insta
     config = materialize_plugin_mcp_definition(identity=edit.identity, state=state,
         server=summary.mcp.mcp_servers[0], package_root=layout.plugin_package_parent / state.current_package_install_id,
         data_root=layout.data_root, secret_resolver=connections.settings.read().mcp_secret)
-    assert config.scope_policy is McpScopePolicy.ROOT_AND_SUBAGENTS
-    revised = replace(selected, scope_policy=McpScopePolicy.ROOT_ONLY)
+    assert config.scope_policy is McpScopePolicy.ROOT_ONLY
+    revised = replace(selected, scope_policy=McpScopePolicy.ROOT_AND_SUBAGENTS)
     await service.replace_plugin_mcp_connection_overlay(replace(edit, expected_overlay=selected, overlay=revised,
         secret_changes=()), connections=connections)
     state = store.read_state(layout)
     config = materialize_plugin_mcp_definition(identity=edit.identity, state=state,
         server=summary.mcp.mcp_servers[0], package_root=layout.plugin_package_parent / state.current_package_install_id,
         data_root=layout.data_root, secret_resolver=connections.settings.read().mcp_secret)
-    assert config.scope_policy is McpScopePolicy.ROOT_ONLY
+    assert config.scope_policy is McpScopePolicy.ROOT_AND_SUBAGENTS
     observed.close()
     await connections.aclose()
 

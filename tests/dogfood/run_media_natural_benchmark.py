@@ -1,7 +1,7 @@
 """Natural-footage visual QA using production frame tools and real vision.
 
 Questions/checkpoints come from independently inspected source frames. Source
-continuations are fully drained using the production selection/render pipeline;
+selection is fully rendered using the production pipeline;
 only those pictures reach the sealed-tool vision probe. A separate native-tool
 run verifies the full Host path. No alternate layout/selector is injected.
 """
@@ -43,7 +43,7 @@ from tests.dogfood.run_model_switch_handover_dogfood import (
     _find_connection,
 )
 from tests.dogfood.run_tool_output_pagination_dogfood import _trace
-from tests.dogfood.run_media_visual_benchmark import collect_overview_pages
+from tests.dogfood.run_media_visual_benchmark import collect_overview_evidence
 from tests.support.postgres_database import (
     admin_root_dsn,
     create_migrated_postgres_test_database,
@@ -188,7 +188,7 @@ def prepare(workspace, category, case):
     begin = monotonic()
     with MediaSource.open((ROOT / case["path"]).resolve()) as source:
         info = probe_media(source)
-        images, index, pages = collect_overview_pages(
+        images, index, batches = collect_overview_evidence(
             source, info, start=case["from"], end=case["to"], budget=BUDGET
         )
     elapsed = monotonic() - begin
@@ -197,7 +197,7 @@ def prepare(workspace, category, case):
         path = workspace / f"{category}-production_overview-{i + 1}.jpg"
         path.write_bytes(image.data)
         paths.append(str(path))
-    return images, index, pages, paths, elapsed
+    return images, index, batches, paths, elapsed
 
 
 def decoded(answer):
@@ -288,12 +288,18 @@ async def run(args):
     core = None
     report = {
         "latency_definition": "Preparation includes source open/probe, production sampling/layout/encoding; end_to_end adds the complete model call. Shared catalog/runtime startup and artifact file writes are excluded. One run per source; no population latency claim.",
-        "output_budget": "Native tasks use the ordinary Host/provider budget." if args.native_only else "Each fixed-picture probe uses the same 1024 total output-token allocation, including model reasoning. A response hitting this boundary is retained as incomplete and not rerun.",
+        "output_budget": "Native tasks use the ordinary Host/provider budget."
+        if args.native_only
+        else "Each fixed-picture probe uses the same 1024 total output-token allocation, including model reasoning. A response hitting this boundary is retained as incomplete and not rerun.",
         "model": args.model,
-        "pipeline": "natural_host" if args.native_only else "production_overview_and_natural_host",
+        "pipeline": "natural_host"
+        if args.native_only
+        else "production_overview_and_natural_host",
         "scope": "Natural Host questions on the selected sources; optional fixed-picture overview probes. Action/narrative use existing regressions.",
         "sources": CASES,
-        "budget": None if args.native_only else {
+        "budget": None
+        if args.native_only
+        else {
             "maximum_images": 1,
             "image_pixels": BUDGET.image_pixels,
             "scope": "per accepted source page in the fixed-picture probes; native Host uses its ordinary provider budget",
@@ -301,8 +307,12 @@ async def run(args):
         },
         "runs": [],
         "native_tool_runs": [],
-        "excluded_host_trial": None if args.native_only else "natural-visual-host-observation.json records normal Host investigation using additional local image/terminal evidence, interrupted before user clarification. It is distinguished by evidence source, not treated as product failure or restarted. All fixed-picture probes below have tools omitted and no dispatcher.",
-        "method": "Natural user questions run through production Host; the model chooses its tools and ranges. Checkpoint truth comes from independently inspected source frames." if args.native_only else "Production read_video_frames prepares the fixed overview and every accepted page is collected by copying its complete next call. No selector or layout substitution. The picture probe bundles those pages; native Host tools are separately verified. Ground-truth checkpoint images were inspected independently.",
+        "excluded_host_trial": None
+        if args.native_only
+        else "natural-visual-host-observation.json records normal Host investigation using additional local image/terminal evidence, interrupted before user clarification. It is distinguished by evidence source, not treated as product failure or restarted. All fixed-picture probes below have tools omitted and no dispatcher.",
+        "method": "Natural user questions run through production Host; the model chooses its tools and ranges. Checkpoint truth comes from independently inspected source frames."
+        if args.native_only
+        else "The production selection and rendering owners prepare the complete fixed overview in physical working batches. The picture probe bundles those images; native Host tools are separately verified. Ground-truth checkpoint images were inspected independently.",
     }
 
     def save():
@@ -347,12 +357,12 @@ async def run(args):
         )
         for category, case in CASES.items():
             if not args.native_only:
-                images, index, pages, paths, preparation = await asyncio.to_thread(
+                images, index, batches, paths, preparation = await asyncio.to_thread(
                     prepare, workspace, category, case
                 )
                 prompt = (
                     case["question"]
-                    + " Do not use tools for this question; inspect only the supplied sampled pictures. Pages can be in coverage-priority order; use actual source timestamps for temporal comparisons. Printed frame numbers are local to source_page. Frame indices: "
+                    + " Do not use tools for this question; inspect only the supplied sampled pictures. Images follow source-time order; use actual source timestamps for temporal comparisons. Printed frame numbers are local to each image. Frame indices: "
                     + json.dumps(index)
                 )
                 begin = monotonic()
@@ -369,7 +379,7 @@ async def run(args):
                     "tool_execution_owner_present": False,
                     "index": index,
                     "images": paths,
-                    "source_pages": pages,
+                    "render_batches": batches,
                     "preparation_seconds": preparation,
                     "host_seconds": host_seconds,
                     "end_to_end_seconds": preparation + host_seconds,
@@ -478,7 +488,11 @@ async def run(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--native-only", action="store_true", help="Run only natural Host tasks, without fixed-picture probes.")
+    parser.add_argument(
+        "--native-only",
+        action="store_true",
+        help="Run only natural Host tasks, without fixed-picture probes.",
+    )
     parser.add_argument("--model", default="qwen3.8-flash")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()

@@ -164,6 +164,9 @@
     ],
     "enforce_queue_material_metadata()": [
       "EXECUTE"
+    ],
+    "seal_native_tool_projection()": [
+      "EXECUTE"
     ]
   },
   "forbidden_runtime_grants": [
@@ -176,6 +179,14 @@
         "UPDATE"
       ],
       "queue_item_id": [
+        "UPDATE"
+      ]
+    },
+    "tool_results": {
+      "source_result_entry_id": [
+        "UPDATE"
+      ],
+      "native_projection": [
         "UPDATE"
       ]
     }

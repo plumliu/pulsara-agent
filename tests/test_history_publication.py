@@ -74,7 +74,7 @@ def _append(repo, guard, owner, text, *, complete=False):
     entry_id = identity("entry")
     repo.commit_assistant_message(
         guard, cut=cut, entry_id=entry_id,
-        parent_content=InlineContent.from_bytes(b"manifest"),
+
         blocks=(AssistantTextBlock(identity("block"), InlineContent.from_bytes(text.encode())),),
         complete_turn=complete, occurred_at=datetime.now(timezone.utc),
         actor_id="model:publication-test", deadline_monotonic=_deadline(),

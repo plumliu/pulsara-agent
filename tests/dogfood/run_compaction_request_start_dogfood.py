@@ -79,7 +79,6 @@ def _seed_history(session, *, segments=5, repetitions=300):
             deadline_monotonic=monotonic() + 30)
         text = f"SOURCE_{index}_FINAL: completed; next step is to continue the current exact request."
         repository.commit_assistant_message(guard, cut=cut, entry_id=random_id("entry"),
-            parent_content=InlineContent.from_bytes(text.encode()),
             blocks=(AssistantTextBlock(block_id=random_id("block"), text=InlineContent.from_bytes(text.encode())),),
             complete_turn=True, occurred_at=datetime.now(timezone.utc),
             actor_id="compaction-dogfood-fixture", deadline_monotonic=monotonic() + 30)

@@ -762,7 +762,6 @@ class RendererBridge:
             "command_id",
             "command_kind",
             "client_submission_id",
-            "plan_reason",
             "target_turn_id",
             "target_queue_item_id",
             "requested_permission_mode",
@@ -830,7 +829,6 @@ class RendererBridge:
                     else command_id,
                 )
             ),
-            plan_reason=str(body.get("plan_reason", "")),
             target_turn_id=str(body.get("target_turn_id", "")),
             target_queue_item_id=str(body.get("target_queue_item_id", "")),
             requested_permission_mode=permission,

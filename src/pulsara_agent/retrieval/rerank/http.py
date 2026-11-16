@@ -1,7 +1,6 @@
 """The two ordinary rerank request shapes using the provider SDK."""
 
 import asyncio
-import json
 import math
 
 from pulsara_agent.llm.adapters.openai.client import (
@@ -20,8 +19,7 @@ MAXIMUM_RERANK_RESPONSE_BYTES = 256 * 1024
 class HttpRerankProvider:
     def __init__(self, connection, *, config=RerankBackendConfig(), semaphore=None):
         if (
-            connection.shape
-            not in {"flat_rerank", "nested_rerank"}
+            connection.shape not in {"flat_rerank", "nested_rerank"}
             or not connection.complete
         ):
             raise ValueError("rerank configuration is invalid")
@@ -39,8 +37,6 @@ class HttpRerankProvider:
         documents = tuple(documents)
         if not documents:
             return []
-        if len(documents) > 20:
-            raise RerankServiceError("rerank candidate count exceeds 20")
         # Call-local names also support connection tests without canonical facts.
         names = (
             tuple(candidate_ids)
@@ -59,8 +55,6 @@ class HttpRerankProvider:
             payload.update(query=query, documents=list(documents))
         elif shape == "nested_rerank":
             payload["input"] = {"query": query, "documents": list(documents)}
-        if len(json.dumps(payload, ensure_ascii=False).encode()) > 192 * 1024:
-            raise RerankServiceError("rerank request exceeds its byte bound")
         async with self._semaphore:
             await prepare_openai_sdk()
             import openai

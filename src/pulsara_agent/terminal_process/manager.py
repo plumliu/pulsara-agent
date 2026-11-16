@@ -36,8 +36,8 @@ from pulsara_agent.terminal_process.models import (
 )
 from pulsara_agent.terminal_process.output import (
     OutputSubscriber,
-    TERMINAL_HOST_RETAINED_HARD_BYTES,
-    TERMINAL_RETAINED_OUTPUT_HARD_BYTES,
+    TERMINAL_HOST_OUTPUT_MEMORY_BYTES,
+    TERMINAL_OUTPUT_MEMORY_BYTES,
     TerminalOutputOwner,
     TerminalOutputSnapshot,
 )
@@ -149,7 +149,7 @@ class ProcessRegistry:
         max_live_processes: int = 8,
         max_finished_processes: int = 32,
         finished_ttl_seconds: float = 3600.0,
-        maximum_host_retained_bytes: int = TERMINAL_HOST_RETAINED_HARD_BYTES,
+        maximum_host_retained_bytes: int = TERMINAL_HOST_OUTPUT_MEMORY_BYTES,
         completion_subscriber: TerminalCompletionSubscriber | None = None,
     ) -> None:
         self._owner_identity = random_id("terminal-owner")
@@ -445,6 +445,11 @@ class ProcessRegistry:
             attempt = self._decision_attempts.get(attempt_id)
             return None if attempt is None else attempt.state.value
 
+    def foreground_decision_was_aborted(self, attempt_id: str) -> bool:
+        with self._lock:
+            attempt = self._decision_attempts.get(attempt_id)
+            return attempt is not None and not attempt.adoption_allowed
+
     def abort_foreground_decision(self, attempt_id: str) -> bool:
         """Abort one exact Terminal invocation still deciding foreground yield."""
 
@@ -587,12 +592,18 @@ class ProcessRegistry:
         try:
             if before_spawn is not None:
                 cursor = output.capture_cursor()
-                before_spawn(TerminalResult(
-                    status=TerminalStatus.RUNNING,
-                    output="", exit_code=-1, cwd=str(cwd), process_id=process_id,
-                    output_cursor=cursor, retained_from_cursor=cursor,
-                    output_body_candidate=output.body_candidate(),
-                ))
+                before_spawn(
+                    TerminalResult(
+                        status=TerminalStatus.RUNNING,
+                        output="",
+                        exit_code=-1,
+                        cwd=str(cwd),
+                        process_id=process_id,
+                        output_cursor=cursor,
+                        retained_from_cursor=cursor,
+                        output_body_candidate=output.body_candidate(),
+                    )
+                )
             if scope is not None:
                 scope.prepare()
                 env = scope.environment(env)
@@ -826,7 +837,7 @@ class ProcessRegistry:
                     subscriber(
                         _info(state),
                         state.output.snapshot(
-                            maximum_chars=TERMINAL_RETAINED_OUTPUT_HARD_BYTES
+                            maximum_chars=TERMINAL_OUTPUT_MEMORY_BYTES
                         ),
                     )
                 except Exception:
@@ -860,7 +871,6 @@ class ProcessRegistry:
     ) -> TerminalOutputOwner:
         with self._owned(process_id, owner_host_session_id) as state:
             return state.output
-
 
     def poll(
         self,
@@ -905,6 +915,7 @@ class ProcessRegistry:
         max_output_chars: int,
         owner_host_session_id: str,
         before_effect: Callable[[TerminalResult], None] | None = None,
+        since_cursor: str | None = None,
     ) -> TerminalResult:
         with self._owned(process_id, owner_host_session_id) as state:
             if (
@@ -925,10 +936,13 @@ class ProcessRegistry:
             # Reuse the same physical boundary as initial yield/wait. Output or PTY
             # echo does not establish that an interactive response is complete.
             state.physical_completion.wait(yield_time_ms / 1000)
-            return _snapshot(state, max_output_chars, since_cursor=before_write)
+            return _snapshot(state, max_output_chars, since_cursor=since_cursor)
 
     def close_stdin(
-        self, process_id: str, *, owner_host_session_id: str,
+        self,
+        process_id: str,
+        *,
+        owner_host_session_id: str,
         before_effect: Callable[[TerminalResult], None] | None = None,
     ) -> TerminalResult:
         with self._owned(process_id, owner_host_session_id) as state:
@@ -958,7 +972,10 @@ class ProcessRegistry:
             return _lifecycle_result(state)
 
     def kill(
-        self, process_id: str, *, owner_host_session_id: str,
+        self,
+        process_id: str,
+        *,
+        owner_host_session_id: str,
         before_effect: Callable[[TerminalResult], None] | None = None,
     ) -> TerminalResult:
         termination = self.terminate_if_running(
@@ -986,7 +1003,8 @@ class ProcessRegistry:
                 before_effect(_lifecycle_result(state))
             with state.lock:
                 already_terminal = (
-                    state.final_status is not None and state.physical_completion.is_set()
+                    state.final_status is not None
+                    and state.physical_completion.is_set()
                 )
             if already_terminal:
                 return TerminalTerminationResult(
@@ -1011,7 +1029,9 @@ class ProcessRegistry:
             elif joined:
                 disposition = TerminalTerminationDisposition.TERMINATION_COMPLETED
             else:
-                disposition = TerminalTerminationDisposition.PHYSICAL_SETTLEMENT_INCOMPLETE
+                disposition = (
+                    TerminalTerminationDisposition.PHYSICAL_SETTLEMENT_INCOMPLETE
+                )
             return TerminalTerminationResult(
                 disposition,
                 _lifecycle_result(state),
@@ -1071,14 +1091,16 @@ class ProcessRegistry:
     ) -> tuple[TerminalProcessInfo, ...]:
         """Freeze running public process facts without reading retained output."""
 
-        return tuple(sorted(
-            self.list_processes(
-                owner_host_session_id=owner_host_session_id,
-                include_finished=False,
-                include_running=True,
-            ),
-            key=lambda item: item.process_id,
-        ))
+        return tuple(
+            sorted(
+                self.list_processes(
+                    owner_host_session_id=owner_host_session_id,
+                    include_finished=False,
+                    include_running=True,
+                ),
+                key=lambda item: item.process_id,
+            )
+        )
 
     def log(
         self,
@@ -1107,7 +1129,6 @@ class ProcessRegistry:
                 truncated_by_response_bound=snapshot.truncated_by_response_bound,
                 source_coverage=snapshot.source_coverage,
             )
-
 
     def live_count(self, *, owner_host_session_id: str) -> int:
         with self._lock:
@@ -1337,10 +1358,14 @@ class ProcessRegistry:
                     self._prune()
                 finally:
                     self._launch_condition.acquire()
-                if not self._closed and not self._retirement_stopping and any(
-                    state.ended_at is not None
-                    and state.ended_at + self.finished_ttl_seconds <= monotonic()
-                    for state in self._states.values()
+                if (
+                    not self._closed
+                    and not self._retirement_stopping
+                    and any(
+                        state.ended_at is not None
+                        and state.ended_at + self.finished_ttl_seconds <= monotonic()
+                        for state in self._states.values()
+                    )
                 ):
                     # An output lease/read or incomplete physical join blocked
                     # expiry. This is maintenance frequency, never a lifetime cap.
@@ -1451,8 +1476,7 @@ class ProcessRegistry:
         for _order, state in (*finished, *live):
             if excess <= 0:
                 break
-            current = state.output.retained_utf8_bytes
-            removed = state.output.evict_oldest_to(max(0, current - excess))
+            removed = state.output.spill_to_disk()
             excess -= removed
         if excess > 0:
             raise RuntimeError(
@@ -1523,7 +1547,12 @@ class TerminalManager:
 
         def read_initial_result(state: _ProcessState) -> None:
             nonlocal initial_result
-            initial_result = _snapshot(state, request.max_output_chars)
+            initial_result = replace(
+                _snapshot(state, request.max_output_chars),
+                cancelled=self.process_registry.foreground_decision_was_aborted(
+                    attempt_id
+                ),
+            )
 
         while True:
             attempt_id = decision_attempt_id or random_id("terminal-decision")
@@ -1594,6 +1623,20 @@ class TerminalManager:
 
     def log_process(self, process_id: str, **kwargs):
         return self.process_registry.log(process_id, **kwargs)
+
+    def model_observation_cursor(self, process_id, *, owner_host_session_id):
+        return self.process_registry.output_owner(
+            process_id, owner_host_session_id=owner_host_session_id
+        ).observation_cursor()
+
+    def accept_model_observation(self, process_id, cursor, *, owner_host_session_id):
+        try:
+            owner = self.process_registry.output_owner(
+                process_id, owner_host_session_id=owner_host_session_id
+            )
+        except KeyError:
+            return
+        owner.accept_observation(cursor)
 
     def poll_process(self, process_id: str, **kwargs):
         return self.process_registry.poll(process_id, **kwargs)
@@ -1875,7 +1918,7 @@ def _status(state: _ProcessState) -> TerminalStatus:
 
 def _info(state: _ProcessState) -> TerminalProcessInfo:
     state.refresh()
-    output = state.output.snapshot(maximum_chars=1)
+    output = state.output.metadata_snapshot()
     ended = state.ended_at
     status = _status(state)
     exit_code: int | None = None

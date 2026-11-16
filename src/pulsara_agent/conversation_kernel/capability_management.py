@@ -78,6 +78,7 @@ from pulsara_agent.plugins.mcp_connection import (
     plugin_connection_owner,
     overlay_from_dict,
     overlay_to_dict,
+    PluginMcpConnectionOverlay,
 )
 from pulsara_agent.process_credential_boundary import ProcessCredentialScrubSet
 from pulsara_agent.primitives.context import (
@@ -103,7 +104,11 @@ class PreparedCapabilityManagementInvocation:
     skill_validation: LocalSkillValidationOutcome | None = None
     skill_removal: LocalSkillRemovalIdentity | None = None
     hook: FrozenHookSourceSnapshot | None = None
-    scrub_set: ProcessCredentialScrubSet | None = field(default=None, repr=False, compare=False)
+    scrub_set: ProcessCredentialScrubSet | None = field(
+        default=None, repr=False, compare=False
+    )
+    native_config: bool = False
+    plugin_overlay: PluginMcpConnectionOverlay | None = None
 
 
 class CapabilityManagementPreparation:
@@ -128,30 +133,60 @@ class CapabilityManagementPreparation:
         self.workspace_kind = workspace_kind
         self.hook_review_tools = hook_review_tools
 
-    async def prepare(
-        self, arguments: Mapping[str, object]
-    ) -> PreparedCapabilityManagementInvocation:
-        intent = parse_capability_management_intent(arguments)
+    def native_fields(self, intent):
+        from pulsara_agent.conversation_kernel.capability_targets import (
+            resolve_capability_target,
+        )
+
         fields = thaw_json(intent.fields)
-        target = thaw_json(intent.target) if intent.target is not None else {}
-        if target.get("kind") == "SKILL":
-            native_scope = await asyncio.to_thread(
-                self.skills.resolve_loose_skill_scope,
+        target = thaw_json(intent.target)
+        if self.workspace_kind != "project" and target.get("config_path") in {
+            str(self.workspace_root / ".pulsara/hooks.json"),
+            str(self.workspace_root / ".pulsara/mcp.yaml"),
+        }:
+            raise ValueError("this operation requires a GUI project working directory")
+        if target["kind"] == "PATH":
+            path = Path(target["path"]).expanduser()
+            if not path.is_absolute():
+                path = self.workspace_root / path
+            fields.update(source_path=str(path.resolve()), scope=intent.scope.value)
+        elif target["kind"] == "SKILL":
+            scope = self.skills.resolve_loose_skill_scope(
                 skill_path=Path(target["skill_path"]),
                 workspace_root=self.workspace_root,
                 removal=intent.action is Action.REMOVE_LOOSE_SKILL,
             )
-            resolved_scope = CapabilityManagementScope(native_scope.value.upper())
+            fields.update(skill_path=target["skill_path"], scope=scope.value.upper())
         else:
-            resolved_scope = intent.scope or CapabilityManagementScope(target["scope"])
-        # These are native owner arguments, never a second public request/parser.
-        fields.update(
-            {
-                key: value
-                for key, value in target.items()
-                if key not in {"kind", "scope"}
-            }
+            fields.update(resolve_capability_target(self, target))
+        return fields
+
+    async def prepare(
+        self, arguments: Mapping[str, object], *, native_config: bool = False
+    ):
+        prepared = await self._prepare(arguments, native_config=native_config)
+        scrub = (
+            prepared.scrub_set or self.plugins._credential_boundary.capture_scrub_set()
         )
+        for secret in self.mcp.credential_boundary.capture_scrub_set().values:
+            scrub.observe(secret)
+        try:
+            settings = self.mcp.settings.read()
+        except (OSError, ValueError):
+            pass
+        else:
+            for credential in settings.mcp_credentials:
+                scrub.observe(credential.value)
+        return replace(prepared, native_config=native_config, scrub_set=scrub)
+
+    async def _prepare(
+        self, arguments: Mapping[str, object], *, native_config: bool = False
+    ) -> PreparedCapabilityManagementInvocation:
+        intent = parse_capability_management_intent(
+            arguments, native_config=native_config
+        )
+        fields = self.native_fields(intent)
+        resolved_scope = CapabilityManagementScope(fields.pop("scope"))
         root = (
             self.workspace_root
             if resolved_scope is CapabilityManagementScope.WORKSPACE
@@ -171,7 +206,7 @@ class CapabilityManagementPreparation:
                 Action.INSTALL_PLUGIN,
                 Action.SET_PLUGIN_ENABLED,
                 Action.REMOVE_PLUGIN,
-                Action.CONFIGURE_PLUGIN_MCP_CONNECTION,
+                Action.UPDATE_MCP_CONNECTION,
             }
         ):
             raise ValueError("this operation requires a GUI project working directory")
@@ -187,12 +222,16 @@ class CapabilityManagementPreparation:
             Action.SET_HOOK_SOURCE_ENABLED,
         }:
             return await self._hook(intent, fields, root)
-        if intent.action in {
-            Action.ADD_LOCAL_MCP,
-            Action.UPDATE_LOCAL_MCP,
-            Action.REMOVE_LOCAL_MCP,
-        }:
-            return await self._local(intent, fields, root)
+        if (
+            intent.action
+            in {
+                Action.ADD_LOCAL_MCP,
+                Action.UPDATE_MCP_CONNECTION,
+                Action.REMOVE_LOCAL_MCP,
+            }
+            and "plugin_id" not in fields
+        ):
+            return await self._local(intent, fields, root, native_config=native_config)
         if (
             intent.action in {Action.AUTHORIZE_MCP, Action.CLEAR_MCP_AUTHORIZATION}
             and "plugin_id" not in fields
@@ -235,7 +274,13 @@ class CapabilityManagementPreparation:
                 ),
             )
             if not isinstance(validation, ValidPluginValidationOutcome):
-                raise ValueError("Plugin source did not pass native package validation")
+                details = "; ".join(
+                    str(getattr(item, "message", item))
+                    for item in getattr(validation, "diagnostics", ())
+                )
+                raise ValueError(
+                    f"无法安装插件 {source}：{details or '源包无法完整读取或校验。'}"
+                )
             current = await self._plugin(
                 root, validation.summary.manifest.name, required=False
             )
@@ -319,6 +364,7 @@ class CapabilityManagementPreparation:
         prefill = intent.to_dict()
         review = ()
         process = False
+        overlay = None
         if intent.action is Action.SET_PLUGIN_ENABLED:
             process = fields["enabled"] != plugin.enabled and self._has_process(plugin)
             if fields["enabled"]:
@@ -352,19 +398,33 @@ class CapabilityManagementPreparation:
             )
             old = overlay_to_dict(old_overlay) if old_overlay is not None else None
             current = self._connection(plugin, server)
-            if intent.action is Action.CONFIGURE_PLUGIN_MCP_CONNECTION:
+            if intent.action is Action.UPDATE_MCP_CONNECTION:
                 self._exact(fields, "expected_overlay", old)
                 expected["expected_overlay"] = old
-                if "overlay" not in fields:
+                if "config" not in fields:
                     user_inputs.append("connection_configuration")
                     candidate = current
                     prefill["overlay"] = old
                     overlay = old_overlay
                 else:
+                    from .capability_management_config import plugin_config_candidate
+
                     overlay = (
-                        overlay_from_dict(fields["overlay"])
-                        if fields["overlay"] is not None
-                        else None
+                        (
+                            overlay_from_dict(fields["config"])
+                            if fields["config"] is not None
+                            else None
+                        )
+                        if native_config
+                        else plugin_config_candidate(
+                            server,
+                            current,
+                            old_overlay,
+                            fields["config"],
+                            owner=plugin_connection_owner(
+                                plugin.identity, server.local_server_id
+                            ),
+                        )
                     )
                     if (
                         overlay is not None
@@ -388,6 +448,16 @@ class CapabilityManagementPreparation:
                     candidate = self._connection(
                         replace(plugin, mcp_connection_overlays=overlays), server
                     )
+                prefill["overlay"] = (
+                    overlay_to_dict(overlay) if overlay is not None else None
+                )
+                if (
+                    not native_config
+                    and isinstance(fields.get("config"), Mapping)
+                    and fields["config"].get("auth", {}).get("type") == "static_headers"
+                    and not getattr(candidate.auth, "headers", ())
+                ):
+                    user_inputs.append("connection_configuration")
                 try:
                     _require_destination_confirmation(current, candidate, (), False)
                 except ValueError:
@@ -432,6 +502,7 @@ class CapabilityManagementPreparation:
             freeze_json(expected),
             plugin=plugin,
             plugin_connection_review=review,
+            plugin_overlay=overlay,
         )
 
     async def _skill(self, intent, fields, root):
@@ -447,7 +518,7 @@ class CapabilityManagementPreparation:
         )
         target = validation = removal = None
         if intent.action is Action.INSTALL_LOOSE_SKILL:
-            # Native publisher owns candidate overrides and exclusive publication.
+            # The publisher validates source metadata and owns exclusive publication.
             request = InstallLooseLocalSkillRequest(
                 Path(fields["source_path"]),
                 scope,
@@ -459,7 +530,13 @@ class CapabilityManagementPreparation:
                 self.skills.validate_loose_skill_install, request
             )
             if validation.disposition is not LocalSkillValidationDisposition.VALID:
-                raise ValueError("Skill source did not pass native validation")
+                details = "; ".join(
+                    str(item.to_dict().get("message", item))
+                    for item in validation.diagnostics
+                )
+                raise ValueError(
+                    f"无法安装技能 {Path(fields['source_path']) / 'SKILL.md'}：{details or '源目录或技能正文无法读取。'}"
+                )
         elif intent.action is Action.REMOVE_LOOSE_SKILL:
             removal = await asyncio.to_thread(
                 self.skills.inspect_loose_skill_removal,
@@ -677,15 +754,15 @@ class CapabilityManagementPreparation:
         )
         return value
 
-    async def _local(self, intent, fields, root):
+    async def _local(self, intent, fields, root, *, native_config=False):
         target = LocalMcpTarget(fields["server_id"], root)
         entry = fields.get("config")
-        if intent.action is not Action.REMOVE_LOCAL_MCP and entry is None:
+        if intent.action is not Action.REMOVE_LOCAL_MCP and "config" not in fields:
             async with self.mcp.lane:
                 current = await asyncio.to_thread(self.mcp.inspect, target)
                 if intent.action is Action.ADD_LOCAL_MCP and current is not None:
                     raise McpManagementConflict("MCP connection already exists")
-                if intent.action is Action.UPDATE_LOCAL_MCP and current is None:
+                if intent.action is Action.UPDATE_MCP_CONNECTION and current is None:
                     raise McpManagementConflict("MCP connection no longer exists")
                 expected = config_guard(current) if current is not None else None
                 self._exact(fields, "expected_identity", expected)
@@ -708,10 +785,34 @@ class CapabilityManagementPreparation:
                     if expected is not None
                     else freeze_json({}),
                 )
+        if intent.action is not Action.REMOVE_LOCAL_MCP:
+            if entry is None:
+                raise ValueError("独立 MCP 连接的 config 不能为 null。")
+            if not native_config:
+                from .capability_management_config import local_config_candidate
+
+                async with self.mcp.lane:
+                    current = await asyncio.to_thread(self.mcp.inspect, target)
+                    if (
+                        intent.action is Action.UPDATE_MCP_CONNECTION
+                        and current is None
+                    ):
+                        raise McpManagementConflict("MCP connection no longer exists")
+                    entry = local_config_candidate(current, entry, owner=target.owner)
+                    fields["expected_identity"] = (
+                        config_guard(current) if current else None
+                    )
         mutation = await self.mcp.prepare_mutation(
             intent.action, target, entry, expected=fields.get("expected_identity")
         )
         requirements = [f"credential:{name}" for name in mutation.missing_credentials]
+        if (
+            not native_config
+            and entry is not None
+            and entry.get("auth", {}).get("type") == "static_headers"
+            and not entry["auth"].get("headers")
+        ):
+            requirements.append("connection_configuration")
         if mutation.requires_destination_confirmation:
             requirements.append("credential_destination_confirmation")
         return PreparedCapabilityManagementInvocation(

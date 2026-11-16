@@ -3,7 +3,6 @@ from tests.support.model_config import scheduled_task_service
 from pulsara_agent.identity import derive_id
 
 from pulsara_agent.identity import random_id
-from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 
 from tests.support.model_config import frozen_test_prompt
 import asyncio
@@ -11,6 +10,7 @@ import ast
 from dataclasses import fields
 from datetime import datetime, timezone
 import json
+import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import socket
@@ -24,15 +24,7 @@ import mcp_types as types
 import pytest
 
 from pulsara_agent.conversation_kernel.contracts import HostWriterGuard
-from pulsara_agent.capability.contracts import (
-    CapabilityRouteReasonCode,
-    FrozenMcpRouteProjection,
-    FrozenMcpToolExposure,
-    McpToolCapabilityRef,
-    ToolCapabilityRouteKind,
-    ToolCapabilityVersionRef,
-    tool_capability_version_identity_digest,
-)
+
 from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
 from pulsara_agent.cli import build_parser, _mcp_command
 from pulsara_agent.conversation_kernel.interaction import (
@@ -42,7 +34,6 @@ from pulsara_agent.conversation_kernel.interaction import (
 from pulsara_agent.conversation_kernel.interaction_arbiter import (
     InteractionAdmissionHooks,
 )
-from pulsara_agent.conversation_kernel.context_sources import _render_mcp_catalog
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.conversation_kernel.live_control import SessionLiveControlOwner
@@ -53,11 +44,6 @@ from pulsara_agent.conversation_kernel.mcp.input_required import (
     McpInputRequiredFailure,
     McpInputRequiredRoundOwner,
     McpInputRequiredUnsupported,
-)
-from pulsara_agent.conversation_kernel.mcp.contracts import (
-    McpCatalogSnapshot,
-    McpServerCatalogEntry,
-    McpToolSemanticFact,
 )
 from pulsara_agent.conversation_kernel.mcp.naming import mangle_mcp_tool_names
 from pulsara_agent.conversation_kernel.mcp.sdk_facade import (
@@ -78,7 +64,6 @@ from pulsara_agent.conversation_kernel.mcp.supervisor import (
     McpPhysicalConcurrencyKind,
     McpServerState,
     McpSnapshotStale,
-    _provider_projection_from_semantics,
     _resource_uri_matches_template,
 )
 from pulsara_agent.conversation_kernel.tool_surface import McpEffectKind
@@ -112,15 +97,12 @@ from pulsara_agent.conversation_kernel.tool_policy import (
     DefaultToolDispatchAuthorizationPolicy,
 )
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
-from pulsara_agent.hooks.context import HookContextOwner
 from pulsara_agent.hooks.contracts import (
     ContextOutcome,
     ContinuationOutcome,
     FrozenHookDefinitionView,
     GateOutcome,
-    HookDispatchScopeRef,
     HookEventType,
-    HookScopeKind,
     PermissionOutcome,
 )
 from pulsara_agent.llm.adapters.openai.function_tools import (
@@ -139,7 +121,7 @@ from pulsara_agent.primitives.run_permission import (
     RunPermissionAdmissionSource,
     build_run_permission_snapshot,
 )
-from pulsara_agent.primitives.context import context_fingerprint, freeze_json, thaw_json
+from pulsara_agent.primitives.context import context_fingerprint, thaw_json
 from pulsara_agent.ports.live_agent_event import (
     TextDeltaPayload,
     TextEndPayload,
@@ -322,6 +304,43 @@ def _seal_mcp_test_port(port: DirectKernelToolPort) -> None:
     from tests.support.round3 import _UnavailableTestDecisionPort
     port.bind_decision_port(_UnavailableTestDecisionPort())
     port.seal_builtin_composition()
+
+
+async def _meta_arguments(port, borrow, provider_name, arguments):
+    from types import SimpleNamespace
+    from pulsara_agent.conversation_kernel.tool_contracts import ProcessLocalEffectSettlementDisposition
+    semantic = next(item for item in port._mcp_current.root_tool_specs
+        if item.provider_tool_name == provider_name or item.remote_tool_name == provider_name)
+    result = await port._query_capabilities_result(tool_name="query_capabilities",
+        arguments={"target": {"kind":"MCP_TOOL", "server_id":semantic.server_id,
+            "remote_tool_name":semantic.remote_tool_name}, "kind":"MCP"},
+        invocation_context=SimpleNamespace(surface_borrow=borrow, result_entry_id=random_id("entry")))
+    assert result.state == "SUCCESS", result.public_value()
+    await port.settle_process_local_effect(result.process_local_settlement,
+        ProcessLocalEffectSettlementDisposition.COMMITTED)
+    return {"target": result.public_value()["content"][0]["value"]["invocation"]["target"], "arguments": arguments}
+
+
+def _meta_scripted_model(remote_name, arguments, final_text):
+    step = 0
+    async def stream(request):
+        nonlocal step
+        step += 1
+        if step == 1:
+            events = _generic_tool_stream(block_id="query-mcp", tool_name="query_capabilities",
+                arguments={"kind":"MCP", "target":{"kind":"MCP_TOOL", "server_id":"fixture", "remote_tool_name":remote_name}})
+        elif step == 2:
+            body = join_text_content(next(message for message in reversed(request.compiled_input.messages)
+                if message.role is MessageRole.TOOL_RESULT).content)
+            token = re.search(r"mcpref:[a-z2-7]{26}", body)
+            assert token is not None, body
+            events = _generic_tool_stream(block_id="call-mcp", tool_name="call_mcp_tool",
+                arguments={"target":{"kind":"MCP_TOOL_REF", "tool_ref":token.group()}, "arguments":arguments})
+        else:
+            events = _text_stream(final_text if step == 3 else "after reconnect")
+        for event in events:
+            yield event
+    return CallbackScriptedKernelModel(stream)
 
 
 def _mcp_tool_stream(tool_name: str) -> list[object]:
@@ -742,143 +761,6 @@ def test_round9_discovery_retains_canonical_valid_wire_incompatible_mcp_tool(
     asyncio.run(exercise())
 
 
-@pytest.mark.postgres
-@pytest.mark.parametrize(
-    "inspect_tool_name",
-    ("mcp__fixture__intersecting_unions",),
-)
-def test_round9_meta_inspect_full_install_then_single_physical_use(
-    stage2_migrated_postgres_database,
-    tmp_path: Path,
-    inspect_tool_name: str,
-) -> None:
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = ConversationKernelRepository(provider)
-    session_id = derive_id("session", "test-fixture", f"session:round9-meta:{uuid4().hex}")
-    lease = acquire_bound_test_writer(
-        repository,
-        session_id=session_id,
-        workspace_id=random_id("workspace"),
-        writer_owner_id=random_id("host"),
-        lease_seconds=30,
-        deadline_monotonic=monotonic() + 30,
-    )
-
-    async def exercise() -> tuple[
-        object, CallbackScriptedKernelModel, object, _RecordingHookDispatcher
-    ]:
-        supervisor = McpHostSupervisor(
-            workspace_root=tmp_path,
-            configs=(_config(tmp_path),),
-            client_factory=_MixedSchemaFakeMcpClient,  # type: ignore[arg-type]
-        )
-        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
-            workspace_root=tmp_path,
-            host_owner_id='host:g5wosu2bcbheegwb23wgxr36s4',
-            session_id=session_id,
-            live_bus=LiveAgentEventBus(),
-            authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
-        )
-        port.bind_mcp_supervisor(supervisor)
-        _seal_mcp_test_port(port)
-        await supervisor.start()
-        await supervisor.wait_initial_readiness()
-
-        async def stream(request):
-            if request.model_call_index == 1:
-                events = _generic_tool_stream(
-                    block_id="call:inspect",
-                    tool_name="query_capabilities",
-                    arguments={"target": {"kind": "MCP_TOOL", "server_id": "fixture", "tool_name": inspect_tool_name}},
-                )
-            elif request.model_call_index == 2:
-                result = next(
-                    item
-                    for item in reversed(request.compiled_input.messages)
-                    if item.role is MessageRole.TOOL_RESULT
-                )
-                outer = json.loads(join_text_content(result.content))[
-                    "pulsara_tool_result"
-                ]
-                inspected = json.loads(outer["body"])
-                events = _generic_tool_stream(
-                    block_id="call:use-meta",
-                    tool_name="use_new_mcp_tool",
-                    arguments={'arguments': {"value": "hello"}, 'target': {"kind":"MCP_TOOL_REF", "tool_ref":inspected["invocation"]["target"]["tool_ref"]}},
-                )
-            else:
-                events = _text_stream("meta complete")
-            for event in events:
-                yield event
-
-        model = CallbackScriptedKernelModel(stream)
-        hooks = _RecordingHookDispatcher()
-        hook_context = HookContextOwner()
-        hook_scope = HookDispatchScopeRef(object(), object(), HookScopeKind.ROOT, session_id)
-        hook_context.register_scope(hook_scope)
-        runner = ConversationKernelRunner(
-            model_resolution_snapshot_provider=test_model_resolution_snapshot,
-            repository=repository,
-            writer_lease=lease,
-            model=model,
-            tools=port,
-            live_bus=LiveAgentEventBus(),
-            context_source_collector=StaticContextSourceCollector(),
-            hook_dispatcher=hooks,  # type: ignore[arg-type]
-            hook_context_owner=hook_context,
-            hook_scope=hook_scope,
-        )
-        try:
-            result = await runner.run_turn(frozen_test_prompt("inspect and invoke the new MCP tool"))
-            client = _MixedSchemaFakeMcpClient.instances[-1]
-            return result, model, client.session, hooks
-        finally:
-            supervisor.stop_admission()
-            close = asyncio.create_task(supervisor.aclose())
-            await port.aclose(timeout_seconds=5)
-            await close
-
-    result, model, session, hooks = asyncio.run(exercise())
-    assert result.final_text == "meta complete"
-    assert result.tool_call_count == 2
-    assert len(model.requests) == 3
-    assert session.call_count == 1
-    resolved_hook_calls = [
-        (wire, subject)
-        for wire, subject in hooks.calls
-        if wire.get("tool_use_id") == "call:use-meta" and wire.get("tool_name") == "mcp__fixture__intersecting_unions"
-    ]
-    assert len(resolved_hook_calls) == 2
-    assert [wire["hook_event_name"] for wire, _subject in resolved_hook_calls] == [
-        "PreToolUse",
-        "PostToolUse",
-    ]
-    assert all(
-        wire["tool_name"] == "mcp__fixture__intersecting_unions"
-        and wire["tool_use_id"] == "call:use-meta"
-        and wire["tool_input"] == {"value": "hello"}
-        for wire, _subject in resolved_hook_calls
-    )
-    assert all(
-        subject.canonical_subject == "mcp__fixture__intersecting_unions"
-        and subject.aliases == ()
-        for _wire, subject in resolved_hook_calls
-    )
-    assert all(wire.get("tool_name") != "use_new_mcp_tool" for wire, _ in hooks.calls)
-    assert [
-        row["entry_kind"]
-        for row in repository.rehydrate_session(
-            session_id=session_id,
-            deadline_monotonic=monotonic() + 30,
-        )
-    ] == [
-        "USER_MESSAGE",
-        "ASSISTANT_TOOL_REQUEST",
-        "TOOL_RESULT",
-        "ASSISTANT_TOOL_REQUEST",
-        "TOOL_RESULT",
-        "ASSISTANT_MESSAGE",
-    ]
 
 
 def test_round6_host_discovery_reservation_covers_client_open(
@@ -942,7 +824,7 @@ def test_round6_long_remote_tool_name_has_bounded_settleable_identity(
                 for item in runtime.root_tool_specs
                 if item.remote_tool_name == _LongNameFakeMcpSession.remote_name
             )
-            executor = runtime.executors[semantic.provider_tool_name]
+            executor = runtime.executors[(semantic.server_id, semantic.remote_tool_name)]
             permit = executor.admit(
                 session_id='session:5z3uyfooohbmggby3l6ije7mzy',
                 scope_kind=ModelInputScopeKind.ROOT,
@@ -982,9 +864,8 @@ def test_round6_long_remote_tool_name_has_bounded_settleable_identity(
     asyncio.run(exercise())
 
 
-@pytest.mark.parametrize("template_target", [False, True])
 def test_round6_advertised_resource_template_instance_is_readable(
-    tmp_path: Path, template_target: bool,
+    tmp_path: Path,
 ) -> None:
     async def exercise() -> None:
         supervisor = McpHostSupervisor(
@@ -997,8 +878,6 @@ def test_round6_advertised_resource_template_instance_is_readable(
         runtime = supervisor.install_pending_at_safe_point()
         assert runtime is not None
         arguments = {'target': {"kind":'MCP_RESOURCE', "server_id":"fixture", 'uri':"fixture://round6/users/alice"}}
-        if template_target:
-            arguments = {"target": {"kind": "MCP_RESOURCE_TEMPLATE", "server_id": "fixture", "uri_template": "fixture://round6/users/{name}"}, "uri": "fixture://round6/users/alice"}
         try:
             for bad in (
                 {"target": {"kind": "MCP_RESOURCE_TEMPLATE", "server_id": "fixture", "uri_template": "fixture://unobserved/{name}"}, "uri": "fixture://round6/users/alice"},
@@ -1049,7 +928,7 @@ async def _parallel_probe(runtime, *, session_id: str) -> tuple[bytes, bytes]:
         for item in runtime.root_tool_specs
         if item.remote_tool_name == "fixture_parallel_probe"
     )
-    executor = runtime.executors[semantic.provider_tool_name]
+    executor = runtime.executors[(semantic.server_id, semantic.remote_tool_name)]
     permits = tuple(
         executor.admit(
             session_id=session_id,
@@ -1529,7 +1408,7 @@ def test_round6_stdio_discovery_direct_tool_resource_and_prompt(tmp_path: Path) 
                 for item in runtime.root_tool_specs
                 if item.remote_tool_name == "fixture_echo"
             )
-            executor = runtime.executors[echo.provider_tool_name]
+            executor = runtime.executors[(echo.server_id, echo.remote_tool_name)]
             permit = executor.admit(
                 session_id='session:qcxkhtntcrrxggj2dfjkj7xdjy',
                 scope_kind=ModelInputScopeKind.ROOT,
@@ -1621,7 +1500,7 @@ def test_round6_stdio_legacy_initialize_normalizes_implicit_complete(
             assert runtime.candidates["legacy"].discovery_snapshot.prompts == ()
             (echo,) = runtime.root_tool_specs
             assert echo.remote_tool_name == "legacy_echo"
-            executor = runtime.executors[echo.provider_tool_name]
+            executor = runtime.executors[(echo.server_id, echo.remote_tool_name)]
             permit = executor.admit(
                 session_id='session:tqomikq3fcgadm6sdh7zbbtgda',
                 scope_kind=ModelInputScopeKind.ROOT,
@@ -2036,87 +1915,6 @@ def test_round9_late_mcp_discovery_is_visible_without_surface_publication(
     asyncio.run(exercise())
 
 
-def test_round9_mcp_catalog_variants_are_bounded_closed_degradations() -> None:
-    catalog = McpCatalogSnapshot(
-        owner_epoch="epoch:aaaaaaaaaaaaaaaaaaaaaaaaaa",
-        catalog_revision=1,
-        servers=(
-            McpServerCatalogEntry(
-                runtime_source=LocalConfiguredMcpRuntimeSource(),
-                server_id="fixture",
-                display_name="Fixture",
-                status=McpServerState.READY,
-                exposed_tool_count=1,
-                discovered_tool_count=1,
-                resource_count=1,
-                resource_template_count=0,
-                prompt_count=1,
-                bounded_tool_name_overview=("fixture_echo",),
-                sanitized_instructions="bounded fixture instructions",
-                stable_failure_category=None,
-                tool_surface_semantic_fingerprint="sha256:" + "1" * 64,
-                catalog_semantic_fingerprint="sha256:" + "2" * 64,
-                scope_subagents=False,
-            ),
-        ),
-        semantic_fingerprint="sha256:" + "3" * 64,
-        presentation_fingerprint="sha256:" + "4" * 64,
-    )
-
-    from pulsara_agent.capability.contracts import (
-        CapabilityKind, CapabilitySourceKind, capability_identity, capability_source_ref,
-    )
-
-    version = ToolCapabilityVersionRef(
-        identity=capability_identity(
-            kind=CapabilityKind.TOOL,
-            source=capability_source_ref(CapabilitySourceKind.MCP_SERVER, "fixture"),
-            stable_name="fixture_echo",
-        ),
-        semantic_fingerprint="sha256:" + "6" * 64,
-        provider_name="mcp__fixture__fixture_echo",
-    )
-    route_payload = {
-        "server_id": "fixture",
-        "remote_tool_name": "fixture_echo",
-        "version": tool_capability_version_identity_digest(version),
-        "route": ToolCapabilityRouteKind.NEW_MCP_META_ONLY.value,
-        "reason": CapabilityRouteReasonCode.NEW_NOT_IN_NATIVE_SURFACE.value,
-    }
-    route = FrozenMcpToolExposure(
-        target=McpToolCapabilityRef("fixture", "fixture_echo"),
-        version=version,
-        route=ToolCapabilityRouteKind.NEW_MCP_META_ONLY,
-        public_reason_code=CapabilityRouteReasonCode.NEW_NOT_IN_NATIVE_SURFACE,
-        route_fingerprint=context_fingerprint(
-            "mcp-tool-exposure-route:v1", route_payload
-        ),
-    )
-    routes = FrozenMcpRouteProjection(
-        routes=(route,),
-        joined_catalog_semantic_fingerprint=catalog.semantic_fingerprint,
-        projection_fingerprint=context_fingerprint(
-            "mcp-route-projection:v1",
-            {
-                "routes": (route.route_fingerprint,),
-                "catalog": catalog.semantic_fingerprint,
-            },
-        ),
-    )
-    from tests.test_round9_unified_capability_semantics import _source_snapshot
-
-    full, compact, reference = _render_mcp_catalog(catalog, routes, (
-        _source_snapshot(source_kind=CapabilitySourceKind.MCP_SERVER, source_id="fixture", facts=()),
-    ))
-    full_payload = json.loads(full)
-
-    assert len(reference.encode("utf-8")) <= len(compact.encode("utf-8"))
-    assert len(compact.encode("utf-8")) <= len(full.encode("utf-8"))
-    assert "read_more" not in reference
-    assert "bounded fixture instructions" not in full
-    assert full_payload["servers"][0]["meta_tool_names"] == [
-        "mcp__fixture__fixture_echo"
-    ]
 
 
 def test_reload_capabilities_name_is_one_complete_hard_cut() -> None:
@@ -2185,7 +1983,7 @@ def test_round6_tool_failure_matrix_separates_exact_response_from_unknown(
         assert runtime is not None
         try:
             semantic = next(iter(runtime.root_tool_specs))
-            executor = runtime.executors[semantic.provider_tool_name]
+            executor = runtime.executors[(semantic.server_id, semantic.remote_tool_name)]
             permit = executor.admit(
                 session_id='session:jiztxctq27fn75sefs4ifbfzvq',
                 scope_kind=ModelInputScopeKind.ROOT,
@@ -2210,8 +2008,8 @@ def test_round6_tool_failure_matrix_separates_exact_response_from_unknown(
     assert output_mismatch.state == "SYSTEM_ERROR"
     assert b"MCP_OUTPUT_SCHEMA_MISMATCH" in output_mismatch.content
     assert b"private mismatch" not in output_mismatch.content
-    assert "$.count" in json.loads(output_mismatch.content)["message"]
-    assert "not-an-integer" in json.loads(output_mismatch.content)["message"]
+    assert "$.count" in output_mismatch.content.decode("utf-8")
+    assert "not-an-integer" in output_mismatch.content.decode("utf-8")
 
     monkeypatch.setattr(
         "pulsara_agent.conversation_kernel.mcp.supervisor._render_typed_result",
@@ -2220,7 +2018,7 @@ def test_round6_tool_failure_matrix_separates_exact_response_from_unknown(
     lowering_failure = asyncio.run(invoke_with(_FakeMcpClient, call_id="call:lowering"))
     assert lowering_failure.state == "SYSTEM_ERROR"
     assert b"MCP_RESULT_LOWERING_FAILED" in lowering_failure.content
-    assert json.loads(lowering_failure.content)["message"] == "ValueError: private payload"
+    assert "ValueError: private payload" in lowering_failure.content.decode("utf-8")
 
     _TransportFailureFakeMcpSession.may_have_reached_server = False
     unwritten = asyncio.run(
@@ -2234,8 +2032,8 @@ def test_round6_tool_failure_matrix_separates_exact_response_from_unknown(
         invoke_with(_TransportFailureFakeMcpClient, call_id="call:unknown")
     )
     assert unknown.state == "SYSTEM_ERROR"
-    assert json.loads(unknown.content)["remote_outcome"] == "UNKNOWN"
-    assert json.loads(unknown.content)["retry_performed"] is False
+    assert "结果未确认" in unknown.content.decode("utf-8")
+    assert "未自动重做" in unknown.content.decode("utf-8")
 
 
 @pytest.mark.parametrize("default_effect", ("READ_ONLY", "EXTERNAL_EFFECT"))
@@ -2291,15 +2089,14 @@ def test_mcp_call_failure_preserves_outcome_and_cancellation(
             else:
                 result = await executor.invoke(permit, {"text": "observe"})
                 assert result.state == "SYSTEM_ERROR"
-                body = json.loads(result.content)
-                assert body["remote_outcome"] == "UNKNOWN"
-                assert body["retry_performed"] is False
+                body = result.content.decode("utf-8")
+                assert "结果未确认" in body and "未自动重做" in body
                 expected = {
                     "sse": "SSE stream ended",
                     "timeout": "deadline expired",
                     "bug": "injected implementation defect",
                 }
-                assert expected[failure] in body["message"]
+                assert expected[failure] in body
             assert calls == 1
             assert permit.state.value == "RELEASED"
         finally:
@@ -2398,38 +2195,20 @@ def test_mcp_sse_failure_continues_batch_and_agent_loop(
         await supervisor.wait_initial_readiness()
 
         async def stream(request):
-            if dynamic and request.model_call_index == 1:
-                events = _generic_tool_stream(
-                    block_id="call:inspect",
-                    tool_name="query_capabilities",
-                    arguments={"target": {"kind": "MCP_TOOL", "server_id": "fixture", "tool_name": "mcp__fixture__intersecting_unions"}},
-                )
-            elif request.model_call_index == (2 if dynamic else 1):
-                name, arguments = "mcp__fixture__fake_echo", {"text": "observe"}
-                if dynamic:
-                    previous = next(
-                        item
-                        for item in reversed(request.compiled_input.messages)
-                        if item.role is MessageRole.TOOL_RESULT
-                    )
-                    inspected = json.loads(
-                        json.loads(join_text_content(previous.content))[
-                            "pulsara_tool_result"
-                        ]["body"]
-                    )
-                    name, arguments = (
-                        "use_new_mcp_tool",
-                        {'arguments': {"value": "observe"}, 'target': {"kind":"MCP_TOOL_REF", "tool_ref":inspected["invocation"]["target"]["tool_ref"]}},
-                    )
+            if request.model_call_index == 1:
+                events = _generic_tool_stream(block_id="call:inspect", tool_name="query_capabilities",
+                    arguments={"kind":"MCP", "target":{"kind":"MCP_TOOL", "server_id":"fixture",
+                        "remote_tool_name":"intersecting_unions" if dynamic else "fake_echo"}})
+            elif request.model_call_index == 2:
+                previous = next(item for item in reversed(request.compiled_input.messages) if item.role is MessageRole.TOOL_RESULT)
+                token = re.search(r"mcpref:[a-z2-7]{26}", join_text_content(previous.content))
+                assert token is not None
+                arguments = {"target":{"kind":"MCP_TOOL_REF", "tool_ref":token.group()},
+                    "arguments":{"value":"observe"} if dynamic else {"text":"observe"}}
                 events = [
-                    *_generic_tool_stream(
-                        block_id="call:broken-mcp", tool_name=name, arguments=arguments
-                    ),
-                    *_generic_tool_stream(
-                        block_id="call:independent",
-                        tool_name="read_file",
-                        arguments={"target": {"kind": "PATH", "path": "independent.txt"}},
-                    ),
+                    *_generic_tool_stream(block_id="call:broken-mcp", tool_name="call_mcp_tool", arguments=arguments),
+                    *_generic_tool_stream(block_id="call:independent", tool_name="read_file",
+                        arguments={"target":{"kind":"PATH", "path":"independent.txt"}}),
                 ]
             else:
                 events = _text_stream("connection failed; independent work completed")
@@ -2461,11 +2240,11 @@ def test_mcp_sse_failure_continues_batch_and_agent_loop(
                 with pytest.raises(asyncio.CancelledError):
                     await task
                 assert physical_calls == 1
-                assert len(model.requests) == (2 if dynamic else 1)
+                assert len(model.requests) == 2
                 return
             result = await task
             assert result.final_text == "connection failed; independent work completed"
-            assert result.tool_call_count == (3 if dynamic else 2)
+            assert result.tool_call_count == 3
             assert physical_calls == 1
             before, after = (
                 model.requests[-2].compiled_input,
@@ -2474,18 +2253,11 @@ def test_mcp_sse_failure_continues_batch_and_agent_loop(
             assert after.system_prompt == before.system_prompt
             assert after.tools == before.tools
             assert after.messages[: len(before.messages)] == before.messages
-            bodies = [
-                json.loads(join_text_content(item.content))["pulsara_tool_result"][
-                    "body"
-                ]
-                for item in after.messages
-                if item.role is MessageRole.TOOL_RESULT
-            ]
-            failed = json.loads(bodies[-2])
-            assert failed["error"] == "MCP_CALL_FAILED"
-            assert "SSE stream ended" in failed["message"]
-            assert failed["remote_outcome"] == "UNKNOWN"
-            assert failed["retry_performed"] is False
+            bodies = [join_text_content(item.content) for item in after.messages if item.role is MessageRole.TOOL_RESULT]
+            failed = bodies[-2]
+            assert "SSE stream ended" in failed
+            assert "未自动重做" in failed
+            assert ("may have executed" in failed) if default_effect == "EXTERNAL_EFFECT" else ("No reliable observation" in failed)
             assert "independent work continues" in bodies[-1]
         finally:
             supervisor.stop_admission()
@@ -2498,7 +2270,7 @@ def test_mcp_sse_failure_continues_batch_and_agent_loop(
         session_id=session_id, deadline_monotonic=monotonic() + 30
     )
     results = [row for row in rows if row["entry_kind"] == "TOOL_RESULT"]
-    assert len(results) == (1 if stop_during_call else 2) + int(dynamic)
+    assert len(results) == (2 if stop_during_call else 3)
 
 
 @pytest.mark.parametrize("failure", ("sse", "transport"))
@@ -2546,14 +2318,13 @@ def test_mcp_standard_read_keeps_connection_failure_detail(
                 scope_kind=ModelInputScopeKind.ROOT,
             )
             assert result.state == "SYSTEM_ERROR"
-            body = json.loads(result.content)
+            body = result.content.decode("utf-8")
             assert (
                 "SSE stream ended"
                 if failure == "sse"
                 else "MCP_TRANSPORT_OUTCOME_UNKNOWN"
-            ) in body["message"]
-            assert body["remote_outcome"] == "UNKNOWN"
-            assert body["retry_performed"] is False
+            ) in body
+            assert "结果未确认" in body and "未自动重做" in body
         finally:
             runtime.release()
             await supervisor.aclose()
@@ -2593,54 +2364,12 @@ def test_round6_unsupported_input_required_preserves_external_effect_unknown(
     assert b"MCP_INPUT_REQUIRED_UNSUPPORTED" in read_only.content
     external = asyncio.run(invoke("EXTERNAL_EFFECT"))
     assert external.state == "SYSTEM_ERROR"
-    body = json.loads(external.content)
-    assert body["remote_outcome"] == "UNKNOWN"
-    assert "MCP_INPUT_REQUIRED_ELICITATION_UNSUPPORTED" in body["message"]
-    assert body["retry_performed"] is False
+    body = external.content.decode("utf-8")
+    assert "结果未确认" in body
+    assert "MCP_INPUT_REQUIRED_ELICITATION_UNSUPPORTED" in body
+    assert "未自动重做" in body
 
 
-def test_round6_mcp_surface_over_128_tools_routes_whole_cohort_to_meta(
-    tmp_path: Path,
-) -> None:
-    async def exercise() -> None:
-        supervisor = McpHostSupervisor(
-            workspace_root=tmp_path,
-            configs=(_config(tmp_path),),
-            client_factory=_LargeSurfaceFakeMcpClient,  # type: ignore[arg-type]
-        )
-        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
-            workspace_root=tmp_path,
-            host_owner_id='host:tglx27oivromnzgakjq4mgawke',
-            session_id='session:qoeu2rwdadfcdaqzqa2zlzkk7e',
-            live_bus=LiveAgentEventBus(),
-            authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
-        )
-        port.bind_mcp_supervisor(supervisor)
-        _seal_mcp_test_port(port)
-        await supervisor.start()
-        await supervisor.wait_initial_readiness()
-        try:
-            port.prepare_tool_surface_safe_point()
-            surface = prepare_test_direct_tool_surface(
-                port,
-                conversation_scope_kind=ModelInputScopeKind.ROOT,
-            )
-            assert not any(
-                item.name.startswith("mcp__")
-                for item in surface.model_surface.tool_specs
-            )
-            assert surface.capability_exposure_plan is not None
-            assert all(
-                route.route.value != "DIRECT"
-                for route in (
-                    surface.capability_exposure_plan.mcp_catalog_route_projection.routes
-                )
-            )
-        finally:
-            await port.aclose()
-            await supervisor.aclose()
-
-    asyncio.run(exercise())
 
 
 def test_round6_standard_remote_read_has_one_bounded_operation_timeout(
@@ -2716,7 +2445,7 @@ def test_round6_dirty_fence_blocks_new_dispatch_but_pre_admission_drains(
                 for item in runtime.root_tool_specs
                 if item.remote_tool_name == "fixture_echo"
             )
-            executor = runtime.executors[echo.provider_tool_name]
+            executor = runtime.executors[(echo.server_id, echo.remote_tool_name)]
             admitted = executor.admit(
                 session_id='session:qcxkhtntcrrxggj2dfjkj7xdjy',
                 scope_kind=ModelInputScopeKind.ROOT,
@@ -2885,118 +2614,6 @@ def test_round6_first_failure_releases_readiness_before_background_retry(
 
     asyncio.run(exercise())
 
-def test_round6_direct_kernel_surface_executes_exact_mcp_generation(
-    tmp_path: Path,
-) -> None:
-    async def exercise() -> None:
-        supervisor = McpHostSupervisor(
-            workspace_root=tmp_path,
-            configs=(_config(tmp_path, tool_effect_overrides={"fixture_echo": "READ_ONLY"}),),
-        )
-        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
-            workspace_root=tmp_path,
-            host_owner_id='host:um5edy62izvdyaqfp7sleqd3qm',
-            session_id='session:vbyef3afwygcmgc6kb7o4cgo3u',
-            live_bus=LiveAgentEventBus(),
-            authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
-        )
-        port.bind_mcp_supervisor(supervisor)
-        _seal_mcp_test_port(port)
-        await supervisor.start()
-        await supervisor.wait_initial_readiness()
-        port.prepare_tool_surface_safe_point()
-        surface = prepare_test_direct_tool_surface(
-            port,
-            conversation_scope_kind=ModelInputScopeKind.ROOT,
-        )
-        dynamic = next(
-            item
-            for item in surface.model_surface.tool_specs
-            if item.name.endswith("fixture_echo")
-        )
-        borrow = port.borrow_tool_surface(surface)
-        permission = build_run_permission_snapshot(
-            snapshot_id='permission:xe33u4flpejjy72jmvg5arcvtu',
-            requested_mode=PermissionMode.READ_ONLY,
-            effective_mode=PermissionMode.READ_ONLY,
-            admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
-        )
-        try:
-            from types import SimpleNamespace
-            from pulsara_agent.primitives.context import thaw_json
-            target = {"kind": "MCP_TOOL", "server_id": "fixture", "tool_name": dynamic.name}
-            inspected = await port._query_capabilities_result(
-                tool_name="query_capabilities", arguments={"target": target},
-                invocation_context=SimpleNamespace(surface_borrow=borrow, page_budget=ToolResultPageBudget(tool_call_id=random_id("call"))),
-            )
-            assert inspected.state == "SUCCESS"
-            detail = json.loads(inspected.content)
-            assert detail["target"] == target
-            assert detail["input_schema"] == thaw_json(dynamic.parameters)
-            assert detail["description"] == dynamic.description
-            assert detail["invocation"] == {"mode": "DIRECT", "tool_name": dynamic.name}
-            assert "tool_ref" not in detail
-            rejected = await port._query_capabilities_result(
-                tool_name="query_capabilities", arguments={"target": {**target, "tool_name": "fixture_echo"}},
-                invocation_context=SimpleNamespace(surface_borrow=borrow, page_budget=ToolResultPageBudget(tool_call_id=random_id("call"))),
-            )
-            assert rejected.state == "APPLICATION_ERROR"
-            assert b"MCP_TOOL_NOT_FOUND" in rejected.content
-            old_input = await port._query_capabilities_result(
-                tool_name="query_capabilities", arguments={"server_id": "fixture", "tool_name": dynamic.name},
-                invocation_context=SimpleNamespace(surface_borrow=borrow, page_budget=ToolResultPageBudget(tool_call_id=random_id("call"))),
-            )
-            assert old_input.state == "APPLICATION_ERROR" and b"INVALID_ARGUMENTS" in old_input.content
-            authorization = await port.authorize(
-                tool_name=dynamic.name,
-                arguments={"text": "surface"},
-                tool_call_id="call:surface",
-                turn_id='turn:fugd2z4wkqsu77svw4oie5ktvy',
-                assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
-                permission_snapshot=permission,
-                surface_borrow=borrow,
-                memory_context=_enabled_memory_context(),
-            )
-            assert authorization.kind is KernelToolAuthorizationKind.ALLOW
-            invocation = KernelToolInvocationContext(
-                session_id='session:vbyef3afwygcmgc6kb7o4cgo3u',
-                workspace_id='workspace:o7umcg4kw34zo5te63yniff7ze',
-                turn_id='turn:fugd2z4wkqsu77svw4oie5ktvy',
-                assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
-                tool_call_id="call:surface",
-                attempt_id='attempt:p6lbqwaoo356qvim3is7ntneem',
-                page_budget=ToolResultPageBudget(tool_call_id="call:surface"),
-                result_entry_id='entry:zvmjajlmix3vyoeoy2zhz6xd2a',
-                conversation_scope_kind=ModelInputScopeKind.ROOT.value,
-                host_owner_epoch=1,
-                authorization_reference=authorization.reference,
-                permission_snapshot_fingerprint=permission.snapshot_fingerprint,
-                effective_permission_mode=permission.effective_mode,
-                attempt_permission_snapshot_fingerprint=(
-                    permission.snapshot_fingerprint
-                ),
-                surface_borrow=borrow,
-            )
-            result = await port.invoke(
-                tool_name=dynamic.name,
-                arguments={"text": "surface"},
-                tool_call_id="call:surface",
-                attempt_id='attempt:p6lbqwaoo356qvim3is7ntneem',
-                turn_id='turn:fugd2z4wkqsu77svw4oie5ktvy',
-                assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
-                invocation_context=invocation,
-            )
-            assert result.state == "SUCCESS"
-            assert b"fixture:surface" in result.content
-            assert result.effect_class == "read_only"
-        finally:
-            borrow.close()
-            supervisor.stop_admission()
-            supervisor_close = asyncio.create_task(supervisor.aclose())
-            await port.aclose(timeout_seconds=5)
-            await supervisor_close
-
-    asyncio.run(exercise())
 
 
 def test_round6_permission_matrix_is_local_and_scope_surface_is_stable(
@@ -3026,13 +2643,13 @@ def test_round6_permission_matrix_is_local_and_scope_surface_is_stable(
         borrow = port.borrow_tool_surface(surface)
         echo = next(
             item
-            for item in surface.model_surface.tool_specs
-            if item.name.endswith("fixture_echo")
+            for item in port._mcp_current.root_tool_specs
+            if item.provider_tool_name.endswith("fixture_echo")
         )
         effect = next(
             item
-            for item in surface.model_surface.tool_specs
-            if item.name.endswith("fixture_effect")
+            for item in port._mcp_current.root_tool_specs
+            if item.provider_tool_name.endswith("fixture_effect")
         )
         try:
             decisions: dict[
@@ -3049,10 +2666,10 @@ def test_round6_permission_matrix_is_local_and_scope_surface_is_stable(
                     (echo, {"text": "read"}),
                     (effect, {"value": "effect"}),
                 ):
-                    call_id = f"call:{mode.value}:{semantic.name}"
+                    call_id = f"call:{mode.value}:{semantic.provider_tool_name}"
                     decision = await port.authorize(
-                        tool_name=semantic.name,
-                        arguments=arguments,
+                        tool_name="call_mcp_tool",
+                        arguments=await _meta_arguments(port, borrow, semantic.provider_tool_name, arguments),
                         tool_call_id=call_id,
                         turn_id='turn:2xp6wtr7zict6zayr4kdgireum',
                         assistant_entry_id='entry:mjbqlitwrnojm2ywmk6xzrb7du',
@@ -3060,25 +2677,25 @@ def test_round6_permission_matrix_is_local_and_scope_surface_is_stable(
                         surface_borrow=borrow,
                         memory_context=_enabled_memory_context(),
                     )
-                    decisions[(mode, semantic.name)] = decision.kind
+                    decisions[(mode, semantic.provider_tool_name)] = decision.kind
             assert all(
-                decisions[(mode, echo.name)] is KernelToolAuthorizationKind.ALLOW
+                decisions[(mode, echo.provider_tool_name)] is KernelToolAuthorizationKind.ALLOW
                 for mode in PermissionMode
             )
             assert (
-                decisions[(PermissionMode.READ_ONLY, effect.name)]
+                decisions[(PermissionMode.READ_ONLY, effect.provider_tool_name)]
                 is KernelToolAuthorizationKind.PERMISSION_DENIED
             )
             assert (
-                decisions[(PermissionMode.ASK_PERMISSIONS, effect.name)]
+                decisions[(PermissionMode.ASK_PERMISSIONS, effect.provider_tool_name)]
                 is KernelToolAuthorizationKind.REQUIRE_CONFIRMATION
             )
             assert (
-                decisions[(PermissionMode.ACCEPT_EDITS, effect.name)]
+                decisions[(PermissionMode.ACCEPT_EDITS, effect.provider_tool_name)]
                 is KernelToolAuthorizationKind.REQUIRE_CONFIRMATION
             )
             assert (
-                decisions[(PermissionMode.BYPASS_PERMISSIONS, effect.name)]
+                decisions[(PermissionMode.BYPASS_PERMISSIONS, effect.provider_tool_name)]
                 is KernelToolAuthorizationKind.ALLOW
             )
             assert surface.model_surface.surface_fingerprint
@@ -3167,7 +2784,7 @@ def _exercise_postgres_mcp_effect_and_reconnect(
     from tests.test_kernel_image_input_k2_postgres import _image
 
     workspace_id = random_id("workspace")
-    image = _image(workspace_id=workspace_id)
+    image = _image()
     first_prompt = (
         freeze_canonical_prompt(
             FrozenPromptContent(
@@ -3216,22 +2833,12 @@ def _exercise_postgres_mcp_effect_and_reconnect(
         await supervisor.start()
         await supervisor.wait_initial_readiness()
         port.prepare_tool_surface_safe_point()
-        surface = prepare_test_direct_tool_surface(
+        prepare_test_direct_tool_surface(
             port,
             conversation_scope_kind=ModelInputScopeKind.ROOT,
         )
-        dynamic_name = next(
-            item.name
-            for item in surface.model_surface.tool_specs
-            if item.name.endswith("fixture_echo")
-        )
-        model = ScriptedKernelModel(
-            [
-                _mcp_tool_stream(dynamic_name),
-                _text_stream("mcp complete"),
-                _text_stream("after reconnect"),
-            ]
-        )
+        dynamic_name = "fixture_echo"
+        model = _meta_scripted_model(dynamic_name, {"text":"postgres"}, "mcp complete")
         runner = ConversationKernelRunner(
             model_resolution_snapshot_provider=test_model_resolution_snapshot,
             repository=repository,
@@ -3256,10 +2863,10 @@ def _exercise_postgres_mcp_effect_and_reconnect(
 
     result, second_result, dynamic_name, model = asyncio.run(exercise())
     assert result.final_text == "mcp complete"
-    assert result.tool_call_count == 1
+    assert result.tool_call_count == 2
     assert second_result.final_text == "after reconnect"
-    before_reconnect = model.requests[1].compiled_input
-    after_reconnect = model.requests[2].compiled_input
+    before_reconnect = model.requests[2].compiled_input
+    after_reconnect = model.requests[3].compiled_input
     assert after_reconnect.system_prompt == before_reconnect.system_prompt
     assert after_reconnect.tools == before_reconnect.tools
     assert (
@@ -3269,7 +2876,7 @@ def _exercise_postgres_mcp_effect_and_reconnect(
     if with_images:
         # I13: physical reconnect preserves both image occurrences already
         # installed; the new pure-image turn adds two more by suffix only.
-        for request, expected_count in zip(model.requests, (2, 2, 4), strict=True):
+        for request, expected_count in zip(model.requests, (2, 2, 2, 4), strict=True):
             images = tuple(
                 part
                 for message in request.compiled_input.messages
@@ -3285,12 +2892,23 @@ def _exercise_postgres_mcp_effect_and_reconnect(
         "USER_MESSAGE",
         "ASSISTANT_TOOL_REQUEST",
         "TOOL_RESULT",
+        "ASSISTANT_TOOL_REQUEST",
+        "TOOL_RESULT",
         "ASSISTANT_MESSAGE",
         "USER_MESSAGE",
         "ASSISTANT_MESSAGE",
     ]
     assert dynamic_name in str(rows[1])
-    assert "fixture:postgres" in str(rows[2])
+    assert "fixture:postgres" in str(rows[4])
+    from jsonschema import Draft202012Validator
+    from pulsara_agent.capability.source_query import call_mcp_tool_output_schema, query_output_schema
+    from pulsara_agent.conversation_kernel.tool_outputs import PostgresToolOutputReadPort
+    from pulsara_agent.ports.tool_execution import thaw_tool_json_object
+
+    output_reader = PostgresToolOutputReadPort(provider, session_id=session_id, workspace_id=workspace_id)
+    for row, schema in ((rows[2], query_output_schema()), (rows[4], call_mcp_tool_output_schema())):
+        complete = output_reader.read_result({"kind": "SESSION_ENTRY", "entry_id": row["id"]})
+        Draft202012Validator(schema).validate(thaw_tool_json_object(complete.value))
     events = repository.events_after(
         session_id=session_id,
         after_sequence=0,
@@ -3310,7 +2928,7 @@ def _exercise_postgres_mcp_effect_and_reconnect(
     assert (
         event_types.index("ToolAttemptAccepted")
         < event_types.index("ToolRemoteIdentityPublished")
-        < event_types.index("ToolResultAccepted")
+        < max(index for index,value in enumerate(event_types) if value == "ToolResultAccepted")
     )
 
 
@@ -3349,25 +2967,16 @@ def test_round6_long_remote_name_exact_result_reaches_canonical_acceptance(
         await supervisor.start()
         await supervisor.wait_initial_readiness()
         port.prepare_tool_surface_safe_point()
-        surface = prepare_test_direct_tool_surface(
+        prepare_test_direct_tool_surface(
             port,
             conversation_scope_kind=ModelInputScopeKind.ROOT,
         )
-        dynamic_name = next(
-            item.name
-            for item in surface.model_surface.tool_specs
-            if item.name.startswith("mcp__")
-        )
+        dynamic_name = _LongNameFakeMcpSession.remote_name
         runner = ConversationKernelRunner(
             model_resolution_snapshot_provider=test_model_resolution_snapshot,
             repository=repository,
             writer_lease=lease,
-            model=ScriptedKernelModel(
-                [
-                    _mcp_empty_tool_stream(dynamic_name),
-                    _text_stream("long name settled"),
-                ]
-            ),
+            model=_meta_scripted_model(dynamic_name, {}, "long name settled"),
             tools=port,
             live_bus=LiveAgentEventBus(),
             context_source_collector=StaticContextSourceCollector(),
@@ -3382,13 +2991,15 @@ def test_round6_long_remote_name_exact_result_reaches_canonical_acceptance(
 
     result = asyncio.run(exercise())
     assert result.final_text == "long name settled"
-    assert result.tool_call_count == 1
+    assert result.tool_call_count == 2
     rows = repository.rehydrate_session(
         session_id=session_id,
         deadline_monotonic=monotonic() + 30,
     )
     assert [row["entry_kind"] for row in rows] == [
         "USER_MESSAGE",
+        "ASSISTANT_TOOL_REQUEST",
+        "TOOL_RESULT",
         "ASSISTANT_TOOL_REQUEST",
         "TOOL_RESULT",
         "ASSISTANT_MESSAGE",
@@ -3400,8 +3011,8 @@ def test_round6_long_remote_name_exact_result_reaches_canonical_acceptance(
         deadline_monotonic=monotonic() + 30,
     )
     event_types = tuple(row["event_type"] for row in events)
-    assert event_types.index("ToolRemoteIdentityPublished") < event_types.index(
-        "ToolResultAccepted"
+    assert event_types.index("ToolRemoteIdentityPublished") < max(
+        index for index, value in enumerate(event_types) if value == "ToolResultAccepted"
     )
 
 
@@ -3421,7 +3032,7 @@ def test_round6_same_schema_reconnect_keeps_semantics_and_old_borrow(
                 for item in first.root_tool_specs
                 if item.remote_tool_name == "fixture_echo"
             )
-            first_executor = first.executors[first_echo.provider_tool_name]
+            first_executor = first.executors[(first_echo.server_id, first_echo.remote_tool_name)]
             admitted_old = first_executor.admit(
                 session_id='session:qcxkhtntcrrxggj2dfjkj7xdjy',
                 scope_kind=ModelInputScopeKind.ROOT,
@@ -3464,7 +3075,7 @@ def test_round6_same_schema_reconnect_keeps_semantics_and_old_borrow(
                 for item in second.root_tool_specs
                 if item.remote_tool_name == "fixture_echo"
             )
-            second_executor = second.executors[second_echo.provider_tool_name]
+            second_executor = second.executors[(second_echo.server_id, second_echo.remote_tool_name)]
             new_permit = second_executor.admit(
                 session_id='session:qcxkhtntcrrxggj2dfjkj7xdjy',
                 scope_kind=ModelInputScopeKind.ROOT,
@@ -3486,52 +3097,6 @@ def test_round6_same_schema_reconnect_keeps_semantics_and_old_borrow(
     asyncio.run(exercise())
 
 
-def test_round6_schema_change_reconnect_requires_safe_point_rebase(
-    tmp_path: Path,
-) -> None:
-    async def exercise() -> None:
-        _SchemaChangingFakeMcpClient.instances.clear()
-        _SchemaChangingFakeMcpSession.description = "schema-v1"
-        supervisor = McpHostSupervisor(
-            workspace_root=tmp_path,
-            configs=(_config(tmp_path),),
-            client_factory=_SchemaChangingFakeMcpClient,  # type: ignore[arg-type]
-        )
-        await supervisor.start()
-        await supervisor.wait_initial_readiness()
-        first = supervisor.install_pending_at_safe_point()
-        assert first is not None
-        second = None
-        try:
-            first_fingerprint = first.root_tool_specs[0].descriptor_fingerprint
-            _SchemaChangingFakeMcpSession.description = "schema-v2"
-            supervisor.reconnect("fixture")
-            deadline = monotonic() + 3
-            while monotonic() < deadline:
-                task = supervisor._tasks.get("fixture")  # noqa: SLF001
-                if task is not None and task.done():
-                    task.result()
-                    break
-                await asyncio.sleep(0.01)
-            else:
-                pytest.fail("schema-change reconnect did not finish")
-
-            # Physical discovery alone does not mutate the installed runtime.
-            assert first.root_tool_specs[0].descriptor_fingerprint == first_fingerprint
-            second = supervisor.install_pending_at_safe_point()
-            assert second is not None
-            assert second.root_tool_specs[0].descriptor_fingerprint != first_fingerprint
-            assert (
-                second.catalog_snapshot.semantic_fingerprint
-                != first.catalog_snapshot.semantic_fingerprint
-            )
-        finally:
-            first.release()
-            if second is not None:
-                second.release()
-            await supervisor.aclose()
-
-    asyncio.run(exercise())
 
 
 def test_round6_config_disable_rebuilds_surface_and_old_borrow_drains(
@@ -3560,10 +3125,11 @@ def test_round6_config_disable_rebuilds_surface_and_old_borrow_drains(
         )
         old_dynamic = next(
             item
-            for item in old_surface.model_surface.tool_specs
-            if item.name.endswith("fixture_echo")
+            for item in port._mcp_current.root_tool_specs
+            if item.provider_tool_name.endswith("fixture_echo")
         )
         old_borrow = port.borrow_tool_surface(old_surface)
+        meta = await _meta_arguments(port, old_borrow, old_dynamic.provider_tool_name, {"text":"old-batch"})
         disabled = _config(tmp_path, enabled=False)
         try:
             assert await port.reload_mcp_configs(
@@ -3589,8 +3155,7 @@ def test_round6_config_disable_rebuilds_surface_and_old_borrow_drains(
                 admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
             )
             authorization = await port.authorize(
-                tool_name=old_dynamic.name,
-                arguments={"text": "old-batch"},
+                tool_name="call_mcp_tool", arguments=meta,
                 tool_call_id="call:disable-old",
                 turn_id='turn:vb4fdzl3ytcweesb64zuaudpsa',
                 assistant_entry_id='entry:hwjwv3oojkolrw7ke26qre2fk4',
@@ -3697,8 +3262,8 @@ def test_round6_config_disable_cancels_visible_uncommitted_confirmation(
         )
         effect = next(
             item
-            for item in surface.model_surface.tool_specs
-            if item.name.endswith("fixture_effect")
+            for item in port._mcp_current.root_tool_specs
+            if item.provider_tool_name.endswith("fixture_effect")
         )
         borrow = port.borrow_tool_surface(surface)
         permission = build_run_permission_snapshot(
@@ -3708,9 +3273,10 @@ def test_round6_config_disable_cancels_visible_uncommitted_confirmation(
             admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
         )
         try:
+            meta = await _meta_arguments(port, borrow, effect.provider_tool_name, {"value":"cancel-me"})
             authorization = await port.authorize(
-                tool_name=effect.name,
-                arguments={"value": "cancel-me"},
+                tool_name="call_mcp_tool",
+                arguments=meta,
                 tool_call_id="call:disable-confirmation",
                 turn_id='turn:7x6zgmrnoj4y65nwzjlx37kisq',
                 assistant_entry_id='entry:xedxcmf5dpahplt7jyzwxzziue',
@@ -3729,7 +3295,7 @@ def test_round6_config_disable_cancels_visible_uncommitted_confirmation(
             waiter = asyncio.create_task(
                 port.request_confirmation(
                     prepared_request=prepared_permission,
-                    tool_name=effect.name,
+                    tool_name="call_mcp_tool",
                     assistant_entry_id='entry:xedxcmf5dpahplt7jyzwxzziue',
                     permission_snapshot=permission,
                 )
@@ -3907,8 +3473,8 @@ def test_round6_mcp_confirmation_admits_before_publish_and_drains_dirty(
         )
         effect = next(
             item
-            for item in surface.model_surface.tool_specs
-            if item.name.endswith("fixture_effect")
+            for item in port._mcp_current.root_tool_specs
+            if item.provider_tool_name.endswith("fixture_effect")
         )
         borrow = port.borrow_tool_surface(surface)
         permission = build_run_permission_snapshot(
@@ -3918,9 +3484,10 @@ def test_round6_mcp_confirmation_admits_before_publish_and_drains_dirty(
             admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
         )
         try:
+            meta = await _meta_arguments(port, borrow, effect.provider_tool_name, {"value":"confirmed"})
             authorization = await port.authorize(
-                tool_name=effect.name,
-                arguments={"value": "confirmed"},
+                tool_name="call_mcp_tool",
+                arguments=meta,
                 tool_call_id="call:confirmation",
                 turn_id='turn:lx2t6m7itytcet27oko7ja2ffq',
                 assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
@@ -3940,7 +3507,7 @@ def test_round6_mcp_confirmation_admits_before_publish_and_drains_dirty(
             waiter = asyncio.create_task(
                 port.request_confirmation(
                     prepared_request=prepared_permission,
-                    tool_name=effect.name,
+                    tool_name="call_mcp_tool",
                     assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
                     permission_snapshot=permission,
                 )
@@ -3971,7 +3538,7 @@ def test_round6_mcp_confirmation_admits_before_publish_and_drains_dirty(
                 assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
                 tool_call_id="call:confirmation",
                 attempt_id=allowed.accepted_attempt_id,
-                page_budget=ToolResultPageBudget(tool_call_id="call:confirmation"),
+
                 result_entry_id='entry:zvmjajlmix3vyoeoy2zhz6xd2a',
                 conversation_scope_kind=ModelInputScopeKind.ROOT.value,
                 host_owner_epoch=1,
@@ -3984,15 +3551,15 @@ def test_round6_mcp_confirmation_admits_before_publish_and_drains_dirty(
                 surface_borrow=borrow,
             )
             result = await port.invoke(
-                tool_name=effect.name,
-                arguments={"value": "confirmed"},
+                tool_name="call_mcp_tool",
+                arguments=meta,
                 tool_call_id="call:confirmation",
                 attempt_id=allowed.accepted_attempt_id,
                 turn_id='turn:lx2t6m7itytcet27oko7ja2ffq',
                 assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
                 invocation_context=invocation,
             )
-            assert b"effect:confirmed" in result.content
+            assert "effect:confirmed" in str(result.public_value())
             assert result.effect_class == "unknown_effect"
         finally:
             borrow.close()
@@ -4165,42 +3732,6 @@ def test_round6_naming_disambiguates_normalization_collisions() -> None:
     assert len(set(truncated_collision.values())) == 1
 
 
-def test_round9_3_provider_name_collision_is_one_closed_group() -> None:
-    schema = freeze_json({"type": "object", "properties": {}})
-    semantics = tuple(
-        McpToolSemanticFact(
-            server_id=server_id,
-            remote_tool_name=remote_name,
-            provider_tool_name="mcp__same__normalized",
-            description="collision member",
-            input_schema=schema,
-            descriptor_fingerprint=f"sha256:{server_id}:{remote_name}",
-        )
-        for server_id, remote_name in (
-            ("same", "normalized"),
-            ("same", "normalized-"),
-            ("same-", "normalized"),
-        )
-    )
-    survivor = McpToolSemanticFact(
-        server_id="other",
-        remote_tool_name="unique",
-        provider_tool_name="mcp__other__unique",
-        description="unique tool",
-        input_schema=schema,
-        descriptor_fingerprint="sha256:other:unique",
-    )
-    selected, collisions = _provider_projection_from_semantics((*semantics, survivor))
-    assert selected == (survivor,)
-    assert len(collisions) == 1
-    assert collisions[0].provider_name == "mcp__same__normalized"
-    assert tuple(
-        (item.server_id, item.remote_tool_name) for item in collisions[0].members
-    ) == (
-        ("same", "normalized"),
-        ("same", "normalized-"),
-        ("same-", "normalized"),
-    )
 
 
 def _free_port() -> int:
@@ -4583,8 +4114,7 @@ def test_round6_does_not_expand_durable_or_protocol_oracles() -> None:
     assert len(LIVE_EVENT_TYPES) == 20
     assert len(SUBJECT_SLOTS) == 8
     assert len(APPEND_GUARDS) == 1
-    # Known-Agent membership is the sole product relation added to this oracle.
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 31
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
 
     root = Path(__file__).parents[1]
     mcp_root = root / "src" / "pulsara_agent" / "conversation_kernel" / "mcp"
@@ -4730,9 +4260,7 @@ def test_mcp_identity_frozen_for_success_error_and_cancelled_dispatch(tmp_path: 
             executor = next(iter(runtime.executors.values()))
             session = executor.lease._slot.client.session
             generation = executor.lease.connection_generation
-            target = {"target": {"kind": "MCP_RESOURCE_TEMPLATE", "server_id": "fixture",
-                                  "uri_template": "fixture://round6/users/{name}"},
-                      "uri": "fixture://round6/users/alice"}
+            target = {"target": {"kind": "MCP_RESOURCE", "server_id": "fixture", "uri": "fixture://round6/users/alice"}}
             cancelled = asyncio.Event()
             cancelled.set()
 
@@ -4836,9 +4364,7 @@ def test_mcp_supervisor_epoch_and_permits_are_owner_scoped(tmp_path: Path) -> No
             result = await first_executor.invoke(permit, {"text": "original"})
             assert result.state == "SUCCESS"
 
-            target = {"target": {"kind": "MCP_RESOURCE_TEMPLATE", "server_id": "fixture",
-                                  "uri_template": "fixture://round6/users/{name}"},
-                      "uri": "fixture://round6/users/alice"}
+            target = {"target": {"kind": "MCP_RESOURCE", "server_id": "fixture", "uri": "fixture://round6/users/alice"}}
             calls = []
             async def unexpected_read(*args, **kwargs):
                 calls.append((args, kwargs))

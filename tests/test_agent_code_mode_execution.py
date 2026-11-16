@@ -13,27 +13,22 @@ from pulsara_agent.conversation_kernel.tool_invocations import ToolInvocationSou
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
 from pulsara_agent.conversation_kernel.tool_policy import DefaultToolDispatchAuthorizationPolicy
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
-from pulsara_agent.ports.tool_execution import ToolCall, ToolOutputSourceFormatHint
-from pulsara_agent.message import ToolResultState
-from pulsara_agent.tools.builtins.filesystem import ReadFileTool, EditFileTool
+from pulsara_agent.tools.builtins.filesystem import ReadFileTool
 from pulsara_agent.primitives.context import freeze_json
 
 
-def _read(root, *, deferred=False):
-    return ReadFileTool(root).execute(ToolCall('read', 'read_file',
-        {'target': {'kind': 'PATH', 'path': 'source.txt'}}, defer_file_observation=deferred))
+def _native_fields(text):
+    return json.JSONDecoder().raw_decode(text[text.index('{'):])[0]
 
 
-def _edit(root, revision, value):
-    return EditFileTool(root).execute(ToolCall('edit', 'edit_file', {
-        'target': {'kind': 'PATH', 'path': 'source.txt'}, 'base_revision': revision,
-        'operations': [{'kind': 'replace_lines', 'start_line': 1, 'end_line': 1, 'lines': [value]}]}))
-
-
-def test_public_value_uses_owner_format_without_json_guessing():
-    text = b'{"value":9007199254740993}'
-    assert KernelToolResult('SUCCESS', text).public_value() == text.decode()
-    assert KernelToolResult('SUCCESS', b'{"value":3}', public_format=ToolOutputSourceFormatHint.JSON).public_value() == {'value': 3}
+def test_public_value_uses_explicit_text_and_object_content():
+    from pulsara_agent.conversation_kernel.content_parts import ResultPart
+    from pulsara_agent.ports.tool_execution import ToolBusinessValue
+    text='{"value":9007199254740993}'
+    result=KernelToolResult('SUCCESS',ToolBusinessValue(content=(ResultPart('text',text),)))
+    assert result.public_value()['content']==[{'type':'text','value':text}]
+    result=KernelToolResult('SUCCESS',ToolBusinessValue(content=(ResultPart('object',{'value':3}),)))
+    assert result.public_value()['content']==[{'type':'object','value':{'value':3}}]
 
 
 def test_code_source_does_not_require_or_copy_model_tool_call():
@@ -50,40 +45,18 @@ def test_code_source_does_not_require_or_copy_model_tool_call():
     assert model.tool_name is None and model.original_arguments is None
 
 
-def test_large_code_read_grants_shared_native_edit_only_after_actual_delivery(tmp_path):
-    (tmp_path / 'source.txt').write_text('\n'.join('x' * 80 for _ in range(600)))
-    result = _read(tmp_path, deferred=True)
-    payload = json.loads(result.output)
-    from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
-    assert result.page_complete and payload["next"] is not None
-    assert ToolResultPageBudget("read").fits(result.output)
-    assert result.status is ToolResultState.SUCCESS
-    denied = _edit(tmp_path, payload['content_revision'], 'after-delivery')
-    assert json.loads(denied.output)['error'] == 'READ_OBSERVATION_REQUIRED'
-    result.delivery_succeeded()
-    assert _edit(tmp_path, payload['content_revision'], 'after-delivery').status is ToolResultState.SUCCESS
 
 
-def test_native_observation_is_shared_with_code_edit_and_old_read_cannot_replace_newer_observation(tmp_path):
-    path = tmp_path / 'source.txt'
-    path.write_text('initial\nsecond\n')
-    old = _read(tmp_path, deferred=True)
-    native = json.loads(_read(tmp_path).output)
-    assert _edit(tmp_path, native['content_revision'], 'native-read-code-edit').status is ToolResultState.SUCCESS
-    fresh = json.loads(_read(tmp_path).output)
-    old.delivery_succeeded()
-    assert _edit(tmp_path, fresh['content_revision'], 'newer-observation').status is ToolResultState.SUCCESS
 
 
 def test_source_file_is_frozen_once_through_file_owner_without_edit_observation(tmp_path):
     path = tmp_path / 'source.txt'
     path.write_text('return 1;')
     tool = ReadFileTool(tmp_path)
-    source = tool.read_code_mode_source('source.txt', maximum_bytes=1024)
+    source = tool.read_code_mode_source('source.txt')
     path.write_text('return 2;')
     assert source == 'return 1;'
-    with pytest.raises(ValueError):
-        tool.read_code_mode_source('source.txt', maximum_bytes=1)
+    assert tool.read_code_mode_source('source.txt') == 'return 2;'
 
 
 def test_child_close_does_not_release_shared_terminal_owner(tmp_path):
@@ -109,7 +82,7 @@ def _canonical_code_calls(database, *, code_result_body=b'private-code-physical-
     from pulsara_agent.llm.input import FrozenPromptContent
     from pulsara_agent.conversation_kernel.repository import AssistantToolCallBlock, build_prepared_tool_result_acceptance
     from pulsara_agent.conversation_kernel.tool_invocations import current_tool_invocation
-    from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
+    from pulsara_agent.conversation_kernel.content_parts import ResultPart
     from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
     from tests.test_stage2_conversation_kernel_postgres import _repository, _start_root_turn, _assistant_permission_fingerprint
     repository = _repository(database)
@@ -123,7 +96,7 @@ def _canonical_code_calls(database, *, code_result_body=b'private-code-physical-
     cut = repository.prepare_provider_input_cut(lease.guard, turn_id=turn_id, deadline_monotonic=deadline)
     exec_entry, exec_call, exec_attempt = (random_id(k) for k in ('entry','call','attempt'))
     repository.commit_assistant_message(lease.guard, cut=cut, entry_id=exec_entry,
-        parent_content=InlineContent.from_bytes(b'program request'), blocks=(AssistantToolCallBlock(
+        blocks=(AssistantToolCallBlock(
             block_id=random_id('block'), tool_call_id=exec_call, tool_name='exec_cell', arguments=freeze_json({'code':'return 1;'})),),
         occurred_at=datetime.now(timezone.utc), actor_id='model:test', deadline_monotonic=deadline)
     permission = _assistant_permission_fingerprint(repository, lease.guard, exec_entry, deadline)
@@ -159,10 +132,8 @@ def _canonical_code_calls(database, *, code_result_body=b'private-code-physical-
                 candidate = build_prepared_tool_result_acceptance(guard=lease.guard, workspace_id=workspace_id,
                     result_id=result_id, result_entry_id=entry_id, turn_id=turn_id, assistant_entry_id=None,
                     tool_call_id=call_id, attempt_id=attempt_id, result_state='SUCCESS',
-                    canonical_preview_content=InlineContent.from_bytes(code_result_body),
-                    output_body=InlineContent.from_bytes(code_result_body), output_unavailability_reason=None,
-                    source_coverage=ToolOutputSourceCoverage.COMPLETE, output_omitted=False,
-                    source_coverage_reason=None, observed_at=datetime.now(timezone.utc),
+                    public_fields={}, content_parts=(ResultPart('text',code_result_body.decode()),),
+                    observed_at=datetime.now(timezone.utc),
                     observation_duration_microseconds=10, observation_origin_kind=ToolObservationOrigin.BUILTIN,
                     trusted_tool_reported_duration_microseconds=None, actor_id='read_file')
                 accepted = repository.accept_tool_result(lease.guard, candidate=candidate, deadline_monotonic=deadline)
@@ -179,7 +150,7 @@ def test_code_call_rejections_and_late_results_share_actual_source_without_assis
     from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
     repository, lease, turn_id, exec_entry, exec_call, results = _canonical_code_calls(stage2_migrated_postgres_database)
     with repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=monotonic()+30) as connection:
-        assert connection.execute('SELECT count(*) FROM pulsara_v3.assistant_message_blocks WHERE session_id=%s', (lease.guard.session_id,)).fetchone()[0] == 1
+        assert connection.execute("SELECT count(*) FROM pulsara_v3.content_parts WHERE session_id=%s AND type='tool_call'", (lease.guard.session_id,)).fetchone()[0] == 1
         assert connection.execute('SELECT count(*) FROM pulsara_v3.tool_invocations WHERE session_id=%s', (lease.guard.session_id,)).fetchone()[0] == 3
         assert connection.execute('SELECT count(*) FROM pulsara_v3.tool_execution_attempts WHERE session_id=%s', (lease.guard.session_id,)).fetchone()[0] == 2
         rows = connection.execute('SELECT tool_call_entry_id,attempt_id,result_entry_id FROM pulsara_v3.tool_results WHERE session_id=%s ORDER BY observed_at', (lease.guard.session_id,)).fetchall()
@@ -192,22 +163,30 @@ def _formal_cell_rows(session):
     from time import monotonic
     from psycopg.rows import dict_row
     from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
-    from pulsara_agent.conversation_kernel._repository.prompts import _cell_body_in_connection
-    from pulsara_agent.ports.terminal_observation import CellOutputContent
+    from pulsara_agent.conversation_kernel._repository.queue_content import read_input_owner
     with session.repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,
             row_factory=dict_row, deadline_monotonic=monotonic()+10) as connection:
         rows = connection.execute("SELECT * FROM pulsara_v3.prompt_queue_items WHERE session_id=%s "
             "AND input_origin='CELL_OUTPUT' ORDER BY queue_sequence",(session.session_id,)).fetchall()
-        return [(row,dict(CellOutputContent.from_bytes(_cell_body_in_connection(connection,row)).record)) for row in rows]
+        values=[]
+        for row in rows:
+            content=read_input_owner(connection,row=row)
+            assert (content.cell_id,content.source_turn_id,content.source_exec_attempt_id,content.record_sequence,content.storage_kind)==(row['source_cell_id'],row['source_turn_id'],row['source_tool_attempt_id'],row['source_record_sequence'],row['cell_output_kind'])
+            assert all(p['type']=='text' for p in content.storage_parts)
+            values.append((row,{'kind':content.storage_kind,'text':''.join(p['value'] for p in content.storage_parts)}))
+        return values
 
 
 async def _settled_formal_records(session, *, expected=None):
-    async with asyncio.timeout(15):
-        while True:
-            rows = await asyncio.to_thread(_formal_cell_rows, session)
-            if not session._code_mode.snapshot_cell_index() and (expected is None or len(rows) >= expected):
-                return [record for _,record in rows]
-            await asyncio.sleep(.005)
+    from time import monotonic
+    deadline=monotonic()+15
+    while True:
+        rows = await asyncio.to_thread(_formal_cell_rows,session)
+        cells=session._code_mode.snapshot_cell_index()
+        if not cells and (expected is None or len(rows)>=expected):
+            return [record for _,record in rows]
+        assert monotonic()<deadline, {'records':[record for _,record in rows],'cells':cells,'expected':expected}
+        await asyncio.sleep(.005)
 
 
 @pytest.mark.postgres
@@ -215,7 +194,6 @@ def test_real_host_code_calls_parallel_then_continue_after_source_turn_final(tmp
     from pulsara_agent.identity import random_id
     from pulsara_agent.conversation_kernel.host import KernelHostCore
     from pulsara_agent.llm.input import PromptContent, MessageRole, text_part_values
-    from pulsara_agent.model_input.lowering import decode_tool_result_observation
     from pulsara_agent.primitives.permission import PermissionMode
     from pulsara_agent.workspace_identity import HostWorkspaceInput
     from tests.support.model_config import test_model_runtime, test_model_binding
@@ -248,8 +226,7 @@ await Promise.all([
   tools.read_file({target:{kind:"PATH",path:"source.txt"}}).then(x => order.push("fast"))
 ]);
 const read = await tools.read_file({target:{kind:"PATH",path:"source.txt"}});
-await tools.edit_file({target:{kind:"PATH",path:"source.txt"},base_revision:read.content_revision,
-  operations:[{kind:"replace_lines",start_line:1,end_line:1,lines:["after-source-final"]}]});
+await tools.edit_file({target:{kind:"PATH",path:"source.txt"},old_text:"before",new_text:"after-source-final"});
 try { await tools.read_flie({}); } catch (error) { console.log({tool_hint:error.message}); }
 try { await tools.read_file({target:{kind:"PATH",path:"source.txt"},limti:1}); }
 catch (error) { console.log({parameter_hint:error.message}); }
@@ -262,16 +239,16 @@ return {finished:true};
         index = len(model.requests)
         tool_messages = [m for m in request.compiled_input.messages if m.role is MessageRole.TOOL_RESULT]
         for message in tool_messages:
-            body = str(decode_tool_result_observation(text_part_values(message.content)[0])['body'])
+            body = text_part_values(message.content)[0]
             assert 'after-source-final' not in body
         if index == 1:
             payloads = _tool_call('exec_cell', random_id('call'), {'code':code})
         else:
             if index == 2:
-                observation = json.loads(str(decode_tool_result_observation(text_part_values(tool_messages[-1].content)[0])['body']))
+                observation = _native_fields(text_part_values(tool_messages[-1].content)[0])
                 cell_id = observation['target']['cell_id']
                 bodies.append(observation)
-                assert observation['accepted'] and 'output' not in observation
+                assert observation['meta']['status']=='SUCCESS'
             payloads = _text(random_id('block'),'FIRST_SOURCE_FINAL' if index == 2 else 'FORMAL_INPUT_OBSERVED')
         for payload in payloads:
             yield payload
@@ -289,11 +266,12 @@ return {finished:true};
             records = await _settled_formal_records(session, expected=5)
             assert (tmp_path / 'source.txt').read_text().startswith('after-source-final\n')
             texts = [record.get('text','') for record in records]
-            assert json.dumps({'order':['fast','slow']},separators=(',',':')) in texts
+            parsed=[json.loads(text) for text in texts]
+            assert {'order':['fast','slow']} in parsed
             assert any('INVALID_ARGUMENTS' in text for text in texts)
             assert any('Did you mean \\"read_file\\"?' in text for text in texts)
-            assert any("Did you mean 'limit'?" in text for text in texts)
-            assert records[-1] == {'kind':'return','text':'{"finished":true}'}
+            assert any("Did you mean" in str(value) and "limit" in str(value) for value in parsed), parsed
+            assert records[-1]['kind']=='return' and parsed[-1]=={'finished':True}
             assert len(post_diagnostics) == 1 and post_diagnostics[0]['tool_name'] == 'edit_file'
         finally:
             await core.shutdown()
@@ -308,7 +286,6 @@ def test_real_host_stop_and_frozen_large_outputs_use_canonical_owners(mode, tmp_
     from pulsara_agent.conversation_kernel.host import KernelHostCore
     from pulsara_agent.conversation_kernel.tool_outputs import PostgresToolOutputReadPort
     from pulsara_agent.llm.input import PromptContent, MessageRole, text_part_values
-    from pulsara_agent.model_input.lowering import decode_tool_result_observation
     from pulsara_agent.primitives.permission import PermissionMode
     from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
     from pulsara_agent.workspace_identity import HostWorkspaceInput
@@ -322,7 +299,7 @@ def test_real_host_stop_and_frozen_large_outputs_use_canonical_owners(mode, tmp_
         code = 'console.log("\\ud800"); return "\\ud800";'
     if mode == 'terminal_body':
         command = "head -c 50000 /dev/zero | tr '\\0' x"
-        code = 'const result=await tools.exec_process(' + json.dumps({'command':command,'yield_time_ms':1000,'max_output_chars':512}) + ');console.log({length:result.output.length,exit_code:result.exit_code});'
+        code = 'const result=await tools.exec_process(' + json.dumps({'command':command,'yield_time_ms':1000}) + ');console.log({length:result.content.map(p=>p.value).join("").length,exit_code:result.meta.exit_code});'
     accepted_cell = None
     async def stream(request):
         nonlocal accepted_cell
@@ -331,8 +308,8 @@ def test_real_host_stop_and_frozen_large_outputs_use_canonical_owners(mode, tmp_
             payloads = _tool_call('exec_cell',random_id('call'),{'code':code})
         elif index == 2:
             message = next(m for m in reversed(request.compiled_input.messages) if m.role is MessageRole.TOOL_RESULT)
-            body = json.loads(str(decode_tool_result_observation(text_part_values(message.content)[0])['body']))
-            assert body['accepted'] and 'output' not in body
+            body = _native_fields(text_part_values(message.content)[0])
+            assert body['meta']['status']=='SUCCESS'
             accepted_cell = body['target']
             if mode == 'stop':
                 async with asyncio.timeout(5):
@@ -344,8 +321,8 @@ def test_real_host_stop_and_frozen_large_outputs_use_canonical_owners(mode, tmp_
         else:
             if mode == 'stop' and index == 3:
                 message = next(m for m in reversed(request.compiled_input.messages) if m.role is MessageRole.TOOL_RESULT)
-                body = json.loads(str(decode_tool_result_observation(text_part_values(message.content)[0])['body']))
-                assert body['state'] == 'terminated' and 'output' not in body
+                body = _native_fields(text_part_values(message.content)[0])
+                assert body['meta']['cell_status'] == 'terminated' and 'output' not in body
             payloads = _text(random_id('block'),'OBSERVED')
         for payload in payloads:
             yield payload
@@ -366,7 +343,8 @@ def test_real_host_stop_and_frozen_large_outputs_use_canonical_owners(mode, tmp_
             elif mode == 'unicode':
                 assert records == [{'kind':'log','text':'\ud800'},{'kind':'return','text':'\ud800'}]
             elif mode == 'terminal_body':
-                assert records == [{'kind':'log','text':'{"length":50000,"exit_code":0}'}]
+                assert len(records)==1 and records[0]['kind']=='log'
+                assert json.loads(records[0]['text'])=={'length':50000,'exit_code':0}
                 with session.repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,
                         deadline_monotonic=monotonic()+10) as connection:
                     rows = connection.execute("SELECT r.result_entry_id FROM pulsara_v3.tool_results r "
@@ -375,7 +353,9 @@ def test_real_host_stop_and_frozen_large_outputs_use_canonical_owners(mode, tmp_
                 assert len(rows) == 1
                 reader = PostgresToolOutputReadPort(session.repository.connection_provider,
                     session_id=session.session_id,workspace_id=session.workspace.workspace_key)
-                assert reader.read_body({'kind':'SESSION_ENTRY','entry_id':rows[0][0]}).content == b'x'*50000
+                actual=reader.read_result({'kind':'SESSION_ENTRY','entry_id':rows[0][0]}).value
+                assert ''.join(part['value'] for part in actual['content'])=='x'*50000
+                assert actual['meta']['exit_code']==0
             else:
                 assert records == [{'kind':'log','text':'x'*50000},{'kind':'log','text':'tail-record'}]
                 rows = await asyncio.to_thread(_formal_cell_rows,session)
@@ -385,9 +365,9 @@ def test_real_host_stop_and_frozen_large_outputs_use_canonical_owners(mode, tmp_
                         rows = await asyncio.to_thread(_formal_cell_rows,session)
                 reader = PostgresToolOutputReadPort(session.repository.connection_provider,
                     session_id=session.session_id,workspace_id=session.workspace.workspace_key)
-                from pulsara_agent.ports.terminal_observation import CellOutputContent
-                saved = reader.read_body({'kind':'SESSION_ENTRY','entry_id':rows[0][0]['consumed_entry_id']})
-                assert CellOutputContent.from_bytes(saved.content).record == records[0]
+                with pytest.raises(KeyError):
+                    reader.read_result({'kind':'SESSION_ENTRY','entry_id':rows[0][0]['consumed_entry_id']})
+
         finally:
             await core.shutdown()
     asyncio.run(scenario())
@@ -463,7 +443,6 @@ def test_two_cells_and_native_batch_share_leaf_without_serializing_physical_wait
     from pulsara_agent.identity import random_id
     from pulsara_agent.conversation_kernel.host import KernelHostCore
     from pulsara_agent.llm.input import PromptContent, MessageRole, text_part_values
-    from pulsara_agent.model_input.lowering import decode_tool_result_observation
     from pulsara_agent.primitives.permission import PermissionMode
     from pulsara_agent.workspace_identity import HostWorkspaceInput
     from tests.support.model_config import test_model_runtime, test_model_binding
@@ -485,15 +464,14 @@ def test_two_cells_and_native_batch_share_leaf_without_serializing_physical_wait
         elif index == 2:
             assert len(messages) == 2
             for message in messages:
-                observed = json.loads(str(decode_tool_result_observation(text_part_values(message.content)[0])['body']))
-                assert observed['accepted']
+                observed = _native_fields(text_part_values(message.content)[0])
+                assert observed['meta']['status']=='SUCCESS'
                 cells.append(observed['target']['cell_id'])
                 observations.append(observed)
             payloads = _tool_call('read_file',random_id('call'),{'target':{'kind':'PATH','path':'source.txt'}})
         else:
             if index == 3:
-                body = json.loads(str(decode_tool_result_observation(text_part_values(messages[-1].content)[0])['body']))
-                assert body['content'].endswith('native-value')
+                assert 'native-value' in text_part_values(messages[-1].content)[0]
                 native_seen = True
             payloads = _text(random_id('block'),'BOTH_CELLS_SETTLED')
         for payload in payloads:
@@ -520,13 +498,12 @@ def test_two_cells_and_native_batch_share_leaf_without_serializing_physical_wait
 
 
 @pytest.mark.postgres
-@pytest.mark.parametrize('scenario_kind', ['post_failure', 'later_block', 'budget'])
+@pytest.mark.parametrize('scenario_kind', ['post_failure','later_block'])
 def test_batch_hooks_block_atomically_and_keep_accepted_work_after_post_failure(scenario_kind, tmp_path, monkeypatch, stage2_migrated_postgres_database):
     from pulsara_agent.identity import random_id
     from pulsara_agent.conversation_kernel.host import KernelHostCore
     from pulsara_agent.conversation_kernel.tool_execution import ToolBatchExecutor
     from pulsara_agent.llm.input import PromptContent, MessageRole, text_part_values
-    from pulsara_agent.model_input.lowering import decode_tool_result_observation
     from pulsara_agent.primitives.permission import PermissionMode
     from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
     from pulsara_agent.workspace_identity import HostWorkspaceInput
@@ -537,7 +514,7 @@ def test_batch_hooks_block_atomically_and_keep_accepted_work_after_post_failure(
     import pulsara_agent.conversation_kernel.host as kernel_host
     root_session_id, cell_id = None, None
     root_calls = 0
-    pages, member_posts, diagnostics, member_pres, budget_quotes = [], [], [], [], []
+    pages, member_posts, diagnostics, member_pres = [], [], [], []
     original_post = ToolBatchExecutor._dispatch_post_tool
     original_pre = ToolBatchExecutor._dispatch_pre_tool
     original_offer = ToolBatchExecutor._offer_operational_best_effort
@@ -563,18 +540,6 @@ def test_batch_hooks_block_atomically_and_keep_accepted_work_after_post_failure(
     monkeypatch.setattr(ToolBatchExecutor,'_dispatch_pre_tool',block_second_member)
     monkeypatch.setattr(ToolBatchExecutor,'_dispatch_post_tool',fail_one_member)
     monkeypatch.setattr(ToolBatchExecutor,'_offer_operational_best_effort',observe_diagnostic)
-    if scenario_kind == 'budget':
-        from pulsara_agent.conversation_kernel.subagents.collaboration_api import CollaborationToolPort
-        invoke = CollaborationToolPort.invoke
-        async def quote_after_hooks(owner, *, tool_name, arguments, invocation_context):
-            if tool_name == 'run_agent':
-                def reject_receipt(body, _ids):
-                    budget_quotes.append(body)
-                    return False
-                invocation_context = replace(invocation_context,
-                    page_budget=replace(invocation_context.page_budget, accepts_provider_body=reject_receipt))
-            return await invoke(owner, tool_name=tool_name, arguments=arguments, invocation_context=invocation_context)
-        monkeypatch.setattr(CollaborationToolPort, 'invoke', quote_after_hooks)
     async def stream(request):
         nonlocal root_calls,cell_id
         if request.session_id != root_session_id:
@@ -582,13 +547,13 @@ def test_batch_hooks_block_atomically_and_keep_accepted_work_after_post_failure(
         else:
             root_calls += 1
             if root_calls == 1:
-                code = 'try { const admitted=await tools.run_agent([{instruction:"first work",work_title:"first title"},{instruction:"second work",work_title:"second title"}]);const finished=await tools.wait_agent({agents:[...new Map(admitted.agents.map(a=>[a.agent_id,a])).values()],until:"idle"});console.log(admitted);console.log(finished); } catch(error) { console.log({rejected:error.code}); }'
+                code = 'try { const admitted=await tools.run_agent([{instruction:"first work",work_title:"first title"},{instruction:"second work",work_title:"second title"}]);const finished=await tools.wait_agent({agents:[...new Map(admitted.content.map(p=>p.value.agent).map(a=>[a.agent_id,a])).values()],settle:"all"});console.log({status:admitted.meta.status,records:admitted.content.map(p=>p.value)});console.log(finished); } catch(error) { console.log({rejected:error.code}); }'
                 payloads = _tool_call('exec_cell',random_id('call'),{'code':code})
             else:
                 if root_calls == 2:
                     message = next(m for m in reversed(request.compiled_input.messages) if m.role is MessageRole.TOOL_RESULT)
-                    page = json.loads(str(decode_tool_result_observation(text_part_values(message.content)[0])['body']))
-                    assert page['accepted']
+                    page = _native_fields(text_part_values(message.content)[0])
+                    assert page['meta']['status']=='SUCCESS'
                     pages.append(page)
                     cell_id = page['target']['cell_id']
                 payloads = _text(random_id('block'),'BATCH_ACCEPTED')
@@ -613,23 +578,20 @@ def test_batch_hooks_block_atomically_and_keep_accepted_work_after_post_failure(
                 rows = connection.execute("SELECT r.result_state,r.attempt_id FROM pulsara_v3.tool_results r JOIN pulsara_v3.tool_invocations i ON i.session_id=r.session_id AND i.id=r.invocation_id WHERE i.session_id=%s AND i.source_kind='CODE_MODE_CALL' AND i.tool_name='run_agent'",(root_session_id,)).fetchall()
                 assert len(rows) == 1
                 if scenario_kind != 'post_failure':
-                    expected = 'APPLICATION_ERROR' if scenario_kind == 'budget' else 'PERMISSION_DENIED'
+                    expected = 'PERMISSION_DENIED'
                     assert batch == {'rejected':expected}
                     assert rows[0][0] == expected
-                    assert (rows[0][1] is not None) is (scenario_kind == 'budget')
-                    if scenario_kind == 'budget':
-                        assert len(budget_quotes) == 1 and all(title in budget_quotes[0] for title in ('first title', 'second title'))
+                    assert rows[0][1] is None
                     assert member_pres == [0, 1]
                     assert connection.execute('SELECT count(*) FROM pulsara_v3.sessions WHERE root_session_id=%s',(root_session_id,)).fetchone()[0] == 0
                     assert not diagnostics
                 else:
-                    assert set(batch) == {'agents','works','details'}
-                    assert all(len(batch[key]) == 2 for key in batch)
+                    assert batch['status']=='SUCCESS'
+                    assert len(batch['records'])==2
                     assert member_posts == [0,1]
                     assert len(diagnostics) == 1 and diagnostics[0]['member_index'] == 0
-                    work_ids = [item['work_id'] for item in batch['works']]
+                    work_ids = [item['work']['work_id'] for item in batch['records']]
                     assert connection.execute('SELECT count(*) FROM pulsara_v3.prompt_queue_items WHERE id=ANY(%s)',(work_ids,)).fetchone()[0] == 2
-                    assert [item['work_title'] for item in batch['details']] == ['first title', 'second title']
                     titles = dict(connection.execute('SELECT id,work_title FROM pulsara_v3.prompt_queue_items WHERE id=ANY(%s)',(work_ids,)).fetchall())
                     assert [titles[work] for work in work_ids] == ['first title', 'second title']
                     original = connection.execute("SELECT original_arguments FROM pulsara_v3.tool_invocations WHERE session_id=%s AND tool_name='run_agent'",(root_session_id,)).fetchone()[0]
@@ -688,18 +650,6 @@ def test_role_surface_keeps_control_tools_visible_and_rejects_restricted_executi
     asyncio.run(scenario())
 
 
-def test_delayed_read_never_replaces_newer_observation_when_file_reverts(tmp_path):
-    from pulsara_agent.tools.builtins.filesystem import _state_for_workspace
-    path = tmp_path/'source.txt'
-    path.write_text('old revision\n')
-    delayed = _read(tmp_path,deferred=True)
-    path.write_text('new revision\n')
-    newer = json.loads(_read(tmp_path).output)
-    path.write_text('old revision\n')
-    delayed.delivery_succeeded()
-    assert _state_for_workspace(tmp_path).observation(path.resolve()).content_revision == newer['content_revision']
-
-
 @pytest.mark.postgres
 @pytest.mark.parametrize('name,arguments', [('run_agent', {'instruction': 'must not create work'}),
     ('wait_agent', {'targets': []}), ('decide', {'condition': 'x', 'inputs': []})])
@@ -707,7 +657,6 @@ def test_new_root_schema_rejects_native_code_only_call_and_continues(name, argum
     from pulsara_agent.identity import random_id
     from pulsara_agent.conversation_kernel.host import KernelHostCore
     from pulsara_agent.llm.input import PromptContent, MessageRole, text_part_values
-    from pulsara_agent.model_input.lowering import decode_tool_result_observation
     from pulsara_agent.primitives.permission import PermissionMode
     from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
     from pulsara_agent.workspace_identity import HostWorkspaceInput
@@ -723,7 +672,7 @@ def test_new_root_schema_rejects_native_code_only_call_and_continues(name, argum
             events = _tool_call(name, random_id('call'), arguments)
         else:
             message = next(m for m in reversed(request.compiled_input.messages) if m.role is MessageRole.TOOL_RESULT)
-            observed.append(decode_tool_result_observation(text_part_values(message.content)[0]))
+            observed.append(text_part_values(message.content)[0])
             events = _text(random_id('block'), 'CONTINUED_AFTER_UNAVAILABLE')
         for event in events:
             yield event
@@ -741,7 +690,7 @@ def test_new_root_schema_rejects_native_code_only_call_and_continues(name, argum
             result = await session.run_turn(PromptContent.text('try the removed native entry'),
                 requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
             assert result.final_text == 'CONTINUED_AFTER_UNAVAILABLE'
-            assert len(observed) == 1 and 'exec_cell' in str(observed[0]['body'])
+            assert len(observed) == 1 and 'exec_cell' in observed[0]
             with session.repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,
                     deadline_monotonic=monotonic()+10) as connection:
                 assert connection.execute('SELECT count(*) FROM pulsara_v3.tool_execution_attempts WHERE session_id=%s',

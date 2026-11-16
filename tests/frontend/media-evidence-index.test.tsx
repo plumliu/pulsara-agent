@@ -4,51 +4,51 @@ import { MediaEvidenceIndex } from '../../frontend/components/media-evidence-ind
 import { FileMediaContext } from '../../frontend/components/file-link-context';
 import type { FilePreviewApi } from '../../frontend/lib/file-preview';
 import type { ToolTrace } from '../../frontend/lib/pulsara-types';
+import type { ToolBusinessValue } from '../../frontend/lib/tool-business-value';
 
-const page = {target:{kind:'PATH',path:'/project/canonical video.mp4'},media_version:{modified_ns:'1823467890123456789',size:100},crop:[.1,.2,.8,.9],frames:[{n:1,image:1,t:3.123456789},{n:2,image:1,t:9.75}]};
-const trace: ToolTrace = {id:'trace',kind:'read',toolName:'read_video_frames',title:'读取画面',subtitle:'已完成',status:'completed',argumentsJson:JSON.stringify({target:{kind:'PATH',path:'wrong.mp4'},from:0,to:999}),resultText:JSON.stringify(page)};
+const value: ToolBusinessValue = {target:{kind:'PATH',path:'videos/canonical video.mp4'},meta:{status:'SUCCESS'},content:[
+  {type:'text',value:'detail：请求 [3, 10) 秒。\n'},
+  {type:'object',value:{t:3.123456789,visible_range:[3.123456789,3.2]}},
+  {type:'object',value:{t:9.75,visible_range:[9.75,10]}},
+]};
+const trace: ToolTrace = {id:'trace',kind:'read',toolName:'read_video_frames',title:'读取画面',subtitle:'已完成',status:'completed',argumentsJson:JSON.stringify({target:{kind:'PATH',path:'wrong.mp4'},from:0,to:999}),businessValue:value};
 const api: FilePreviewApi = {open:vi.fn(),snapshot:vi.fn(),close:vi.fn(),page:vi.fn(),action:vi.fn(),annotations:vi.fn()};
-function mount(value: ToolTrace, open=vi.fn()) {
-  return {open,...render(<FileMediaContext.Provider value={{api,ownerKey:'test',sessionId:'test',open}}><MediaEvidenceIndex trace={value}/></FileMediaContext.Provider>)};
+function mount(item: ToolTrace, open=vi.fn()) {
+  return {open,...render(<FileMediaContext.Provider value={{api,ownerKey:'test',sessionId:'test',open}}><MediaEvidenceIndex trace={item}/></FileMediaContext.Provider>)};
 }
 afterEach(() => {cleanup();vi.clearAllMocks();});
-it('uses exact canonical source, time, crop and file version with no media load until clicked', () => {
-  const {open} = mount({...trace,resultText:undefined,resultContent:{parts:[{type:'text',text:JSON.stringify(page)}]}});
+it('uses frozen business times and the public target; opens current media only on a click', () => {
+  const {open} = mount(trace);
   expect(api.open).not.toHaveBeenCalled();
   expect(open).not.toHaveBeenCalled();
-  const button=screen.getByRole('button',{name:'定位第 1 帧到 3.123456789 秒'});
-  expect(button.getAttribute('title')).toContain('crop=[0.1,0.2,0.8,0.9]');
-  fireEvent.click(button);
-  expect(open).toHaveBeenCalledExactlyOnceWith('/project/canonical video.mp4',3.123456789,{modified_ns:'1823467890123456789',size:100});
+  fireEvent.click(screen.getByRole('button',{name:'定位第 1 帧到 3.123456789 秒'}));
+  expect(open).toHaveBeenCalledExactlyOnceWith('videos/canonical video.mp4',3.123456789);
 });
-it('uses transcript absolute times without reading next or inferring finer timestamps', () => {
-  const {open}=mount({...trace,toolName:'read_transcript',resultText:JSON.stringify({...page,frames:undefined,crop:undefined,entries:[{from:130.75,to:180,text:'原文片段',position:{index:2,line:1,char_offset:20}}],next:{tool:'read_transcript',arguments:{continuation:{position:'unread'}}}})});
-  fireEvent.click(screen.getByRole('button',{name:'定位原文 1 到 130.75 秒'}));
-  expect(open).toHaveBeenCalledExactlyOnceWith(page.target.path,130.75,page.media_version);
+it('uses complete transcript segment times and keeps original wording', () => {
+  const {open}=mount({...trace,toolName:'read_transcript',businessValue:{...value,meta:{status:'SUCCESS',source:'subtitle'},content:[{type:'object',value:{from:130.75,to:180,text:'原文片段',visible_range:{from:130.75,to:150}}}]}});
+  const button=screen.getByRole('button',{name:'定位原文 1 到 130.75 秒'});
+  expect(button.getAttribute('title')).toBe('原文片段');
+  fireEvent.click(button);
+  expect(open).toHaveBeenCalledExactlyOnceWith('videos/canonical video.mp4',130.75);
   expect(api.open).not.toHaveBeenCalled();
 });
-it.each([
-  {...page,media_version:undefined}, {...page,frames:[{n:1,image:1,t:-1}]}, {...page,crop:[0,0,0,1]},
-])('does not invent navigable evidence from incomplete or invalid pages', value => {
-  mount({...trace,resultText:JSON.stringify(value)});
+it('flattens successive collage indices in their original content order', () => {
+  const {open}=mount({...trace,businessValue:{...value,content:[
+    {type:'object',value:{frames:[{n:1,t:3,cell_rect:[0,0,.5,1]},{n:2,t:4,cell_rect:[.5,0,1,1]}]}},
+    {type:'text',value:'后续拼图'},
+    {type:'object',value:{frames:[{n:1,t:5,cell_rect:[0,0,1,1]}]}},
+  ]}});
+  fireEvent.click(screen.getByRole('button',{name:'定位第 3 帧到 5 秒'}));
+  expect(open).toHaveBeenCalledExactlyOnceWith('videos/canonical video.mp4',5);
+});
+it('does not manufacture navigation from display text or arguments', () => {
+  mount({...trace,businessValue:undefined,resultText:JSON.stringify(value)});
   expect(screen.queryByRole('navigation')).toBeNull();
 });
-it('does not show generated parameters or a running tool as delivered evidence', () => {
+it('rejects invalid time indices and a running result', () => {
+  const {unmount}=mount({...trace,businessValue:{...value,content:[{type:'object',value:{t:-1}}]}});
+  expect(screen.queryByRole('navigation')).toBeNull();
+  unmount();
   mount({...trace,status:'running'});
   expect(screen.queryByRole('navigation')).toBeNull();
-});
-
-it('keeps independent seek times when detail observations share one image', () => {
-  const {open}=mount(trace);
-  const first=screen.getByRole('button',{name:'定位第 1 帧到 3.123456789 秒'});
-  const second=screen.getByRole('button',{name:'定位第 2 帧到 9.75 秒'});
-  expect(first.getAttribute('title')).toContain('图 1');
-  expect(second.getAttribute('title')).toContain('图 1');
-  fireEvent.click(first);
-  fireEvent.click(second);
-  expect(open.mock.calls).toEqual([
-    [page.target.path,3.123456789,page.media_version],
-    [page.target.path,9.75,page.media_version],
-  ]);
-  expect(api.open).not.toHaveBeenCalled();
 });

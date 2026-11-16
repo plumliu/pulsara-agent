@@ -133,7 +133,7 @@ class PluginMcpConnectionOverlay:
     environment: tuple[tuple[str, str], ...] = ()
     secret_environment: tuple[tuple[str, McpSecretInput], ...] = ()
     auth: McpAuthConfig = NoAuth()
-    scope_policy: McpScopePolicy = McpScopePolicy.ROOT_ONLY
+    scope_policy: McpScopePolicy = McpScopePolicy.ROOT_AND_SUBAGENTS
 
     def __post_init__(self):
         if not isinstance(self.scope_policy, McpScopePolicy):

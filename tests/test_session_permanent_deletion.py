@@ -1,6 +1,5 @@
 """Session deletion hard-cut: real constraints, independent memory, and fences."""
 
-from pulsara_agent.memory.targets import memory_target
 
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from time import monotonic
@@ -11,11 +10,9 @@ import pytest
 
 from pulsara_agent.conversation_kernel._repository.deletion import SessionDeletionBusy
 from pulsara_agent.conversation_kernel.repository import ConversationKernelConflict
-from pulsara_agent.conversation_kernel.memory.contracts import MemoryRelationKind
 from pulsara_agent.conversation_kernel.memory.management import (
     MemoryManagementSelection,
 )
-from pulsara_agent.conversation_kernel.memory.writes import PreparedMemoryRelationWrite
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
 from tests.test_conversation_fork import (
@@ -27,7 +24,7 @@ from tests.test_conversation_fork import (
     child_lease,
     identity,
 )
-from tests.test_direct_advisory_memory import _open_direct_memory_session
+from tests.support.memory_workspace import project_memory_session, project_memory
 
 
 DIRECT = {
@@ -42,11 +39,10 @@ DIRECT = {
     "imported_history_groups",
     "transcript_entries",
     "session_context_genesis",
-    "assistant_message_blocks",
     "provider_assistant_replay_fragments",
     "tool_results",
     "prompt_queue_items",
-    "canonical_image_refs",
+    "content_parts",
     "assistant_visualizations",
     "interaction_decisions",
     "plan_workflows",
@@ -56,8 +52,8 @@ DIRECT = {
 INDIRECT = {
     "provider_call_usage": ("turns", "turn_id"),
     "turn_context_binding_revisions": ("turns", "turn_id"),
-    "tool_execution_attempts": ("assistant_message_blocks", "tool_call_id"),
-    "imported_tool_call_closures": ("assistant_message_blocks", "tool_call_id"),
+    "tool_execution_attempts": ("content_parts", "tool_call_id"),
+    "imported_tool_call_closures": ("content_parts", "tool_call_id"),
 }
 
 
@@ -191,7 +187,7 @@ def test_condition_retry_checks_new_lifecycle(repo, monkeypatch):
 
 
 def test_catalog_ownership_semantic_edges_grants_and_index_coverage(repo):
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 31
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
     fks = rows(
         repo,
         """SELECT c.conrelid::regclass::text AS child,
@@ -223,7 +219,7 @@ def test_catalog_ownership_semantic_edges_grants_and_index_coverage(repo):
             child == "tool_invocations"
             and (
                 (parent == "turns" and "turn_id" in f["columns"])
-                or (parent == "assistant_message_blocks" and "tool_call_id" in f["columns"])
+                or (parent == "content_parts" and "tool_call_id" in f["columns"])
             )
         )
         if ownership:
@@ -245,7 +241,7 @@ def test_catalog_ownership_semantic_edges_grants_and_index_coverage(repo):
                 assert (f["action"], f["deferred"], f["initially_deferred"]) == ("c", False, False)
                 continue
             if (
-                child in {"canonical_image_refs", "assistant_visualizations"}
+                child in {"content_parts", "assistant_visualizations"}
                 and f["action"] == "c"
             ):
                 continue
@@ -324,69 +320,34 @@ def test_cold_domain_lease_closed_existence_and_exact_release(
 
 
 @pytest.mark.parametrize('archived_only', [False, True])
-def test_memory_graph_and_project_survive_unchanged_with_user_edit(repo, tmp_path, archived_only):
+def test_project_memories_and_embeddings_survive_with_user_edit(repo, tmp_path, archived_only):
     project = tmp_path / "preserved-project"
     project.mkdir()
-    lease, invoke, remember = _open_direct_memory_session(
-        repo, workspace_root=str(project)
-    )
-    _, old, _ = remember("Deletion test: review is Friday.", project=True)
-    _, decision, _ = remember(
-        "Deletion test: prepare slides Thursday.",
-        project=True,
-        based_on=(old["target"]["memory_id"],),
-    )
-    _, newer, _ = remember("Deletion test: review is Monday.", project=True)
-    invoke(
-        "mark_memory_relation",
-        {
-            'source': memory_target(newer["target"]["memory_id"]),
-            'target': memory_target(old["target"]["memory_id"]),
-            "relation_kind": "SUPERSEDES",
-        },
-        PreparedMemoryRelationWrite(
-            memory_domain_id="u_local",
-            source_memory_id=newer["target"]["memory_id"],
-            target_memory_id=old["target"]["memory_id"],
-            relation_kind=MemoryRelationKind.SUPERSEDES,
-        ),
-    )
-    ids = [x["target"]["memory_id"] for x in (old, decision, newer)]
+    lease,binding=project_memory_session(repo,str(project))
+    records=[project_memory(repo,binding,'Review date','Deletion test: review is Friday.'),
+             project_memory(repo,binding,'Preparation','Deletion test: prepare slides Thursday.'),
+             project_memory(repo,binding,'Latest review','Deletion test: review is Monday.')]
+    turn(repo,lease.guard,'Remember the shared project facts.',finish=True)
+    ids=[record.fact_id for record in records]
     before = rows(
         repo,
         "SELECT * FROM pulsara_v3.memory_facts WHERE id=ANY(%s) ORDER BY id",
         (ids,),
     )
-    relations = rows(
-        repo,
-        "SELECT * FROM pulsara_v3.memory_relations WHERE source_fact_id=ANY(%s) ORDER BY id",
-        (ids,),
-    )
     with repo.connection_provider.connection(
         lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=monotonic()+30,
     ) as connection:
-        connection.execute(
-            """INSERT INTO pulsara_v3.memory_embeddings
-               (memory_domain_id,fact_id,fact_semantic_digest,
-                embedding_contract_id,embedding)
-               SELECT memory_domain_id,id,fact_semantic_digest,'deletion-test',
-                      ('[' || repeat('0,',1023) || '0]')::public.vector
-               FROM pulsara_v3.memory_facts WHERE id=ANY(%s)""", (ids,),
-        )
+        from pulsara_agent.conversation_kernel._repository.memory import _embedding_input_digest
+        for item in connection.execute("SELECT memory_domain_id,id,search_text FROM pulsara_v3.memory_facts WHERE id=ANY(%s)",(ids,)).fetchall():
+            connection.execute("""INSERT INTO pulsara_v3.memory_embeddings
+                (memory_domain_id,fact_id,fact_semantic_digest,embedding_contract_id,embedding)
+                VALUES (%s,%s,%s,'deletion-test',('[' || repeat('0,',1023) || '0]')::public.vector)""",
+                (item[0],item[1],_embedding_input_digest(item[2])))
     embeddings = rows(repo, "SELECT * FROM pulsara_v3.memory_embeddings WHERE fact_id=ANY(%s) ORDER BY fact_id", (ids,))
     assert len(embeddings) == 3
     if archived_only:
         from tests.test_session_archive import archive
-        from datetime import datetime, timezone
-        from pulsara_agent.conversation_kernel.contracts import InlineContent
-        from pulsara_agent.conversation_kernel.repository import AssistantTextBlock
         sid = lease.guard.session_id
-        turn_id = rows(repo, "SELECT id FROM pulsara_v3.turns WHERE session_id=%s AND status='RUNNING'", (sid,))[0]['id']
-        repo.commit_assistant_message(lease.guard,
-            cut=repo.prepare_provider_input_cut(lease.guard, turn_id=turn_id, deadline_monotonic=monotonic()+30),
-            entry_id=identity('entry'), parent_content=InlineContent.from_bytes(b'done'),
-            blocks=(AssistantTextBlock(identity('block'), InlineContent.from_bytes(b'done')),),
-            complete_turn=True, occurred_at=datetime.now(timezone.utc), actor_id='model:test', deadline_monotonic=monotonic()+30)
         archive(repo, lease)
         workspace = rows(repo, 'SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s', (sid,))[0]['workspace_id']
         targets = [sid]
@@ -408,11 +369,6 @@ def test_memory_graph_and_project_survive_unchanged_with_user_edit(repo, tmp_pat
     )
     assert after == before
     assert rows(repo, "SELECT * FROM pulsara_v3.memory_embeddings WHERE fact_id=ANY(%s) ORDER BY fact_id", (ids,)) == embeddings
-    assert rows(
-        repo,
-        "SELECT * FROM pulsara_v3.memory_relations WHERE source_fact_id=ANY(%s) ORDER BY id",
-        (ids,),
-    ) == relations
     assert project.is_dir()
     workspace = after[0]["context_id"]
     assert rows(repo, "SELECT id FROM pulsara_v3.workspaces WHERE id=%s", (workspace,))
@@ -420,38 +376,18 @@ def test_memory_graph_and_project_survive_unchanged_with_user_edit(repo, tmp_pat
     detail = repo.memory_management_detail(
         memory_domain_id="u_local",
         selection=selection,
-        fact_id=newer["target"]["memory_id"],
+        fact_id=records[-1].fact_id,
         deadline_monotonic=monotonic() + 30,
     )
-    changed = repo.memory_management_edit_statement(
-        memory_domain_id="u_local",
-        selection=selection,
-        fact_id=newer["target"]["memory_id"],
-        statement="Deletion test: review is Tuesday.",
-        expected_updated_at=detail["fact"]["updated_at"],
-        deadline_monotonic=monotonic() + 30,
-    )
-    assert changed["changed"]
-    # Exercise the ordinary graph preview/delete even after source removal,
-    # and leave the shared fixture's project directory clean for other tests.
-    for fact in (old, newer):
-        preview = repo.memory_deletion_preview(
-            memory_domain_id="u_local",
-            selection=selection,
-            fact_id=fact["target"]["memory_id"],
-            deadline_monotonic=monotonic() + 30,
-        )
-        repo.execute_memory_deletion(
-            memory_domain_id="u_local",
-            selection=selection,
-            fact_id=fact["target"]["memory_id"],
-            additional=(),
-            expected_records=lambda: iter(preview),
-            deadline_monotonic=monotonic() + 30,
-        )
-    assert not rows(
-        repo, "SELECT id FROM pulsara_v3.workspaces WHERE id=%s", (workspace,)
-    )
+    changed=repo.update_memory(memory_domain_id='u_local',fact_id=records[-1].fact_id,
+        statement='Deletion test: review is Tuesday.',expected_updated_at=detail['updated_at'],
+        read_binding=binding,deadline_monotonic=monotonic()+30)
+    assert changed.changed
+    for record in (*records[:-1],changed.record):
+        repo.delete_memory(memory_domain_id='u_local',fact_id=record.fact_id,
+            expected_updated_at=record.updated_at,read_binding=binding,deadline_monotonic=monotonic()+30)
+    assert not rows(repo, 'SELECT id FROM pulsara_v3.workspaces WHERE id=%s', (workspace,))
+
 
 
 def test_delete_failure_rolls_back_entire_aggregate(

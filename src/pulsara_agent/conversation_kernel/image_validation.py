@@ -279,9 +279,9 @@ class HostPromptImageValidator:
             width=width,
             height=height,
         )
-        _validate_unbound_prompt_size(
-            FrozenPromptContent((LLMTextPart("Image loaded."), image))
-        )
+        # The local asset has passed its encoded-byte and pixel/decoder
+        # boundaries. User-prompt envelopes and provider display budgets do not
+        # constrain a valid programmatic image result.
         return image
 
     async def _validate_images(
@@ -304,7 +304,7 @@ class HostPromptImageValidator:
         try:
             async with self._state_lock:
                 if self._closed:
-                    raise RuntimeError("prompt image validator is closed")
+                    raise PromptImageValidationError("prompt image validator is closed")
                 context = multiprocessing.get_context("spawn")
                 parent, child = context.Pipe(duplex=False)
                 process = context.Process(

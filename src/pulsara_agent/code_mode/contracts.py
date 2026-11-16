@@ -1,14 +1,12 @@
 """Process-local Code Mode boundary; business execution remains in the kernel."""
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 import asyncio
 from typing import Awaitable, Callable, Literal, Mapping, Protocol
 
-from pulsara_agent.primitives.tool_observation import MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
-from pulsara_agent.identity import ID_PAYLOAD_PATTERN
-from pulsara_agent.ports.tool_execution import freeze_tool_json_object
 
 from .targets import cell_target, cell_target_schema
 
@@ -19,15 +17,23 @@ CellParticipationReference = tuple[str, str | None, CellParticipationKind]
 
 class CellParticipationObserver(Protocol):
     def observe_agent_participation(
-        self, cell_id: str, references: tuple[CellParticipationReference, ...],
+        self,
+        cell_id: str,
+        references: tuple[CellParticipationReference, ...],
     ) -> None: ...
 
     def mark_cell_participation_incomplete(self, cell_id: str) -> None: ...
 
 
-def _object_schema(properties: dict[str, object], required: list[str]) -> dict[str, object]:
-    return {"type": "object", "properties": properties, "required": required,
-            "additionalProperties": False}
+def _object_schema(
+    properties: dict[str, object], required: list[str]
+) -> dict[str, object]:
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": False,
+    }
 
 
 def _yield_schema() -> dict[str, object]:
@@ -35,69 +41,93 @@ def _yield_schema() -> dict[str, object]:
 
 
 def exec_cell_parameters_schema() -> dict[str, object]:
-    return {"oneOf": [
-        _object_schema({field: {"type": "string", **({"minLength": 1} if field == "path" else {})}}, [field])
-        for field in ("code", "path")
-    ]}
+    return {
+        "oneOf": [
+            _object_schema(
+                {
+                    "target": {
+                        "type": "object",
+                        "properties": {
+                            "kind": {"const": "PATH"},
+                            "path": {"type": "string", "minLength": 1},
+                        },
+                        "required": ["kind", "path"],
+                        "additionalProperties": False,
+                    }
+                },
+                ["target"],
+            ),
+            _object_schema({"code": {"type": "string"}}, ["code"]),
+        ]
+    }
 
 
 def query_cells_parameters_schema() -> dict[str, object]:
-    return {"oneOf": [
-        _object_schema({
-            "cursor": {"type": "string", "pattern": "^cell:" + ID_PAYLOAD_PATTERN + "$"},
-            "max_items": {"type": "integer", "minimum": 1, "default": 50},
-        }, []),
-        _object_schema({
-            "target": cell_target_schema(),
-            "offset_chars": {"type": "integer", "minimum": 0, "default": 0},
-            "max_chars": {"type": "integer", "minimum": 1, "maximum": 32_000,
-                          "default": 20_000},
-        }, ["target"]),
-    ]}
+    return _object_schema({"target": cell_target_schema()}, [])
 
 
 def manage_cell_parameters_schema() -> dict[str, object]:
-    return {"oneOf": [
-        _object_schema({"action": {"type": "string", "const": "wait"},
-                        "target": cell_target_schema(), "yield_time_ms": _yield_schema()},
-                       ["action", "target"]),
-        _object_schema({"action": {"type": "string", "const": "stop"},
-                        "target": cell_target_schema()}, ["action", "target"]),
-    ]}
+    return {
+        "oneOf": [
+            _object_schema(
+                {
+                    "action": {"type": "string", "const": "wait"},
+                    "target": cell_target_schema(),
+                    "yield_time_ms": _yield_schema(),
+                },
+                ["action", "target"],
+            ),
+            _object_schema(
+                {
+                    "action": {"type": "string", "const": "stop"},
+                    "target": cell_target_schema(),
+                },
+                ["action", "target"],
+            ),
+        ]
+    }
 
 
 @dataclass(frozen=True, slots=True)
 class CodeModeLimits:
-    """Initial physical profile specified in Code Mode §4.2, never lifetime caps."""
+    """Current working-set profile measured by the hard-cut resource experiment.
+
+    Data accounts for source, transport, pending calls and unaccepted output;
+    the separate 64 MiB QuickJS heap bounds each of four active VMs. These are
+    simultaneous physical reservations, never total output or lifetime caps.
+    """
 
     segment_ms: int = 5_000
     watchdog_ms: int = 10_000
     heap_bytes: int = 64 * 1024 * 1024
     stack_bytes: int = 256 * 1024
-    value_bytes: int = 4 * 1024 * 1024
-    cell_bytes: int = 16 * 1024 * 1024
-    host_bytes: int = 64 * 1024 * 1024
+    # Unified delivery contract §9.1: one Cell and four-VM Host working data.
+    cell_bytes: int = 32 * 1024 * 1024
+    host_bytes: int = 128 * 1024 * 1024
     vm_slots: int = 4
-    # The existing model tool-result boundary includes the complete envelope.
-    page_bytes: int = MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
-    # One existing bounded model page plus error/control scratch is reserved so
-    # a full collector can still deliver an accepted-result reading route and make progress.
+    # Independent scratch for transport and bounded failure diagnostics.
     control_bytes: int = 64 * 1024
 
     def __post_init__(self) -> None:
-        if any(type(value) is not int or value <= 0 for value in (
-            self.segment_ms, self.watchdog_ms, self.heap_bytes, self.stack_bytes,
-            self.value_bytes, self.cell_bytes, self.host_bytes, self.vm_slots,
-            self.page_bytes, self.control_bytes,
-        )):
+        if any(
+            type(value) is not int or value <= 0
+            for value in (
+                self.segment_ms,
+                self.watchdog_ms,
+                self.heap_bytes,
+                self.stack_bytes,
+                self.cell_bytes,
+                self.host_bytes,
+                self.vm_slots,
+                self.control_bytes,
+            )
+        ):
             raise ValueError("Code Mode physical limits must be positive integers")
-        if not (self.segment_ms < self.watchdog_ms
-                and self.stack_bytes <= 512 * 1024
-                and self.value_bytes < self.heap_bytes
-                and self.value_bytes + self.control_bytes < self.cell_bytes
-                and self.cell_bytes <= self.host_bytes
-                and self.page_bytes <= MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
-                and self.page_bytes + 2048 <= self.control_bytes):
+        if not (
+            self.segment_ms < self.watchdog_ms
+            and self.stack_bytes <= 512 * 1024
+            and self.cell_bytes <= self.host_bytes
+        ):
             raise ValueError("Inconsistent Code Mode physical profile")
 
 
@@ -121,20 +151,12 @@ class CodeModeToolResult:
     state: str = "SUCCESS"
     result_id: str | None = None
     result_entry_id: str | None = None
-    read: Mapping[str, object] | None = None
-    output_available: bool = False
-    source_coverage: str = "COMPLETE"
-    source_coverage_reason: str | None = None
-    output_unavailability_reason: str | None = None
-    required_facts: Mapping[str, object] = field(default_factory=dict)
+    has_result: bool = True
     error_code: str | None = None
     error_message: str | None = None
     delivery_succeeded: Callable[[], Awaitable[None]] | None = None
     # Accepted-result owner can read a large/late result without another result store.
     read_undelivered: Callable[[], Awaitable[Mapping[str, object]]] | None = None
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "required_facts", freeze_tool_json_object(self.required_facts))
 
 
 CodeModeInvoke = Callable[[CodeModeInvocation], Awaitable[CodeModeToolResult]]
@@ -159,6 +181,7 @@ class CodeModeOutputLease:
     record: Mapping[str, object]
     snapshot: object
     occurred_at: datetime
+    content: object | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,8 +197,10 @@ class CodeModeCellSnapshot:
 
     def public_value(self) -> dict[str, object]:
         result: dict[str, object] = {
-            "target": cell_target(self.cell_id), "state": self.state,
-            "has_unread_output": self.has_unread_output, "pending_calls": self.pending_calls,
+            "target": cell_target(self.cell_id),
+            "state": self.state,
+            "has_unread_output": self.has_unread_output,
+            "pending_calls": self.pending_calls,
         }
         if self.error is not None:
             result["error"] = dict(self.error)

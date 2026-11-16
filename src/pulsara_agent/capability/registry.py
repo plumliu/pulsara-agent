@@ -71,22 +71,9 @@ def _require_bounded_planner_framing(
             add(item.wire_tool_fingerprint)
         else:
             add(item.reason.value)
-    for item in tools.mcp.inspectability_facts:
-        add(tool_capability_version_identity_digest(item.version))
-        add(item.descriptor_payload_fingerprint)
-        add(item.mcp_execution_policy_fingerprint)
-    for fact in tools.mcp.provider_name_collision_facts:
-        add(fact.provider_name)
-        for member in fact.members:
-            add(member.server_id)
-            add(member.remote_tool_name)
-            add(member.discovered_tool_identity)
     predecessor = tools.predecessor
     if isinstance(predecessor, InstalledCapabilityEpochPredecessor):
         add(predecessor.direct_projection_set.projection_set_fingerprint)
-        add(predecessor.mcp_route_projection.projection_fingerprint)
-        for route in predecessor.mcp_route_projection.routes:
-            add(route.route_fingerprint)
 
 
 def freeze_capability_registration_set(
@@ -190,7 +177,8 @@ def freeze_capability_dispatch_cut_and_views(
 
     tool_facts = registry.tool_facts
     skill_facts = registry.skill_facts
-    expected_versions = {tool_capability_version_ref(fact) for fact in tool_facts}
+    builtin_facts = tuple(fact for fact in tool_facts if fact.origin is ToolCapabilityOrigin.BUILTIN)
+    expected_versions = {tool_capability_version_ref(fact) for fact in builtin_facts}
     actual_versions = {item.version for item in tools.native_wire.entries}
     if not expected_versions <= actual_versions:
         raise ValueError("native eligibility does not cover registry tools")
@@ -206,7 +194,7 @@ def freeze_capability_dispatch_cut_and_views(
         tool_capability_version_ref(fact): (
             frozen_tool_spec_fingerprint(fact.canonical_tool_spec)
         )
-        for fact in tool_facts
+        for fact in builtin_facts
     }
     if isinstance(tools.predecessor, InstalledCapabilityEpochPredecessor):
         for version, spec in zip(
@@ -231,22 +219,6 @@ def freeze_capability_dispatch_cut_and_views(
     )
     if mcp_snapshots != tools.mcp.source_snapshots:
         raise ValueError("MCP projection does not exact-join registry sources")
-    expected_mcp_inspectability = {
-        (
-            fact.identity.source.stable_source_id,
-            fact.identity.stable_name,
-        ): tool_capability_version_ref(fact)
-        for fact in tool_facts
-        if fact.origin is ToolCapabilityOrigin.MCP
-    }
-    actual_mcp_inspectability = {
-        (item.target.server_id, item.target.remote_tool_name): item.version
-        for item in tools.mcp.inspectability_facts
-    }
-    if actual_mcp_inspectability != expected_mcp_inspectability:
-        raise ValueError(
-            "MCP inspectability does not exact-join registry Tool versions"
-        )
     skill_snapshot = tuple(
         item
         for item in registry.source_snapshots

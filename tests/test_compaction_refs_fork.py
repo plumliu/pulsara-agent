@@ -282,19 +282,13 @@ def test_fork_retained_prefix_is_local_dense_and_self_contained(repo):
     assert not _rows(
         repo, "SELECT 1 FROM pulsara_v3.turns WHERE session_id=%s", (child,)
     )
-    assert not _rows(
-        repo,
-        "SELECT 1 FROM information_schema.columns WHERE table_schema='pulsara_v3' AND table_name='canonical_image_refs' AND column_name='context_snapshot_id'",
-    )
     refs = _rows(
         repo,
-        "SELECT transcript_entry_id, ref_ordinal, blob_id FROM pulsara_v3.canonical_image_refs WHERE session_id=%s ORDER BY transcript_entry_id, ref_ordinal",
+        "SELECT entry_id, ordinal, blob_id FROM pulsara_v3.content_parts WHERE session_id=%s AND type='image' ORDER BY entry_id, ordinal",
         (child,),
     )
     assert len(refs) == 4
-    assert {row["transcript_entry_id"] for row in refs} == set(
-        carrier.retained_entry_ids
-    )
+    assert {row["entry_id"] for row in refs} == set(carrier.retained_entry_ids)
     grandchild = _fork(repo, child, entries[-1]["id"])
     grandchild_entries = _rows(
         repo,

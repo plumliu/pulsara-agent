@@ -7,8 +7,7 @@
 .memory-view button, .memory-view input, .memory-view select { font-size: 14px; }
 .memory-view button { transition: background .15s ease, border-color .15s ease, color .15s ease; }
 .memory-view button:disabled { opacity: .5; cursor: default; }
-.memory-view :is(button, input, select):focus-visible { outline: 2px solid var(--amber); outline-offset: 3px; }
-.memory-view :is(.memory-search input, .memory-project select, .memory-state-select select):focus-visible { outline: none; }
+.memory-view :is(button, input, select, textarea):focus-visible { outline: 2px solid var(--line-strong); outline-offset: 2px; }
 
 .memory-scope-header { display: grid; grid-template-columns: max-content minmax(0, 320px); justify-content: space-between; align-items: center; gap: 12px 18px; margin-bottom: 18px; }
 .memory-project-slot { min-width: 0; height: 40px; }
@@ -19,35 +18,31 @@
 .memory-toolbar { padding: 18px 20px 14px; border-bottom: 1px solid var(--line); }
 .memory-controls { display: flex; align-items: center; gap: 12px; }
 .memory-search { display: flex; align-items: center; gap: 9px; flex: 1; min-width: 0; min-height: 39px; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); color: var(--muted); }
-.memory-search:focus-within, .memory-project:focus-within, .memory-state-select:focus-within { border-color: var(--line-strong); box-shadow: 0 0 0 2px color-mix(in srgb, var(--ink) 10%, transparent); }
 .memory-search input { width: 100%; min-width: 0; padding: 9px 0; border: 0; background: transparent; color: var(--ink); }
 .memory-search input::placeholder { color: var(--faint); }
 .memory-search svg { flex: none; }
-.memory-state-select, .memory-project { position: relative; display: flex; align-items: center; gap: 8px; min-height: 39px; padding: 0 11px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); background: var(--paper); }
-.memory-state-select select, .memory-project select { appearance: none; min-width: 0; width: 100%; padding: 9px 20px 9px 0; border: 0; background: transparent; color: var(--ink-soft); cursor: pointer; }
-.memory-state-select > svg, .memory-project > svg { flex: none; pointer-events: none; }
-.memory-state-select > svg:last-child, .memory-project > svg:last-child { position: absolute; right: 10px; }
-.memory-state-select { flex: none; }
-.memory-project { height: 40px; min-height: 0; }
-.memory-project select { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.memory-filters { --sliding-count: 5; width: max-content; max-width: 100%; margin-top: 14px; }
+.memory-project { display: flex; align-items: center; gap: 8px; width: 100%; height: 40px; min-height: 0; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper-raised); color: var(--ink-soft); }
+.memory-project > svg { display: block; flex: none; color: var(--muted); pointer-events: none; }
+.memory-project select { appearance: none; -webkit-appearance: none; flex: 1; width: 100%; min-width: 0; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; color: inherit; font: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.memory-search, .memory-project { transition: background .15s ease, border-color .15s ease, box-shadow .15s ease; }
+.memory-search:focus-within, .memory-project:focus-within { border-color: var(--line-strong); background: color-mix(in srgb, var(--paper-deep) 25%, var(--paper-raised)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--ink) 6%, transparent); }
+.memory-view .memory-search input:focus-visible, .memory-view .memory-project select:focus-visible { outline: none; }
+.memory-filters { --sliding-count: 4; width: max-content; max-width: 100%; margin-top: 14px; }
 .memory-filters[data-kind='FACT'] { --sliding-index: 1; }
 .memory-filters[data-kind='USER_PROFILE'] { --sliding-index: 2; }
 .memory-filters[data-kind='RESPONSE_PREFERENCE'] { --sliding-index: 3; }
-.memory-filters[data-kind='DECISION'] { --sliding-index: 4; }
 .memory-filters button { min-height: 30px; padding: 4px 10px; border-radius: 6px; }
 
 .memory-list { padding: 5px 10px; }
 .memory-row { position: relative; display: grid; grid-template-columns: 30px minmax(0, 1fr) 16px; align-items: start; gap: 10px; width: 100%; padding: 13px 12px; text-align: left; color: var(--ink); background: transparent; border-bottom: 1px solid var(--line); }
 .memory-row:last-child { border-bottom: 0; }
 .memory-row:hover { background: color-mix(in srgb, var(--paper-deep) 55%, transparent); border-radius: 9px; }
-.memory-row.is-selected { background: color-mix(in srgb, var(--amber-soft) 46%, var(--paper-raised)); border-radius: 9px; }
-.memory-row.is-selected::before { content: ''; position: absolute; inset: 14px auto 14px 0; width: 2px; border-radius: 2px; background: var(--amber); }
+.memory-row.is-selected { background: color-mix(in srgb, var(--paper-deep) 65%, var(--paper-raised)); border-radius: 9px; }
 .memory-row-icon { display: grid; place-items: center; align-self: start; width: 28px; height: 28px; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); background: var(--paper-deep); }
 .memory-row-icon { transition: background .18s ease, border-color .18s ease, color .18s ease; }
-.memory-row.is-selected .memory-row-icon { color: var(--amber); background: var(--amber-soft); border-color: color-mix(in srgb, var(--amber) 18%, var(--line)); }
+.memory-row.is-selected .memory-row-icon { color: var(--ink-soft); background: var(--paper-deep); border-color: var(--line-strong); }
 .memory-row-chevron { align-self: start; margin-top: 5.2px; color: var(--faint); transition: transform .2s cubic-bezier(.2,.8,.2,1), color .18s ease; }
-.memory-row:is(:hover, :focus-visible) .memory-row-chevron { transform: translateX(2px); color: var(--amber); }
+.memory-row:is(:hover, :focus-visible) .memory-row-chevron { transform: translateX(2px); color: var(--ink-soft); }
 .memory-row:active:not(:disabled) .memory-row-chevron { transform: translateX(3px); }
 .memory-list, .memory-empty, .memory-editor { animation: memory-content-in .18s ease-out; }
 .memory-row-copy { min-width: 0; }
@@ -58,10 +53,6 @@
 .memory-metadata { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; font-size: 12px; line-height: 1.6; color: var(--muted); }
 .memory-kind { padding: 2px 6px; border-radius: 5px; background: var(--paper-deep); color: var(--ink-soft); }
 .memory-metadata time { margin-left: auto; color: var(--faint); font-variant-numeric: tabular-nums; }
-.memory-usage { display: flex; align-items: center; gap: 5px; margin: 5px 0 0; font-size: 12px; color: var(--muted); line-height: 1.6; }
-.memory-usage.is-preference { color: var(--blue); }
-.memory-usage > svg { flex: none; }
-.memory-usage.is-conflicted { color: var(--amber); }
 .memory-empty, .memory-loading { display: grid; justify-items: center; align-content: center; min-height: 330px; padding: 44px 28px; text-align: center; color: var(--muted); }
 .memory-empty-icon { display: grid; place-items: center; width: 58px; height: 58px; margin-bottom: 20px; border: 1px solid var(--line); border-radius: 17px; background: var(--paper-deep); color: var(--amber); }
 .memory-empty h2 { margin: 0; font-family: var(--serif); color: var(--ink); font-size: 22px; font-weight: 500; }
@@ -90,80 +81,13 @@
 .memory-editor { display: grid; gap: 9px; }
 .memory-editor label { font-size: 13px; font-weight: 600; }
 .memory-editor textarea { width: 100%; min-height: 130px; resize: vertical; padding: 11px 12px; border: 1px solid var(--line-strong); border-radius: 9px; background: var(--paper-raised); color: var(--ink); font: 16px/1.7 var(--serif); }
-.memory-editor textarea:focus-visible { outline: 2px solid var(--ink-soft); outline-offset: 2px; }
-.memory-editor p, .memory-edited-note { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
 .memory-editor-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .memory-editor-actions button { min-height: 34px; padding: 7px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper-raised); color: var(--ink-soft); }
 .memory-editor-actions button:last-child { background: var(--ink); color: var(--paper); }
 .memory-editor-actions button:disabled { opacity: .5; cursor: default; }
-.memory-edited-note { margin-top: 10px; }
-.memory-graph { margin-top: 16px; }
-.memory-graph-current, .memory-graph-node { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; width: 100%; min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); text-align: left; }
-.memory-graph-current { border-color: color-mix(in srgb, var(--amber) 42%, var(--line)); background: color-mix(in srgb, var(--amber-soft) 22%, var(--paper)); }
-.memory-graph-caption { color: var(--muted); font-size: 11px; line-height: 1.5; }
-.memory-graph-current > .memory-graph-caption { color: var(--amber); font-weight: 600; }
-.memory-graph-statement { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere; color: var(--ink); font-size: 13px; line-height: 1.55; }
-.memory-graph-branches { margin-left: 18px; border-left: 1px solid var(--line-strong); }
-.memory-graph-branch { position: relative; margin-left: 22px; padding-top: 9px; }
-.memory-graph-branch::before { content: ''; position: absolute; top: 22px; left: -22px; width: 22px; height: 1px; background: var(--line-strong); }
-.memory-graph-branch:last-child::after { content: ''; position: absolute; left: -23px; top: 23px; bottom: 0; width: 3px; background: var(--paper-raised); }
-.memory-graph-edge { position: relative; display: flex; align-items: center; gap: 5px; min-height: 22px; color: var(--muted); font-size: 11px; }
-.memory-graph-edge svg { color: var(--amber); }
-.memory-graph-node { margin-top: 3px; cursor: pointer; }
-.memory-graph-node:hover:not(:disabled) { border-color: var(--amber); background: var(--paper-raised); }
-.memory-view .memory-graph-node { transition: background .18s ease, border-color .18s ease, color .18s ease, transform .18s ease; }
-.memory-graph-node:active:not(:disabled) { transform: translateY(1px); }
-.memory-graph-empty { margin: 12px 0 0; color: var(--faint); font-size: 12px; }
-.memory-graph-more { margin: 9px 0 0 40px; padding: 5px 0; background: transparent; color: var(--muted); font-size: 12px; }
 .memory-delete { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 34px; margin-top: 22px; padding: 7px 11px; border: 1px solid color-mix(in srgb, var(--red) 22%, var(--line)); border-radius: 8px; color: var(--red); background: transparent; }
 .memory-delete:hover:not(:disabled) { background: var(--red-soft); border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
-.memory-delete-overlay { position: fixed; inset: 0; z-index: 120; display: grid; place-items: center; padding: 20px; background: rgba(18,17,14,.3); backdrop-filter: blur(3px); animation: fade-in .15s ease-out; }
-.memory-delete-dialog { display: flex; flex-direction: column; width: min(680px,100%); max-height: calc(100dvh - 40px); min-height: 0; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 16px; background: var(--paper-solid); box-shadow: var(--shadow-lg); color: var(--ink); font-family: var(--sans); animation: dialog-in .2s cubic-bezier(.2,.8,.2,1); }
-.memory-delete-dialog :is(button, input, summary):focus-visible { outline: 2px solid var(--ink-soft); outline-offset: 2px; }
-.memory-delete-dialog button { font-size: 14px; }
-.memory-delete-dialog button:disabled { opacity: .48; cursor: default; }
-.memory-delete-dialog > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex: none; padding: 21px 25px 18px; border-bottom: 1px solid var(--line); }
-.memory-delete-kicker { color: var(--faint); font-size: 11px; letter-spacing: .04em; }
-.memory-delete-dialog h2 { margin: 4px 0 0; font-family: var(--serif); font-size: 23px; font-weight: 500; }
-.memory-delete-dialog > header button { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; color: var(--muted); }
-.memory-delete-dialog > header button:hover { background: var(--paper-deep); }
-.memory-delete-body { min-height: 0; overflow: auto; padding: 20px 25px 22px; }
 .memory-delete-explainer { margin: 0 0 15px; color: var(--muted); font-size: 13px; line-height: 1.6; }
-.memory-delete-target { display: grid; gap: 8px; padding: 14px 16px; border: 1px solid color-mix(in srgb, var(--red) 25%, var(--line)); border-radius: 10px; background: color-mix(in srgb, var(--red-soft) 35%, var(--paper)); }
-.memory-delete-target > strong { color: var(--red); font-size: 12px; }
-.memory-delete-fact { display: grid; gap: 4px; min-width: 0; overflow-wrap: anywhere; font-size: 14px; line-height: 1.55; }
-.memory-delete-fact small { color: var(--faint); font-size: 11px; }
-.memory-delete-totals { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 4px; }
-.memory-delete-totals > span { padding: 6px 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--paper); color: var(--muted); font-size: 12px; }
-.memory-delete-totals strong { color: var(--ink); font-weight: 600; }
-.memory-delete-group { margin-top: 21px; }
-.memory-delete-group h3 { display: flex; align-items: baseline; gap: 7px; margin: 0 0 9px; font-size: 14px; font-weight: 600; }
-.memory-delete-group h3 span { color: var(--faint); font-size: 12px; font-weight: 400; }
-.memory-delete-group > p { margin: -3px 0 9px; color: var(--muted); font-size: 12px; line-height: 1.6; }
-.memory-delete-group ul, .memory-delete-relations ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
-.memory-delete-group li { padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); }
-.memory-delete-conflicts li { display: grid; gap: 5px; border-color: color-mix(in srgb, var(--red) 24%, var(--line)); }
-.memory-delete-conflicts li > strong { color: var(--red); font-size: 12px; }
-.memory-delete-conflicts li > small { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
-.memory-delete-choices { min-width: 0; margin: 20px 0 0; padding: 13px; border: 1px solid var(--line); border-radius: 9px; }
-.memory-delete-choices legend { padding: 0 4px; font-size: 13px; font-weight: 600; }
-.memory-delete-choices p { margin: 0 0 11px; color: var(--muted); font-size: 12px; }
-.memory-delete-choices label { display: flex; align-items: flex-start; gap: 9px; margin: 9px 0; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
-.memory-delete-choices input { flex: none; margin-top: 3px; accent-color: var(--amber); }
-.memory-delete-choices button, .memory-delete-retry, .memory-delete-dialog > footer button { min-height: 35px; padding: 7px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); color: var(--ink-soft); }
-.memory-delete-choices button { margin-top: 8px; }
-.memory-delete-retry { margin-top: 10px; }
-.memory-delete-relations { margin-top: 19px; border-top: 1px solid var(--line); padding-top: 13px; }
-.memory-delete-relations summary { width: fit-content; cursor: pointer; color: var(--muted); font-size: 12px; }
-.memory-delete-relations ul { margin-top: 11px; }
-.memory-delete-relations li { padding: 9px 0; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
-.memory-delete-relations li strong { color: var(--ink-soft); }
-.memory-delete-relation-facts { display: grid; gap: 6px; margin-top: 7px; }
-.memory-delete-relation-facts p { display: grid; grid-template-columns: 64px minmax(0,1fr); gap: 9px; margin: 0; line-height: 1.5; }
-.memory-delete-relation-facts small { color: var(--faint); font-size: 11px; }
-.memory-delete-dialog > footer { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; flex: none; padding: 14px 25px; border-top: 1px solid var(--line); }
-.memory-delete-dialog > footer .memory-delete-confirm { border-color: color-mix(in srgb, var(--red) 40%, var(--line)); background: var(--red); color: white; }
-.memory-delete-dialog > footer .memory-delete-confirm:not(:disabled):hover { filter: brightness(.94); }
 
 /* Only the collection and detail take part; the rest of the app stays still.
    Native snapshots animate removal without keeping stale controls mounted. */
@@ -194,8 +118,7 @@
   .memory-toolbar { padding: 14px; }
   .memory-controls { flex-wrap: wrap; gap: 9px; }
   .memory-search { flex-basis: 100%; }
-  .memory-state-select { margin-left: auto; }
-  .memory-filters { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .memory-filters { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .memory-filters button { padding: 5px 4px; font-size: 12px; }
   .memory-row { padding: 12px 6px; gap: 8px; }
   .memory-row-heading { gap: 8px; }
@@ -203,8 +126,14 @@
   .memory-metadata time { flex-basis: 100%; margin-left: 0; }
   .memory-empty { min-height: 300px; padding: 36px 22px; }
   .memory-detail-body { padding: 16px 18px; }
-  .memory-delete-overlay { padding: 10px; }
-  .memory-delete-dialog { max-height: calc(100dvh - 20px); }
-  .memory-delete-dialog > header, .memory-delete-dialog > footer { padding: 14px 16px; }
-  .memory-delete-body { padding: 16px; }
 }
+
+.memory-title { margin: 0; color: var(--ink); font-size: 16px; font-weight: 500; line-height: 1.65; overflow-wrap: anywhere; }
+.memory-list-excerpt { margin: 3px 0 7px; color: var(--muted); font-size: 13px; line-height: 1.7; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere; }
+.memory-detail-title { font-family: var(--serif); font-size: 21px; margin-bottom: 10px; }
+.memory-detail .memory-statement { margin-top: 18px; }
+.memory-editor :is(input, select) { width: 100%; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); color: var(--ink); }
+.memory-editor .memory-kind { width: fit-content; }
+.memory-create { flex: none; white-space: nowrap; }
+.memory-delete-confirmation { margin-top: 18px; padding: 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); }
+.memory-delete-confirmation .memory-delete { margin-top: 0; background: var(--red); color: white; }

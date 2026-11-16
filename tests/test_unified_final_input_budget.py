@@ -159,100 +159,10 @@ def test_sdk_open_uses_wire_budget_and_resolves_output(
         request.surface_borrow.close()
 
 
-@pytest.mark.parametrize(
-    "api,project",
-    [
-        ("openai_chat_completions", chat_semantic_wire_group),
-        ("openai_responses", responses_semantic_wire_group),
-    ],
-)
-def test_memory_suffix_quote_prices_only_actual_wire_items(api, project):
-    from pulsara_agent.conversation_kernel.context_sources import (
-        build_memory_context_source,
-    )
-    from pulsara_agent.conversation_kernel.memory.dispatch import MemoryDispatchSupport
-    from pulsara_agent.model_input.contracts import (
-        ContextSourceKind,
-        ContextSourceAbsenceKind,
-    )
-    from pulsara_agent.model_input.continuity import (
-        ProcessLocalSourceHead,
-        SourceObservationPresence,
-        SourceObservationLifecycle,
-        encode_runtime_observation,
-    )
 
-    port = _port(api=api)
-    request, _ = _prepared_execution(port)
-    prepared = request.prepared_call
-    support = object.__new__(MemoryDispatchSupport)
-    prior = ProcessLocalSourceHead(
-        ContextSourceKind.MEMORY_RECALL,
-        SourceObservationPresence.VALUE,
-        "sha256:" + "1" * 64,
-        "sha256:" + "2" * 64,
-        'turn:klmmazz67vfgsfsvg6ceqgdsfu',
-        1,
-    )
-    try:
-        for kind in (
-            ContextSourceKind.MEMORY_RECALL,
-            ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
-        ):
-            invalidations = []
-            for absence, presence, lifecycle in (
-                (
-                    ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-                    SourceObservationPresence.CLEARED,
-                    SourceObservationLifecycle.CLEARED,
-                ),
-                (
-                    ContextSourceAbsenceKind.UNAVAILABLE,
-                    SourceObservationPresence.UNAVAILABLE,
-                    SourceObservationLifecycle.UNAVAILABLE,
-                ),
-            ):
-                desired = build_memory_context_source(
-                    kind=kind, texts=None, absence_kind=absence
-                )
-                message = encode_runtime_observation(
-                    source_kind=kind,
-                    trust_class=desired.trust_class,
-                    lifecycle=lifecycle,
-                    presence=presence,
-                    body="",
-                )
-                invalidations.append(message)
-                wire = tuple(project(message))
-                expected = prepared.compile_binding.estimator.estimate_ordered_wire_json_components(
-                    ordered_input_items=wire,
-                    ordered_input_sources=(message,) * len(wire),
-                )
-                assert (
-                    quote_provider_suffix_input_tokens(
-                        call=prepared.call, messages=(message,)
-                    )
-                    == expected.total_input_tokens
-                )
-            full = build_memory_context_source(
-                kind=kind,
-                texts=("full memory", "compact", "reference")
-                if kind is ContextSourceKind.MEMORY_RECALL
-                else ("full memory",),
-            )
-            reservation = support._memory_invalidation_reservation(
-                source_kind=kind,
-                prior=replace(prior, source_kind=kind),
-                desired=full,
-                prepared_call=prepared,
-            )
-            assert reservation.invalidation_input_token_ceiling == max(
-                quote_provider_suffix_input_tokens(call=prepared.call, messages=(m,))
-                for m in invalidations
-            )
-            assert not hasattr(reservation, "full_input_token_cost")
-    finally:
-        request.surface_borrow.close()
+
+
+
 
 
 
@@ -262,111 +172,99 @@ def test_memory_suffix_quote_prices_only_actual_wire_items(api, project):
 
 
 @pytest.mark.parametrize('api', ['openai_chat_completions', 'openai_responses'])
-@pytest.mark.parametrize('anchored', [False, True])
-@pytest.mark.parametrize('kind_name', ['MEMORY_RECALL', 'MEMORY_RESPONSE_PREFERENCE_HEAD'])
-@pytest.mark.parametrize('changed', [False, True])
-def test_replaced_memory_is_paid_once_at_exact_wire_boundary(api, anchored, kind_name, changed):
-    from time import monotonic
-    from pulsara_agent.conversation_kernel.context_sources import build_memory_context_source, replace_memory_context_sources
-    from pulsara_agent.conversation_kernel.memory.dispatch import MemoryDispatchSupport
-    from pulsara_agent.conversation_kernel.provider_dispatch import _remaining_invalidation_input_tokens
-    from pulsara_agent.llm.request import ProviderInputUsageAnchor
-    from pulsara_agent.model_input.contracts import ContextSourceKind, ContextSourceAbsenceKind
-    from tests.test_catalog_final_wire_resources import _prepare_case
+def test_wire_overflow_does_not_attribute_small_required_items_to_failure(api):
+    from tests.test_catalog_final_wire_resources import _prepare_case, _measure, _assert_typed_budget_rejection
+    from tests.support.model_input import _candidate
+    from pulsara_agent.model_input.contracts import ContextSourceKind
+    # Large fixed SYSTEM dominates the input; a valid image and complete native
+    # result coexist. Their presence cannot identify the cause of aggregate overflow.
+    coordinator, candidate, _, _ = _prepare_case(api,
+        _candidate(ContextSourceKind.BASE_SYSTEM, 'fixed SYSTEM ' * 15_000),
+        mixed=True, cold=True, budget=20_000)
+    decision = _measure(coordinator, candidate)
+    assert decision.wire_input_plan is None
+    _assert_typed_budget_rejection(coordinator, decision)
 
-    kind = ContextSourceKind[kind_name]
-    count = 3 if kind is ContextSourceKind.MEMORY_RECALL else 1
-    old = build_memory_context_source(kind=kind, texts=('old memory',) * count)
-    updated = build_memory_context_source(kind=kind, texts=('new desired memory',) * count) if changed else old
+
+@pytest.mark.parametrize("api,project", [
+    ("openai_chat_completions", chat_semantic_wire_group),
+    ("openai_responses", responses_semantic_wire_group),
+])
+def test_memory_suffix_quote_prices_only_actual_wire_items(api, project):
+    from pulsara_agent.model_input.contracts import ContextSourceKind
+    from pulsara_agent.model_input.continuity import RuntimeObservationItem, encode_runtime_observation
+    port = _port(api=api)
+    request, _ = _prepared_execution(port)
+    try:
+        for body in (
+            (RuntimeObservationItem("当前没有匹配的记忆。"),),
+            (RuntimeObservationItem("本次无法读取记忆，请依据当前输入继续。"),),
+            (RuntimeObservationItem("完整 response preferences"), RuntimeObservationItem("完整 recall")),
+        ):
+            message = encode_runtime_observation(source_kind=ContextSourceKind.MEMORY_RECALL, body=body)
+            wire = tuple(project(message))
+            expected = request.prepared_call.compile_binding.estimator.estimate_ordered_wire_json_components(
+                ordered_input_items=wire, ordered_input_sources=(message,) * len(wire))
+            assert quote_provider_suffix_input_tokens(call=request.prepared_call.call, messages=(message,)) == expected.total_input_tokens
+    finally:
+        request.surface_borrow.close()
+
+
+@pytest.mark.parametrize('api', ['openai_chat_completions', 'openai_responses'])
+@pytest.mark.parametrize('anchored', [False, True])
+@pytest.mark.parametrize('changed', [False, True])
+def test_memory_net_delta_is_paid_once_at_exact_wire_boundary(api, anchored, changed):
+    from time import monotonic
+    from pulsara_agent.conversation_kernel.context_sources import observation_source
+    from pulsara_agent.model_input.continuity import RuntimeObservationItem
+    from pulsara_agent.model_input.contracts import ContextSourceKind
+    from pulsara_agent.llm.request import ProviderInputUsageAnchor
+    from tests.test_catalog_final_wire_resources import _prepare_case, _measure
+    kind = ContextSourceKind.MEMORY_RECALL
+    old = observation_source(kind, (RuntimeObservationItem('old memory'),), 60)
+    updated = observation_source(kind, (RuntimeObservationItem('new desired memory'),), 60) if changed else old
 
     def prepare(budget):
-        coordinator, candidate, view, _ = _prepare_case(api, updated, initial_catalog=old, budget=budget)
-        support = MemoryDispatchSupport(compiler=coordinator._compiler, io_owner=coordinator._io,
-            memory_projection=None, input_reader=coordinator._input_reader, deadline_factory=None)
-        coordinator._memory_support = support
-        # Recall planning precedes retrieval, so its desired fact is a placeholder.
-        desired = build_memory_context_source(kind=kind, texts=('',) * count) if count == 3 else updated
-        reservation = support._memory_invalidation_reservation(source_kind=kind,
-            prior=next(head for head in view.source_heads if head.source_kind is kind),
-            desired=desired, prepared_call=candidate.prepared_call)
-        return coordinator, candidate, view, reservation
+        return _prepare_case(api, updated, initial_catalog=old, budget=budget)[:3]
 
-    coordinator, candidate, view, reservation = prepare(100_000)
-    measurement = asyncio.run(coordinator._freeze_candidate_wire_measurement(candidate, deadline=monotonic()+30))
-    raw = measurement.quote.raw_final_wire_estimated_input_tokens
-    measurement.discard_materialization_to_quote()
+    coordinator, candidate, view = prepare(100_000)
+    measured = asyncio.run(coordinator._freeze_candidate_wire_measurement(candidate, deadline=monotonic()+30))
+    raw = measured.quote.raw_final_wire_estimated_input_tokens
+    measured.discard_materialization_to_quote()
     if anchored:
         plan, call = view.wire_input_plan, candidate.call
-        delta = raw - plan.quote.raw_final_wire_estimated_input_tokens
+        delta = raw-plan.quote.raw_final_wire_estimated_input_tokens
         anchor = ProviderInputUsageAnchor(call.resolved_model_call_id, view.epoch_nonce, view.epoch_revision,
             call.binding.connection_id.value, call.target.fact, plan.route_wire_profile_fingerprint,
             'alias', 100_000-delta, plan.quote.raw_final_wire_estimated_input_tokens, plan.materialization)
         coordinator._continuity.observe_usage_anchor(view.scope, epoch_nonce=view.epoch_nonce,
             epoch_revision=view.epoch_revision, reported_model_id='alias', anchor=anchor)
     else:
-        coordinator, candidate, view, reservation = prepare(raw)
-    # If no actual value was resolved and the compiler leaves the prior head
-    # installed, the invalidation obligation must still reserve its wire suffix.
-    unresolved = replace_memory_context_sources(candidate.sources, (
-        build_memory_context_source(kind=kind, texts=None,
-            absence_kind=ContextSourceAbsenceKind.NOT_APPLICABLE),))
-    unresolved_request = replace(candidate.compile_request, sources=unresolved)
-    unresolved_append = coordinator._compiler.compile_installed_append(
-        unresolved_request, planning=candidate.planning)
-    unresolved_candidate = replace(candidate, sources=unresolved,
-        compile_request=unresolved_request, append_result=unresolved_append,
-        semantic_input=unresolved_append.compiled_input)
-    assert _remaining_invalidation_input_tokens(unresolved_candidate, (reservation,)) == reservation.invalidation_input_token_ceiling
-    assert reservation.invalidation_input_token_ceiling > 0
-    assert _remaining_invalidation_input_tokens(candidate, (reservation,)) == 0
-    decision = asyncio.run(coordinator.measure_prepared_wire_candidate(candidate,
-        deadline=monotonic()+30, invalidation_reservations=(reservation,)))
+        coordinator, candidate, view = prepare(raw)
+    decision = _measure(coordinator, candidate)
     assert decision.wire_input_plan is not None
     assert decision.quote.budget_input_tokens == decision.quote.effective_input_budget_tokens
-    assert decision.candidate.sources == candidate.sources
-    assert decision.candidate.semantic_input.messages == candidate.semantic_input.messages
-    assert any(('new desired memory' if changed else 'old memory') in str(message.content) for message in decision.candidate.semantic_input.messages)
+    assert decision.candidate is candidate
     assert decision.candidate.semantic_input.messages[:len(view.messages)] == view.messages
-
-
-@pytest.mark.parametrize('api', ['openai_chat_completions', 'openai_responses'])
-@pytest.mark.parametrize('kind_name', ['MEMORY_RECALL', 'MEMORY_RESPONSE_PREFERENCE_HEAD'])
-def test_cold_memory_planning_does_not_inherit_old_reservation(api, kind_name):
-    from pulsara_agent.conversation_kernel.context_sources import build_memory_context_source
-    from pulsara_agent.conversation_kernel.memory.dispatch import MemoryDispatchSupport
-    from pulsara_agent.model_input.contracts import ContextSourceKind
-    from tests.test_catalog_final_wire_resources import _prepare_case
-
-    kind = ContextSourceKind[kind_name]
-    count = 3 if kind is ContextSourceKind.MEMORY_RECALL else 1
-    old = build_memory_context_source(kind=kind, texts=('old',) * count)
-    desired = build_memory_context_source(kind=kind, texts=('replacement',) * count)
-    coordinator, candidate, view, _ = _prepare_case(api, desired, initial_catalog=old)
-    support = MemoryDispatchSupport(compiler=coordinator._compiler, io_owner=coordinator._io,
-        memory_projection=None, input_reader=coordinator._input_reader, deadline_factory=None)
-    preference = desired if count == 1 else build_memory_context_source(
-        kind=ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD, texts=('preference',))
-    recall = desired if count == 3 else build_memory_context_source(
-        kind=ContextSourceKind.MEMORY_RECALL, texts=('recall',) * 3)
-    assert any(head.source_kind is kind for head in view.source_heads)
-    kwargs = dict(planning=candidate.planning, prepared_preference=preference,
-        recall_desired=recall, prepared_call=candidate.prepared_call)
-    assert any(item is not None for item in support.planning_reservations(**kwargs, new_epoch=False))
-    assert support.planning_reservations(**kwargs, new_epoch=True) == (None, None)
-    assert support.planning_preference_refresh_reservation(planning=candidate.planning,
-        desired=preference, prepared_call=candidate.prepared_call, new_epoch=True) is None
-
-
-@pytest.mark.parametrize('api', ['openai_chat_completions', 'openai_responses'])
-def test_wire_overflow_does_not_attribute_small_required_items_to_failure(api):
-    from tests.test_catalog_final_wire_resources import _prepare_case, _measure, _assert_typed_budget_rejection
-    from tests.test_round3_structured_model_input_compiler import _candidate
-    from pulsara_agent.model_input.contracts import ContextSourceKind
-    # Large fixed SYSTEM dominates the input; a valid image and FULL_REQUIRED
-    # result coexist. Their presence cannot identify the cause of aggregate overflow.
-    coordinator, candidate, _, _ = _prepare_case(api,
-        _candidate(ContextSourceKind.BASE_SYSTEM, ('fixed SYSTEM ' * 15_000,)),
-        mixed=True, cold=True, budget=20_000)
-    decision = _measure(coordinator, candidate)
-    assert decision.wire_input_plan is None
-    _assert_typed_budget_rejection(coordinator, decision)
+    suffix = decision.candidate.semantic_input.messages[len(view.messages):]
+    assert len(suffix) == int(changed)
+    if changed:
+        assert 'new desired memory' in suffix[0].content[0].text
+    if not anchored and not changed:
+        # The already installed prefix is the entire input. Verify the exact
+        # physical wire boundary without trying to install that same prefix
+        # into an artificially smaller earlier call budget.
+        with pytest.raises(ValueError, match="provider wire plan exceeds the input budget"):
+            replace(decision.wire_input_plan, quote=replace(decision.quote,
+                effective_input_budget_tokens=decision.quote.effective_input_budget_tokens-1))
+        return
+    if anchored:
+        coordinator._continuity.observe_usage_anchor(view.scope, epoch_nonce=view.epoch_nonce,
+            epoch_revision=view.epoch_revision, reported_model_id='alias',
+            anchor=replace(anchor, reported_input_tokens=anchor.reported_input_tokens+1))
+    else:
+        coordinator, candidate, _ = prepare(raw-1)
+    rejected = _measure(coordinator, candidate)
+    assert rejected.wire_input_plan is None
+    assert rejected.quote.budget_input_tokens == rejected.quote.effective_input_budget_tokens+1
+    assert rejected.candidate.sources == candidate.sources

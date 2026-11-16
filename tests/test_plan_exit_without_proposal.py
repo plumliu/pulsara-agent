@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from time import monotonic
 
 import pytest
@@ -117,7 +116,7 @@ def test_no_proposal_exit_restores_saved_permission_and_automatically_runs_tools
             if not model.agent_enter:
                 await session.enter_plan(
                     command_id=random_id("command"),
-                    entry_reason="exit regression",
+
                     resume_permission_mode=mode,
                 )
             running = asyncio.create_task(
@@ -130,6 +129,13 @@ def test_no_proposal_exit_restores_saved_permission_and_automatically_runs_tools
                 )
             )
             await asyncio.wait_for(model.exit_started.wait(), 10)
+            if model.agent_enter:
+                from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
+                cut = session.repository.prepare_provider_input_cut(session._lease.guard,
+                    turn_id=model.requests[-1].turn_id, deadline_monotonic=monotonic()+5)
+                facts = CanonicalProviderInputReader(session.repository.connection_provider).read_frozen_compile_snapshot(cut,
+                    deadline_monotonic=monotonic()+5)
+                assert text_part_values(facts.plan_mode_original_input) == ("Stop planning and continue.",)
             queued = await session.submit_prompt(
                 command_id=random_id("command"),
                 content=PromptContent.text("ordinary queued message"),
@@ -205,16 +211,16 @@ def test_no_proposal_exit_restores_saved_permission_and_automatically_runs_tools
                 assert successor["effective_permission_mode"] == mode.value
                 assert successor["permission_overlay"] == "NONE"
                 results = conn.execute(
-                    "SELECT r.*, e.inline_content, e.turn_id FROM pulsara_v3.tool_results r JOIN pulsara_v3.transcript_entries e ON e.session_id=r.session_id AND e.id=r.result_entry_id WHERE r.session_id=%s",
+                    "SELECT r.*, e.turn_id FROM pulsara_v3.tool_results r JOIN pulsara_v3.transcript_entries e ON e.session_id=r.session_id AND e.id=r.result_entry_id WHERE r.session_id=%s",
                     (session.session_id,),
                 ).fetchall()
                 by_call = {r["tool_call_id"]: r for r in results}
                 exit_result = by_call["call:exit"]
                 assert exit_result["result_state"] == "SUCCESS"
                 assert exit_result["turn_id"] != successor["turn_id"]
-                payload = json.loads(bytes(exit_result["inline_content"]))
-                assert payload["plan_control"] == "EXITED_PLAN"
-                assert payload["resume_permission_mode"] == mode.value
+                from pulsara_agent.conversation_kernel.tool_outputs import read_accepted_tool_business_value
+                payload = read_accepted_tool_business_value(conn, exit_result)
+                assert payload == {"meta":{"status":"SUCCESS"}, "content":[{"type":"text","value":f"已退出计划模式，恢复 {mode.value} 权限并继续。"}]}
                 origin = next(
                     e for e in entries if e["id"] == exit_result["result_entry_id"]
                 )
@@ -242,8 +248,7 @@ def test_no_proposal_exit_restores_saved_permission_and_automatically_runs_tools
                 for message in resumed.messages
                 for part in text_part_values(message.content)
             )
-            assert "EXITED_PLAN" in rendered
-            assert "resume_permission_mode" in rendered
+            assert f"已退出计划模式，恢复 {mode.value} 权限并继续。" in rendered
             assert mode.value in rendered
             for before, after in zip(model.requests, model.requests[1:]):
                 assert (
@@ -276,8 +281,7 @@ def test_no_proposal_exit_restores_saved_permission_and_automatically_runs_tools
                 entry
                 for entry in snapshot.entries
                 if entry.entry_kind == wire.PLAN_CONTINUATION
-                and json.loads(entry.content.inline_content).get("transition")
-                == "EXITED_PLAN"
+                and entry.entry_id == successor["id"]
             ]
             assert len(protocol_continuations) == 1
             assert protocol_continuations[0].turn_id == successor["turn_id"]
@@ -288,16 +292,11 @@ def test_no_proposal_exit_restores_saved_permission_and_automatically_runs_tools
     asyncio.run(scenario())
 
 
-def test_exit_resource_admission_failure_does_not_publish_partial_exit(
+def test_exit_final_event_failure_rolls_back_all_exit_changes(
     tmp_path,
     monkeypatch,
     stage2_migrated_postgres_database,
 ):
-    from pulsara_agent.model_input.contracts import (
-        ModelInputCompileFailureKind,
-        StructuredModelInputCompileError,
-    )
-
     model = _ExitModel({})
     model.allow_exit.set()
 
@@ -309,19 +308,20 @@ def test_exit_resource_admission_failure_does_not_publish_partial_exit(
             monkeypatch=monkeypatch,
         )
 
-        def reject(_quote, **_):
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET
-            )
-
-        monkeypatch.setattr(session._runner, "_require_post_response_resources", reject)
+        append_events = session.repository._append_events
+        def fail_after_writes(*args, **kwargs):
+            accepted = append_events(*args, **kwargs)
+            if any(draft.event_type.value == "PlanWorkflowExited" for draft in kwargs["drafts"]):
+                raise OSError("injected final event publication failure")
+            return accepted
+        monkeypatch.setattr(session.repository, "_append_events", fail_after_writes)
         try:
             await session.enter_plan(
                 command_id=random_id("command"),
-                entry_reason="admission failure",
+
                 resume_permission_mode=PermissionMode.ACCEPT_EDITS,
             )
-            with pytest.raises(StructuredModelInputCompileError):
+            with pytest.raises(OSError, match="injected final event"):
                 await session.run_turn(
                     PromptContent.text("exit"), command_id=random_id("command")
                 )
@@ -390,7 +390,7 @@ def test_exit_committed_successor_obeys_stop_or_close_before_handoff(
         try:
             await session.enter_plan(
                 command_id=random_id("command"),
-                entry_reason="exit cancellation",
+
                 resume_permission_mode=PermissionMode.ACCEPT_EDITS,
             )
             running = asyncio.create_task(

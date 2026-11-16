@@ -5,19 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
 
 from pulsara_agent.capability.pulsara_home import (
     PulsaraHomeDisposition,
     UserHomeResolution,
     UserHomeResolutionError,
     resolve_user_home,
-)
-from pulsara_agent.message import ToolResultState
-from pulsara_agent.ports.tool_execution import (
-    ToolCall,
-    ToolExecutionResult,
-    ToolOutputSourceFormatHint,
 )
 
 
@@ -104,20 +97,3 @@ class WorkspaceTool:
         # Read-only tools accept the same host-local target regardless of whether
         # callers spell it as an absolute path or relative to the workspace.
         return self.workspace_root / path
-
-    def _result(
-        self,
-        call: ToolCall,
-        *,
-        status: ToolResultState,
-        output: str,
-        metadata: dict[str, Any] | None = None,
-    ) -> ToolExecutionResult:
-        return ToolExecutionResult(
-            call_id=call.id,
-            tool_name=call.name,
-            status=status,
-            output=output,
-            metadata=metadata or {},
-            public_format=ToolOutputSourceFormatHint.JSON,
-        )

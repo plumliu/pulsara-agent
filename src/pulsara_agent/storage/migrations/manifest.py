@@ -72,6 +72,7 @@ CONVERSATION_KERNEL_RUNTIME_PRIVILEGES = {
 }
 CONVERSATION_KERNEL_RUNTIME_COLUMN_PRIVILEGES = {
     "content_parts": {"entry_id": ("UPDATE",), "queue_item_id": ("UPDATE",)},
+    "tool_results": {"source_result_entry_id": ("UPDATE",), "native_projection": ("UPDATE",)},
 }
 
 if tuple(CONVERSATION_KERNEL_RUNTIME_PRIVILEGES) != CONVERSATION_KERNEL_RELATIONS:

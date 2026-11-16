@@ -8,17 +8,154 @@ import math
 
 from pulsara_agent.tools.builtins.workspace import WorkspaceTool
 from pulsara_agent.tools.builtins.filesystem import (
-    ViewImageSource,
-    ViewImageSourceKind,
     path_target_arg,
-    parse_view_image_source,
 )
 
 MEDIA_TOOL_NAMES = frozenset({"read_video_frames", "read_transcript", "annotate_media"})
 IMAGE_TOOL_NAMES = frozenset({"view_image", "read_video_frames"})
 
 
+def media_business_output_schema(name: str) -> dict:
+    """Describe the complete JS business value, including actual failure values."""
+    from pulsara_agent.ports.tool_execution import tool_business_value_schema
+    from pulsara_agent.tools.builtins.filesystem_contracts import path_target_schema
+
+    def record(properties, required):
+        return {
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": False,
+        }
+
+    def part(kind, value):
+        return record({"type": {"const": kind}, "value": value}, ["type", "value"])
+
+    def numbers(length):
+        return {
+            "type": "array",
+            "items": {"type": "number"},
+            "minItems": length,
+            "maxItems": length,
+        }
+
+    text = part("text", {"type": "string"})
+    image_target = media_parameters_schema("view_image")["properties"]["target"]
+    image = part("image", image_target["oneOf"][1])
+    target = path_target_schema()
+    meta, required_meta = {}, ()
+    if name == "view_image":
+        target = image_target
+        success_content = {
+            "type": "array",
+            "prefixItems": [text, image],
+            "minItems": 2,
+            "maxItems": 2,
+        }
+        failure_content = {"type": "array", "items": text}
+    elif name == "read_video_frames":
+        time_range = numbers(2)
+        detail = record(
+            {
+                "t": {"type": "number"},
+                "visible_range": time_range,
+                "dt": {"type": "number"},
+            },
+            ["t", "visible_range"],
+        )
+        cell = record(
+            {
+                "n": {"type": "integer", "minimum": 1},
+                "t": {"type": "number"},
+                "cell_rect": numbers(4),
+                "dt": {"type": "number"},
+                "visible_range": time_range,
+                "representative_range": time_range,
+            },
+            ["n", "t", "cell_rect"],
+        )
+        collage = record({"frames": {"type": "array", "items": cell}}, ["frames"])
+        success_content = failure_content = {
+            "type": "array",
+            "items": {
+                "oneOf": [text, image, part("object", {"oneOf": [detail, collage]})]
+            },
+        }
+    elif name == "read_transcript":
+        segment = record(
+            {
+                "from": {"type": "number"},
+                "to": {"type": "number"},
+                "text": {"type": "string"},
+                "speaker": {"type": "string"},
+                "visible_range": record(
+                    {"from": {"type": "number"}, "to": {"type": "number"}},
+                    ["from", "to"],
+                ),
+            },
+            ["from", "to", "text"],
+        )
+        meta = {"source": {"enum": ["subtitle", "asr"]}, "language": {"type": "string"}}
+        required_meta = ("source",)
+        success_content = failure_content = {
+            "type": "array",
+            "items": {"oneOf": [text, part("object", segment)]},
+        }
+    else:
+        raise ValueError("unknown JS media tool")
+    return {
+        "description": (
+            "Complete JS business value. Business failures throw with this failure value "
+            "in err.result when available; failures without a business value omit it. "
+            "Image success is independent of the current model's image capability."
+        ),
+        "oneOf": [
+            tool_business_value_schema(
+                fields={"target": target},
+                required_fields=("target",),
+                meta=meta,
+                required_meta=required_meta,
+                content_schema=success_content,
+            ),
+            tool_business_value_schema(
+                fields={"target": target},
+                meta=meta,
+                content_schema=failure_content,
+                statuses=("ERROR", "CANCELLED"),
+            ),
+        ],
+    }
+
+
 def media_parameters_schema(name: str) -> dict:
+    if name == "view_image":
+        from pulsara_agent.identity import ID_PAYLOAD_PATTERN
+        from pulsara_agent.tools.builtins.filesystem_contracts import path_target_schema
+
+        return {
+            "type": "object",
+            "properties": {
+                "target": {
+                    "oneOf": [
+                        path_target_schema(),
+                        {
+                            "type": "object",
+                            "properties": {
+                                "kind": {"const": "IMAGE_REF"},
+                                "image_ref": {
+                                    "type": "string",
+                                    "pattern": f"^image:{ID_PAYLOAD_PATTERN}$",
+                                },
+                            },
+                            "required": ["kind", "image_ref"],
+                            "additionalProperties": False,
+                        },
+                    ]
+                }
+            },
+            "required": ["target"],
+            "additionalProperties": False,
+        }
     properties = {
         "target": {
             "type": "object",
@@ -34,10 +171,14 @@ def media_parameters_schema(name: str) -> dict:
     }
     required = ["target"]
     if name == "read_video_frames":
-        properties["from"]["description"] = "Start in seconds (decimals supported). Defaults to 0 for overview/motion; required for detail."
-        properties["to"]["description"] = "Exclusive end in seconds. Defaults to media end for overview/motion; detail requires an explicit end at most 2 seconds after from."
+        properties["from"]["description"] = (
+            "Start in seconds (decimals supported). Defaults to 0 for overview/motion; required for detail."
+        )
+        properties["to"]["description"] = (
+            "Exclusive end in seconds. Defaults to media end for overview/motion; detail requires an explicit end at most 2 seconds after from."
+        )
         properties.update(
-            mode={
+            action={
                 "type": "string",
                 "enum": ["overview", "detail", "motion"],
                 "default": "overview",
@@ -50,18 +191,9 @@ def media_parameters_schema(name: str) -> dict:
                 "minItems": 4,
                 "maxItems": 4,
             },
-            continuation={
-                "type": "object",
-                "minProperties": 1,
-                "description": "Copy the complete next call returned by runtime; omit on the first read.",
-            },
         )
     elif name == "read_transcript":
-        properties["continuation"] = {
-            "type": "object",
-            "minProperties": 1,
-            "description": "Copy the complete next call returned by runtime; omit on the first read.",
-        }
+        pass
     elif name == "annotate_media":
         properties["text"] = {"type": "string", "minLength": 1}
         required = ["target", "from", "to", "text"]
@@ -76,6 +208,11 @@ def media_parameters_schema(name: str) -> dict:
 
 
 def validate_media_arguments(name: str, arguments: Mapping[str, object]) -> None:
+    if name == "view_image":
+        from pulsara_agent.tools.builtins.filesystem import parse_view_image_source
+
+        parse_view_image_source(arguments)
+        return
     schema = media_parameters_schema(name)
     if set(arguments) - set(schema["properties"]) or not set(
         schema["required"]
@@ -96,10 +233,14 @@ def validate_media_arguments(name: str, arguments: Mapping[str, object]) -> None
     ):
         raise ValueError("INVALID_RANGE: from must precede to")
     if name == "read_video_frames":
-        mode = arguments.get("mode", "overview")
-        if not isinstance(mode, str) or mode not in {"overview", "detail", "motion"}:
-            raise ValueError("INVALID_ARGUMENTS: invalid mode")
-        if mode == "detail":
+        action = arguments.get("action", "overview")
+        if not isinstance(action, str) or action not in {
+            "overview",
+            "detail",
+            "motion",
+        }:
+            raise ValueError("INVALID_ARGUMENTS: invalid action")
+        if action == "detail":
             from pulsara_agent.media.frames_detail import validate_detail_range
 
             validate_detail_range(arguments.get("from"), arguments.get("to"))
@@ -120,25 +261,6 @@ def validate_media_arguments(name: str, arguments: Mapping[str, object]) -> None
         not isinstance(arguments["text"], str) or not arguments["text"].strip()
     ):
         raise ValueError("INVALID_ARGUMENTS: text must contain non-whitespace text")
-    if name in {"read_video_frames", "read_transcript"} and "continuation" in arguments:
-        if (
-            not isinstance(arguments["continuation"], Mapping)
-            or not arguments["continuation"]
-        ):
-            raise ValueError(
-                "INVALID_ARGUMENTS: continuation must be a nonempty object"
-            )
-
-
-def parse_image_tool_source(
-    name: str, arguments: Mapping[str, object]
-) -> ViewImageSource:
-    if name == "view_image":
-        return parse_view_image_source(arguments)
-    if name != "read_video_frames":
-        raise ValueError("not an image tool")
-    validate_media_arguments(name, arguments)
-    return ViewImageSource(ViewImageSourceKind.PATH, path_target_arg(arguments))
 
 
 @dataclass(slots=True)

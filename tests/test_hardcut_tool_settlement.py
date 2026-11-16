@@ -13,12 +13,9 @@ from pulsara_agent.conversation_kernel.tool_contracts import KernelToolResult
 from pulsara_agent.conversation_kernel.tool_execution import ToolBatchExecutor, _code_result
 from pulsara_agent.conversation_kernel.tool_outputs import PostgresToolOutputReadPort, ToolOutputProcessor
 from pulsara_agent.identity import random_id
-from pulsara_agent.llm.input import FrozenPromptContent, LLMTextPart, LLMImagePart
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
-from pulsara_agent.ports.tool_execution import (ToolBusinessValue, ToolOutputSourceCoverage,
-    ToolOutputSourceFormatHint, thaw_tool_json_object, tool_json_values_equal)
-from pulsara_agent.ports.tool_output import (AcceptedToolResultProjectionError, ToolOutputBodyCandidate,
-    ToolResultSaveError, ToolOutputUnavailableReason)
+from pulsara_agent.ports.tool_execution import (ToolBusinessValue, thaw_tool_json_object, tool_json_values_equal)
+from pulsara_agent.ports.tool_output import (AcceptedToolResultProjectionError, ToolResultSaveError, ToolOutputUnavailableReason)
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from tests.test_hardcut_tool_result_storage import prepare
 from tests.test_hardcut_entry_parts import read
@@ -94,8 +91,7 @@ def test_typed_settlement_saves_complete_value_and_confirms_lost_ack_without_ree
         result = KernelToolResult("APPLICATION_ERROR", ToolBusinessValue(
             {"meta": {"exit_code": 23}, "structuredContent": None},
             (ResultPart("text", "physical effect already happened\r\n"), ResultPart("object", {"all": [1, None]}))),
-            result_facts={"canonical_path": "/actual", "file_mtime_ns": 7},
-            required_facts={"old_display_fact": "must not be persisted"})
+            result_facts={"canonical_path": "/actual", "file_mtime_ns": 7})
         outcome = asyncio.run(settle(execution, candidate, result))
     finally:
         _code_result.reset(token)
@@ -111,16 +107,14 @@ def test_typed_settlement_saves_complete_value_and_confirms_lost_ack_without_ree
         assert saved["result_facts"] == {"canonical_path": "/actual", "file_mtime_ns": 7}
 
 
-def test_physical_full_text_wins_over_preview_and_is_not_parsed_as_legacy_json(repository):
+def test_json_shaped_text_is_preserved_as_declared_text(repository):
     lease, candidate = prepare(repository)
-    result = KernelToolResult("SUCCESS", b'{"preview":"short"}', native_output=b"short",
-        public_format=ToolOutputSourceFormatHint.JSON,
-        output_body_candidate=ToolOutputBodyCandidate("all\r\ncomplete\n", ToolOutputSourceFormatHint.TEXT,
-                                                    ToolOutputSourceCoverage.COMPLETE))
-    asyncio.run(settle(executor(repository, lease), candidate, result))
-    value = read_value(repository, candidate)
-    assert value["content"] == ({"type": "text", "value": "all\r\ncomplete\n"},)
-    assert value["meta"] == {"status": "SUCCESS"}
+    text = '{"content":"business text","next":null}\r\n'
+    result = KernelToolResult("SUCCESS", ToolBusinessValue(content=(ResultPart("text",text),)))
+    asyncio.run(settle(executor(repository,lease),candidate,result))
+    value = read_value(repository,candidate)
+    assert value["content"] == ({"type":"text","value":text},)
+    assert value["meta"] == {"status":"SUCCESS"}
 
 
 def test_save_failure_produces_no_accepted_target_or_code_value(repository, monkeypatch):
@@ -134,7 +128,7 @@ def test_save_failure_produces_no_accepted_target_or_code_value(repository, monk
     token = _code_result.set(captured)
     try:
         with pytest.raises(ToolResultSaveError, match="保存失败") as failure:
-            asyncio.run(settle(execution, candidate, KernelToolResult("SUCCESS", b"effect already happened")))
+            asyncio.run(settle(execution, candidate, KernelToolResult("SUCCESS", ToolBusinessValue(content=(ResultPart("text","effect already happened"),)))))
         assert failure.value.reason is ToolOutputUnavailableReason.BODY_PUBLICATION_FAILED
         assert failure.value.result_state == "SUCCESS"
         assert failure.value.known_value["content"] == ({"type": "text", "value": "effect already happened"},)
@@ -151,10 +145,14 @@ def test_frozen_image_outcome_is_published_then_accepted_as_ordered_content(repo
     lease, candidate = prepare(repository)
     stream = BytesIO()
     Image.new("RGB", (7, 5), (11, 23, 41)).save(stream, format="PNG")
-    content = FrozenPromptContent((LLMTextPart("image failure context\n"),
-        LLMImagePart("image/png", stream.getvalue(), 7, 5), LLMTextPart("following explanation")))
+    from tests.support.images import bound_test_image
+    image = bound_test_image("image/png", stream.getvalue(), 7, 5)
+    content = ToolBusinessValue(content=(ResultPart("text", "image failure context\n"),
+        ResultPart("image", {"kind":"IMAGE_REF","image_ref":image.image_ref}),
+        ResultPart("text", "following explanation")))
     execution = executor(repository, lease)
-    outcome = asyncio.run(settle(execution, candidate, KernelToolResult("APPLICATION_ERROR", content), tool_name="view_image"))
+    outcome = asyncio.run(settle(execution, candidate,
+        KernelToolResult("APPLICATION_ERROR", content, pending_images=(image,)), tool_name="view_image"))
     value = read_value(repository, candidate)
     assert value["meta"] == {"status": "ERROR"}
     assert [part["type"] for part in value["content"]] == ["text", "image", "text"]
@@ -198,25 +196,26 @@ def test_confirmation_failure_retains_known_value_and_cause_without_readable_tar
 
 @pytest.mark.parametrize("state", ["SUCCESS", "APPLICATION_ERROR", "CANCELLED"])
 def test_text_code_units_are_saved_before_display_and_kept_in_complete_value(repository, monkeypatch, state):
-    from pulsara_agent.conversation_kernel import tool_outputs
+    from pulsara_agent.conversation_kernel import native_tool_delivery
 
     lease, candidate = prepare(repository, state)
     execution = executor(repository, lease)
-    original_project = tool_outputs.project_tool_result_export
+    original_project = native_tool_delivery.project_native_tool_page
     text = "actual\x00\r\n中文😀\ud800\udfff"
     projected_after_save = []
 
-    def project(value):
+    def project(**arguments):
         projected_after_save.append(read_value(repository, candidate))
-        return original_project(value)
+        return original_project(**arguments)
 
-    monkeypatch.setattr(tool_outputs, "project_tool_result_export", project)
+    monkeypatch.setattr(native_tool_delivery, "project_native_tool_page", project)
     outcome = asyncio.run(settle(execution, candidate,
         KernelToolResult(state, ToolBusinessValue(content=(ResultPart("text", text),)))))
     assert projected_after_save[0]["content"][0]["value"] == text
     assert read_value(repository, candidate)["content"][0]["value"] == text
     assert outcome.settlement.result_state == state
-    assert "actual\x00\r\n中文😀\\ud800\\udfff" in outcome.settlement.public_projection.canonical_body
+    projected = text.encode("utf-16-le",errors="surrogatepass").decode("utf-16-le",errors="surrogatepass")
+    assert projected in outcome.settlement.public_projection.canonical_body
     assert len(execution._live_bus.settlements) == 1
 
 
@@ -247,7 +246,7 @@ def test_original_utf16_and_number_candidate_confirms_real_commit_after_lost_ack
 
 
 def test_projection_failure_preserves_accepted_value_identity_and_live_commit(repository, monkeypatch):
-    from pulsara_agent.conversation_kernel import tool_outputs
+    from pulsara_agent.conversation_kernel import native_tool_delivery
     from tests.test_hardcut_source_consumers import invoke_code_mode_failure
 
     lease, candidate = prepare(repository)
@@ -259,10 +258,10 @@ def test_projection_failure_preserves_accepted_value_identity_and_live_commit(re
         return original_accept(*args, **kwargs)
     monkeypatch.setattr(repository, "accept_tool_result", accept)
     cause = RuntimeError("injected display failure")
-    def cannot_project(value):
+    def cannot_project(_page, **_kwargs):
         assert read_value(repository, candidate)["content"][0]["value"] == "physical write complete"
         raise cause
-    monkeypatch.setattr(tool_outputs, "project_tool_result_export", cannot_project)
+    monkeypatch.setattr(native_tool_delivery, "render_native_tool_page", cannot_project)
     delivered = []
     result = KernelToolResult("SUCCESS", ToolBusinessValue(
         {"structuredContent": None}, (ResultPart("text", "physical write complete"),)),
@@ -279,7 +278,7 @@ def test_projection_failure_preserves_accepted_value_identity_and_live_commit(re
     code_result = invoke_code_mode_failure(monkeypatch, error)
     assert code_result.value == thaw_tool_json_object(error.known_value)
     assert code_result.result_id == candidate.result_id and code_result.result_entry_id == candidate.result_entry_id
-    assert code_result.output_available and code_result.output_unavailability_reason is None
+    assert code_result.has_result
     assert code_result.error_code == "RESULT_PROJECTION_FAILED" and code_result.state == "SUCCESS"
     assert code_result.delivery_succeeded is None and delivered == []
 
@@ -303,7 +302,7 @@ def test_preparation_failure_retains_known_value_without_accepted_identity(repos
 
 
 def test_projection_failure_does_not_discard_committed_process_local_effect(repository, monkeypatch):
-    from pulsara_agent.conversation_kernel import tool_outputs
+    from pulsara_agent.conversation_kernel import native_tool_delivery
     from pulsara_agent.conversation_kernel.tool_contracts import (
         ProcessLocalEffectSettlementDisposition, ProcessLocalEffectSettlementToken,
     )
@@ -319,9 +318,9 @@ def test_projection_failure_does_not_discard_committed_process_local_effect(repo
 
     session_id, workspace_id, lease = _lease(repository)
     tool = Tool()
-    def cannot_project(_value):
+    def cannot_project(_page, **_kwargs):
         raise RuntimeError("display failed after effect commit")
-    monkeypatch.setattr(tool_outputs, "project_tool_result_export", cannot_project)
+    monkeypatch.setattr(native_tool_delivery, "render_native_tool_page", cannot_project)
     model = ScriptedKernelModel([_tool_stream(1)])
     with pytest.raises(AcceptedToolResultProjectionError) as caught:
         asyncio.run(_runner(repository, lease, model, tool).run_turn(frozen_test_prompt("run once")))

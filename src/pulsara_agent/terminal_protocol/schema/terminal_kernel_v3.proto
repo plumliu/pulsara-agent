@@ -189,6 +189,9 @@ message CanonicalInputSource {
   string source_turn_id = 7;
   string source_tool_attempt_id = 8;
   optional string work_title = 9;
+  string source_cell_id = 10;
+  uint64 source_record_sequence = 11;
+  string cell_output_kind = 12;
 }
 
 message CanonicalVisualization {
@@ -263,6 +266,9 @@ message PromptQueueControl {
   string source_turn_id = 17;
   string source_tool_attempt_id = 18;
   optional string work_title = 19;
+  string source_cell_id = 20;
+  uint64 source_record_sequence = 21;
+  string cell_output_kind = 22;
 }
 
 message PlanWorkflowControl {
@@ -282,10 +288,10 @@ message PlanInteractionControl {
   uint64 interaction_ordinal = 5;
   string typed_content_fingerprint = 6;
   uint64 option_count = 7;
-  bool allow_free_text = 8;
   uint64 draft_utf8_size = 9;
   string draft_utf8_digest = 10;
   bool summary_present = 11;
+  string expires_at_utc = 12;
 }
 
 enum PlanHandoffDisposition {
@@ -789,7 +795,6 @@ message CommandRequest {
   string command_id = 4;
   CommandKind command_kind = 5;
   string client_submission_id = 6;
-  string plan_reason = 7;
   string target_turn_id = 8;
   reserved 10;
   PermissionMode requested_permission_mode = 11;
@@ -1059,7 +1064,6 @@ message PlanQuestionContent {
   string interaction_id = 2;
   string question = 3;
   repeated PlanQuestionOption options = 4;
-  bool allow_free_text = 5;
   string typed_content_fingerprint = 6;
 }
 

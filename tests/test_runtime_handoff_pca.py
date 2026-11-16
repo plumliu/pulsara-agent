@@ -25,16 +25,8 @@ from pulsara_agent.llm.adapters.openai.chat_completions import chat_semantic_wir
 from pulsara_agent.llm.adapters.openai.responses import responses_semantic_wire_group
 from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV3
 from pulsara_agent.model_input.compiler import estimate_runtime_handoff_pca_tokens
-from pulsara_agent.model_input.continuity import (
-    SourceObservationLifecycle,
-    SourceObservationPresence,
-    encode_runtime_observation,
-)
-from pulsara_agent.model_input.contracts import (
-    ContextSourceKind,
-    ContextTrustClass,
-    ModelInputScopeKind,
-)
+from pulsara_agent.model_input.contracts import ModelInputScopeKind
+from pulsara_agent.llm.input import LLMMessage
 from pulsara_agent.primitives.context import canonical_json_bytes
 from pulsara_agent.tools.builtins.todo import parse_todo_replacement
 
@@ -63,7 +55,7 @@ def agent(index):
 
 
 def payload(handoff):
-    return json.loads(handoff.full_text.split("\n", 1)[0])
+    return json.loads(handoff.text.split("\n", 1)[0])
 
 
 def pca_body(handoff):
@@ -71,7 +63,7 @@ def pca_body(handoff):
     del data["todos"]
     del data["todo_counts"]
     return (
-        canonical_json_bytes(data).decode() + "\n" + handoff.full_text.split("\n", 1)[1]
+        canonical_json_bytes(data).decode() + "\n" + handoff.text.split("\n", 1)[1]
     )
 
 
@@ -117,8 +109,7 @@ def test_todo_only_preserves_status_text_order_counts_and_continuation():
         "completed": 1,
         "total": 3,
     }
-    assert handoff.full_text == handoff.compact_text
-    assert handoff.full_text.endswith(HANDOFF_CONTINUATION)
+    assert handoff.text.endswith(HANDOFF_CONTINUATION)
     assert "omitted" not in payload(handoff)
 
 
@@ -144,13 +135,7 @@ def test_actual_source_encoder_and_both_serializers_stay_within_pca_boundary(
         todo=None,
     )
     body = pca_body(handoff)
-    message = encode_runtime_observation(
-        source_kind=ContextSourceKind.COMPACTION_RUNTIME_HANDOFF,
-        trust_class=ContextTrustClass.UNTRUSTED_OBSERVATION,
-        lifecycle=SourceObservationLifecycle.SNAPSHOT,
-        presence=SourceObservationPresence.VALUE,
-        body=body,
-    )
+    message = LLMMessage.user(body)
     primitive = PulsaraHeuristicTokenEstimatorV3()
     cost = sum(
         primitive.estimate_wire_json_component(item) for item in serializer(message)
@@ -162,8 +147,8 @@ def test_actual_source_encoder_and_both_serializers_stay_within_pca_boundary(
         if scope is ModelInputScopeKind.ROOT
         else SUBAGENT_HANDOFF_BUDGET_OMISSION
     )
-    assert handoff.full_text.endswith(omission)
-    assert ("query_cells" in handoff.full_text) is (scope is ModelInputScopeKind.ROOT)
+    assert handoff.text.endswith(omission)
+    assert ("query_cells" in handoff.text) is (scope is ModelInputScopeKind.ROOT)
     data = payload(handoff)
     keys = ("terminal_processes", "agents")
     if scope is ModelInputScopeKind.ROOT:
@@ -193,9 +178,8 @@ def test_actual_source_encoder_and_both_serializers_stay_within_pca_boundary(
 def test_legal_quoted_todo_can_exceed_local_budget_without_changing_pca_selection(
     scope,
 ):
-    # This passes the real NFC/unique/192-byte/4-KiB parser. Source JSON nesting
-    # amplifies escaping; the complete message is deliberately above 3,200.
-    items = [{"text": str(i) + '"' * 107, "status": "pending"} for i in range(16)]
+    # Ten legal complete TODO items exceed the separate PCA budget; they remain complete.
+    items = [{"text": str(i) + '"' * 500, "status": "pending"} for i in range(10)]
     todo = todo_snapshot(items)
     facts = dict(
         conversation_scope_kind=scope,
@@ -209,16 +193,16 @@ def test_legal_quoted_todo_can_exceed_local_budget_without_changing_pca_selectio
     with_todo = freeze_compaction_runtime_handoff(**facts, todo=todo)
     assert pca_body(with_todo) == pca_body(without)
     assert payload(with_todo)["todos"] == items
-    assert payload(with_todo)["todo_counts"]["total"] == 16
-    assert estimate_runtime_handoff_pca_tokens(with_todo.full_text) > 3_200
+    assert payload(with_todo)["todo_counts"]["total"] == 10
+    assert estimate_runtime_handoff_pca_tokens(with_todo.text) > 3_200
     only_todo = freeze_compaction_runtime_handoff(
         conversation_scope_kind=scope,
         terminal_processes=(),
         todo=todo,
     )
-    assert estimate_runtime_handoff_pca_tokens(only_todo.full_text) > 3_200
-    assert HANDOFF_BUDGET_OMISSION not in only_todo.full_text
-    assert SUBAGENT_HANDOFF_BUDGET_OMISSION not in only_todo.full_text
+    assert estimate_runtime_handoff_pca_tokens(only_todo.text) > 3_200
+    assert HANDOFF_BUDGET_OMISSION not in only_todo.text
+    assert SUBAGENT_HANDOFF_BUDGET_OMISSION not in only_todo.text
 
 
 @pytest.mark.parametrize(
@@ -284,7 +268,7 @@ def test_first_candidate_too_large_still_produces_handoff_and_stops_enumeration(
     )
     assert handoff is not None
     assert payload(handoff)["agents"] == []
-    assert handoff.full_text.endswith(HANDOFF_BUDGET_OMISSION)
+    assert handoff.text.endswith(HANDOFF_BUDGET_OMISSION)
 
 
 def test_invalid_envelope_and_reader_errors_are_not_reported_as_empty_or_omission():
@@ -382,7 +366,7 @@ def test_lazy_agent_pages_read_after_50_and_stop_on_confirmed_budget_omission(sc
         if scope is ModelInputScopeKind.ROOT
         else SUBAGENT_HANDOFF_BUDGET_OMISSION
     )
-    assert handoff.full_text.endswith(omission)
+    assert handoff.text.endswith(omission)
 
 
 @pytest.mark.parametrize(
@@ -401,8 +385,8 @@ def test_full_agent_page_requests_next_page_to_distinguish_exactly_complete_inve
     handoff = freeze(port_fixture(subagent=Inventory()), scope)
     assert len(reads) == 2
     assert len(payload(handoff)["agents"]) == 50
-    assert HANDOFF_BUDGET_OMISSION not in handoff.full_text
-    assert SUBAGENT_HANDOFF_BUDGET_OMISSION not in handoff.full_text
+    assert HANDOFF_BUDGET_OMISSION not in handoff.text
+    assert SUBAGENT_HANDOFF_BUDGET_OMISSION not in handoff.text
 
 
 @pytest.mark.parametrize(

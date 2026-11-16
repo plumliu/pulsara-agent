@@ -28,13 +28,13 @@ from pulsara_agent.scheduling.contracts import (
     ScheduledTriggerSource,
     ScheduledTaskError,
     utc_instant,
-    validate_rule,
+    normalize_schedule_input,
+    public_schedule_rule,
     next_occurrence,
 )
 from pulsara_agent.workspace_identity import WorkspaceUnavailable
-from pulsara_agent.ports.tool_execution import FrozenToolJsonDict, freeze_tool_json_object
-from pulsara_agent.primitives.context import canonical_json_bytes
-from pulsara_agent.primitives.tool_result_budget import ToolResultPageBoundary
+from pulsara_agent.ports.tool_execution import FrozenToolJsonDict, ToolBusinessValue, freeze_tool_json_object
+from pulsara_agent.conversation_kernel.content_parts import ResultPart
 
 _LOG = logging.getLogger(__name__)
 
@@ -48,46 +48,21 @@ def task_payload(row: dict) -> dict:
     }
 
 
-def model_task_payload(payload: dict) -> dict:
-    """Model identity handoff; native service/HTTP rows keep their own fields."""
-    return {
-        "target": schedule_target(payload["id"]),
-        "session": {"kind": "SESSION", "session_id": payload["session_id"]},
-        **{key: value for key, value in payload.items() if key not in {"id", "session_id"}},
-    }
-
-
-def model_task_summary(payload: dict) -> dict:
-    value = model_task_payload(task_payload(payload))
-    result = {key: value[key] for key in (
-        "target", "session", "revision", "status", "schedule", "timezone", "permission_mode", "next_run_at"
-    ) if key in value}
-    result["inspect"] = {"tool": "query_schedules", "arguments": {"target": result["target"]}}
-    return result
-
-
-def model_management_receipt(action, payload):
-    if action == "switch":
-        return {"action": action, **{key: model_task_summary(payload[key]) for key in ("paused", "active")}}
-    if action == "delete":
-        return {"action": action, "target": schedule_target(payload["id"]), "deleted": True}
-    return {"action": action, **model_task_summary(payload)}
-
-
-def _require_model_result(page_budget, value):
-    if not page_budget.fits(canonical_json_bytes(value).decode("utf-8")):
-        raise ToolResultPageBoundary("The minimum schedule result does not fit this call's result allowance")
+def model_schedule_record(payload: dict) -> dict:
+    return {"target": schedule_target(payload["id"]), **{key: payload[key] for key in (
+        "name", "prompt", "schedule", "timezone", "permission_mode", "status", "next_run_at")}}
 
 
 @dataclass(frozen=True, slots=True)
 class ScheduledToolObservation:
     """One tool value and the revisions read with its actual schedule rows."""
 
-    value: FrozenToolJsonDict
+    value: ToolBusinessValue
     result_facts: FrozenToolJsonDict
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "value", freeze_tool_json_object(self.value))
+        if not isinstance(self.value, ToolBusinessValue):
+            raise TypeError("schedule observation requires a typed business value")
         object.__setattr__(self, "result_facts", freeze_tool_json_object(self.result_facts))
 
     @classmethod
@@ -187,6 +162,7 @@ class ScheduledTaskService:
 
     def _payload(self, row):
         payload = task_payload(row)
+        payload["schedule"] = public_schedule_rule(row["schedule"], row["timezone"])
         if "session_title" in row:
             payload["session_title"] = display_title({"id": row["session_id"], "title": row["session_title"]})
         error = self._prepare_errors.get(row["id"])
@@ -209,10 +185,9 @@ class ScheduledTaskService:
                 payload["prepare_error"] = "时间规则已超出可表示范围，请修改规则。"
         return payload
 
-    async def list(self, *, cursor=None, status=None, session_id=None, model_summary=False):
+    async def list(self, *, cursor=None, status=None, session_id=None):
         rows, cursor = await self._read(
             "list_scheduled_tasks", cursor=cursor, status=status, session_id=session_id,
-            **({"model_summary": True} if model_summary else {})
         )
         return {"tasks": [self._payload(row) for row in rows], "next_cursor": cursor}
 
@@ -226,19 +201,18 @@ class ScheduledTaskService:
             raise KeyError(task_id)
         return self._payload(row)
 
-    async def create(self, *, session_id, values, status=None, result_check=None):
+    async def create(self, *, session_id, values, status=None):
         row = await self._manage(
             "create_scheduled_task",
             session_id=session_id,
             values=values,
             status=status,
             model_resolution_snapshot=self._core.model_runtime.freeze_resolution_snapshot(),
-            **({"result_check": result_check} if result_check is not None else {}),
         )
         self.wake()
         return self._payload(row)
 
-    async def mutate(self, *, task_id, expected_revision, action, values=None, result_check=None):
+    async def mutate(self, *, task_id, expected_revision, action, values=None):
         row = await self.get(task_id)
         result = await self._manage(
             "mutate_scheduled_task",
@@ -247,21 +221,12 @@ class ScheduledTaskService:
             expected_revision=expected_revision,
             action=action,
             values=values,
-            **({"result_check": result_check} if result_check is not None else {}),
         )
         self._prepare_errors.pop(task_id, None)
         self.wake()
-        return None if result is None else self._payload(result)
+        return None if action == "delete" or result is None else self._payload(result)
 
-    async def switch(self, *, task_id, expected_revision, replacement, result_check=None):
-        validate_action(
-            dict(
-                action="switch",
-                target=schedule_target(task_id),
-                expected_revision=expected_revision,
-                replacement=replacement,
-            )
-        )
+    async def switch(self, *, task_id, expected_revision, replacement):
         source = await self.get(task_id)
         paused, active = await self._manage(
             "switch_scheduled_task",
@@ -270,102 +235,100 @@ class ScheduledTaskService:
             expected_revision=expected_revision,
             replacement=replacement,
             model_resolution_snapshot=self._core.model_runtime.freeze_resolution_snapshot(),
-            **({"result_check": result_check} if result_check is not None else {}),
         )
         self._prepare_errors.pop(task_id, None)
         self._prepare_errors.pop(active["id"], None)
         self.wake()
         return {"paused": self._payload(paused), "active": self._payload(active)}
 
-    async def invoke_query(self, arguments, *, default_session_id, permission_mode, page_budget, memory_domain_id=None):
+    async def invoke_query(self, arguments, *, default_session_id, permission_mode, memory_domain_id=None):
         token = self._memory_domain.set(memory_domain_id)
         try:
-            return await self._invoke_query(arguments, default_session_id=default_session_id,
-                permission_mode=permission_mode, page_budget=page_budget)
+            value = dict(validate_query(dict(arguments)))
+            if "target" in value:
+                row = await self.get(value["target"]["task_id"])
+                if row["session_id"] != default_session_id:
+                    raise ScheduledTaskError("TASK_NOT_FOUND", "该定时任务不存在或不属于当前会话。")
+                rows = (row,)
+            else:
+                raw_rows = await self._read("list_model_scheduled_tasks", session_id=default_session_id,
+                    status=None if value.get("status", "ALL") == "ALL" else value["status"])
+                rows = tuple(self._payload(row) for row in raw_rows)
+            parts = []
+            for row in rows:
+                parts.append(ResultPart("object", model_schedule_record(row)))
+                if row.get("prepare_error"):
+                    parts.append(ResultPart("text", f"定时任务 {row['id']} 当前无法准备执行：{row['prepare_error']}"))
+            if not rows:
+                parts.append(ResultPart("text", "当前会话没有符合条件的定时任务。"))
+            return ScheduledToolObservation.from_rows(ToolBusinessValue(content=tuple(parts)), rows)
         finally:
             self._memory_domain.reset(token)
 
-    async def _invoke_query(self, arguments, *, default_session_id, permission_mode, page_budget):
-        value = dict(validate_query(dict(arguments)))
-        if "target" in value:
-            row = await self.get(value["target"]["task_id"])
-            return ScheduledToolObservation.from_rows(model_task_payload(row), (row,))
-        # Model-only scope default; service/HTTP list(None) remains user-level.
-        session = value.pop("session", None)
-        value["session_id"] = (
-            default_session_id if session is None else session["session_id"]
-        )
-        page = await self.list(**value, model_summary=True)
-        tasks = page["tasks"]
-        for count in range(len(tasks), -1, -1):
-            if tasks and count == 0:
-                break
-            selected = tasks[:count]
-            more = count < len(tasks) or page["next_cursor"] is not None
-            result = {"tasks": [model_task_summary(task) for task in selected],
-                "next": {"tool": "query_schedules", "arguments": {
-                    "session": {"kind": "SESSION", "session_id": value["session_id"]},
-                    **({"status": value["status"]} if "status" in value else {}),
-                    "cursor": selected[-1]["id"]}} if more else None}
-            if page_budget.fits(canonical_json_bytes(result).decode("utf-8")):
-                return ScheduledToolObservation.from_rows(result, selected)
-        raise ToolResultPageBoundary("The minimum schedule page does not fit this call's result allowance")
-
-    async def invoke_manage(self, arguments, *, default_session_id, permission_mode, page_budget, memory_domain_id=None):
+    async def invoke_manage(self, arguments, *, default_session_id, permission_mode, memory_domain_id=None):
         token = self._memory_domain.set(memory_domain_id)
         try:
-            return await self._invoke_manage(arguments, default_session_id=default_session_id,
-                permission_mode=permission_mode, page_budget=page_budget)
-        finally:
-            self._memory_domain.reset(token)
-
-    async def _invoke_manage(self, arguments, *, default_session_id, permission_mode, page_budget):
-        value = dict(validate_action(dict(arguments)))
-        action = value.pop("action")
-        if action == "create" and value.get("session") is None:
-            value["session"] = {"kind": "SESSION", "session_id": default_session_id}
-        if action in {"create", "update", "switch"}:
-            values = value.get("values")
+            value = dict(validate_action(dict(arguments)))
+            action = value["action"]
+            if action == "create":
+                row = await self.create(session_id=default_session_id,
+                    values={**value["values"], "permission_mode": permission_mode.value}, status=value.get("status"))
+                public = {"target": schedule_target(row["id"]), "meta": {
+                    "schedule_status": row["status"], "next_run_at": row["next_run_at"]}}
+                text = "已创建并启用定时任务。" if row["status"] == "ACTIVE" else "已创建定时任务，当前为暂停状态。"
+                return ScheduledToolObservation.from_rows(ToolBusinessValue(public_fields=public,
+                    content=(ResultPart("text", text),)), (row,))
+            task_id = value["target"]["task_id"]
+            ids = [task_id]
+            replacement = value.get("replacement")
+            if action == "switch" and replacement["kind"] == "existing":
+                ids.append(replacement["target"]["task_id"])
+            revisions = await self._read("read_saved_schedule_revisions", session_id=default_session_id, task_ids=ids)
+            if any(task_id not in revisions for task_id in ids):
+                raise ScheduledTaskError("SNAPSHOT_REQUIRED", "请先用 query_schedules 查询目标计划，再执行此操作。")
+            rows = [await self.get(task_id) for task_id in ids]
+            if any(row["session_id"] != default_session_id for row in rows):
+                raise ScheduledTaskError("TASK_NOT_FOUND", "该定时任务不存在或不属于当前会话。")
+            if action == "resume" or (action == "switch" and replacement["kind"] == "existing"):
+                enabled = rows[-1]
+                if list(PermissionMode).index(PermissionMode(enabled["permission_mode"])) > list(PermissionMode).index(permission_mode):
+                    raise ScheduledTaskError("PERMISSION_ESCALATION", "当前调用权限不足以启用这个计划，请由用户调整权限后再试。")
             if action == "switch":
-                replacement = value["replacement"]
-                values = (
-                    replacement["values"]
-                    if replacement["kind"] == "create"
-                    else await self.get(replacement["target"]["task_id"])
-                )
-            # A model can preserve or narrow its current preset, never grant
-            # itself broader future permissions by saving task text/config.
-            modes = list(PermissionMode)
-            if not isinstance(values, dict) or "permission_mode" not in values:
-                raise ScheduledTaskError("INVALID_REQUEST", "任务权限配置缺失。")
-            requested = PermissionMode(values["permission_mode"])
-            if modes.index(requested) > modes.index(permission_mode):
-                raise ScheduledTaskError(
-                    "PERMISSION_ESCALATION",
-                    "当前会话权限不足以保存此任务配置，请由用户调整会话权限后再试。",
-                )
-        if "session" in value:
-            value["session_id"] = value.pop("session")["session_id"]
-        if "target" in value:
-            value["task_id"] = value.pop("target")["task_id"]
-        def result_check(payload):
-            _require_model_result(page_budget, model_management_receipt(action, payload))
-        if action == "create":
-            result = await self.create(**value, result_check=result_check)
-        elif action == "switch":
-            result = await self.switch(**value, result_check=result_check)
-            return ScheduledToolObservation.from_rows(model_management_receipt(action, result),
-                (result["paused"], result["active"]))
-        else:
-            result = await self.mutate(action=action, **value, result_check=result_check)
-        return ScheduledToolObservation.from_rows(
-            model_management_receipt(action, {"id": value["task_id"]} if action == "delete" else result),
-            () if action == "delete" else (result,))
+                replacement = dict(replacement)
+                if replacement["kind"] == "existing":
+                    replacement["expected_revision"] = revisions[ids[-1]]
+                else:
+                    replacement["values"] = {**replacement["values"], "permission_mode": permission_mode.value}
+                paused, active = await self._manage("switch_scheduled_task", session_id=default_session_id,
+                    task_id=task_id, expected_revision=revisions[task_id], replacement=replacement,
+                    model_resolution_snapshot=self._core.model_runtime.freeze_resolution_snapshot())
+                self.wake()
+                public = {"target": schedule_target(active["id"]), "meta": {
+                    "schedule_status": active["status"], "next_run_at": task_payload(active)["next_run_at"]}}
+                return ScheduledToolObservation.from_rows(ToolBusinessValue(public_fields=public,
+                    content=(ResultPart("text", "已暂停原计划并启用替换计划。"),)), (paused, active))
+            row = await self._manage("mutate_scheduled_task", session_id=default_session_id, task_id=task_id,
+                expected_revision=revisions[task_id], action=action, values=value.get("values"))
+            self._prepare_errors.pop(task_id, None)
+            self.wake()
+            if action == "update":
+                text = "定时任务未发生变化。" if row["revision"] == revisions[task_id] else "已更新定时任务。"
+            else:
+                text = {"pause": "已暂停定时任务，尚未执行的排队输入已取消。", "resume": "已启用定时任务。", "delete": "已删除定时任务，已开始的回复继续运行。"}[action]
+            public = {"target": schedule_target(task_id)}
+            if action == "pause":
+                public["meta"] = {"schedule_status": "PAUSED", "next_run_at": None}
+            elif action == "resume":
+                public["meta"] = {"schedule_status": row["status"], "next_run_at": task_payload(row)["next_run_at"]}
+            return ScheduledToolObservation.from_rows(ToolBusinessValue(public_fields=public,
+                content=(ResultPart("text", text),)), (row,))
+        finally:
+            self._memory_domain.reset(token)
 
     async def preview(self, *, schedule, timezone):
-        rule = validate_rule(schedule, timezone)
-        # Database clock is the only authority for due admission and preview.
+        # Database clock is the only authority for defaults and preview.
         now, _ = await self._read("scheduled_next_time")
+        rule = normalize_schedule_input(schedule, timezone, now, creating=True)
         result = next_occurrence(rule, timezone, now)
         if result is None:
             raise ScheduledTaskError("TIME_RANGE_EXHAUSTED", "没有可用的未来触发时点。")
@@ -382,7 +345,7 @@ class ScheduledTaskService:
         from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
         from dateutil import tz
 
-        if not isinstance(run_at_local, str) or len(run_at_local) != 16:
+        if not isinstance(run_at_local, str) or len(run_at_local) not in {16, 19}:
             raise ScheduledTaskError("INVALID_SCHEDULE", "运行时间格式无效。")
         try:
             naive = datetime.fromisoformat(run_at_local)
@@ -391,7 +354,7 @@ class ScheduledTaskService:
             raise ScheduledTaskError("INVALID_SCHEDULE", "时间或时区无效。") from exc
         if (
             naive.tzinfo is not None
-            or naive.isoformat(timespec="minutes") != run_at_local
+            or naive.isoformat(timespec="minutes" if len(run_at_local) == 16 else "seconds") != run_at_local
         ):
             raise ScheduledTaskError("INVALID_SCHEDULE", "请填写当地日期和时间。")
         local = naive.replace(tzinfo=zone, fold=0)
@@ -399,17 +362,7 @@ class ScheduledTaskService:
             raise ScheduledTaskError(
                 "INVALID_SCHEDULE", "这个当地时间因夏令时切换不存在，请选择其他时间。"
             )
-        from datetime import timezone as datetime_timezone
-
-        return {
-            "schedule": validate_rule(
-                {
-                    "kind": "once",
-                    "run_at_utc": local.astimezone(datetime_timezone.utc).isoformat(),
-                },
-                timezone,
-            )
-        }
+        return {"schedule": {"kind": "once", "run_at": naive.isoformat(timespec="seconds")}}
 
     @staticmethod
     def _run_request(request):

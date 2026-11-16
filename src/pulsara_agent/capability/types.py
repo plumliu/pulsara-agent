@@ -66,11 +66,6 @@ class SkillSource(StrEnum):
     BUNDLED = "bundled"
 
 
-class ActiveSkillReason(StrEnum):
-    EXPLICIT_USER_MENTION = "explicit_user_mention"
-    HOST_COMMAND = "host_command"
-
-
 class SkillAuthoringDiagnosticCode(StrEnum):
     BODY_OVER_500_LINES = "skill_body_over_500_lines"
     BODY_ESTIMATE_OVER_5000_TOKENS = "skill_body_estimate_over_5000_tokens"
@@ -470,44 +465,32 @@ class ResolvedSkillCatalogEntry:
 
 
 @dataclass(frozen=True, slots=True)
-class ActiveSkillInjection:
+class MinimalSkillRef:
     name: str
-    path: Path
-    base_dir: Path
     skill_path: str
-    body: str
-    reason: ActiveSkillReason
-    origin: SkillDefinitionOrigin
-    manifest_semantic_fingerprint: str
-    body_digest: str
-    raw_document_digest: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.reason, ActiveSkillReason):
-            raise TypeError("active Skill reason is not closed")
-        if not isinstance(
-            self.origin, (LooseSkillOrigin, PluginSkillOrigin, BundledSkillOrigin)
-        ):
-            raise TypeError("active Skill origin is not closed")
-        if self.path.name != "SKILL.md" or self.base_dir != self.path.parent:
-            raise ValueError("active Skill physical identity is inconsistent")
-        for value in (
-            self.manifest_semantic_fingerprint,
-            self.body_digest,
-            self.raw_document_digest,
-        ):
-            if not value.startswith("sha256:"):
-                raise ValueError("active Skill fingerprint is invalid")
+        if not self.name or not Path(self.skill_path).is_absolute():
+            raise ValueError("Skill reference lacks an absolute current identity")
 
-    @property
-    def source(self) -> SkillSource:
-        return skill_source_for_origin(self.origin)
+
+@dataclass(frozen=True, slots=True)
+class ActiveSkillSelection:
+    name: str
+    skill_path: str
+    origin: SkillDefinitionOrigin
+
+    def __post_init__(self) -> None:
+        if not self.name or not Path(self.skill_path).is_absolute():
+            raise ValueError("active Skill selection lacks its current identity")
+        if not isinstance(self.origin, (LooseSkillOrigin, PluginSkillOrigin, BundledSkillOrigin)):
+            raise TypeError("active Skill origin is not closed")
 
 
 __all__ = [
-    "ActiveSkillInjection",
+    "MinimalSkillRef",
+    "ActiveSkillSelection",
     "ActiveSkillProjectionUnavailableReason",
-    "ActiveSkillReason",
     "BundledSkillOrigin",
     "ConflictingSkillCandidateIssue",
     "ConflictingSkillCandidateRef",

@@ -21,16 +21,11 @@ from pulsara_agent.media.asr_cache import (
 from pulsara_agent.media.audio import ExtractedAudio, SoundObservation, extract_audio
 from pulsara_agent.media.source import MediaError, MediaInfo, MediaSource, probe_media
 from pulsara_agent.media.subtitles import (
-    SubtitleEntry,
     SubtitleReadResult,
     read_subtitles,
 )
 from pulsara_agent.media.transcript import TranscriptService, missing_ranges, plan_gaps
 from pulsara_agent.media.transcript_work import TranscriptWork
-from pulsara_agent.primitives.tool_result_budget import (
-    ToolResultPageBudget,
-    ToolResultPageBoundary,
-)
 
 
 @dataclass
@@ -178,56 +173,16 @@ def run_async(function):
     return run
 
 
-BUDGET = ToolResultPageBudget("call")
-
-
-@run_async
-async def test_one_hour_empty_audio_advances_only_180_seconds():
-    h = Harness()
-    page = await h.service().read(
-        Source(), info(), {}, BUDGET, memory_domain_id="default"
-    )
-    assert h.extractions == [(0, 180)]
-    assert page.payload["processed_range"] == {"from": 0, "to": 180}
-    assert (
-        page.payload["next"]["arguments"]["continuation"]["source_modified_ns"]
-        == "1793000000123456789"
-    )
-    assert page.payload["sound_observations"][0]["state"] == "sound_present"
-    next_page = await h.service().read(
-        Source(),
-        info(),
-        page.payload["next"]["arguments"],
-        BUDGET,
-        memory_domain_id="default",
-    )
-    assert h.extractions[-1] == (180, 360)
-    assert next_page.payload["processed_range"] == {"from": 180, "to": 360}
-
-
-@run_async
-async def test_multiple_gaps_share_one_180_second_allowance():
-    h = Harness()
-    seed(h.cache, 180, 360)
-    page = await h.service().read(
-        Source(), info(), {"from": 150, "to": 600}, BUDGET, memory_domain_id="default"
-    )
-    assert h.extractions == [(150, 180), (360, 510)]
-    assert sum(h.requests) == 180
-    assert page.payload["processed_range"]["to"] == 510
-    assert page.payload["next"]["arguments"]["from"] == 150
-
-
 @run_async
 async def test_subtitle_empty_gap_never_falls_back_to_asr_without_audio_or_configuration():
     h = Harness(subtitle=SubtitleReadResult(True, 2, "en", ()))
     service = h.service()
     service.asr_config = None
     page = await service.read(
-        Source(), info(audio=None), {}, BUDGET, memory_domain_id="default"
+        Source(), info(audio=None), {}, memory_domain_id="default"
     )
-    assert page.payload["complete"] is True
-    assert page.payload["source"] == "subtitle"
+    assert not page.errors and page.processed_to == page.requested_range[1]
+    assert page.source == "subtitle"
     assert not h.requests and not h.extractions
 
 
@@ -235,107 +190,27 @@ async def test_subtitle_empty_gap_never_falls_back_to_asr_without_audio_or_confi
 async def test_no_audio_is_terminal_and_never_requires_asr_config():
     h = Harness()
     page = await h.service().read(
-        Source(), info(audio=None), {}, BUDGET, memory_domain_id="default"
+        Source(), info(audio=None), {}, memory_domain_id="default"
     )
-    assert page.is_error and page.payload["error"] == "NO_AUDIO_TRACK"
-    assert page.payload["next"] is None and not h.requests
+    assert bool(page.errors) and page.errors[0]["error"] == "NO_AUDIO_TRACK"
+    assert not h.requests
 
 
 @run_async
-async def test_full_cached_hour_exceeds_180_seconds_and_does_not_need_asr():
+async def test_complete_cached_hour_does_not_need_asr_configuration():
     h = Harness()
     seed(h.cache, 0, 3600, "original")
     service = h.service()
     service.asr_config = None
-    page = await service.read(Source(), info(), {}, BUDGET, memory_domain_id="default")
-    assert page.payload["complete"] is True
-    assert page.payload["processed_range"]["to"] == 3600
-    assert page.payload["entries"][0]["text"] == "original"
+    page = await service.read(Source(), info(), {}, memory_domain_id="default")
+    assert not page.errors and page.processed_to == page.requested_range[1]
+    assert page.processed_to == 3600
+    assert page.entries[0].text == "original"
     assert not h.requests
 
 
 @run_async
-async def test_long_same_time_subtitle_fragments_preserve_all_text_and_real_time():
-    original = '汉字\\"\n' * 200
-    h = Harness(
-        subtitle=SubtitleReadResult(
-            True,
-            2,
-            "zh",
-            (SubtitleEntry(10, 20, original, 0), SubtitleEntry(10, 20, "second", 1)),
-        )
-    )
-    budget = ToolResultPageBudget(
-        "real-call", accepts_provider_body=lambda body, _: len(body.encode()) < 1350
-    )
-    arguments = {"from": 15, "to": 3600}
-    collected = []
-    for _ in range(100):
-        page = await h.service().read(
-            Source(), info(), arguments, budget, memory_domain_id="default"
-        )
-        assert budget.fits(page.body)
-        for entry in page.payload["entries"]:
-            collected.append(entry["text"])
-            assert entry["from"] == 10 and entry["to"] == 20
-            assert entry["visible_range"] == {"from": 15, "to": 20}
-        if page.payload["next"] is None:
-            break
-        arguments = page.payload["next"]["arguments"]
-    else:
-        pytest.fail("continuation did not advance")
-    assert "".join(collected) == original + "second"
-    assert not h.requests
-
-
-@run_async
-async def test_pending_cached_text_precedes_next_paid_window_and_same_next_is_observational():
-    h = Harness()
-    seed(h.cache, 0, 180, "A" * 2000)
-    budget = ToolResultPageBudget(
-        "call", accepts_provider_body=lambda body, _: len(body) < 1300
-    )
-    page = await h.service().read(
-        Source(), info(), {}, budget, memory_domain_id="default"
-    )
-    arguments = page.payload["next"]["arguments"]
-    repeat1 = await h.service().read(
-        Source(), info(), arguments, budget, memory_domain_id="default"
-    )
-    repeat2 = await h.service().read(
-        Source(), info(), arguments, budget, memory_domain_id="default"
-    )
-    assert repeat1.body == repeat2.body
-    assert not h.requests
-    h.cache.blocks.clear()
-    with pytest.raises(MediaError) as error:
-        await h.service().read(
-            Source(), info(), arguments, budget, memory_domain_id="default"
-        )
-    assert error.value.code == "TRANSCRIPT_CONTINUATION_INVALID"
-    assert not h.requests
-
-
-@run_async
-async def test_completed_boundary_next_cannot_reidentify_cleaned_cache():
-    h = Harness()
-    page = await h.service().read(
-        Source(), info(), {}, BUDGET, memory_domain_id="default"
-    )
-    h.cache.blocks.clear()
-    with pytest.raises(MediaError, match="cleared"):
-        await h.service().read(
-            Source(),
-            info(),
-            page.payload["next"]["arguments"],
-            BUDGET,
-            memory_domain_id="default",
-        )
-    assert len(h.requests) == 1
-
-
-@run_async
-async def test_partial_failure_preserves_successful_prefix_and_later_cache_without_retry_next():
+async def test_partial_failure_preserves_successful_prefix_and_later_cache_without_retry():
     def response(duration, index):
         if index == 2:
             raise AsrError(
@@ -348,25 +223,13 @@ async def test_partial_failure_preserves_successful_prefix_and_later_cache_witho
     h = Harness(response=response)
     seed(h.cache, 30, 60)
     later = seed(h.cache, 210, 240, "later cached original")
-    page = await h.service().read(
-        Source(), info(240), {}, BUDGET, memory_domain_id="default"
-    )
-    assert page.is_error and page.payload["processed_range"]["to"] == 60
-    assert page.payload["next"] is None
-    assert page.payload["errors"][0]["remote_result_unknown"] is True
+    page = await h.service().read(Source(), info(240), {}, memory_domain_id="default")
+    assert bool(page.errors) and page.processed_to == 60
+    assert page.errors[0]["remote_result_unknown"] is True
     assert later in h.cache.blocks
-    assert page.payload["entries"][0]["text"] == "prefix"
+    assert page.entries[0].text == "prefix"
     assert h.extractions == [(0, 30), (60, 210)]
     assert sum(h.requests) == 180
-
-
-@run_async
-async def test_smallest_page_boundary_prevents_paid_request():
-    h = Harness()
-    budget = ToolResultPageBudget("call", accepts_provider_body=lambda _body, _: False)
-    with pytest.raises(ToolResultPageBoundary):
-        await h.service().read(Source(), info(), {}, budget, memory_domain_id="default")
-    assert not h.requests and not h.extractions
 
 
 @run_async
@@ -377,12 +240,10 @@ async def test_cache_write_failure_delivers_original_once_and_never_resubmits():
         )
     )
     h.cache.fail_write = True
-    page = await h.service().read(
-        Source(), info(10), {}, BUDGET, memory_domain_id="default"
-    )
-    assert page.payload["complete"] is True
-    assert page.payload["entries"][0]["speaker"] == "speaker"
-    assert page.payload["entries"][0]["text"] == "real"
+    page = await h.service().read(Source(), info(10), {}, memory_domain_id="default")
+    assert not page.errors and page.processed_to == page.requested_range[1]
+    assert page.entries[0].speaker == "speaker"
+    assert page.entries[0].text == "real"
     assert len(h.requests) == 1 and not h.cache.blocks
 
 
@@ -420,12 +281,11 @@ async def test_real_pyav_wav_extract_and_timestamp_map_pipeline(tmp_path):
             source,
             probe_media(source),
             {"from": 1, "to": 2},
-            BUDGET,
             memory_domain_id="default",
         )
-    assert page.payload["complete"] is True
-    assert page.payload["entries"][0]["from"] == 1.1
-    assert page.payload["entries"][0]["to"] == 1.3
+    assert not page.errors and page.processed_to == page.requested_range[1]
+    assert page.entries[0].start == 1.1
+    assert page.entries[0].end == 1.3
     assert calls == [1]
     assert cache.blocks[0].payload["sound"]["state"] == "near_silent"
 
@@ -442,7 +302,7 @@ def test_gap_union_does_not_swallow_tiny_unprocessed_gap():
                 ((150, 180), (360, 600)), maximum_audio_bytes=16 * 1024 * 1024
             )
         )
-        == 180
+        == 270
     )
 
 
@@ -471,7 +331,6 @@ async def test_overlapping_concurrent_reads_share_work_across_models_and_cancel_
             Source(),
             info(300),
             {"from": 0, "to": 180},
-            BUDGET,
             memory_domain_id="default",
         )
     )
@@ -481,7 +340,6 @@ async def test_overlapping_concurrent_reads_share_work_across_models_and_cancel_
             Source(),
             info(300),
             {"from": 90, "to": 270},
-            BUDGET,
             memory_domain_id="default",
         )
     )
@@ -496,8 +354,8 @@ async def test_overlapping_concurrent_reads_share_work_across_models_and_cancel_
     release.set()
     page = await two
     assert sorted(calls) == [("A", 180), ("B", 90)]
-    assert page.payload["complete"] is True
-    assert page.payload["processed_range"] == {"from": 90, "to": 270}
+    assert not page.errors and page.processed_to == page.requested_range[1]
+    assert page.requested_range == (90, 270) and page.processed_to == 270
     assert sorted(h.extractions) == [(0, 180), (180, 270)]
 
 
@@ -517,7 +375,7 @@ async def test_last_waiter_cancellation_settles_shared_request_without_cache_cov
     service = h.service()
     service.transcribe = transcribe
     task = asyncio.create_task(
-        service.read(Source(), info(), {}, BUDGET, memory_domain_id="default")
+        service.read(Source(), info(), {}, memory_domain_id="default")
     )
     await accepted.wait()
     task.cancel()
@@ -525,43 +383,6 @@ async def test_last_waiter_cancellation_settles_shared_request_without_cache_cov
         await task
     assert settled.is_set()
     assert not h.cache.blocks
-
-
-@run_async
-async def test_real_subtitle_physical_chunks_and_same_time_source_positions(tmp_path):
-    path = tmp_path / "subtitles.srt"
-    original = "字幕" * 400
-    path.write_text(
-        f"1\n00:00:01,000 --> 00:00:02,000\n{original}\n\n2\n00:00:01,000 --> 00:00:02,000\nsecond\n"
-    )
-    h = Harness()
-    service = TranscriptService(
-        work=h.work,
-        cache=h.cache,
-        asr_config=None,
-        run_media=direct,
-        run_cache=direct,
-        maximum_upload_bytes=16 * 1024 * 1024,
-        maximum_response_bytes=256,
-        deadline_monotonic=monotonic() + 30,
-        transcribe=h.asr,
-    )
-    arguments = {"from": 0, "to": 3}
-    text = []
-    with MediaSource.open(path) as source:
-        metadata = probe_media(source)
-        for _ in range(100):
-            page = await service.read(
-                source, metadata, arguments, BUDGET, memory_domain_id="default"
-            )
-            text.extend(entry["text"] for entry in page.payload["entries"])
-            if page.payload["next"] is None:
-                break
-            arguments = page.payload["next"]["arguments"]
-        else:
-            pytest.fail("subtitle source page did not progress")
-    assert "".join(text) == original + "second"
-    assert not h.requests
 
 
 @run_async
@@ -586,16 +407,15 @@ async def test_joined_waiter_retains_first_accepted_deadline_and_does_not_resubm
     second.transcribe = transcribe
     second.deadline = monotonic() + 10
     a = asyncio.create_task(
-        first.read(Source(), info(180), {}, BUDGET, memory_domain_id="default")
+        first.read(Source(), info(180), {}, memory_domain_id="default")
     )
     await accepted.wait()
     b = asyncio.create_task(
-        second.read(Source(), info(180), {}, BUDGET, memory_domain_id="default")
+        second.read(Source(), info(180), {}, memory_domain_id="default")
     )
     pa, pb = await asyncio.gather(a, b)
-    assert pa.payload["errors"] == pb.payload["errors"]
-    assert pa.payload["errors"][0]["error"] == "MEDIA_PROCESSING_DEADLINE_EXPIRED"
-    assert pa.payload["next"] is None and pb.payload["next"] is None
+    assert pa.errors == pb.errors
+    assert pa.errors[0]["error"] == "MEDIA_PROCESSING_DEADLINE_EXPIRED"
     assert calls == [1] and cancelled.is_set() and not h.cache.blocks
 
 
@@ -608,7 +428,7 @@ async def test_cache_read_failure_is_not_an_empty_cache_and_never_submits_asr():
 
     h.cache.query_ranges = fail
     with pytest.raises(OSError, match="database read failed"):
-        await h.service().read(Source(), info(), {}, BUDGET, memory_domain_id="default")
+        await h.service().read(Source(), info(), {}, memory_domain_id="default")
     assert not h.requests and not h.extractions
 
 
@@ -679,87 +499,6 @@ async def test_partial_claim_preparation_failure_does_not_leak_new_work():
 
 
 @run_async
-async def test_overlapping_cache_pages_merge_chronologically_and_keep_earlier_block_later_items():
-    h = Harness()
-    a, middle, later = "A" * 800, "B" * 800, "C" * 800
-    seed(
-        h.cache,
-        0,
-        10,
-        a + later,
-        items=[
-            {"start": 1, "end": 2, "text": a, "speaker": None},
-            {"start": 7, "end": 9, "text": later, "speaker": None},
-        ],
-    )
-    seed(
-        h.cache,
-        4,
-        8,
-        middle,
-        items=[{"start": 4, "end": 5, "text": middle, "speaker": None}],
-    )
-    budget = ToolResultPageBudget(
-        "call", accepts_provider_body=lambda body, _: len(body) < 1900
-    )
-    arguments = {"from": 0, "to": 10}
-    text = []
-    times = []
-    for _ in range(30):
-        page = await h.service().read(
-            Source(), info(10), arguments, budget, memory_domain_id="default"
-        )
-        assert budget.fits(page.body)
-        text.extend(item["text"] for item in page.payload["entries"])
-        times.extend(item["from"] for item in page.payload["entries"])
-        if page.payload["next"] is None:
-            break
-        arguments = page.payload["next"]["arguments"]
-    else:
-        pytest.fail("overlap page did not advance")
-    assert "".join(text) == a + middle + later
-    assert times == sorted(times)
-    assert not h.requests
-
-
-@run_async
-async def test_context_boundary_novel_earlier_item_loaded_before_later_provisional_cursor():
-    h = Harness()
-    seed(
-        h.cache,
-        0,
-        10,
-        "A" * 800 + "C" * 800,
-        items=[
-            {"start": 1, "end": 2, "text": "A" * 800, "speaker": None},
-            {"start": 7, "end": 9, "text": "C" * 800, "speaker": None},
-        ],
-    )
-    boundary = seed(
-        h.cache,
-        4,
-        8,
-        "B" * 800,
-        items=[{"start": 3, "end": 5, "text": "B" * 800, "speaker": None}],
-    )
-    boundary.payload["request_range"] = {"from": 2, "to": 9}
-    budget = ToolResultPageBudget(
-        "call", accepts_provider_body=lambda body, _: len(body) < 1900
-    )
-    arguments = {"from": 0, "to": 10}
-    text = []
-    for _ in range(30):
-        page = await h.service().read(
-            Source(), info(10), arguments, budget, memory_domain_id="default"
-        )
-        text.extend(item["text"] for item in page.payload["entries"])
-        if page.payload["next"] is None:
-            break
-        arguments = page.payload["next"]["arguments"]
-    assert "".join(text) == "A" * 800 + "B" * 800 + "C" * 800
-
-
-@run_async
 async def test_overlap_dedup_only_cross_block_same_utterance_and_preserves_repeated_source_positions():
     h = Harness()
     seed(
@@ -783,16 +522,17 @@ async def test_overlap_dedup_only_cross_block_same_utterance_and_preserves_repea
             {"start": 5.2, "end": 5.5, "text": "novel", "speaker": None},
         ],
     )
-    page = await h.service().read(
-        Source(), info(10), {}, BUDGET, memory_domain_id="default"
-    )
-    assert [item["text"] for item in page.payload["entries"]] == [
+    page = await h.service().read(Source(), info(10), {}, memory_domain_id="default")
+    assert [
+        item["text"]
+        for item in [item.public_value(page.requested_range) for item in page.entries]
+    ] == [
         "same",
         "same",
         "novel",
         "same",
     ]
-    assert len(page.payload["diagnostics"]) == 1
+    assert len(page.diagnostics) == 1
 
 
 @run_async
@@ -808,12 +548,10 @@ async def test_actual_word_grouping_respects_punctuation_pause_speaker_and_raw_w
     ]
     block = seed(h.cache, 0, 10, "Hello world. Again pause new new", items=rows)
     block.payload["granularity"] = "word"
-    page = await h.service().read(
-        Source(), info(10), {}, BUDGET, memory_domain_id="default"
-    )
+    page = await h.service().read(Source(), info(10), {}, memory_domain_id="default")
     assert [
         (item["text"], item["from"], item["to"], item.get("speaker"))
-        for item in page.payload["entries"]
+        for item in [item.public_value(page.requested_range) for item in page.entries]
     ] == [
         ("Hello world.", 0, 2, "A"),
         ("Again", 2, 3, "A"),
@@ -821,42 +559,6 @@ async def test_actual_word_grouping_respects_punctuation_pause_speaker_and_raw_w
         ("new new", 4, 5, "B"),
     ]
     assert block.payload["items"] == rows
-
-
-@run_async
-async def test_cached_middle_filling_page_prevents_next_paid_gap():
-    h = Harness()
-    seed(h.cache, 30, 60, "M" * 5000)
-    budget = ToolResultPageBudget(
-        "call", accepts_provider_body=lambda body, _: len(body) < 1800
-    )
-    page = await h.service().read(
-        Source(), info(240), {}, budget, memory_domain_id="default"
-    )
-    assert h.extractions == [(0, 30)]
-    assert page.payload["processed_range"]["to"] == 60
-    assert page.payload["next"]["arguments"]["continuation"]["position"] is not None
-
-
-@run_async
-async def test_uncached_long_original_is_explicit_terminal_partial_without_unusable_next():
-    h = Harness(
-        response=lambda duration, _: AsrTranscript(
-            "X" * 5000, (AsrTimestamp(0, duration, "X" * 5000),), "segment"
-        )
-    )
-    h.cache.fail_write = True
-    budget = ToolResultPageBudget(
-        "call", accepts_provider_body=lambda body, _: len(body) < 1800
-    )
-    page = await h.service().read(
-        Source(), info(180), {}, budget, memory_domain_id="default"
-    )
-    assert page.is_error and page.payload["status"] == "partial"
-    assert page.payload["next"] is None and page.payload["complete"] is False
-    assert page.payload["errors"][0]["error"] == "ASR_CACHE_WRITE_FAILED"
-    assert 0 < len(page.payload["entries"][0]["text"]) < 5000
-    assert len(h.requests) == 1 and budget.fits(page.body)
 
 
 @run_async
@@ -873,36 +575,11 @@ async def test_equal_time_overlap_dedup_preserves_greatest_original_repeat_multi
                 for _ in range(count)
             ],
         )
-    page = await h.service().read(
-        Source(), info(10), {}, BUDGET, memory_domain_id="default"
-    )
-    assert [item["text"] for item in page.payload["entries"]] == ["yes"] * 4
-
-
-@run_async
-async def test_forged_boundary_or_missing_anchor_never_skips_unprocessed_audio():
-    from copy import deepcopy
-
-    h = Harness()
-    page = await h.service().read(
-        Source(), info(600), {}, BUDGET, memory_domain_id="default"
-    )
-    arguments = page.payload["next"]["arguments"]
-    for field, value in [
-        ("anchor", None),
-        ("window_from", 360),
-        ("source", "subtitle"),
-    ]:
-        forged = deepcopy(arguments)
-        forged["continuation"][field] = value
-        if field == "window_from":
-            forged["continuation"]["processed_to"] = 360
-        with pytest.raises(MediaError) as failure:
-            await h.service().read(
-                Source(), info(600), forged, BUDGET, memory_domain_id="default"
-            )
-        assert failure.value.code == "INVALID_ARGUMENTS"
-    assert len(h.requests) == 1
+    page = await h.service().read(Source(), info(10), {}, memory_domain_id="default")
+    assert [
+        item["text"]
+        for item in [item.public_value(page.requested_range) for item in page.entries]
+    ] == ["yes"] * 4
 
 
 @run_async
@@ -935,12 +612,12 @@ async def test_original_deadline_before_quota_or_decode_never_claims_possible_ch
             service.run_asr_cache = waiting_cache
         try:
             page = await service.read(
-                Source(), info(180), {}, BUDGET, memory_domain_id="default"
+                Source(), info(180), {}, memory_domain_id="default"
             )
         finally:
             if phase == "quota":
                 client._admission.release()
-        error = page.payload["errors"][0]
+        error = page.errors[0]
         assert error["remote_result_unknown"] is False
         assert error["request_accounting"] == {"attempts": []}
         assert not h.requests and not h.extractions
@@ -962,13 +639,15 @@ async def test_original_deadline_after_valid_response_preserves_original_during_
         return await direct(operation, *args, **kwargs)
 
     service.run_asr_cache = cache
-    page = await service.read(
-        Source(), info(180), {}, BUDGET, memory_domain_id="default"
+    page = await service.read(Source(), info(180), {}, memory_domain_id="default")
+    assert (
+        not page.errors
+        and page.processed_to == page.requested_range[1]
+        and not page.errors
     )
-    assert page.payload["complete"] is True and not page.is_error
-    assert page.payload["entries"][0]["text"] == "confirmed"
+    assert page.entries[0].text == "confirmed"
     assert len(h.requests) == 1 and not h.cache.blocks
-    assert "cache persistence could not be confirmed" in page.payload["diagnostics"][0]
+    assert "cache persistence could not be confirmed" in page.diagnostics[0]
 
 
 @run_async
@@ -1002,11 +681,9 @@ async def test_real_sdk_upload_deadline_reports_observed_send_and_input_accounti
     service.prepare_transcribe = AsrClient().prepare_and_transcribe
     service.deadline = monotonic() + 0.5
     try:
-        page = await service.read(
-            Source(), info(180), {}, BUDGET, memory_domain_id="default"
-        )
+        page = await service.read(Source(), info(180), {}, memory_domain_id="default")
         assert entered.is_set()
-        error = page.payload["errors"][0]
+        error = page.errors[0]
         assert error["remote_result_unknown"] is True
         attempt = error["request_accounting"]["attempts"][0]
         assert (
@@ -1067,15 +744,15 @@ async def test_real_sdk_validated_response_survives_deadline_during_client_close
     service.prepare_transcribe = AsrClient().prepare_and_transcribe
     service.deadline = monotonic() + 0.1
     task = asyncio.create_task(
-        service.read(Source(), info(180), {}, BUDGET, memory_domain_id="default")
+        service.read(Source(), info(180), {}, memory_domain_id="default")
     )
     await closing.wait()
     await asyncio.sleep(0.12)
     release.set()
     page = await task
-    assert page.payload["complete"] is True
-    assert page.payload["entries"][0]["text"] == "known"
-    assert not page.is_error and not h.cache.blocks
+    assert not page.errors and page.processed_to == page.requested_range[1]
+    assert page.entries[0].text == "known"
+    assert not page.errors and not h.cache.blocks
 
 
 @run_async

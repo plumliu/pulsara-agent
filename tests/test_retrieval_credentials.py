@@ -15,7 +15,7 @@ from tests.test_memory_retrieval_adapters import VECTOR
 def _memory_port(settings):
     return KernelMemoryToolPort(
         repository=SimpleNamespace(connection_provider=object()),
-        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+        session_id="session:336wrfwkamrr3up6kjtsgvgcte",
         read_binding=object(),
         embedding_config=EmbeddingBackendConfig(),
         rerank_config=RerankBackendConfig(),
@@ -68,17 +68,26 @@ def test_missing_or_unreadable_settings_degrade_without_opening_provider(
         )
         from pulsara_agent.conversation_kernel.history_excerpt import HistoryCandidate
         from pulsara_agent.conversation_kernel.memory.recall import (
-            MemoryQueryResult, MemoryRetrievalDisposition,
+            MemoryQueryResult,
+            MemoryRetrievalDisposition,
         )
 
         mixed = MemoryQueryResult(
             disposition=MemoryRetrievalDisposition.COMPLETE,
-            facts=("ordinary", HistoryCandidate(
-                session_id='session:2gshm5wjf42flcppodmqqhvruu', q1_entry_id='entry:hsbhejqlvgm3oe42nqmhybryyu', title="old",
-                score=1.0, document={}, messages=(), covered_entry_sequence=1,
-                variant="QA", include_tools=False,
-            )),
-            attempted_stages=(),
+            facts=(
+                "ordinary",
+                HistoryCandidate(
+                    session_id="session:2gshm5wjf42flcppodmqqhvruu",
+                    q1_entry_id="entry:hsbhejqlvgm3oe42nqmhybryyu",
+                    title="old",
+                    score=1.0,
+                    document={},
+                    messages=(),
+                    covered_entry_sequence=1,
+                    variant="QA",
+                    include_tools=False,
+                ),
+            ),
         )
         implicit = await port._rerank_explicit(
             "query", mixed, total_deadline=999999999, purpose="automatic_recall"

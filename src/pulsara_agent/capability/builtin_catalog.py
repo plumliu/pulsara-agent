@@ -5,13 +5,13 @@ from __future__ import annotations
 from pulsara_agent.tools.builtins.media import MEDIA_TOOL_NAMES, media_parameters_schema
 
 from pulsara_agent.scheduling.requests import manage_schedule_schema, query_schedules_schema
-from pulsara_agent.capability.source_query import query_input_schema
+from pulsara_agent.capability.source_query import query_input_schema, capability_target_schema
 from pulsara_agent.tools.builtins.filesystem_contracts import (
     read_file_parameters_schema, write_file_parameters_schema,
-    search_content_parameters_schema, find_files_parameters_schema,
+    search_content_parameters_schema, find_files_parameters_schema, edit_file_parameters_schema,
 )
 from pulsara_agent.ports.session_content import (
-    SESSION_QUERY_TOOL_NAMES, SESSION_READ_DEFAULT_CHARS, SESSION_READ_MAX_CHARS,
+    SESSION_QUERY_TOOL_NAMES,
     session_query_input_schema,
 )
 
@@ -22,13 +22,8 @@ from pulsara_agent.identity import ID_PAYLOAD_PATTERN
 
 from pulsara_agent.capability.management_intent import capability_management_input_schema
 
-from pulsara_agent.memory.product_contract import (
-    MEMORY_COHESIVE_UNIT_GUIDE,
-    MEMORY_RETRIEVAL_AUTHORING_GUIDE,
-    MEMORY_CONTEXT_PRODUCT_GUIDE,
-    memory_kind_product_guide,
-)
-from pulsara_agent.memory.targets import memory_target_schema
+from pulsara_agent.memory.inputs import memory_input_schema
+from pulsara_agent.primitives.plan_workflow import plan_enter_schema, plan_question_schema, plan_exit_schema
 
 from pulsara_agent.capability.descriptor import (
     BuiltinToolAdvertisePolicy,
@@ -46,7 +41,6 @@ from pulsara_agent.ports.tool_registry import (
 from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.primitives.todo import (
     MAXIMUM_TODO_ITEMS,
-    MAXIMUM_TODO_TEXT_UTF8_BYTES,
 )
 from pulsara_agent.ports.terminal import (
     EXEC_PROCESS_TOOL_DESCRIPTION,
@@ -71,28 +65,12 @@ from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import 
 
 
 
-_SOURCE_AUTHORITIES = [
-    "explicit_user_instruction",
-    "tool_result",
-    "document_source",
-    "conversation_evidence",
-    "model_inference",
-    "system_rule",
-]
-_VERIFICATION_STATUSES = [
-    "unverified",
-    "inferred",
-    "user_confirmed",
-    "tool_verified",
-    "contradicted",
-    "stale",
-]
 
 
 _ACTION_PERMISSION_OVERRIDE_SPECS: dict[str, tuple[tuple[str, str, str, bool], ...]] = {
     "manage_process": tuple(
         ("action", action, "terminal_process_observe", True)
-        for action in ("poll", "wait")
+        for action in ("wait",)
     ),
     "manage_cell": (("action", "wait", "subagent_runtime", True),),
 }
@@ -107,77 +85,6 @@ def object_schema(*, properties: dict[str, Any], required: list[str]) -> dict[st
     }
 
 
-def _edit_operation_schema() -> dict[str, Any]:
-    logical_lines = {
-        "type": "array",
-        "minItems": 1,
-        "items": {
-            "type": "string",
-        },
-    }
-    inclusive_range = {
-        "start_line": {
-            "type": "integer",
-            "minimum": 1,
-        },
-        "end_line": {
-            "type": "integer",
-            "minimum": 1,
-        },
-    }
-    return {
-        "oneOf": [
-            object_schema(
-                properties={
-                    "kind": {"const": "replace_lines"},
-                    **inclusive_range,
-                    "lines": logical_lines,
-                },
-                required=["kind", "start_line", "end_line", "lines"],
-            ),
-            object_schema(
-                properties={
-                    "kind": {"const": "delete_lines"},
-                    **inclusive_range,
-                },
-                required=["kind", "start_line", "end_line"],
-            ),
-            object_schema(
-                properties={
-                    "kind": {"const": "insert_before"},
-                    "line": {
-                        "type": "integer",
-                        "minimum": 1,
-                    },
-                    "lines": logical_lines,
-                },
-                required=["kind", "line", "lines"],
-            ),
-            object_schema(
-                properties={
-                    "kind": {"const": "insert_after"},
-                    "line": {
-                        "type": "integer",
-                        "minimum": 1,
-                    },
-                    "lines": logical_lines,
-                },
-                required=["kind", "line", "lines"],
-            ),
-            object_schema(
-                properties={
-                    "kind": {"const": "replace_file"},
-                    "content": {
-                        "type": "string",
-                        "description": (
-                            'Complete replacement text; an empty string empties the file.'
-                        ),
-                    },
-                },
-                required=["kind", "content"],
-            ),
-        ]
-    }
 
 
 def builtin_tool_descriptors() -> tuple[BuiltinToolDescriptor, ...]:
@@ -214,94 +121,15 @@ def _descriptor(
     )
 
 
-def _remember_parameters() -> dict[str, Any]:
-    return object_schema(
-        properties={
-            "based_on": {
-                "description": (
-                    "MEMORY targets this statement depends on; exclude merely related items, "
-                    "paraphrases and wider-scope copies. GLOBAL bases must be GLOBAL; "
-                    "CURRENT_PROJECT bases may be GLOBAL or this project. Deleting any basis "
-                    "deletes this item."
-                ),
-                "items": memory_target_schema(),
-                "maxItems": 8,
-                "type": "array",
-            },
-            "context_target": {
-                "description": MEMORY_CONTEXT_PRODUCT_GUIDE,
-                "enum": ["GLOBAL", "CURRENT_PROJECT"],
-                "type": "string",
-            },
-            "kind": {
-                "description": memory_kind_product_guide()
-                + " Choose FACT when uncertain.",
-                "enum": ["USER_PROFILE", "RESPONSE_PREFERENCE", "FACT", "DECISION"],
-                "type": "string",
-            },
-            "statement": {
-                "description": (
-                    MEMORY_COHESIVE_UNIT_GUIDE
-                    + " "
-                    + MEMORY_RETRIEVAL_AUTHORING_GUIDE
-                    + " UTF-8 limit: 8192 bytes; RESPONSE_PREFERENCE: 2048."
-                ),
-                "maxLength": 8192,
-                "minLength": 1,
-                "type": "string",
-            },
-        },
-        required=["statement", "context_target", "kind"],
-    )
 
 
-_MEMORY_SEARCH_PARAMETERS = object_schema(
-    properties={
-        "kind": {
-            "description": "Preferred kind; omit unless the request requires one kind. Results may "
-            "include other kinds when exact matches are insufficient; see "
-            "filter_match.",
-            "enum": ["USER_PROFILE", "RESPONSE_PREFERENCE", "FACT", "DECISION"],
-            "type": "string",
-        },
-        "limit": {"default": 5, "maximum": 50, "minimum": 1, "type": "integer"},
-        "query": {
-            "description": "Describe the needed subject using natural language or keywords, with "
-            "known project and distinguishing details. Resolve vague references from "
-            "available context. Maximum 32768 UTF-8 bytes.",
-            "maxLength": 32768,
-            "minLength": 1,
-            "type": "string",
-        },
-    },
-    required=["query"],
-)
-_MEMORY_GET_PARAMETERS = object_schema(
-    properties={
-        "target": memory_target_schema(
-            "Copy a MEMORY target from a memory result or reference."
-        )
-    },
-    required=["target"],
-)
-_REMEMBER_PARAMETERS = _remember_parameters()
-_MARK_MEMORY_RELATION_PARAMETERS = object_schema(
-    properties={
-        "relation_kind": {"enum": ["CONTRADICTS", "SUPERSEDES"], "type": "string"},
-        "source": memory_target_schema(
-            "For SUPERSEDES, the supported replacement that remains active."
-        ),
-        "target": memory_target_schema("For SUPERSEDES, the item made inactive."),
-    },
-    required=["source", "target", "relation_kind"],
-)
 
 _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     **{name: _descriptor(name=name, description=description,
         input_schema=media_parameters_schema(name), is_read_only=True,
         permission_category="filesystem_read") for name, description in (
-        ("read_video_frames", "ROOT direct only. Read local video as attached images with time indices. target alone gives a sparse full-video overview. Use overview on any range to locate content, detail to read text or inspect objects and local states, and motion to examine changes, order or brief events. detail requires explicit from/to with 0 < to - from <= 2 seconds and samples the start, midpoint and just before the end; repeated source frames are returned once. Decimal seconds and normalized crop are supported. Copy complete next when more evidence is needed; stop when the question is answered."),
-        ("read_transcript", "ROOT direct only. Read timed original text from local video or audio. Prefer embedded text subtitles; otherwise reuse transcription cache and configured cloud ASR for gaps. Optional from/to seconds; copy the complete next call to continue and omit continuation initially. One call adds at most 180 seconds of ASR; cached/subtitle text pages may span longer. Reading does not verify subtitles against speech or understand music."),
+        ("read_video_frames", "Read local video frames. Pass target:PATH, from?, to?, action? and crop?. overview locates content across a range; detail reads text or objects within explicit from/to at most two seconds apart; motion examines changes and order. detail samples start, midpoint and just before the end. Decimal seconds and normalized crop are supported. Returned indices describe the images that follow them."),
+        ("read_transcript", "Read timed original text from local video or audio. Pass target:PATH with optional from/to seconds. Embedded text subtitles are preferred; cached or configured ASR fills gaps. The complete requested range is acquired before display pagination. Transcription does not verify subtitles against speech or interpret music."),
         ("annotate_media", "ROOT direct only. As you review a local video or audio file, share your own observations and interpretations with the user as a timeline note on the relevant passage. The user can read it while you continue reviewing and click it to revisit that passage. Provide target, from/to seconds and nonblank plain text. Notes are append-only and leave playback and the source file unchanged."),
     )},
     "open_in_pulsara": _descriptor(
@@ -309,8 +137,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             "ROOT only. Show local PATH files, URL webpages, or AGENT read-only conversations "
             "in this conversation's tabs. Group related targets; the last accepted target is "
             "selected. Invalid items return their zero-based index while valid items proceed. "
-            "Results acknowledge requests, not completed display or webpage contents. "
-            "Copy each result item's target for reuse."
+            "Results acknowledge requests, not completed display or webpage contents."
         ),
         input_schema={'additionalProperties': False,
  'properties': {'targets': {'items': {'anyOf': [{'additionalProperties': False,
@@ -348,20 +175,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "query_capabilities": _descriptor(
         name="query_capabilities",
         description=(
-            "Query capabilities. List/overview: omit target; optional kind, scope, "
-            "source_kind, parent, offset, limit. parent selects children; kind filters "
-            "the catalog category. Inspect: pass only the complete target, without list "
-            "fields. target.kind identifies the object; target cannot be null. Omit "
-            "unused fields. Copy next to continue; description_omitted means inspect that "
-            "target for its description. Results reflect observed catalog completeness; "
-            "SUBAGENT sees only its assigned MCP runtime.\n"
-            "Read Skill bodies with read_file using a PATH target from skill_path; "
-            "resource content with read_mcp_resource. MCP_PROMPT returns metadata only; "
-            "users expand prompts in the composer slash menu.\n"
-            "For MCP tools, follow invocation.mode even if an older named entry remains: "
-            "DIRECT calls the listed full tool_name (mcp__<server>__<tool>); META uses "
-            "returned input_schema and invocation.target with use_new_mcp_tool; "
-            "UNAVAILABLE reports the obstacle."
+            'Discover installed capabilities. kind is required: SKILL, HOOK, MCP, or PLUGIN. List SKILL, HOOK or MCP with kind, scope? and parent?; list PLUGIN with kind and scope?. Inspect with kind and target only. MCP also accepts query to search tool names, descriptions and services; do not combine query with target. Tool hits include input_schema and invocation.target for call_mcp_tool; a service hit does not expand its tools. Read Skill or Hook files when details are needed. Subagents may query MCP only. Omit unused fields; null is not omission.'
         ),
         input_schema=query_input_schema(),
         is_read_only=True,
@@ -370,49 +184,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "manage_capability": _descriptor(
         name="manage_capability",
         description=(
-            "Manage user-requested capabilities. ROOT only; all permission modes. "
-            "Signatures: ? means omittable (null only where schema permits); send only "
-            "the selected action's fields.\n"
-            "Copy query/result targets or use a known exact target. ADD_LOCAL_MCP "
-            "constructs a LOCAL MCP_CONNECTION target with destination scope and new "
-            "server_id. LOCAL/PLUGIN below means target.source_kind. Use installation "
-            "identities, not runtime_server_id or MCP tool/resource/prompt targets.\n"
-            "INSTALL_LOOSE_SKILL(scope, source_path, name?, description?): install into a "
-            "new destination.\n"
-            "SET_LOOSE_SKILL_ENABLED(target:SKILL, enabled)\n"
-            "REMOVE_LOOSE_SKILL(target:SKILL): remove an eligible loose Skill directory.\n"
-            "TRUST_HOOK_SOURCE(target:HOOK_SOURCE): review/trust current definitions.\n"
-            "REVOKE_HOOK_TRUST(target:HOOK_SOURCE): keep definitions.\n"
-            "SET_HOOK_SOURCE_ENABLED(target:HOOK_SOURCE, enabled)\n"
-            "ADD_LOCAL_MCP(target:LOCAL MCP_CONNECTION, config?)\n"
-            "UPDATE_LOCAL_MCP(target:LOCAL MCP_CONNECTION, config?, expected_identity?)\n"
-            "REMOVE_LOCAL_MCP(target:LOCAL MCP_CONNECTION, expected_identity?): remove "
-            "entry/dedicated credentials, keep server program.\n"
-            "INSTALL_PLUGIN(scope, source_path, replace?, source_format?): install "
-            "disabled; enable separately.\n"
-            "SET_PLUGIN_ENABLED(target:PLUGIN, enabled, expected_package_install_id?): "
-            "enable requires component review.\n"
-            "REMOVE_PLUGIN(target:PLUGIN, expected_package_install_id?): remove "
-            "instance/dedicated credentials, keep data/source.\n"
-            "CONFIGURE_PLUGIN_MCP_CONNECTION(target:PLUGIN MCP_CONNECTION, overlay?, "
-            "expected_overlay?, expected_package_install_id?)\n"
-            "AUTHORIZE_MCP(target:MCP_CONNECTION): authorize configured OAuth.\n"
-            "CLEAR_MCP_AUTHORIZATION(target:MCP_CONNECTION): clear local grants, keep "
-            "config/remote tokens.\n"
-            "Both OAuth actions allow expected_identity? for LOCAL or "
-            "expected_package_install_id? for PLUGIN only.\n"
-            "Query eligibility. Plugin Skills use their Plugin owner; bundled Skills are "
-            "read-only. Hook trust, Hook enablement and Plugin enablement are "
-            "independent. Edit loose Skills with file tools/terminal; see "
-            "pulsara-skill-creator.\n"
-            "Copy only VISIBLE.value package guards, never WITHHELD; omitted guards are "
-            "inspected/frozen by the owner. Runtime handles required review/confirmation, "
-            "including user-submitted forms for READ_ONLY mutations. Enter credentials "
-            "privately in the editor.\n"
-            "Read status (mutation), current (state), adoption (availability); completed "
-            "mutations need no routine reload or replay. For "
-            "setup/customization/troubleshooting, read pulsara-mcp-installer, "
-            "pulsara-plugin-installer or pulsara-skill-installer as applicable."
+            "Install and manage capabilities. Use only the selected action's fields; ? means optional, not null. INSTALL_LOOSE_SKILL(target:PATH, scope); SET_LOOSE_SKILL_ENABLED(target:SKILL, enabled); REMOVE_LOOSE_SKILL(target:SKILL). TRUST_HOOK_SOURCE(target:HOOK_SOURCE); REVOKE_HOOK_TRUST(target:HOOK_SOURCE); SET_HOOK_SOURCE_ENABLED(target:HOOK_SOURCE, enabled). ADD_LOCAL_MCP(target:MCP_CONNECTION, config?); UPDATE_MCP_CONNECTION(target:MCP_CONNECTION, config?); REMOVE_LOCAL_MCP(target:MCP_CONNECTION); AUTHORIZE_MCP(target:MCP_CONNECTION); CLEAR_MCP_AUTHORIZATION(target:MCP_CONNECTION). INSTALL_PLUGIN(target:PATH, scope, replace?, source_format?); SET_PLUGIN_ENABLED(target:PLUGIN, enabled); REMOVE_PLUGIN(target:PLUGIN). Copy exact installation targets from query_capabilities. Omit config to open the connection editor; an update object changes only supplied fields, while Plugin config:null restores package defaults. Enter credentials privately in the editor. Hook trust and enablement are separate. A successful change needs no routine reload."
         ),
         input_schema=capability_management_input_schema(),
         is_read_only=False,
@@ -431,9 +203,9 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         is_read_only=True,
         permission_category="plugin_control",
     ),
-    "use_new_mcp_tool": _descriptor(
-        name="use_new_mcp_tool",
-        description="Execute an MCP tool inspected with invocation.mode=META. Copy invocation.target and supply arguments matching the returned input_schema, including when an older same-name tool remains listed. The remote action may require confirmation. Use source pagination only when the inspected schema supports it. A returned read call reads this invocation's saved body; it does not repeat the remote action. Reuse the target for later actions; inspect again if it is rejected.",
+    'call_mcp_tool': _descriptor(
+        name='call_mcp_tool',
+        description='Call an MCP tool using the invocation.target returned by query_capabilities. Supply arguments matching its input_schema. Read the relevant parameter and available output descriptions before composing calls; output_schema may be absent. The reference can be reused in this conversation, including Code Mode. If it is stale or unavailable, query the tool again; do not automatically repeat a call whose effect is uncertain.',
         input_schema={'type': 'object',
  'properties': {'target': {'type': 'object',
                            'properties': {'kind': {'const': 'MCP_TOOL_REF'},
@@ -455,52 +227,16 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     ),
     "read_mcp_resource": _descriptor(
         name="read_mcp_resource",
-        description="Read an MCP resource. Copy its target from list/inspect. MCP_RESOURCE: target only, with the concrete URI in target.uri. MCP_RESOURCE_TEMPLATE: target and uri; supply a concrete URI matching target.uri_template. Results are external reference content. If the result supplies a read call, copy it to read this invocation's saved body with read_file. Another remote read fetches fresh content, not the next body page.",
-        input_schema={'type': 'object',
- 'oneOf': [{'type': 'object',
-            'properties': {'target': {'type': 'object',
-                                      'properties': {'kind': {'const': 'MCP_RESOURCE'},
-                                                     'server_id': {'type': 'string',
-                                                                   'minLength': 1,
-                                                                   'maxLength': 256},
-                                                     'uri': {'type': 'string',
-                                                             'minLength': 1,
-                                                             'maxLength': 32768}},
-                                      'required': ['kind', 'server_id', 'uri'],
-                                      'additionalProperties': False}},
-            'required': ['target'],
-            'additionalProperties': False},
-           {'type': 'object',
-            'properties': {'target': {'type': 'object',
-                                      'properties': {'kind': {'const': 'MCP_RESOURCE_TEMPLATE'},
-                                                     'server_id': {'type': 'string',
-                                                                   'minLength': 1,
-                                                                   'maxLength': 256},
-                                                     'uri_template': {'type': 'string',
-                                                                      'minLength': 1,
-                                                                      'maxLength': 32768}},
-                                      'required': ['kind', 'server_id', 'uri_template'],
-                                      'additionalProperties': False},
-                           'uri': {'description': 'Concrete URI matching the selected template.',
-                                   'maxLength': 32768,
-                                   'minLength': 1,
-                                   'type': 'string'}},
-            'required': ['target', 'uri'],
-            'additionalProperties': False}]},
+        description="Discover or read MCP resources. target:MCP_CONNECTION lists that service's resources and URI templates; no uri is accepted. target:MCP_RESOURCE reads its exact URI; supply values for template variables in the URI before reading. Resource listings are metadata, not resource content. Omit unused fields; use the returned content in its given order.",
+        input_schema=object_schema(properties={"target": {"oneOf": [
+            capability_target_schema("MCP_CONNECTION"), capability_target_schema("MCP_RESOURCE")]}}, required=["target"]),
         is_read_only=True,
         permission_category="mcp_read",
     ),
     "read_file": _descriptor(
         name="read_file",
         description=(
-            "Read UTF-8 text. PATH first call: target, offset? (1-based), limit?; returns "
-            "content_revision for edit_file. SESSION_ENTRY first call: target only, "
-            "copied from this session's accepted tool result or formally published Cell "
-            "output. These reads supply frozen content, not file-edit context. Copy the "
-            "complete next call to continue either source (line/character positions and "
-            "PATH revision). Line labels/fragment metadata are display formatting, not "
-            "source text. Read complete affected lines or adjacent gaps before line "
-            "edits. Save the whole frozen result with write_file.source."
+            'Read a UTF-8 text file, or continue a saved tool result. PATH: target, offset?, limit?; offset is a nonzero LF line number, negative from the end, and limit is a positive number of lines. NEXT: target only, copied unchanged from a tool result. NEXT continues that frozen result without running its tool again; it cannot be used in Code Mode. Paths may be workspace-relative, absolute or ~ paths. Omit unused fields; null is invalid.'
         ),
         input_schema=read_file_parameters_schema(),
         is_read_only=True,
@@ -509,48 +245,22 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "view_image": _descriptor(
         name="view_image",
         description=(
-            ('Inspect an image using one target: PATH for a local PNG, JPEG, static WebP, SVG or HTML file; '
- 'IMAGE_REF for a saved image reference. SVG renders without cropping, scripts or external '
- 'resources. HTML captures its content root or a 1200×800 light-theme viewport with reduced motion '
- 'and network access disabled. This is a still view for the model. Use open_in_pulsara to show '
- 'files to the user.')
+            ('Read a local image, render a local HTML file, or reread a known image reference. Pass only target: PATH or IMAGE_REF. Image references may come from any conversation. Local HTML rendering produces an image; it does not publish the page. Readable image content is returned in order with its explanation.')
         ),
-        input_schema={'type': 'object',
- 'properties': {'target': {'oneOf': [{'type': 'object',
-                                      'properties': {'kind': {'type': 'string', 'const': 'PATH'},
-                                                     'path': {'type': 'string', 'minLength': 1}},
-                                      'required': ['kind', 'path'],
-                                      'additionalProperties': False},
-                                     {'type': 'object',
-                                      'properties': {'kind': {'type': 'string',
-                                                              'const': 'IMAGE_REF'},
-                                                     'image_ref': {'description': 'Exact image: '
-                                                                                  'reference from '
-                                                                                  'an earlier '
-                                                                                  'image or '
-                                                                                  'historical '
-                                                                                  'image '
-                                                                                  'placeholder in '
-                                                                                  'this workspace.',
-                                                                   'minLength': 1,
-                                                                   'type': 'string'}},
-                                      'required': ['kind', 'image_ref'],
-                                      'additionalProperties': False}]}},
- 'required': ['target'],
- 'additionalProperties': False},
+        input_schema=media_parameters_schema("view_image"),
         is_read_only=True,
         permission_category="filesystem_read",
     ),
-    "search_content": _descriptor(
-        name="search_content",
-        description='Search text with a Rust regular expression. Optional PATH target selects a file or directory; omit it for the workspace root. content returns excerpts around actual matches, files_only returns file targets, and count returns matching-line counts per file. Results follow rg path traversal order. limit is a per-call upper bound, not a total query cap. Copy the complete next call to continue; next may lead to an empty final page. PARTIAL means source scanning encountered gaps. Read returned file targets with read_file for full current text, revision and edit context.',
+    'search_file_content': _descriptor(
+        name='search_file_content',
+        description='Search file text with a regular expression and return matching lines with paths and line numbers. Pass pattern, optional target:PATH, file_glob and output_mode. An omitted target searches the workspace; file_glob filters relative paths. output_mode selects matching lines, matching file paths, or counts. The complete search result is saved before display pagination. Use find_files to search names instead.',
         input_schema=search_content_parameters_schema(),
         is_read_only=True,
         permission_category="filesystem_read",
     ),
     "find_files": _descriptor(
         name="find_files",
-        description='Find file paths by basename or relative-path glob. Optional PATH target selects a file or directory; omit it for the workspace root. *.py matches all depths; src/*.py one level; src/**/*.py recursively. Use *name* for a name fragment. Results follow rg path traversal order. limit is a per-call upper bound. Copy the complete next call to continue; next may lead to an empty final page. Copy a returned PATH target to a file tool.',
+        description='Find files and directories by name or path pattern. Pass glob and optional target:PATH; an omitted target searches the workspace. Results contain paths, not file contents. Use search_file_content for text inside files.',
         input_schema=find_files_parameters_schema(),
         is_read_only=True,
         permission_category="filesystem_read",
@@ -558,83 +268,16 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "edit_file": _descriptor(
         name="edit_file",
         description=(
-            "Edit an existing UTF-8 PATH using read_file.content_revision as "
-            "base_revision. Anchors are 1-based in that revision; ranges inclusive, "
-            "operations non-overlapping. Line edits require prior reads of affected "
-            "complete lines or adjacent gaps. replace_file must be the sole operation; it "
-            "needs a current revision, not full display. Returns revision, diff and "
-            "changed windows; NO_OP means no bytes changed. Create new paths with "
-            "write_file."
+            "Edit an existing UTF-8 text file. Exact replacement: target:PATH, old_text, new_text; old_text must match exactly once, counting overlapping occurrences. Whole-file replacement: target:PATH, content. Use only one branch's fields. Empty content empties the file. Reading first is optional. The result contains the complete diff; a concurrent file change detected before commit rejects the edit."
         ),
-        input_schema={'additionalProperties': False,
- 'properties': {'base_revision': {'description': "Exact read_file.content_revision for this path.",
-                                  'pattern': '^revision:[a-z2-7]{51}[aq]$',
-                                  'type': 'string'},
-                'operations': {'description': "Literal source text; omit read_file labels. Each lines item is one line without CR/LF/NUL; an empty string is a blank line.",
-                               'items': {'oneOf': [{'additionalProperties': False,
-                                                    'properties': {'end_line': {'minimum': 1,
-                                                                                'type': 'integer'},
-                                                                   'kind': {'const': 'replace_lines'},
-                                                                   'lines': {'items': {'type': 'string'},
-                                                                             'minItems': 1,
-                                                                             'type': 'array'},
-                                                                   'start_line': {'minimum': 1,
-                                                                                  'type': 'integer'}},
-                                                    'required': ['kind',
-                                                                 'start_line',
-                                                                 'end_line',
-                                                                 'lines'],
-                                                    'type': 'object'},
-                                                   {'additionalProperties': False,
-                                                    'properties': {'end_line': {'minimum': 1,
-                                                                                'type': 'integer'},
-                                                                   'kind': {'const': 'delete_lines'},
-                                                                   'start_line': {'minimum': 1,
-                                                                                  'type': 'integer'}},
-                                                    'required': ['kind', 'start_line', 'end_line'],
-                                                    'type': 'object'},
-                                                   {'additionalProperties': False,
-                                                    'properties': {'kind': {'const': 'insert_before'},
-                                                                   'line': {'minimum': 1,
-                                                                            'type': 'integer'},
-                                                                   'lines': {'items': {'type': 'string'},
-                                                                             'minItems': 1,
-                                                                             'type': 'array'}},
-                                                    'required': ['kind', 'line', 'lines'],
-                                                    'type': 'object'},
-                                                   {'additionalProperties': False,
-                                                    'properties': {'kind': {'const': 'insert_after'},
-                                                                   'line': {'minimum': 1,
-                                                                            'type': 'integer'},
-                                                                   'lines': {'items': {'type': 'string'},
-                                                                             'minItems': 1,
-                                                                             'type': 'array'}},
-                                                    'required': ['kind', 'line', 'lines'],
-                                                    'type': 'object'},
-                                                   {'additionalProperties': False,
-                                                    'properties': {'content': {'description': "Complete file text; an empty string empties it.",
-                                                                               'type': 'string'},
-                                                                   'kind': {'const': 'replace_file'}},
-                                                    'required': ['kind', 'content'],
-                                                    'type': 'object'}]},
-                               'minItems': 1,
-                               'type': 'array'},
-                'target': {'type': 'object',
-                           'properties': {'kind': {'type': 'string', 'const': 'PATH'},
-                                          'path': {'description': "Existing path; workspace-relative, absolute or ~.",
-                                                   'minLength': 1,
-                                                   'type': 'string'}},
-                           'required': ['kind', 'path'],
-                           'additionalProperties': False}},
- 'required': ['target', 'base_revision', 'operations'],
- 'type': 'object'},
+        input_schema=edit_file_parameters_schema(),
         is_read_only=False,
         permission_category="filesystem_write",
         is_destructive=True,
     ),
     "write_file": _descriptor(
         name="write_file",
-        description='Create a new UTF-8 file at a PATH target, creating parent directories as needed. Supply exactly one of content (complete file text) or source (the exact SESSION_ENTRY target for a saved result). source accepts the same session-scoped result entries as read_file and copies the entire frozen body without first reading or assembling pages; arbitrary history targets are not result sources. Existing paths are left unchanged. Source-read and destination-write permissions both apply. Use read_file then edit_file to change an existing file.',
+        description='Create a new file without overwriting an existing path. Pass target:PATH and exactly one of content or tool_result_target. content writes the supplied text; tool_result_target:SESSION_ENTRY exports that complete saved tool result, including unread pages, as UTF-8. A NEXT target, ordinary message or Cell output is not an export source. The result reports the created path and bytes written.',
         input_schema=write_file_parameters_schema(),
         is_read_only=False,
         permission_category="filesystem_write",
@@ -667,72 +310,34 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "search_sessions": _descriptor(
         name="search_sessions",
         description=(
-            "Find saved conversations by title/message keywords; omitted query lists by "
-            "activity. This conversation's body hits cover compacted-out earlier content; "
-            "other accessible conversations use saved ROOT history. Copy item.target "
-            "(SESSION) to search/read a conversation or hit.target (SESSION_ENTRY) to "
-            "read a body hit. Title-only matches omit hit.\n"
-            "First: optional query, lifecycle, limit. Continue by copying next: cursor "
-            "and optional limit only. Omit unused fields; null is invalid."
+            'Find saved conversations by title or dialogue keywords; omit query to list conversations by activity. Optional lifecycle selects open or archived conversations. Body matches in this conversation cover earlier content outside the current context; other accessible conversations use saved dialogue. SESSION targets identify conversations; SESSION_ENTRY targets anchor dialogue hits. Images are references, not automatically loaded.'
         ),
-        input_schema=session_query_input_schema(
-            "search_sessions",
-            default_chars=SESSION_READ_DEFAULT_CHARS,
-            maximum_chars=SESSION_READ_MAX_CHARS,
-        ),
+        input_schema=session_query_input_schema("search_sessions"),
         is_read_only=True,
         permission_category="session_read",
     ),
     "search_session_content": _descriptor(
         name="search_session_content",
         description=(
-            "Find saved questions and their answer process by keyword relevance. First: "
-            "query; optional target (SESSION), include_tools, limit. Omitted target "
-            "searches this conversation's compacted-out earlier content, excluding "
-            "messages still in context; other accessible conversations use saved ROOT "
-            "history. Results keep speakers, times and historical quotes/comments; "
-            "[truncated] marks omissions. item.target anchors the question; copy a "
-            "message.target to read_session_content for expansion. Images are presence "
-            "markers; generated markers/image metadata are excluded from search terms.\n"
-            "Continue by copying next: cursor and optional limit only. Omit unused "
-            "fields; null is invalid."
+            'Search saved dialogue by relevance. Pass target:SESSION and query. Results include user messages and steers, assistant commentary and final answers; tools and private reasoning are excluded. Each hit anchors a saved entry for read_session_content. Use view_image to inspect a referenced image.'
         ),
-        input_schema=session_query_input_schema(
-            "search_session_content",
-            default_chars=SESSION_READ_DEFAULT_CHARS,
-            maximum_chars=SESSION_READ_MAX_CHARS,
-        ),
+        input_schema=session_query_input_schema("search_session_content"),
         is_read_only=True,
         permission_category="session_read",
     ),
     "read_session_content": _descriptor(
         name="read_session_content",
         description=(
-            "Read saved messages directly or expand a hit; searching first is optional. "
-            "First: optional target (SESSION/SESSION_ENTRY), direction, include_tools, "
-            "limit, max_chars. Omitted target, or SESSION_ENTRY without session_id, "
-            "selects this conversation's compacted-out earlier content; other accessible "
-            "conversations use saved ROOT history. Read the anchor first, then finish "
-            "long messages across pages before adjacent messages; partial marks a slice. "
-            "source_coverage/body availability reports missing saved tool content, which "
-            "further pages cannot restore. Images are placeholders; copy same-workspace "
-            "IMAGE_REF targets into view_image. Increase max_chars if a whole placeholder "
-            "cannot fit.\n"
-            "Continue by copying next: cursor and optional limit/max_chars only. Omit "
-            "unused fields; null is invalid."
+            'Read saved dialogue. Pass target and required nonzero limit. SESSION: limit must be negative and reads from the latest message backwards. SESSION_ENTRY: positive reads forwards from that entry, negative reads backwards; either includes the anchor. Results preserve the chosen message order and labels. Tool calls, tool results and private reasoning are excluded. Images remain references until view_image is called.'
         ),
-        input_schema=session_query_input_schema(
-            "read_session_content",
-            default_chars=SESSION_READ_DEFAULT_CHARS,
-            maximum_chars=SESSION_READ_MAX_CHARS,
-        ),
+        input_schema=session_query_input_schema("read_session_content"),
         is_read_only=True,
         permission_category="session_read",
     ),
     "query_schedules": _descriptor(
         name="query_schedules",
         description=(
-            "Query schedules. To list schedules, omit target; optional fields: cursor, status, session. Omit status for all statuses, or use ACTIVE or PAUSED; status does not accept null. Omit session or use null for the current session, or pass a SESSION target to select the list's session scope. Continue by copying the returned complete next call. To inspect one schedule, pass only its SCHEDULE target, without cursor, status, or session. target does not accept null. Lists omit prompt bodies; copy an item's inspect call for complete SCHEDULE configuration."
+            'Query schedules in this conversation. List: omit target, optional status ALL, ACTIVE or PAUSED. Inspect: target:SCHEDULE only. Both return full saved configurations; revision is managed automatically. Omit unused fields; null is invalid.'
         ),
         input_schema=query_schedules_schema(),
         is_read_only=True,
@@ -741,41 +346,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "manage_schedule": _descriptor(
         name="manage_schedule",
         description=(
-            "Manage saved schedules; ROOT only. Send only the selected action's fields; ? "
-            "means omittable.\n"
-            "create(values, session?, status?)\n"
-            "update(target, expected_revision, values)\n"
-            "pause/resume/delete(target, expected_revision)\n"
-            "switch(target, expected_revision, replacement)\n"
-            "Copy SCHEDULE targets or use a known exact target. session takes SESSION; "
-            "omission/null selects this session and only sets a new plan's parent. Read "
-            "configuration/revision with query_schedules; reread on revision conflict.\n"
-            "switch atomically pauses the source ACTIVE plan and activates replacement: "
-            "{kind:\"existing\",target,expected_revision} for a PAUSED plan, or "
-            "{kind:\"create\",values} for a new plan in the same session.\n"
-            "values replaces the complete configuration; preserve unrequested fields, "
-            "including permissions. Choose a short name if unspecified. prompt holds "
-            "self-contained future instructions and output expectations; "
-            "timing/permissions use separate fields. Supply an IANA timezone; new plans "
-            "default to Asia/Shanghai unless requested otherwise. Creation uses current "
-            "permissions or a requested narrower preset; saving requires current "
-            "permissions to cover permission_mode.\n"
-            "One ACTIVE plan per session; any number PAUSED. create.status omitted/null "
-            "saves PAUSED; ACTIVE enables automatic scheduling. Use switch for authorized "
-            "replacement; adding a task alone does not request replacement. Independent "
-            "automatic plans need separate sessions.\n"
-            "Calendar rules: local HH:mm, YYYY-MM-DD start_date, weekdays Monday=1 "
-            "through Sunday=7. once/interval instants: whole-second UTC; new/changed once "
-            "times must be future. Intervals retain their fixed anchor. Skip missing "
-            "month days and nonexistent DST times; repeated DST times fire once. Explain "
-            "saved times plainly.\n"
-            "Updates preserve queued instructions. pause/delete/switch cancel source "
-            "pending inputs; running replies continue. delete keeps the chat; stopping a "
-            "reply keeps scheduling active. Resume uses the next future recurrence "
-            "without catch-up; overdue untriggered once plans become due.\n"
-            "Results report mutation/revision without prompt bodies; inspect the returned "
-            "SCHEDULE for configuration. Do not repeat a mutation to recover its "
-            "response."
+            "Manage schedules in this conversation. Use only the selected action's fields: create(values, status?); update(target:SCHEDULE, values); pause(target); resume(target); delete(target); switch(target, replacement). create values contain name, prompt, schedule and optional timezone. update changes only supplied values; a supplied schedule replaces the entire rule. replacement is {kind:existing,target:SCHEDULE} or {kind:create,values}. Query before modifying an existing schedule. Pausing, switching or deleting cancels its unconsumed queued inputs; already running replies continue. Execution permissions are taken from the current turn when creating a schedule."
         ),
         input_schema=manage_schedule_schema(),
         provider_kind=BuiltinToolDomainKind.BUILTIN,
@@ -797,7 +368,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                     "type": "array",
                     "maxItems": MAXIMUM_TODO_ITEMS,
                     "description": (
-                        "Complete ordered snapshot, up to 4 KiB of canonical JSON."
+                        "Complete ordered progress list; an empty list clears it."
                     ),
                     "items": {
                         "type": "object",
@@ -805,9 +376,8 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                             "text": {
                                 "type": "string",
                                 "minLength": 1,
-                                "maxLength": MAXIMUM_TODO_TEXT_UTF8_BYTES,
                                 "description": (
-                                    "Unique task label: one plain line in Unicode NFC, without surrounding whitespace, up to 192 UTF-8 bytes."
+                                    "Unique nonempty task label on one plain line, without surrounding whitespace."
                                 ),
                             },
                             "status": {
@@ -833,7 +403,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "query_agents": _descriptor(
         name="query_agents",
         description=(
-            "Query agents and their delegated work. ROOT can query all retained members; a subagent can query itself and agents introduced through accepted inputs or messages. The list also returns a separate ROOT target for send_agent_message; ROOT is not a query target. Native wait_message needs no target. To list agents, omit target; optional fields: cursor, max_items. To list one agent's work, pass its AGENT target; optional fields: cursor, max_items. To inspect one work item, pass only its WORK target, without pagination fields. Continue by copying the complete next call. Lists contain summaries; copy an item's inspect call to read the selected WORK for instruction, final or stopped diagnostic text. Omit unused fields; target does not accept null. WORK results belong to that request, including stopped diagnostics."
+            "Query collaborating agents and work. No target lists agents; target:AGENT lists that agent's work; target:WORK reads one work's submitted answer or stop explanation. Pass only target when selecting one object. A missing title does not establish that the agent is idle."
         ),
         input_schema=query_agents_input_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
@@ -841,7 +411,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     ),
     "send_agent_message": _descriptor(
         name="send_agent_message",
-        description="Send a message to an Agent's current active work. ROOT addresses this collaboration's ROOT. queued means accepted into that turn; not_started or inactive means not sent. This does not start work or load an inactive Agent.",
+        description='Send a message to target:AGENT, with message. An active recipient receives it during its current work; an idle recipient is not started by the message. A recipient without a started work cannot receive it. Unconsumed messages are rejected when the intended recipient turn ends; they are not redirected to a later task.',
         input_schema=object_schema(properties={"target": target_schema("AGENT", allow_root=True),
             "message": {"type": "string", "minLength": 1, "maxLength": 16384}}, required=["target", "message"]),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
@@ -849,35 +419,35 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     ),
     "wait_message": _descriptor(
         name="wait_message",
-        description="Pause your execution until an unread message from ROOT or another Agent is available for your current turn. No target or sender list is needed. timeout_seconds defaults to 30 and accepts 0–300 seconds; 0 checks immediately. Returns only state: message_available or timeout. Message bodies arrive through normal input processing, subject to its resource rules. Timeout ends this observation, not your assignment. Queued assignments and Work completion do not wake this wait.",
+        description="Wait for another agent's message in a subagent conversation. Optional timeout_seconds bounds this wait; a normal timeout succeeds. Message text arrives through the conversation input, separately from this tool's short result. This wait does not start or reassign work.",
         input_schema=wait_message_parameters_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=True, permission_category="subagent_runtime",
     ),
     "stop_agent": _descriptor(
         name="stop_agent",
-        description="Stop one WORK, or an AGENT's current and already queued work. Return actual outcomes; completed history stays terminal. Results contain compact actual outcomes; inspect the returned WORK targets for final or diagnostic text. Read an omitted saved response without repeating stop. The Agent and its history remain available for new work.",
+        description="Stop target:AGENT or target:WORK. An agent target stops its running and queued work; a work target stops only that work. Submitted tool calls settle their actual effects. meta reports queued_work_count, running_work_count, completed_work_count and stopped_work_count for the listed work. Stopping does not undo effects already performed.",
         input_schema=object_schema(properties={"target": {"oneOf": [target_schema("AGENT"), target_schema("WORK")]}}, required=["target"]),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False, permission_category="subagent_runtime",
     ),
     "exec_cell": _descriptor(
         name="exec_cell",
-        description="Start an independent JavaScript script and immediately return accepted with its CELL target. Pass exactly one of code or path. Top-level await is supported. Each console.log actively sends one selected input to ROOT; script tool results stay inside JavaScript. ROOT with bypass permissions only.",
+        description="Start a JavaScript Cell. Pass exactly one of code (inline JavaScript) or target:PATH (a UTF-8 source file). Read the needed tool interfaces before writing the business script. Tool calls return full saved business values; console.log and a non-undefined top-level return send selected values separately to the conversation. This tool's result reports the Cell start, not its eventual output.",
         input_schema=exec_cell_parameters_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False, permission_category="subagent_runtime",
     ),
     "query_cells": _descriptor(
         name="query_cells",
-        description="Query cells still held by the current Host without consuming execution output. To list cells, omit target; optional fields: cursor, max_items. To inspect one cell's state and frozen source, pass its CELL target; optional fields: offset_chars, max_chars. List cursors and source offsets are separate: do not mix their fields. Continue by copying the complete next call for the selected list or source page. Execution output is delivered actively to ROOT. Omit unused fields; target does not accept null.",
+        description='Query Code Mode Cells. Omit target to list retained Cells; pass target:CELL only for its state, pending_calls and complete executed source. Cell output is delivered separately. There are no source offsets or query cursors.',
         input_schema=query_cells_parameters_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=True, permission_category="subagent_runtime",
     ),
     "manage_cell": _descriptor(
         name="manage_cell",
-        description="Control one cell. Set action and use only its listed fields: wait: target (CELL); optional yield_time_ms. stop: target (CELL) only. Omit unused fields; target does not accept null. wait observes only terminal state or timeout, without consuming output or executing code again. Output delivery does not complete this state wait; timeout leaves it running. stop stops further JavaScript execution and tool submissions. Already accepted Work is not automatically cancelled; use stop_agent for that work. ROOT with bypass permissions only.",
+        description="Control target:CELL. wait(target, action:wait, yield_time_ms?) waits briefly for state changes; stop(target, action:stop) stops further script execution. Use only the selected action's fields. Submitted tool calls still settle actual effects. Output already delivered is not withdrawn.",
         input_schema=manage_cell_parameters_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False, permission_category="subagent_runtime",
@@ -885,24 +455,9 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "enter_plan": _descriptor(
         name="enter_plan",
         description=(
-            "Start a read-only planning phase when the user wants to review an approach before "
-            "implementation, or an unresolved consequential implementation choice needs their decision. "
-            "Investigate, use ask_plan_question for blocking choices, then submit the complete proposal "
-            "with exit_plan. Use this as the only tool call in the response; it takes control of the turn "
-            "and other calls in that response will not run."
+            'Enter read-only planning mode. Call alone with {}. The conversation continues automatically in a new read-only turn. Calling again while already planning succeeds without another mode change.'
         ),
-        input_schema=object_schema(
-            properties={
-                "reason": {
-                    "type": "string",
-                    "maxLength": 4096,
-                    "description": (
-                        "Decision or objective that needs a planning phase; up to 4096 UTF-8 bytes."
-                    ),
-                }
-            },
-            required=[],
-        ),
+        input_schema=plan_enter_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False,
         permission_category="plan_workflow",
@@ -910,70 +465,9 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "ask_plan_question": _descriptor(
         name="ask_plan_question",
         description=(
-            "During an active planning phase, ask one question whose answer materially changes the plan. "
-            "The user's answer becomes this tool's result, then planning continues. Use this as the only "
-            "tool call in the response; other calls in that response will not run."
+            'Ask one question while planning. Pass question and optional options; each option has label, description? and recommended?. The user can always answer freely. The call waits for an answer or cancellation; after ten minutes it returns cancellation and planning continues so you can choose the next step. Call alone.'
         ),
-        input_schema=object_schema(
-            properties={
-                "question": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 16384,
-                    "description": (
-                        "One self-contained question with the context needed to decide; up to 16384 UTF-8 bytes."
-                    ),
-                },
-                "options": {
-                    "description": (
-                        "Omit or use [] for an open question with allow_free_text=true; otherwise supply two or three choices with unique labels."
-                    ),
-                    "anyOf": [
-                        {"type": "array", "maxItems": 0},
-                        {
-                            "type": "array",
-                            "minItems": 2,
-                            "maxItems": 3,
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "label": {
-                                        "type": "string",
-                                        "minLength": 1,
-                                        "maxLength": 256,
-                                        "description": (
-                                            "Distinct choice label; up to 256 UTF-8 bytes."
-                                        ),
-                                    },
-                                    "description": {
-                                        "type": "string",
-                                        "maxLength": 2048,
-                                        "description": (
-                                            "Effect or tradeoff of this choice; up to 2048 UTF-8 bytes."
-                                        ),
-                                    },
-                                    "recommended": {
-                                        "type": "boolean",
-                                        "description": (
-                                            "At most one choice may be true; omitted means false."
-                                        ),
-                                    },
-                                },
-                                "required": ["label"],
-                                "additionalProperties": False,
-                            },
-                        },
-                    ],
-                },
-                "allow_free_text": {
-                    "type": "boolean",
-                    "description": (
-                        "Allow a custom answer alongside the choices. Required true when options is omitted or empty."
-                    ),
-                },
-            },
-            required=["question", "allow_free_text"],
-        ),
+        input_schema=plan_question_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False,
         permission_category="plan_workflow",
@@ -981,94 +475,40 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "exit_plan": _descriptor(
         name="exit_plan",
         description=(
-            "Submit a complete plan for user review, or leave planning without a proposal. A nonblank plan "
-            "opens review: approval resumes implementation, revision continues read-only planning with "
-            "feedback, and cancellation ends planning. Supply a complete replacement plan after revision. "
-            "Omitting plan, passing null or blank text exits without review and automatically resumes with "
-            "the permissions saved on entry. Use this as the only tool call in the response; other calls in "
-            "that response will not run."
+            "Leave planning or submit a plan for approval. With plan: submit its complete Markdown, optional summary names the saved file; wait for the user's decision. Without plan: leave planning without requesting approval or creating a plan file. Revision, cancellation and ten-minute timeout continue the current read-only turn. Approval or no-plan exit resumes the previous permission mode in a new turn. Call alone."
         ),
-        input_schema=object_schema(
-            properties={
-                "plan": {
-                    "type": ["string", "null"],
-                    "maxLength": 1048576,
-                    "description": (
-                        "Complete proposal: outcome, affected components, ordered changes, constraints and validation; up to 1048576 UTF-8 bytes."
-                    ),
-                },
-                "summary": {
-                    "type": "string",
-                    "maxLength": 8192,
-                    "description": (
-                        "Brief overview of the complete plan; up to 8192 UTF-8 bytes."
-                    ),
-                },
-            },
-            required=[],
-        ),
+        input_schema=plan_exit_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False,
         permission_category="plan_workflow",
     ),
-    "search_memory": _descriptor(
-        name="search_memory",
+    'query_memory': _descriptor(
+        name='query_memory',
         description=(
-            "Find saved user or project information by meaning or keywords across "
-            "readable memory contexts. Use get_memory when you already have a MEMORY "
-            "target; copy a result's target to read it. retrieval_summary reports search completeness, filter expansion, "
-            "ranking and relation-check availability; filter_match identifies relaxed "
-            "matches, and relation_warnings identifies active contradictions."
+            "Search or read saved memory. Search: query and optional limit across all kinds. Exact read: target:MEMORY only. Use one branch's fields, without null. Both return complete memory objects and timestamps; the runtime keeps the concurrency condition for later edits and deletion."
         ),
-        input_schema=_MEMORY_SEARCH_PARAMETERS,
+        input_schema=memory_input_schema('query_memory'),
         provider_kind=BuiltinToolDomainKind.MEMORY,
         is_read_only=True,
         permission_category="memory_read",
     ),
-    "get_memory": _descriptor(
-        name="get_memory",
-        description=(
-            "Read a saved memory by target, including its statement, kind, context, "
-            "recorded time, lifecycle, direct relations and any user-edit note. Copy a "
-            "MEMORY target from search_memory or another memory result; a known exact "
-            "target can be used directly."
-        ),
-        input_schema=_MEMORY_GET_PARAMETERS,
-        provider_kind=BuiltinToolDomainKind.MEMORY,
-        is_read_only=True,
-        permission_category="memory_read",
-    ),
+
     "remember": _descriptor(
         name="remember",
         description=(
-            "Save reusable natural-language context for future conversations, including "
-            "attributed tool observations and source-faithful lightweight inferences from "
-            "conversation, behavior, tool choice or planning. Self-report, repetition and "
-            "high confidence are not required. Exclude secrets/credentials, raw tool "
-            "dumps, detailed executable procedures and permission overrides. Saving takes "
-            "effect immediately; it creates no task, reminder or execution authority. "
-            "SAVED returns a new MEMORY target; ALREADY_PRESENT returns the existing item "
-            "with origin/dependencies unchanged. Users can delete memories on the Memory "
-            "page."
+            'Save one reusable memory. Pass context_kind, kind, title and statement when it is a profile or fact. A response preference is entirely in title; its statement is stored empty. Title and kind are fixed after creation. The result includes the new Target and up to three related memories for optional cleanup with manage_memory. Saving creates information, not a task or permission.'
         ),
-        input_schema=_REMEMBER_PARAMETERS,
+        input_schema=memory_input_schema('remember'),
         provider_kind=BuiltinToolDomainKind.MEMORY,
         is_read_only=False,
         permission_category="memory_write",
     ),
-    "mark_memory_relation": _descriptor(
-        name="mark_memory_relation",
+    'manage_memory': _descriptor(
+        name='manage_memory',
         description=(
-            "Relate two inspected saved memories about the same subject and conditions. "
-            "Supply source and target as MEMORY targets, plus relation_kind. New relations "
-            "require both items active and in the same context. Related memories returned by "
-            "remember are suggestions to inspect, not established relations.\n"
-            "CONTRADICTS: keep two incompatible memories of the same kind active when "
-            "neither is the supported replacement; endpoint order does not matter.\n"
-            "SUPERSEDES: source is the supported replacement, including a corrected "
-            "statement or kind; make target inactive without deleting it."
+            'Change or delete an inspected memory. edit: target:MEMORY, action:edit, statement? and context_kind?; supply at least one change, and omitted fields stay unchanged. delete: target:MEMORY, action:delete only. Query first if no prior snapshot exists. The runtime handles concurrency checks; if the memory changed, query again before deciding what to do. Title and kind are fixed; replace the memory to change them.'
         ),
-        input_schema=_MARK_MEMORY_RELATION_PARAMETERS,
+        input_schema=memory_input_schema('manage_memory'),
         provider_kind=BuiltinToolDomainKind.MEMORY,
         is_read_only=False,
         permission_category="memory_write",
@@ -1081,7 +521,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
 _SCRIPT_API_DESCRIPTORS = {
     "run_agent": _descriptor(
         name="run_agent",
-        description="Submit an ordered array of assignments through tools.run_agent in ROOT Code Mode. Omit target to create an Agent or reuse an AGENT target to continue its history. work_title describes this Work; context applies only to creation. Return aligned agents, works and details arrays after atomic acceptance. Acceptance is not completion; copy details inspect calls for WORK results. Ordinary final completes work.",
+        description="Submit an ordered array of assignments through tools.run_agent in ROOT Code Mode. Each item needs instruction; target:AGENT reuses an agent, omission creates one. Optional work_title names this Work. materials accepts CONTEXT_MATERIAL with turns 1–3 or a completed WORK, for new and reused agents. depends_on waits for the specified Work results. Success content records preserve assignment order and contain agent, work and work_status. Acceptance is not completion; use wait_agent or query_agents for progress and answers.",
         input_schema=run_agent_parameters_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False, permission_category="subagent_runtime",
@@ -1090,7 +530,7 @@ _SCRIPT_API_DESCRIPTORS = {
         name="decide",
         description=(
             "Evaluate one natural-language yes/no condition independently for each supplied text "
-            "using the configured Jev-like Decision model. Returns {decisions: boolean[]} in input "
+            "using the configured Decision model. Returns one content object with {decisions: boolean[]} in input "
             "order. Compose with any tools or agent operations for filtering, branching, loops or "
             "further calls. Include needed context in each input. Guard calls with "
             "if (tools.decide.available()); this local synchronous method reports configuration "
@@ -1117,14 +557,19 @@ _SCRIPT_API_DESCRIPTORS["wait_agent"] = replace(
     _descriptor(name="wait_agent", input_schema=wait_agent_parameters_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW, is_read_only=True,
         permission_category="subagent_runtime",
-        description=("Observe selected subagents in ROOT Code Mode. Pass distinct agents targets; ROOT itself is not accepted. "
-            "until defaults to idle: wait for no running or queued work, including new assignments. "
-            "until work_end fixes each initially running Work; initial idle remains satisfied and queued-only targets "
-            "cannot bind. settle defaults to all; first accepts any satisfied target and can still observe a bound "
-            "Work when another target has not started. timeout_seconds defaults to 30 and accepts 0–300. "
-            "Any selected sender's message can end either observation early. Returns state, until, observations "
-            "and pending_targets; message_available and timeout do not establish completion. Query retained WORK "
-            "targets for final or stopped diagnostic text. New calls take new observations and bindings.")),
+        description=("Wait in ROOT Code Mode with exactly one of works:WORK[] or agents:AGENT[]. "
+            "settle is all (default) or first; timeout_seconds is 0–300 (default 30). "
+            "WORK waits for terminal states, AGENT for idle or a selected sender's message. "
+            "Already satisfied targets count immediately. Success returns every target in input order: "
+            "WORK records have agent/work/work_status; AGENT records have agent/is_idle. "
+            "meta.wait_reason explains return; timeout is successful observation, not work completion. "
+            "Message bodies arrive separately in normal conversation input; failures reject with err.result when available.")),
+    is_model_callable=False,
+)
+_SCRIPT_API_DESCRIPTORS["read_file"] = replace(
+    _BUILTIN_DESCRIPTORS["read_file"],
+    input_schema=read_file_parameters_schema(native=False),
+    description="Read a local UTF-8 file. Pass target:PATH with optional nonzero offset and positive limit in lines. Omission reads the full file; negative offset locates from the tail while preserving original line order. Returns the complete saved business value without native pages or NEXT.",
     is_model_callable=False,
 )
 
@@ -1133,7 +578,6 @@ class BuiltinToolBindingKind(StrEnum):
     SESSION_QUERY = "session_query"
     FILESYSTEM = "filesystem"
     MEMORY_MUTATION = "memory_mutation"
-    MEMORY_RECALL = "memory_recall"
     MEMORY_QUERY = "memory_query"
     PLAN_WORKFLOW = "plan_workflow"
     TERMINAL_COMMAND = "terminal_command"
@@ -1152,7 +596,6 @@ class BuiltinToolAvailabilityKind(StrEnum):
     ALWAYS = "always"
     REQUIRES_SCHEDULED_TASK_PORT = "requires_scheduled_task_port"
     REQUIRES_MEMORY_MUTATION_PORT = "requires_memory_mutation_port"
-    REQUIRES_MEMORY_RECALL_PORT = "requires_memory_recall_port"
     REQUIRES_MEMORY_QUERY_PORT = "requires_memory_query_port"
     REQUIRES_TERMINAL_PORTS = "requires_terminal_ports"
     REQUIRES_MAIN_SUBAGENT_CONTROL = "requires_main_subagent_control"
@@ -1232,14 +675,14 @@ _FILESYSTEM = frozenset(
     {
         "edit_file",
         "read_file",
-        "search_content",
+        "search_file_content",
         "find_files",
         "view_image",
         "write_file",
     }
 )
-_MEMORY_MUTATION = frozenset({"remember", "mark_memory_relation"})
-_MEMORY_QUERY = frozenset({"get_memory"})
+_MEMORY_MUTATION = frozenset({"remember", "manage_memory"})
+_MEMORY_QUERY = frozenset({"query_memory"})
 _PLAN = frozenset({"ask_plan_question", "enter_plan", "exit_plan"})
 _SUBAGENT_PARENT = frozenset({"run_agent", "stop_agent", "wait_agent"})
 _SUBAGENT_SHARED = frozenset({"query_agents", "send_agent_message", "wait_message"})
@@ -1247,8 +690,6 @@ _CODE_MODE = frozenset({"exec_cell", "query_cells", "manage_cell"})
 _TERMINAL_PROCESS_ACTIONS = (
     "close_stdin",
     "kill",
-    "poll",
-    "submit",
     "wait",
     "write",
 )
@@ -1431,7 +872,7 @@ def _catalog_shape(name: str):
     if name == "query_capabilities":
         return (BuiltinToolBindingKind.MCP_CATALOG, BuiltinToolAvailabilityKind.ALWAYS, both, "mcp")
     if name in {
-        "use_new_mcp_tool",
+        "call_mcp_tool",
         "read_mcp_resource",
     }:
         return (
@@ -1440,7 +881,7 @@ def _catalog_shape(name: str):
             both,
             "mcp",
         )
-    if name == "open_in_pulsara" or name in MEDIA_TOOL_NAMES:
+    if name in {"open_in_pulsara", "view_image"} or name in MEDIA_TOOL_NAMES:
         return (BuiltinToolBindingKind.FILESYSTEM, BuiltinToolAvailabilityKind.ALWAYS,
                 (ToolInvocationOwnerKind.HOST_MAIN_RUN,), "filesystem")
     if name in _FILESYSTEM:
@@ -1481,13 +922,6 @@ def _catalog_shape(name: str):
             BuiltinToolAvailabilityKind.ALWAYS,
             (ToolInvocationOwnerKind.HOST_MAIN_RUN,),
             "plan",
-        )
-    if name == "search_memory":
-        return (
-            BuiltinToolBindingKind.MEMORY_RECALL,
-            BuiltinToolAvailabilityKind.REQUIRES_MEMORY_RECALL_PORT,
-            (ToolInvocationOwnerKind.HOST_MAIN_RUN,),
-            "memory_read",
         )
     if name in _MEMORY_QUERY:
         return (
@@ -1593,7 +1027,7 @@ def _recovery_contract(name: str) -> BuiltinToolRecoveryContract:
         "view_image",
         "read_mcp_resource",
         "reload_capabilities",
-        "search_content",
+        "search_file_content",
         "find_files",
         "todo",
     }:

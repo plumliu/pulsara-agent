@@ -8,7 +8,6 @@ from pulsara_agent.identity import random_id
 import asyncio
 from datetime import datetime, timezone
 import inspect
-import json
 from pathlib import Path
 import shlex
 import sys
@@ -18,6 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from pulsara_agent.conversation_kernel.content_parts import ResultPart
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.conversation_kernel.host import (
     HostSessionCloseState,
@@ -36,14 +36,9 @@ from pulsara_agent.conversation_kernel.contracts import (
 )
 from pulsara_agent.conversation_kernel.tool_contracts import (
     KernelToolAuthorizationKind,
-    KernelToolPhysicalInvocationError,
 )
 from pulsara_agent.conversation_kernel.tool_runtime import (
     DirectKernelToolPort,
-)
-from pulsara_agent.conversation_kernel.tool_outputs import (
-    CANONICAL_TOOL_RESULT_PREVIEW_HARD_BYTES,
-    ToolOutputProcessor,
 )
 from pulsara_agent.conversation_kernel.tool_policy import (
     DefaultToolDispatchAuthorizationPolicy,
@@ -59,6 +54,7 @@ from pulsara_agent.primitives.run_permission import (
 from pulsara_agent.ports.tool_execution import (
     ToolCall,
     ToolExecutionResult,
+    ToolBusinessValue,
 )
 from tests.support.round3 import authorize_direct_tool, invoke_direct_tool
 
@@ -78,8 +74,13 @@ def test_capacity_raise_releases_host_lock_before_agent_requests_wake() -> None:
         validated = []
         loaded = asyncio.Event()
         agent_id = _name("session")
-        row = dict(id=agent_id, root_session_id=host.session_id,
-                   has_pending_work=True, has_running_turn=False, head_ready=True)
+        row = dict(
+            id=agent_id,
+            root_session_id=host.session_id,
+            has_pending_work=True,
+            has_running_turn=False,
+            head_ready=True,
+        )
 
         def validate(guard, **kwargs):
             assert host._lock.locked()
@@ -138,37 +139,13 @@ def _name(prefix: str) -> str:
 
 
 class _RecordingDeadlineFactory(KernelExecutionDeadlineFactory):
-    def __init__(
-        self, policy: KernelExecutionWatchdogPolicy | None = None
-    ) -> None:
+    def __init__(self, policy: KernelExecutionWatchdogPolicy | None = None) -> None:
         super().__init__(policy)
         self.owners: list[KernelWatchdogOwner] = []
 
     def deadline(self, owner: KernelWatchdogOwner) -> float:
         self.owners.append(owner)
         return super().deadline(owner)
-
-
-def test_tool_result_preview_is_utf8_safe_and_obeys_final_hard_cap() -> None:
-    from pulsara_agent.conversation_kernel.tool_result_display import project_native_tool_result
-    from pulsara_agent.ports.tool_execution import ToolOutputSourceFormatHint
-    from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
-    from tests.support.tool_outputs import RecordingOutputPublisher
-    processor = ToolOutputProcessor(object(), publisher=RecordingOutputPublisher())
-    text = "🙂" * 20_000
-    session_id,entry_id = _name("session"),_name("entry")
-    body = processor.materialize_body(session_id=session_id,workspace_id=_name("workspace"),
-        result_entry_id=entry_id,public_output=text,output_body_candidate=None,
-        public_format=ToolOutputSourceFormatHint.TEXT,deadline_monotonic=float("inf"))
-    budget = ToolResultPageBudget(_name("call"), result_target={"kind":"SESSION_ENTRY","session_id":session_id,"entry_id":entry_id})
-    native,omitted = project_native_tool_result(public_output=text,native_output=None,page_complete=False,
-        required_facts={},output_available=True,output_unavailability_reason=None,page_budget=budget)
-    prepared = processor.prepare(body=body,native_output=native,output_omitted=omitted)
-    assert omitted and prepared.output_body.size == len(text.encode())
-    assert prepared.canonical_preview.size <= CANONICAL_TOOL_RESULT_PREVIEW_HARD_BYTES
-    assert budget.fits(native)
-    assert json.loads(native)["read"] == budget.read
-    prepared.canonical_preview.canonical_bytes.decode("utf-8")
 
 
 async def _start_background_process(
@@ -206,9 +183,8 @@ async def _start_background_process(
         turn_id=turn_id,
         assistant_entry_id=entry_id,
     )
-    payload = json.loads(result.content)
-    assert payload["status"] == "running"
-    assert payload["yielded_to_background"] is True
+    payload = result.content.public_fields
+    assert payload["meta"]["process_status"] == "RUNNING"
     return str(payload["target"]["process_id"]), turn_id, entry_id
 
 
@@ -219,7 +195,8 @@ def test_stage2_terminal_handle_is_same_host_only_and_close_kills_and_joins(
         owner = _name("host")
         session_id = _name("session")
         deadlines = _RecordingDeadlineFactory()
-        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
+        port = DirectKernelToolPort(
+            scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path,
             host_owner_id=owner,
             session_id=session_id,
@@ -230,20 +207,22 @@ def test_stage2_terminal_handle_is_same_host_only_and_close_kills_and_joins(
         process_id, turn_id, entry_id = await _start_background_process(
             port, session_id=session_id
         )
-        assert deadlines.owners == [
-            KernelWatchdogOwner.TERMINAL_FOREGROUND_DECISION
-        ]
+        assert deadlines.owners == [KernelWatchdogOwner.TERMINAL_FOREGROUND_DECISION]
         poll = await invoke_direct_tool(
             port,
             session_id=session_id,
             tool_name="manage_process",
-            arguments={"action": "poll", "target": {"kind": "PROCESS", "process_id": process_id}},
+            arguments={
+                "action": "wait",
+                "timeout_seconds": 0,
+                "target": {"kind": "PROCESS", "process_id": process_id},
+            },
             tool_call_id=_name("call"),
             attempt_id=_name("attempt"),
             turn_id=turn_id,
             assistant_entry_id=entry_id,
         )
-        assert json.loads(poll.content)["target"]["process_id"] == process_id
+        assert poll.content.public_fields["target"]["process_id"] == process_id
         assert deadlines.owners[-1] is KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION
         assert (
             port._terminal.live_process_count(  # noqa: SLF001
@@ -271,7 +250,8 @@ def test_host_scoped_writes_and_terminal_cwd_follow_exact_permission_snapshot(
         workspace.mkdir()
         outside.mkdir()
         session_id = _name("session")
-        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
+        port = DirectKernelToolPort(
+            scheduled_tasks=scheduled_task_service(),
             workspace_root=workspace,
             host_owner_id=_name("host"),
             session_id=session_id,
@@ -319,11 +299,11 @@ def test_host_scoped_writes_and_terminal_cwd_follow_exact_permission_snapshot(
                 assistant_entry_id=_name("entry"),
                 permission_snapshot=accept_edits,
             )
-            payload = json.loads(terminal.content)
+            payload = terminal.content.public_fields
             assert terminal.state == "SUCCESS"
-            assert payload["status"] == "success"
-            assert payload["cwd"] == str(outside)
-            assert str(outside) in payload["output"]
+            assert payload["meta"]["process_status"] == "EXITED"
+            assert payload["meta"]["cwd"] == str(outside)
+            assert str(outside) in terminal.content.content[0].value
             assert port.snapshot_workspace_root() == workspace.resolve()
         finally:
             await port.aclose(timeout_seconds=2)
@@ -339,14 +319,16 @@ def test_stage2_terminal_new_host_does_not_adopt_or_relaunch_old_process(
         new_owner = _name("host")
         old_session_id = _name("session")
         new_session_id = _name("session")
-        old = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
+        old = DirectKernelToolPort(
+            scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path,
             host_owner_id=old_owner,
             session_id=old_session_id,
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
-        new = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
+        new = DirectKernelToolPort(
+            scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path,
             host_owner_id=new_owner,
             session_id=new_session_id,
@@ -356,19 +338,25 @@ def test_stage2_terminal_new_host_does_not_adopt_or_relaunch_old_process(
         process_id, turn_id, entry_id = await _start_background_process(
             old, session_id=old_session_id
         )
-        with pytest.raises(KernelToolPhysicalInvocationError) as raised:
-            await invoke_direct_tool(
-                new,
-                session_id=new_session_id,
-                tool_name="manage_process",
-                arguments={"action": "poll", "target": {"kind": "PROCESS", "process_id": process_id}},
-                tool_call_id=_name("call"),
-                attempt_id=_name("attempt"),
-                turn_id=turn_id,
-                assistant_entry_id=entry_id,
-            )
-        assert isinstance(raised.value.physical_error, KeyError)
-        assert raised.value.effect_class == "TERMINAL_OBSERVATION"
+        rejected = await invoke_direct_tool(
+            new,
+            session_id=new_session_id,
+            tool_name="manage_process",
+            arguments={
+                "action": "wait",
+                "timeout_seconds": 0,
+                "target": {"kind": "PROCESS", "process_id": process_id},
+            },
+            tool_call_id=_name("call"),
+            attempt_id=_name("attempt"),
+            turn_id=turn_id,
+            assistant_entry_id=entry_id,
+        )
+        assert rejected.state == "APPLICATION_ERROR"
+        assert rejected.content.public_fields["target"] == {
+            "kind": "PROCESS",
+            "process_id": process_id,
+        }
         assert (
             new._terminal.live_process_count(  # noqa: SLF001
                 owner_host_session_id=new_owner
@@ -397,11 +385,12 @@ def test_tool_close_blocks_until_cancelled_physical_thread_exits(
                 release.wait()
                 physically_exited.set()
                 return ToolExecutionResult(
-                    call.id, self.name, ToolResultState.SUCCESS, "done"
+                    call.id, self.name, ToolResultState.SUCCESS, ToolBusinessValue(content=(ResultPart("text", "done"),))
                 )
 
         session_id = _name("session")
-        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
+        port = DirectKernelToolPort(
+            scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path,
             host_owner_id=_name("host"),
             session_id=session_id,
@@ -435,7 +424,7 @@ def test_tool_close_blocks_until_cancelled_physical_thread_exits(
         # the known tool outcome; the runner will accept it before interrupting
         # the enclosing turn.
         result = await operation
-        assert result.content == b"done"
+        assert result.content.content == (ResultPart("text", "done"),)
         assert result.physical_timing == "LATE_AFTER_WATCHDOG"
         assert result.caller_cancelled_while_running
         with pytest.raises(TimeoutError, match="after close deadline"):
@@ -454,8 +443,8 @@ def test_host_core_close_waiter_cancellation_joins_one_physical_owner() -> None:
         calls = 0
 
         class BlockingSession:
-            session_id = 'session:sq4icqul3fdtrhy5k5mhtdz5lq'
-            host_session_id = 'host:fnw4mc7b3olk5l3w34pyvmunhu'
+            session_id = "session:sq4icqul3fdtrhy5k5mhtdz5lq"
+            host_session_id = "host:fnw4mc7b3olk5l3w34pyvmunhu"
             root_session_id = None
             _lease = SimpleNamespace(guard=object())
             physical_close_complete = False
@@ -482,23 +471,25 @@ def test_host_core_close_waiter_cancellation_joins_one_physical_owner() -> None:
         core._close_attempts = {}  # type: ignore[attr-defined]
         core._resource_operations = {}
         session = BlockingSession()
-        core._sessions = {'host:fnw4mc7b3olk5l3w34pyvmunhu': session}  # type: ignore[attr-defined]
+        core._sessions = {"host:fnw4mc7b3olk5l3w34pyvmunhu": session}  # type: ignore[attr-defined]
         core._extension_routes = {}  # type: ignore[attr-defined]
         core._suspended_agent_roots = set()  # type: ignore[attr-defined]
-        core._repository = SimpleNamespace(release_host_writer=lambda *args, **kwargs: None)
+        core._repository = SimpleNamespace(
+            release_host_writer=lambda *args, **kwargs: None
+        )
 
         first = asyncio.create_task(
-            core.close_session('host:fnw4mc7b3olk5l3w34pyvmunhu')
+            core.close_session("host:fnw4mc7b3olk5l3w34pyvmunhu")
         )
         await started.wait()
         first.cancel()
         with pytest.raises(asyncio.CancelledError):
             await first
-        assert core._sessions == {'host:fnw4mc7b3olk5l3w34pyvmunhu': session}  # type: ignore[attr-defined]  # noqa: SLF001
+        assert core._sessions == {"host:fnw4mc7b3olk5l3w34pyvmunhu": session}  # type: ignore[attr-defined]  # noqa: SLF001
         assert calls == 1
 
         second = asyncio.create_task(
-            core.close_session('host:fnw4mc7b3olk5l3w34pyvmunhu')
+            core.close_session("host:fnw4mc7b3olk5l3w34pyvmunhu")
         )
         await asyncio.sleep(0)
         assert calls == 1
@@ -521,16 +512,14 @@ def test_round5_host_close_freezes_one_fresh_deadline_for_all_waiters() -> None:
             deadline_factory_calls += 1
             return now[0]
 
-        policy = KernelExecutionWatchdogPolicy(
-            host_session_close_join_seconds=37.0
-        )
+        policy = KernelExecutionWatchdogPolicy(host_session_close_join_seconds=37.0)
         release = asyncio.Event()
         started = asyncio.Event()
         received_deadlines: list[float] = []
 
         class BlockingSession:
-            session_id = 'session:tlvhlzyhaqgtzehsjkwyfvjuji'
-            host_session_id = 'host:67ai47ry4ikif6v6w7ef4cpyl4'
+            session_id = "session:tlvhlzyhaqgtzehsjkwyfvjuji"
+            host_session_id = "host:67ai47ry4ikif6v6w7ef4cpyl4"
             root_session_id = None
             _lease = SimpleNamespace(guard=object())
             physical_close_complete = False
@@ -557,13 +546,15 @@ def test_round5_host_close_freezes_one_fresh_deadline_for_all_waiters() -> None:
         core._close_attempts = {}  # type: ignore[attr-defined]
         core._resource_operations = {}
         session = BlockingSession()
-        core._sessions = {'host:67ai47ry4ikif6v6w7ef4cpyl4': session}  # type: ignore[attr-defined]
+        core._sessions = {"host:67ai47ry4ikif6v6w7ef4cpyl4": session}  # type: ignore[attr-defined]
         core._extension_routes = {}  # type: ignore[attr-defined]
         core._suspended_agent_roots = set()  # type: ignore[attr-defined]
-        core._repository = SimpleNamespace(release_host_writer=lambda *args, **kwargs: None)
+        core._repository = SimpleNamespace(
+            release_host_writer=lambda *args, **kwargs: None
+        )
 
         first = asyncio.create_task(
-            core.close_session('host:67ai47ry4ikif6v6w7ef4cpyl4')
+            core.close_session("host:67ai47ry4ikif6v6w7ef4cpyl4")
         )
         await started.wait()
         assert received_deadlines == [10_037.0]
@@ -572,11 +563,11 @@ def test_round5_host_close_freezes_one_fresh_deadline_for_all_waiters() -> None:
         # waiter must not mint or extend the installed close deadline.
         now[0] += 10_000.0
         second = asyncio.create_task(
-            core.close_session('host:67ai47ry4ikif6v6w7ef4cpyl4')
+            core.close_session("host:67ai47ry4ikif6v6w7ef4cpyl4")
         )
         await asyncio.sleep(0)
         assert deadline_factory_calls == 1
-        installed_attempt = core._close_attempts['host:67ai47ry4ikif6v6w7ef4cpyl4']  # type: ignore[attr-defined]  # noqa: SLF001
+        installed_attempt = core._close_attempts["host:67ai47ry4ikif6v6w7ef4cpyl4"]  # type: ignore[attr-defined]  # noqa: SLF001
         assert installed_attempt.deadline_monotonic == 10_037.0
         release.set()
         await asyncio.gather(first, second)
@@ -587,9 +578,15 @@ def test_round5_host_close_freezes_one_fresh_deadline_for_all_waiters() -> None:
 
 
 def test_runtime_close_has_no_canonical_lifecycle_switch() -> None:
-    assert 'close_conversation' not in inspect.signature(KernelHostCore.close_session).parameters
-    assert 'close_conversation' not in inspect.signature(KernelHostSession.aclose).parameters
-    assert not hasattr(KernelHostSession, 'request_close_conversation')
+    assert (
+        "close_conversation"
+        not in inspect.signature(KernelHostCore.close_session).parameters
+    )
+    assert (
+        "close_conversation"
+        not in inspect.signature(KernelHostSession.aclose).parameters
+    )
+    assert not hasattr(KernelHostSession, "request_close_conversation")
 
 
 def test_round5_writer_renewal_uses_its_short_owner_deadline_during_long_turn() -> None:
@@ -602,9 +599,9 @@ def test_round5_writer_renewal_uses_its_short_owner_deadline_during_long_turn() 
         )
         deadlines = KernelExecutionDeadlineFactory(policy)
         guard = HostWriterGuard(
-            session_id='session:cbzaikgw4by5g4zbwrkzyhd3hu',
+            session_id="session:cbzaikgw4by5g4zbwrkzyhd3hu",
             writer_generation=1,
-            writer_owner_id='host:4e52gs3f3hr7qof3y4tr26limm',
+            writer_owner_id="host:4e52gs3f3hr7qof3y4tr26limm",
         )
         initial = WriterLease(
             guard=guard,
@@ -669,8 +666,8 @@ def test_round5_writer_renewal_uses_its_short_owner_deadline_during_long_turn() 
 def test_host_core_close_failure_quarantines_the_unique_attempt() -> None:
     async def scenario() -> None:
         class FailingSession:
-            session_id = 'session:sazovd3stvpuqithbe4s25br3u'
-            host_session_id = 'host:bam5ezzvqmifzdnm7w6o5l26iy'
+            session_id = "session:sazovd3stvpuqithbe4s25br3u"
+            host_session_id = "host:bam5ezzvqmifzdnm7w6o5l26iy"
             root_session_id = None
             physical_close_complete = False
             necessary_settlement_complete = False
@@ -693,19 +690,21 @@ def test_host_core_close_failure_quarantines_the_unique_attempt() -> None:
         core._deadlines = KernelExecutionDeadlineFactory()  # type: ignore[attr-defined]
         core._close_attempts = {}  # type: ignore[attr-defined]
         session = FailingSession()
-        core._sessions = {'host:bam5ezzvqmifzdnm7w6o5l26iy': session}  # type: ignore[attr-defined]
+        core._sessions = {"host:bam5ezzvqmifzdnm7w6o5l26iy": session}  # type: ignore[attr-defined]
         core._extension_routes = {}  # type: ignore[attr-defined]
         core._suspended_agent_roots = set()  # type: ignore[attr-defined]
-        core._repository = SimpleNamespace(release_host_writer=lambda *args, **kwargs: None)
+        core._repository = SimpleNamespace(
+            release_host_writer=lambda *args, **kwargs: None
+        )
 
         with pytest.raises(RuntimeError, match="physical owner"):
-            await core.close_session('host:bam5ezzvqmifzdnm7w6o5l26iy')
-        attempt = core._close_attempts['host:bam5ezzvqmifzdnm7w6o5l26iy']  # type: ignore[attr-defined]  # noqa: SLF001
+            await core.close_session("host:bam5ezzvqmifzdnm7w6o5l26iy")
+        attempt = core._close_attempts["host:bam5ezzvqmifzdnm7w6o5l26iy"]  # type: ignore[attr-defined]  # noqa: SLF001
         assert attempt.state is HostSessionCloseState.CLOSE_FAILED_QUARANTINED
         assert not session.physical_close_complete
-        assert core._sessions == {'host:bam5ezzvqmifzdnm7w6o5l26iy': session}  # type: ignore[attr-defined]  # noqa: SLF001
+        assert core._sessions == {"host:bam5ezzvqmifzdnm7w6o5l26iy": session}  # type: ignore[attr-defined]  # noqa: SLF001
         with pytest.raises(RuntimeError, match="physical owner"):
-            await core.close_session('host:bam5ezzvqmifzdnm7w6o5l26iy')
+            await core.close_session("host:bam5ezzvqmifzdnm7w6o5l26iy")
         assert session.calls == 1
 
     asyncio.run(scenario())
@@ -714,6 +713,7 @@ def test_host_core_close_failure_quarantines_the_unique_attempt() -> None:
 def test_host_core_late_physically_joined_close_retires_the_attempt() -> None:
     async def scenario() -> None:
         released = []
+
         class JoinedSession:
             session_id = random_id("session")
             host_session_id = random_id("host")
@@ -738,9 +738,12 @@ def test_host_core_late_physically_joined_close_retires_the_attempt() -> None:
         core._sessions = {session.host_session_id: session}
         core._extension_routes = {}
         core._suspended_agent_roots = set()
-        core._repository = SimpleNamespace(release_host_writer=lambda guard, **kwargs: released.append(guard))
+        core._repository = SimpleNamespace(
+            release_host_writer=lambda guard, **kwargs: released.append(guard)
+        )
         await core.close_session(session.host_session_id)
         assert session.physical_close_complete and session.necessary_settlement_complete
         assert not core._sessions and not core._close_attempts
         assert released == [session._lease.guard]
+
     asyncio.run(scenario())

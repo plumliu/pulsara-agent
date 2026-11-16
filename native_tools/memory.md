@@ -2,7 +2,7 @@
 
 共用规则见[原生工具修订草案索引](../PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 1、2 章。记忆对象和 CRUD、范围、并发及隐式召回以[记忆 CRUD hardcut 草案](../PULSARA_MEMORY_CRUD_HARD_CUT_DRAFT.zh.md)为业务基础；完整保存与原生分页沿[统一交付草案](../PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)，存储归属沿[有序内容数据库草案](../PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md)。
 
-状态：讨论草案，未实施。本族只提供 ROOT 原生工具，不提供 JS API。当前确定三个工具的参数、返回字段、类型、失败语义和原生示例。本文件的 TypeScript 用于描述合同，不表示存在脚本调用入口。
+状态：当前实现采用以下三个工具的参数、返回字段、类型和失败语义。本族只提供 ROOT 原生工具，不提供 JS API。本文件的 TypeScript 用于描述合同，不表示存在脚本调用入口。
 
 ## 1. remember：创建记忆
 
@@ -659,7 +659,7 @@ MEMORY_WRITE_HINT 另按[Runtime Observation 草案第 10 节](../PULSARA_RUNTIM
 
 完整结果和原生交付沿索引共用规则：工具状态只表达一次，错误说明进入文字 content；tool_result 指向完整工具结果，NEXT 只补读已保存内容。时间观察信息在原生消息顶层，不混入记忆业务对象的 recorded_at／updated_at。具体工具结果使用本文规定的类型，不恢复旧业务 JSON 或关系包装。
 
-三个工具的返回值及原生示例已在第 1 至 3 章确定。本轮只定文档，不修改生产实现、数据库、工具 schema 或提示词。
+三个工具的返回值及原生示例见第 1 至 3 章。当前工具、共享 CRUD、数据库和隐式召回已接通；完整应用的验收与恢复使用条件以实施计划为准。
 
 当前生产接点：
 

@@ -1,7 +1,5 @@
 """Frozen unified visualization contract: publication, shared reads and recovery."""
 
-from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
-
 import asyncio
 from datetime import datetime, timezone
 from dataclasses import replace
@@ -51,20 +49,15 @@ from tests.test_kernel_image_input_k2_postgres import (
 from tests.test_conversation_fork import assert_session_aggregate_deleted, fork
 
 
-def _cursor(page):
-    return None if page["next"] is None else page["next"]["arguments"]["cursor"]
-
-
 def test_async_preparation_mixed_sources_neutrality_and_timeout(tmp_path):
     async def run():
         io = KernelSessionIO()
         validator = HostPromptImageValidator()
-        workspace = random_id("workspace")
-        image = _image(workspace_id=workspace)
+        image = _image()
 
         class Reader:
             def read_image(self, **kwargs):
-                assert kwargs["workspace_id"] == workspace
+                assert kwargs["image_ref"] == image.image_ref
                 return image
 
         (tmp_path / "chart.html").write_text("<h1>chart</h1>")
@@ -77,8 +70,6 @@ def test_async_preparation_mixed_sources_neutrality_and_timeout(tmp_path):
                 io=io,
                 validator=validator,
                 image_reader=Reader(),
-                session_id=random_id("session"),
-                workspace_id=workspace,
                 deadline_monotonic=monotonic() + 20,
                 **kwargs,
             )
@@ -111,9 +102,7 @@ def test_async_preparation_mixed_sources_neutrality_and_timeout(tmp_path):
             svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><rect width="20" height="20"/></svg>'
             (tmp_path / "diagram.svg").write_text(svg)
             (tmp_path / "diagram.html").write_text(f"<main>{svg}</main>")
-            vectors = await prepare(
-                "```pulsara-viz\ndiagram.svg\ndiagram.html\n```"
-            )
+            vectors = await prepare("```pulsara-viz\ndiagram.svg\ndiagram.html\n```")
             assert vectors[0].state is VisualizationOccurrenceState.FAILED
             assert vectors[0].failure_code == "IMAGE_DECODE_FAILED"
             assert vectors[1].state is VisualizationOccurrenceState.READY
@@ -132,8 +121,6 @@ def test_async_preparation_mixed_sources_neutrality_and_timeout(tmp_path):
                     io=TimedIO(),
                     validator=validator,
                     image_reader=None,
-                    session_id=random_id("session"),
-                    workspace_id=workspace,
                     deadline_monotonic=monotonic() + 20,
                 )
         finally:
@@ -150,7 +137,7 @@ def test_shared_publication_history_chunks_fork_and_gc(
     repo = _repository(stage2_migrated_postgres_database)
     a, aruntime, _ = _bound_session(repo)
     workspace = _workspace(repo, a)
-    image = _image(workspace_id=workspace)
+    image = _image()
     _direct_intent(repo, a, aruntime, FrozenPromptContent((image,)))
     b, bruntime, _ = _bound_session(repo, workspace_id=workspace)
     intent, _ = _direct_intent(
@@ -162,24 +149,19 @@ def test_shared_publication_history_chunks_fork_and_gc(
     def reader(lease):
         return PostgresCanonicalImageReferenceReadPort(
             repo.connection_provider,
-            session_id=lease.guard.session_id,
-            workspace_id=_workspace(repo, lease),
         )
 
     b_reader = reader(b)
 
     def read(port, lease, ws=workspace):
         return port.read_image(
-            session_id=lease.guard.session_id,
-            workspace_id=ws,
             image_ref=image.image_ref,
             maximum_encoded_bytes=1 << 20,
             deadline_monotonic=monotonic() + 30,
         )
 
     assert read(b_reader, b) == image  # B does not own A's image.
-    with pytest.raises(CanonicalImageReferenceUnavailable):
-        read(reader(c), c, _workspace(repo, c))
+    assert read(reader(c), c, _workspace(repo, c)) == image
     cut = repo.prepare_provider_input_cut(
         b.guard, turn_id=intent.turn_id, deadline_monotonic=monotonic() + 30
     )
@@ -204,7 +186,6 @@ def test_shared_publication_history_chunks_fork_and_gc(
     submission = dict(
         cut=cut,
         entry_id=entry,
-        parent_content=InlineContent.from_bytes(b"manifest"),
         blocks=(
             AssistantTextBlock(
                 random_id("block"), InlineContent.from_bytes(b"Here is the image.")
@@ -219,22 +200,36 @@ def test_shared_publication_history_chunks_fork_and_gc(
     # A forced image identity collision rolls back the entire gallery, including
     # the preceding HTML occurrence and assistant message, without changing A.
     from pulsara_agent.conversation_kernel import blob as blob_module
+
     original_id = blob_module._blob_id
     conflicting = replace(image, immutable_bytes=_png(size=(8, 6)), width=8, height=6)
     with monkeypatch.context() as patch:
         patch.setattr(
-            blob_module, "_blob_id",
-            lambda *args, **kwargs: image.image_ref
-            if kwargs.get("image") else original_id(*args, **kwargs),
+            blob_module,
+            "_blob_id",
+            lambda *args, **kwargs: (
+                image.image_ref if kwargs.get("image") else original_id(*args, **kwargs)
+            ),
         )
         with pytest.raises(ConversationKernelConflict, match="IDENTITY_CONFLICT"):
             repo.commit_assistant_message(
-                b.guard, **{**submission, "visualizations": (
-                    candidates[0], replace(candidates[1], image=conflicting),
-                )},
+                b.guard,
+                **{
+                    **submission,
+                    "visualizations": (
+                        candidates[0],
+                        replace(candidates[1], image=conflicting),
+                    ),
+                },
             )
-    assert not _rows(repo, "SELECT id FROM pulsara_v3.transcript_entries WHERE id=%s", (entry,))
-    assert not _rows(repo, "SELECT ordinal FROM pulsara_v3.assistant_visualizations WHERE assistant_entry_id=%s", (entry,))
+    assert not _rows(
+        repo, "SELECT id FROM pulsara_v3.transcript_entries WHERE id=%s", (entry,)
+    )
+    assert not _rows(
+        repo,
+        "SELECT ordinal FROM pulsara_v3.assistant_visualizations WHERE assistant_entry_id=%s",
+        (entry,),
+    )
     assert read(b_reader, b) == image
     repo.commit_assistant_message(b.guard, **submission)
     assert repo.confirm_assistant_message_winner(b.guard, **submission) is not None
@@ -277,10 +272,12 @@ def test_shared_publication_history_chunks_fork_and_gc(
     def history(**kwargs):
         return query.invoke(
             "read_session_content",
-            {"target": {"kind": "SESSION_ENTRY", "session_id": b.guard.session_id, "entry_id": entry}, "limit": 1, **kwargs},
+            {
+                "target": {"kind": "SESSION_ENTRY", "entry_id": entry},
+                "limit": 1,
+                **kwargs,
+            },
             current_range=SessionContentRange(0),
-            tool_call_id="call:history",
-            page_budget=ToolResultPageBudget(tool_call_id="call:history"),
             deadline_monotonic=monotonic() + 30,
         )
 
@@ -290,14 +287,12 @@ def test_shared_publication_history_chunks_fork_and_gc(
             "read_image",
             lambda *a, **k: pytest.fail("history hydrated image"),
         )
-        text = history()["items"][0]["text"]
+        text = history().content[0].value["text"]
         assert (
-            text.count(image.image_ref) == 2
+            text.count("[历史图片；此处未包含图像内容]") == 2
             and "已保存展示项 2" in text
             and "已保存展示项 3" in text
         )
-        first = history(max_chars=len("Here is the image.\n"))
-        assert image.image_ref not in str(first["items"]) and _cursor(first)
         with repo.connection_provider.connection(
             lane=PostgresConnectionLane.MEMORY_QUERY,
             row_factory=dict_row,
@@ -351,8 +346,7 @@ def test_shared_publication_history_chunks_fork_and_gc(
         == image.image_ref
     )
     assert_session_aggregate_deleted(repo, b.guard)
-    with pytest.raises(CanonicalImageReferenceUnavailable):
-        read(b_reader, b)  # Stale caller cannot use child owner.
+    assert read(b_reader, b) == image
     assert read(reader(d), d) == image
     # Removing the remaining owner leaves neither a readable orphan nor a UI pin.
     with repo.connection_provider.connection(
@@ -362,6 +356,18 @@ def test_shared_publication_history_chunks_fork_and_gc(
     ) as conn:
         conn.execute(
             "DELETE FROM pulsara_v3.sessions WHERE id=%s", (child.child_session_id,)
+        )
+    # Removing references makes an asset collectible, not immediately unreadable.
+    assert read(reader(d), d) == image
+    from pulsara_agent.conversation_kernel.blob import _delete_orphans_in_connection
+
+    with repo.connection_provider.connection(
+        lane=PostgresConnectionLane.ARTIFACT,
+        row_factory=dict_row,
+        deadline_monotonic=monotonic() + 30,
+    ) as conn:
+        assert image.image_ref in _delete_orphans_in_connection(
+            conn, grace_seconds=0, maximum_items=100
         )
     second = asyncio.run(chunk(d, 20))
     assert second.error.stable_code == "CONTENT_REFERENCE_MISSING"
@@ -404,60 +410,128 @@ def test_cold_image_content_target_is_exclusive():
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize(("suffix", "media_type"), [("MP4", "video"), ("mp3", "audio"), ("wav", "audio")])
-def test_media_publication_freezes_only_absolute_reference(tmp_path, suffix, media_type):
+@pytest.mark.parametrize(
+    ("suffix", "media_type"), [("MP4", "video"), ("mp3", "audio"), ("wav", "audio")]
+)
+def test_media_publication_freezes_only_absolute_reference(
+    tmp_path, suffix, media_type
+):
     import json
-    from pulsara_agent.conversation_kernel.visualization import VISUALIZATION_VIDEO_MEDIA_TYPE
+    from pulsara_agent.conversation_kernel.visualization import (
+        VISUALIZATION_VIDEO_MEDIA_TYPE,
+    )
 
     async def run():
         io = KernelSessionIO()
-        path = tmp_path / f'demo.{suffix}'
+        path = tmp_path / f"demo.{suffix}"
         # Neither size nor video decoding is part of reference publication.
-        with path.open('wb') as source:
+        with path.open("wb") as source:
             source.truncate(32 << 20)
         try:
             result = await materialize_visualizations(
-                f'```pulsara-viz\nchart.html\ndemo.{suffix}\nmissing.webm\n```',
-                lambda value: (tmp_path / value).resolve(), io=io, validator=None,
-                image_reader=None, session_id=random_id('session'), workspace_id=random_id('workspace'),
+                f"```pulsara-viz\nchart.html\ndemo.{suffix}\nmissing.webm\n```",
+                lambda value: (tmp_path / value).resolve(),
+                io=io,
+                validator=None,
+                image_reader=None,
                 deadline_monotonic=monotonic() + 10,
             )
-            assert [item.state for item in result] == ['FAILED', 'READY', 'FAILED']
+            assert [item.state for item in result] == ["FAILED", "READY", "FAILED"]
             video = result[1]
-            assert video.media_type == VISUALIZATION_VIDEO_MEDIA_TYPE.replace('video-reference', f'{media_type}-reference') and video.codec == 'utf-8'
-            assert json.loads(video.content) == {'path': str(path)}
-            assert len(video.content) < 1024 and video.html is None and video.image is None
+            assert (
+                video.media_type
+                == VISUALIZATION_VIDEO_MEDIA_TYPE.replace(
+                    "video-reference", f"{media_type}-reference"
+                )
+                and video.codec == "utf-8"
+            )
+            assert json.loads(video.content) == {"path": str(path)}
+            assert (
+                len(video.content) < 1024 and video.html is None and video.image is None
+            )
             path.unlink()
-            assert json.loads(video.content) == {'path': str(path)}
+            assert json.loads(video.content) == {"path": str(path)}
         finally:
             await io.aclose(deadline_monotonic=monotonic() + 10)
+
     asyncio.run(run())
 
 
 @pytest.mark.postgres
 @pytest.mark.parametrize("kind", ["video", "audio"])
-def test_media_reference_commit_confirm_protocol_read_and_fork(stage2_migrated_postgres_database, kind):
-    from pulsara_agent.conversation_kernel.visualization import VISUALIZATION_VIDEO_MEDIA_TYPE
+def test_media_reference_commit_confirm_protocol_read_and_fork(
+    stage2_migrated_postgres_database, kind
+):
+    from pulsara_agent.conversation_kernel.visualization import (
+        VISUALIZATION_VIDEO_MEDIA_TYPE,
+    )
     from pulsara_agent.conversation_kernel.prompt_storage import _read_body
+
     repo = _repository(stage2_migrated_postgres_database)
     lease, runtime, _ = _bound_session(repo)
     workspace = _workspace(repo, lease)
-    intent, _ = _direct_intent(repo, lease, runtime, FrozenPromptContent.text('show video'))
-    cut = repo.prepare_provider_input_cut(lease.guard, turn_id=intent.turn_id, deadline_monotonic=monotonic()+30)
-    entry = random_id('entry')
-    name = 'demo.mp4' if kind == 'video' else 'demo.mp3'
+    intent, _ = _direct_intent(
+        repo, lease, runtime, FrozenPromptContent.text("show video")
+    )
+    cut = repo.prepare_provider_input_cut(
+        lease.guard, turn_id=intent.turn_id, deadline_monotonic=monotonic() + 30
+    )
+    entry = random_id("entry")
+    name = "demo.mp4" if kind == "video" else "demo.mp3"
     payload = ('{"path":"/project/' + name + '"}').encode()
-    candidate = FrozenVisualizationOccurrence(name, VisualizationOccurrenceState.READY, **{kind: payload})
-    submission = dict(cut=cut, entry_id=entry, parent_content=InlineContent.from_bytes(b'manifest'),
-        blocks=(AssistantTextBlock(random_id('block'), InlineContent.from_bytes(f'```pulsara-viz\n/project/{name}\n```'.encode())),),
-        visualizations=(candidate,), complete_turn=True, occurred_at=datetime.now(timezone.utc), actor_id='model:test', deadline_monotonic=monotonic()+30)
+    candidate = FrozenVisualizationOccurrence(
+        name, VisualizationOccurrenceState.READY, **{kind: payload}
+    )
+    submission = dict(
+        cut=cut,
+        entry_id=entry,
+        blocks=(
+            AssistantTextBlock(
+                random_id("block"),
+                InlineContent.from_bytes(
+                    f"```pulsara-viz\n/project/{name}\n```".encode()
+                ),
+            ),
+        ),
+        visualizations=(candidate,),
+        complete_turn=True,
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="model:test",
+        deadline_monotonic=monotonic() + 30,
+    )
     repo.commit_assistant_message(lease.guard, **submission)
     assert repo.confirm_assistant_message_winner(lease.guard, **submission) is not None
     child = fork(repo, lease.guard.session_id, entry)
     protocol = CanonicalProtocolReader(repo.connection_provider)
-    child_entry = _rows(repo, "SELECT assistant_entry_id FROM pulsara_v3.assistant_visualizations WHERE session_id=%s AND ordinal=0", (child.child_session_id,))[0]['assistant_entry_id']
-    for session_id, entry_id in ((lease.guard.session_id, entry), (child.child_session_id, child_entry)):
-        reference = protocol.resolve_content_reference(session_id=session_id, entry_id=entry_id, visualization_ordinal=0, deadline_monotonic=monotonic()+30)
-        with repo.connection_provider.connection(lane=PostgresConnectionLane.ARTIFACT, row_factory=dict_row, deadline_monotonic=monotonic()+30) as connection:
-            assert _read_body(connection, row=reference, workspace_id=workspace,
-                expected_media_type=VISUALIZATION_VIDEO_MEDIA_TYPE.replace('video-reference', f'{kind}-reference'), expected_codec='utf-8') == payload
+    child_entry = _rows(
+        repo,
+        "SELECT assistant_entry_id FROM pulsara_v3.assistant_visualizations WHERE session_id=%s AND ordinal=0",
+        (child.child_session_id,),
+    )[0]["assistant_entry_id"]
+    for session_id, entry_id in (
+        (lease.guard.session_id, entry),
+        (child.child_session_id, child_entry),
+    ):
+        reference = protocol.resolve_content_reference(
+            session_id=session_id,
+            entry_id=entry_id,
+            visualization_ordinal=0,
+            deadline_monotonic=monotonic() + 30,
+        )
+        with repo.connection_provider.connection(
+            lane=PostgresConnectionLane.ARTIFACT,
+            row_factory=dict_row,
+            deadline_monotonic=monotonic() + 30,
+        ) as connection:
+            assert (
+                _read_body(
+                    connection,
+                    row=reference,
+                    workspace_id=workspace,
+                    expected_media_type=VISUALIZATION_VIDEO_MEDIA_TYPE.replace(
+                        "video-reference", f"{kind}-reference"
+                    ),
+                    expected_codec="utf-8",
+                )
+                == payload
+            )

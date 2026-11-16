@@ -187,7 +187,7 @@ class _PlanHostModel(_PreflightModel):
         call_index = len(self.requests)
         if call_index == 1:
             payloads = _tool_call(
-                "enter_plan", "call:enter-plan", {"reason": "plan first"}
+                "enter_plan", "call:enter-plan", {}
             )
         elif call_index == 2:
             payloads = _tool_call(
@@ -214,7 +214,7 @@ class _PlanHostModel(_PreflightModel):
                             "recommended": False,
                         },
                     ],
-                    "allow_free_text": True,
+
                 },
             )
         elif call_index == 4:
@@ -243,7 +243,13 @@ class _PlanHostModel(_PreflightModel):
                     ),
                 )
             )
-            assert rendered.count(_PLAN_SENTINEL) == 1
+            observations = [json.loads(part)["pulsara_runtime_observation"]
+                for message in compiled.messages for part in text_part_values(message.content)
+                if part.startswith('{"pulsara_runtime_observation":')]
+            approved = [item for item in observations if item["source"] == "APPROVED_PLAN"]
+            assert len(approved) == 1
+            assert approved[0]["body"][-1] == {"text": f"1. inspect\n2. implement {_PLAN_SENTINEL}\n3. verify"}
+            assert _PLAN_SENTINEL in rendered
             self.implementation_seen.set()
             payloads = _text("ROUND4_IMPLEMENTATION_READY")
         else:  # pragma: no cover - an extra provider cycle is a contract failure
@@ -272,7 +278,7 @@ class _EnterPlanThenTextModel(_PreflightModel):
         self.requests.append(request)
         if len(self.requests) == 1:
             payloads = _tool_call(
-                "enter_plan", "call:queued-enter-plan", {"reason": "queue plan"}
+                "enter_plan", "call:queued-enter-plan", {}
             )
         elif len(self.requests) == 2:
             self.completed.set()
@@ -340,7 +346,7 @@ class _ForceExitRaceModel(_PreflightModel):
         if len(self.requests) != 1:  # pragma: no cover - successor must not bind
             raise AssertionError("force-exit bound an automatic successor")
         for payload in _tool_call(
-            "enter_plan", "call:force-race", {"reason": "force race"}
+            "enter_plan", "call:force-race", {}
         ):
             yield payload
 
@@ -398,6 +404,28 @@ async def _open_test_session(
         test_model_binding(core._model_runtime)  # noqa: SLF001
     )
     return core, session
+
+
+async def _wait_for_plan_interaction(session, *, running=None, previous_id=None):
+    async with asyncio.timeout(10):
+        while True:
+            opened = await session._plan_interactions.current_open()
+            if opened is not None and opened.interaction_id != previous_id:
+                with session.repository.connection_provider.connection(
+                    lane=PostgresConnectionLane.INSPECTOR, row_factory=dict_row,
+                    deadline_monotonic=monotonic()+5,
+                ) as connection:
+                    row = connection.execute(
+                        "SELECT i.control_tool_result_id,t.status FROM pulsara_v3.plan_interactions i "
+                        "JOIN pulsara_v3.turns t ON t.session_id=i.session_id AND t.id=i.origin_turn_id "
+                        "WHERE i.session_id=%s AND i.id=%s", (session.session_id,opened.interaction_id),
+                    ).fetchone()
+                assert row == {"control_tool_result_id":None, "status":"RUNNING"}
+                return opened
+            if running is not None and running.done():
+                await running
+                pytest.fail("planning runner ended before an interaction was opened")
+            await asyncio.sleep(.005)
 
 
 def test_round4_host_enter_question_approve_and_permission_happy_path(
@@ -472,8 +500,9 @@ def test_round4_host_enter_question_approve_and_permission_happy_path(
             interaction_id=opened.interaction_id,
             answer=PlanQuestionAnswer(PlanQuestionAnswerKind.OPTION, option_ordinal=0),
         )
-        draft_run = await asyncio.wait_for(running, timeout=5)
-        assert draft_run.pending_plan_interaction_id is not None
+        draft_opened = await _wait_for_plan_interaction(session, running=running, previous_id=opened.interaction_id)
+        assert draft_opened.draft is not None
+        assert not running.done()
         assert not (tmp_path / "must-not-exist.txt").exists()
 
         with session.repository.connection_provider.connection(
@@ -492,7 +521,7 @@ def test_round4_host_enter_question_approve_and_permission_happy_path(
                 "JOIN pulsara_v3.plan_workflows AS w "
                 "ON w.session_id = i.session_id AND w.id = i.plan_workflow_id "
                 "WHERE i.session_id = %s AND i.id = %s",
-                (session.session_id, draft_run.pending_plan_interaction_id),
+                (session.session_id, draft_opened.interaction_id),
             ).fetchone()
         assert blocked == {"result_state": "PERMISSION_DENIED"}
         assert int(draft["workflow_revision"]) == 4
@@ -501,7 +530,7 @@ def test_round4_host_enter_question_approve_and_permission_happy_path(
             command_id='command:aoqobn3uzzf5rldcj6mn23grfu',
             workflow_id=workflow_id,
             expected_workflow_revision=4,
-            interaction_id=draft_run.pending_plan_interaction_id,
+            interaction_id=draft_opened.interaction_id,
             decision=PlanDraftDecision.APPROVE,
             revision_prompt=None,
         )
@@ -509,6 +538,7 @@ def test_round4_host_enter_question_approve_and_permission_happy_path(
         successor_task = session._active_task  # noqa: SLF001
         assert successor_task is not None
         await asyncio.wait_for(asyncio.shield(successor_task), timeout=5)
+        await asyncio.wait_for(running, timeout=5)
         assert model.implementation_seen.is_set()
 
         with session.repository.connection_provider.connection(
@@ -557,7 +587,6 @@ def test_round4_queued_root_turn_runs_automatic_plan_successor(
         while session._active_task is not None:  # noqa: SLF001
             assert monotonic() < deadline
             await asyncio.sleep(0.01)
-
         with session.repository.connection_provider.connection(
             lane=PostgresConnectionLane.INSPECTOR,
             row_factory=dict_row,
@@ -592,7 +621,7 @@ def test_round4_detached_waiter_cannot_strand_root_slot_before_plan_review(
         )
         entered = await session.enter_plan(
             command_id='command:xvmfuqrzeyxnjmngwmq6hnx6sa',
-            entry_reason="prepare detached review",
+
             resume_permission_mode=PermissionMode.ACCEPT_EDITS,
         )
         running = asyncio.create_task(
@@ -608,11 +637,8 @@ def test_round4_detached_waiter_cannot_strand_root_slot_before_plan_review(
             await running
         assert session._active_task is not None  # noqa: SLF001
         model.release.set()
-
-        deadline = monotonic() + 5
-        while session._active_task is not None:  # noqa: SLF001
-            assert monotonic() < deadline
-            await asyncio.sleep(0.01)
+        opened = await _wait_for_plan_interaction(session)
+        assert opened.draft is not None and session._active_task is not None
 
         with session.repository.connection_provider.connection(
             lane=PostgresConnectionLane.INSPECTOR,
@@ -855,7 +881,7 @@ def test_round4_stale_force_exit_does_not_cancel_valid_root_turn(
         )
         entered = await session.enter_plan(
             command_id='command:lkhkapvefg7cn5vpcgi7ggdz7i',
-            entry_reason="validate before cancelling",
+
             resume_permission_mode=PermissionMode.READ_ONLY,
         )
         running = asyncio.create_task(
@@ -904,7 +930,7 @@ def test_round4_unbound_successor_retries_terminalization_before_retirement(
         )
         entered = await session.enter_plan(
             command_id='command:scry7cudtekborsan7kpgs6uqq',
-            entry_reason="exercise terminalization retry",
+
             resume_permission_mode=PermissionMode.ACCEPT_EDITS,
         )
         running = asyncio.create_task(
@@ -915,8 +941,8 @@ def test_round4_unbound_successor_retries_terminalization_before_retirement(
         )
         await asyncio.wait_for(model.started.wait(), timeout=5)
         model.release.set()
-        origin = await asyncio.wait_for(running, timeout=5)
-        assert origin.pending_plan_interaction_id is not None
+        opened = await _wait_for_plan_interaction(session, running=running)
+        assert opened.draft is not None and not running.done()
 
         with session.repository.connection_provider.connection(
             lane=PostgresConnectionLane.INSPECTOR,
@@ -950,7 +976,7 @@ def test_round4_unbound_successor_retries_terminalization_before_retirement(
                 command_id='command:tw2yikvynynbh63vxu3kemqeqq',
                 workflow_id=entered.target_id,
                 expected_workflow_revision=int(workflow["workflow_revision"]),
-                interaction_id=origin.pending_plan_interaction_id,
+                interaction_id=opened.interaction_id,
                 decision=PlanDraftDecision.APPROVE,
                 revision_prompt=None,
             ),
@@ -969,6 +995,17 @@ def test_round4_unbound_successor_retries_terminalization_before_retirement(
             ).fetchone()
         assert successor == {"status": "INTERRUPTED"}
         assert not model.implementation_seen.is_set()
+        origin = await asyncio.wait_for(running, timeout=5)
+        assert origin.continuation_turn_id is None
+        assert session._active_task is None
+        with session.repository.connection_provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR, row_factory=dict_row,
+            deadline_monotonic=monotonic()+5,
+        ) as connection:
+            assert connection.execute("SELECT id,result_state FROM pulsara_v3.tool_results WHERE session_id=%s AND tool_call_id='call:detached-draft'",
+                (session.session_id,)).fetchall() == [{"id":approved.tool_result_settlement.result_id, "result_state":"SUCCESS"}]
+            assert connection.execute("SELECT count(*) AS n FROM pulsara_v3.turns WHERE session_id=%s",
+                (session.session_id,)).fetchone()['n'] == 2
         await core.close_session(session.host_session_id)
         await core.shutdown()
 
@@ -984,23 +1021,42 @@ def test_pending_review_submission_queues_and_runs_after_cancel_without_prefix_c
     from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 as wire
     from pulsara_agent.terminal_protocol.v3_gateway import TerminalKernelProtocolServer, _Connection
 
+    class Model(_DetachedDraftModel):
+        def __init__(self):
+            super().__init__()
+            self.queued_seen = asyncio.Event()
+
+        async def stream(self, request):
+            if len(self.requests) < 2:
+                async for event in super().stream(request):
+                    yield event
+            else:
+                self.requests.append(request)
+                assert len(self.requests) == 3
+                self.queued_seen.set()
+                for event in _text('QUEUED_AFTER_REVIEW_COMPLETED'):
+                    yield event
+
     async def scenario() -> None:
-        model = _DetachedDraftModel()
+        model = Model()
         model.release.set()
         core, session = await _open_test_session(
             tmp_path=tmp_path, model=model,
             postgres_dsn=stage2_migrated_postgres_database.runtime_dsn,
             monkeypatch=monkeypatch,
         )
+        running = None
         try:
             entered = await session.enter_plan(
-                command_id=random_id('command'), entry_reason='review prompt admission',
+                command_id=random_id('command'),
                 resume_permission_mode=PermissionMode.ACCEPT_EDITS,
             )
-            await asyncio.wait_for(session.run_turn(
+            running = asyncio.create_task(session.run_turn(
                 PromptContent.text('prepare a plan'), command_id=random_id('command'),
                 requested_permission_mode=PermissionMode.ACCEPT_EDITS,
-            ), timeout=10)
+            ))
+            opened = await _wait_for_plan_interaction(session, running=running)
+            assert opened.draft is not None
             attachment = random_id('attachment')
             assert await session.attach_controller(attachment)
             state = _Connection(attachment_id=attachment, attachment_generation=1,
@@ -1033,7 +1089,11 @@ def test_pending_review_submission_queues_and_runs_after_cancel_without_prefix_c
                 interaction_id=str(review['id']), decision=PlanDraftDecision.CANCEL, revision_prompt=None,
             )
             assert cancelled.draft_decision is PlanDraftDecision.CANCEL
+            assert cancelled.continuation_turn_id is None
+            await asyncio.wait_for(running, timeout=10)
             await asyncio.wait_for(model.implementation_seen.wait(), timeout=10)
+            await asyncio.wait_for(model.queued_seen.wait(), timeout=10)
+            assert model.requests[1].turn_id == model.requests[0].turn_id
             admitted = await gateway._command(state, request)
             assert admitted.command_outcome.status in (wire.PENDING, wire.SUCCEEDED)
             assert admitted.command_outcome.prompt_delivery.queue_status == 'CONSUMED'
@@ -1044,6 +1104,8 @@ def test_pending_review_submission_queues_and_runs_after_cancel_without_prefix_c
                 assert connection.execute('SELECT count(*) AS n FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND command_id=%s', (session.session_id, command)).fetchone()['n'] == 1
         finally:
             await core.close_session(session.host_session_id)
+            if running is not None:
+                await asyncio.gather(running, return_exceptions=True)
             await core.shutdown()
 
     asyncio.run(scenario())
@@ -1054,7 +1116,7 @@ class _QuestionSteerModel(_DetachedDraftModel):
         self.requests.append(request)
         if len(self.requests) == 1:
             payloads = _tool_call("ask_plan_question", "call:steer-question", {
-                "question": "Which path?", "options": [], "allow_free_text": True,
+                "question": "Which path?", "options": [],
             })
         elif len(self.requests) == 2:
             self.implementation_seen.set()
@@ -1080,8 +1142,9 @@ def test_plan_question_steer_waits_for_real_answer_then_resumes_same_readonly_tu
         core = KernelHostCore.production(model_runtime=runtime)
         session = await core.open_session(HostWorkspaceInput(workspace_kind="project", workspace_root=tmp_path))
         await session.update_model_call_binding(test_model_binding(runtime))
+        running = None
         try:
-            await session.enter_plan(command_id=random_id("command"), entry_reason="steer question",
+            await session.enter_plan(command_id=random_id("command"),
                                      resume_permission_mode=PermissionMode.ACCEPT_EDITS)
             running = asyncio.create_task(session.run_turn(PromptContent.text("prepare plan"),
                 command_id=random_id("command"), requested_permission_mode=PermissionMode.ACCEPT_EDITS))
@@ -1124,9 +1187,8 @@ def test_plan_question_steer_waits_for_real_answer_then_resumes_same_readonly_tu
             assert current.messages[:len(original.messages)] == original.messages
             rendered = "\n".join(part for message in model.requests[1].compiled_input.messages
                                   for part in text_part_values(message.content))
-            assert "QUESTION_ANSWERED" in rendered
             assert "Use the safe path" in rendered
-            assert rendered.index("QUESTION_ANSWERED") < rendered.index("Use the rollback path instead.")
+            assert rendered.index("Use the safe path") < rendered.index("Use the rollback path instead.")
             with session.repository.connection_provider.connection(
                 lane=PostgresConnectionLane.INSPECTOR, row_factory=dict_row,
                 deadline_monotonic=monotonic()+5,
@@ -1176,10 +1238,13 @@ def test_plan_revision_full_prompt_direct_and_queued_share_admission(
         session = await core.open_session(HostWorkspaceInput(workspace_kind="project", workspace_root=tmp_path))
         await session.update_model_call_binding(test_model_binding(runtime))
         try:
-            await session.enter_plan(command_id=random_id("command"), entry_reason="review revisions",
+            await session.enter_plan(command_id=random_id("command"),
                                      resume_permission_mode=PermissionMode.ACCEPT_EDITS)
-            await session.run_turn(PromptContent.text("prepare plan"), command_id=random_id("command"),
-                                   requested_permission_mode=PermissionMode.ACCEPT_EDITS)
+            running = asyncio.create_task(session.run_turn(PromptContent.text("prepare plan"), command_id=random_id("command"),
+                                   requested_permission_mode=PermissionMode.ACCEPT_EDITS))
+            opened = await _wait_for_plan_interaction(session, running=running)
+            assert opened.draft is not None
+            origin_turn_id = model.requests[0].turn_id
             with session.repository.connection_provider.connection(
                 lane=PostgresConnectionLane.INSPECTOR, row_factory=dict_row,
                 deadline_monotonic=monotonic()+5,
@@ -1209,20 +1274,26 @@ def test_plan_revision_full_prompt_direct_and_queued_share_admission(
                     assert pending["status"] == "PENDING"
             resolution = await session.resolve_plan_draft_review(**kwargs)
             await asyncio.wait_for(model.implementation_seen.wait(), timeout=10)
-            task = session._active_task
-            if task is not None:
-                await asyncio.wait_for(asyncio.shield(task), timeout=10)
+            await asyncio.wait_for(running, timeout=10)
             repeated = await session.resolve_plan_draft_review(**kwargs)
-            assert repeated.continuation_turn_id == resolution.continuation_turn_id
+            assert repeated.continuation_turn_id is resolution.continuation_turn_id is None
+            assert repeated.tool_result_settlement.result_entry_id == resolution.tool_result_settlement.result_entry_id
             with pytest.raises(ConversationKernelConflict):
                 await session.resolve_plan_draft_review(**{**kwargs, "command_id": random_id("command")})
             assert len(model.requests) == 2
             snapshot = CanonicalProtocolReader(session.repository.connection_provider).snapshot(
                 session_id=session.session_id, maximum_entries=64, maximum_control_items=64,
                 deadline_monotonic=monotonic()+5)
-            entry = next(item for item in snapshot.entries if item.entry_id == resolution.continuation_entry_id)
+            with session.repository.connection_provider.connection(
+                lane=PostgresConnectionLane.INSPECTOR, row_factory=dict_row,
+                deadline_monotonic=monotonic()+5,
+            ) as connection:
+                feedback = connection.execute("SELECT id,status,consumed_entry_id,target_turn_id FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND command_id=%s AND input_origin='HUMAN_STEER'", (session.session_id,command)).fetchone()
+            assert feedback['status'] == 'CONSUMED' and feedback['target_turn_id'] == origin_turn_id
+            entry = next(item for item in snapshot.entries if item.entry_id == feedback['consumed_entry_id'])
             assert entry.input_source.command_id == command
-            assert entry.input_source.queue_item_id == ""
+            assert entry.input_source.queue_item_id == feedback['id']
+            assert model.requests[1].turn_id == origin_turn_id
             if pure_image:
                 images = [part for message in model.requests[1].compiled_input.messages
                           for part in message.content if isinstance(part, LLMImagePart)]
@@ -1235,13 +1306,15 @@ def test_plan_revision_full_prompt_direct_and_queued_share_admission(
                 lane=PostgresConnectionLane.INSPECTOR, row_factory=dict_row,
                 deadline_monotonic=monotonic()+5,
             ) as connection:
-                revised = connection.execute("SELECT e.entry_kind, e.source_plan_handoff_kind, t.effective_permission_mode FROM pulsara_v3.transcript_entries e JOIN pulsara_v3.turns t ON t.id=e.turn_id WHERE e.id=%s", (resolution.continuation_entry_id,)).fetchone()
-                assert revised == {"entry_kind": "USER_MESSAGE", "source_plan_handoff_kind": "REVISION_REQUESTED", "effective_permission_mode": PermissionMode.READ_ONLY.value}
+                revised = connection.execute("SELECT e.entry_kind, e.source_plan_handoff_kind, t.effective_permission_mode FROM pulsara_v3.transcript_entries e JOIN pulsara_v3.turns t ON t.id=e.turn_id WHERE e.id=%s", (feedback['consumed_entry_id'],)).fetchone()
+                assert revised == {"entry_kind": "USER_STEER", "source_plan_handoff_kind": None, "effective_permission_mode": PermissionMode.READ_ONLY.value}
                 if source is not None:
                     queued = connection.execute("SELECT status, terminal_reason FROM pulsara_v3.prompt_queue_items WHERE id=%s", (source,)).fetchone()
                     assert queued == {"status": "CANCELLED", "terminal_reason": "USER_REDIRECTED_TO_STEER"}
         finally:
             await core.close_session(session.host_session_id)
+            if running is not None:
+                await asyncio.gather(running, return_exceptions=True)
             await core.shutdown()
 
     asyncio.run(scenario())
@@ -1271,33 +1344,47 @@ def test_plan_multiple_revisions_keep_distinct_user_entries(
         core = KernelHostCore.production(model_runtime=runtime)
         session = await core.open_session(HostWorkspaceInput(workspace_kind="project", workspace_root=tmp_path))
         await session.update_model_call_binding(test_model_binding(runtime))
+        running = None
         try:
-            await session.enter_plan(command_id=random_id("command"), entry_reason="repeat revision",
+            await session.enter_plan(command_id=random_id("command"),
                                      resume_permission_mode=PermissionMode.ACCEPT_EDITS)
-            await session.run_turn(PromptContent.text("plan"), command_id=random_id("command"),
-                                   requested_permission_mode=PermissionMode.ACCEPT_EDITS)
+            running = asyncio.create_task(session.run_turn(PromptContent.text("plan"), command_id=random_id("command"),
+                                   requested_permission_mode=PermissionMode.ACCEPT_EDITS))
             entries = []
+            opened = await _wait_for_plan_interaction(session, running=running)
             for ordinal in (1, 2):
                 with session.repository.connection_provider.connection(
                     lane=PostgresConnectionLane.INSPECTOR, row_factory=dict_row,
                     deadline_monotonic=monotonic()+5,
                 ) as connection:
                     review = connection.execute("SELECT i.id, i.plan_workflow_id, w.workflow_revision FROM pulsara_v3.plan_interactions i JOIN pulsara_v3.plan_workflows w ON w.id=i.plan_workflow_id WHERE i.session_id=%s AND i.kind='DRAFT_REVIEW' AND i.status='OPEN'", (session.session_id,)).fetchone()
+                command = random_id("command")
                 resolution = await session.resolve_plan_draft_review(
-                    command_id=random_id("command"), workflow_id=str(review["plan_workflow_id"]),
+                    command_id=command, workflow_id=str(review["plan_workflow_id"]),
                     expected_workflow_revision=int(review["workflow_revision"]), interaction_id=str(review["id"]),
                     decision=PlanDraftDecision.REVISE, revision_prompt=PromptContent.text(f"revision {ordinal}"))
-                entries.append(resolution.continuation_entry_id)
-                task = session._active_task
-                assert task is not None
-                await asyncio.wait_for(asyncio.shield(task), timeout=10)
+                assert resolution.continuation_turn_id is None
+                if ordinal == 1:
+                    opened = await _wait_for_plan_interaction(session, running=running, previous_id=opened.interaction_id)
+                else:
+                    await asyncio.wait_for(running, timeout=10)
+                with session.repository.connection_provider.connection(
+                    lane=PostgresConnectionLane.INSPECTOR, row_factory=dict_row,
+                    deadline_monotonic=monotonic()+5,
+                ) as connection:
+                    feedback = connection.execute("SELECT status,consumed_entry_id FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND command_id=%s", (session.session_id,command)).fetchone()
+                    assert feedback['status'] == 'CONSUMED'
+                    entries.append(feedback['consumed_entry_id'])
             assert len(set(entries)) == 2
             assert len(model.requests) == 3
+            assert len({request.turn_id for request in model.requests}) == 1
             final_texts = [part for message in model.requests[-1].compiled_input.messages
                            for part in text_part_values(message.content)]
             assert final_texts.count("revision 1") == final_texts.count("revision 2") == 1
         finally:
             await core.close_session(session.host_session_id)
+            if running is not None:
+                await asyncio.gather(running, return_exceptions=True)
             await core.shutdown()
 
     asyncio.run(scenario())
@@ -1322,7 +1409,7 @@ def test_question_answer_failure_preserves_queued_input_and_exact_recovery(
         session = await core.open_session(HostWorkspaceInput(workspace_kind="project", workspace_root=tmp_path))
         await session.update_model_call_binding(test_model_binding(runtime))
         try:
-            await session.enter_plan(command_id=random_id("command"), entry_reason="failure boundary",
+            await session.enter_plan(command_id=random_id("command"),
                                      resume_permission_mode=PermissionMode.ACCEPT_EDITS)
             running = asyncio.create_task(session.run_turn(PromptContent.text("plan"),
                 command_id=random_id("command"), requested_permission_mode=PermissionMode.ACCEPT_EDITS))
@@ -1347,7 +1434,7 @@ def test_question_answer_failure_preserves_queued_input_and_exact_recovery(
             outcome = await session.steer_active_turn(command_id=queued_command,
                 content=PromptContent.text('keep this accepted input'), target_turn_id=target)
             assert outcome.status == 'PENDING'
-            error = (StructuredModelInputCompileError(ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET)
+            error = (StructuredModelInputCompileError(ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET)
                      if failure_stage == 'measurement' else RuntimeError('injected confirmation failure'))
             method = ('prepare_plan_question_resolution_input' if failure_stage == 'measurement'
                       else 'confirm_published_active_root_input')
@@ -1381,7 +1468,7 @@ def test_question_answer_failure_preserves_queued_input_and_exact_recovery(
             await asyncio.wait_for(running, timeout=10)
             rendered = '\n'.join(part for message in model.requests[-1].compiled_input.messages
                                   for part in text_part_values(message.content))
-            assert rendered.index('QUESTION_ANSWERED') < rendered.index('keep this accepted input')
+            assert rendered.index('real answer') < rendered.index('keep this accepted input')
         finally:
             await core.close_session(session.host_session_id)
             await core.shutdown()
@@ -1406,9 +1493,9 @@ def test_accepted_input_does_not_supersede_plan_control(
                 self.started.set()
                 if boundary == 'provider':
                     await self.release.wait()
-                args = {'ask_plan_question': {'question': 'choose', 'options': [], 'allow_free_text': True},
+                args = {'ask_plan_question': {'question': 'choose', 'options': []},
                         'exit_plan': {'plan': 'old plan'}, 'exit_plan_empty': {},
-                        'enter_plan': {'reason': 'old direction'}}[tool_name]
+                        'enter_plan': {}}[tool_name]
                 payloads = _tool_call('exit_plan' if tool_name == 'exit_plan_empty' else tool_name, 'call:late-plan', args)
             else:
                 assert len(self.requests) == 2
@@ -1428,7 +1515,7 @@ def test_accepted_input_does_not_supersede_plan_control(
         await session.update_model_call_binding(test_model_binding(runtime))
         try:
             if tool_name != 'enter_plan':
-                await session.enter_plan(command_id=random_id('command'), entry_reason='active plan',
+                await session.enter_plan(command_id=random_id('command'),
                                          resume_permission_mode=PermissionMode.ACCEPT_EDITS)
             if boundary == 'plan_transaction':
                 original = session.repository.accept_plan_tool_batch
@@ -1450,34 +1537,34 @@ def test_accepted_input_does_not_supersede_plan_control(
             assert outcome.status == 'PENDING'
             release.set()
             model.release.set()
-            if tool_name == 'ask_plan_question':
-                async with asyncio.timeout(10):
-                    while await session._plan_interactions.current_open() is None:
-                        if running.done():
-                            await running
-                            pytest.fail('turn ended before question')
-                        await asyncio.sleep(.01)
+            if tool_name in {'ask_plan_question', 'exit_plan'}:
+                opened = await _wait_for_plan_interaction(session, running=running)
                 with session.repository.connection_provider.connection(
                     lane=PostgresConnectionLane.INSPECTOR, row_factory=dict_row,
                     deadline_monotonic=monotonic()+5) as connection:
-                    question = connection.execute("""SELECT i.id,i.status,i.plan_workflow_id,w.workflow_revision
+                    interaction = connection.execute("""SELECT i.id,i.status,i.plan_workflow_id,w.workflow_revision
                         FROM pulsara_v3.plan_interactions i JOIN pulsara_v3.plan_workflows w
                         ON w.session_id=i.session_id AND w.id=i.plan_workflow_id
-                        WHERE i.session_id=%s AND i.kind='QUESTION'""", (session.session_id,)).fetchone()
-                    assert question['status'] == 'OPEN'
+                        WHERE i.session_id=%s AND i.id=%s""", (session.session_id,opened.interaction_id)).fetchone()
+                    assert interaction['status'] == 'OPEN'
+                    assert connection.execute("SELECT count(*) AS n FROM pulsara_v3.tool_results WHERE session_id=%s AND tool_call_id='call:late-plan'", (session.session_id,)).fetchone()['n'] == 0
+            if tool_name == 'ask_plan_question':
                 await session.resolve_plan_question(command_id=random_id('command'),
-                    workflow_id=question['plan_workflow_id'], expected_workflow_revision=question['workflow_revision'],
-                    interaction_id=question['id'],
+                    workflow_id=interaction['plan_workflow_id'], expected_workflow_revision=interaction['workflow_revision'],
+                    interaction_id=interaction['id'],
                     answer=PlanQuestionAnswer(PlanQuestionAnswerKind.FREE_TEXT, free_text='actual answer'))
+            elif tool_name == 'exit_plan':
+                resolution = await session.resolve_plan_draft_review(command_id=random_id('command'),
+                    workflow_id=interaction['plan_workflow_id'], expected_workflow_revision=interaction['workflow_revision'],
+                    interaction_id=interaction['id'], decision=PlanDraftDecision.REVISE,
+                    revision_prompt=PromptContent.text('Continue investigating this draft.'))
+                assert resolution.continuation_turn_id is None
             await asyncio.wait_for(running, timeout=10)
-            if tool_name == 'exit_plan':
-                assert len(model.requests) == 1  # Draft is review, not approval.
-            else:
-                assert len(model.requests) == 2
-                rendered = '\n'.join(part for message in model.requests[-1].compiled_input.messages
-                                     for part in text_part_values(message.content))
-                assert 'ADDITIONAL_PLAN_INPUT' in rendered
-                assert '被用户取消' not in rendered
+            assert len(model.requests) == 2
+            rendered = '\n'.join(part for message in model.requests[-1].compiled_input.messages
+                                 for part in text_part_values(message.content))
+            assert 'ADDITIONAL_PLAN_INPUT' in rendered
+            assert '被用户取消' not in rendered
             with session.repository.connection_provider.connection(
                 lane=PostgresConnectionLane.INSPECTOR, row_factory=dict_row,
                 deadline_monotonic=monotonic()+5) as connection:
@@ -1487,11 +1574,11 @@ def test_accepted_input_does_not_supersede_plan_control(
                 entry = connection.execute('SELECT turn_id,input_origin FROM pulsara_v3.transcript_entries WHERE id=%s',
                     (queue['consumed_entry_id'],)).fetchone()
                 assert entry == {'turn_id': target, 'input_origin': 'HUMAN_STEER'}
-                result = connection.execute("SELECT result_state,result_origin_kind FROM pulsara_v3.tool_results WHERE session_id=%s AND tool_call_id='call:late-plan'", (session.session_id,)).fetchone()
-                assert result == {'result_state': 'SUCCESS', 'result_origin_kind': 'PLAN_CONTROL'}
+                results = connection.execute("SELECT result_state,result_origin_kind FROM pulsara_v3.tool_results WHERE session_id=%s AND tool_call_id='call:late-plan'", (session.session_id,)).fetchall()
+                assert results == [{'result_state': 'SUCCESS', 'result_origin_kind': 'PLAN_CONTROL'}]
                 if tool_name == 'exit_plan':
                     review = connection.execute("SELECT status FROM pulsara_v3.plan_interactions WHERE session_id=%s AND kind='DRAFT_REVIEW'", (session.session_id,)).fetchone()
-                    assert review['status'] == 'OPEN'
+                    assert review['status'] == 'REVISION_REQUESTED'
         finally:
             release.set()
             model.release.set()

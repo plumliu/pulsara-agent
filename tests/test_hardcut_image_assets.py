@@ -26,6 +26,7 @@ from pulsara_agent.conversation_kernel.prompt_storage import (
     publish_prompt_images,
     prompt_to_content_drafts,
     read_image_reference_in_connection,
+    read_image_reference_metadata_in_connection,
 )
 from pulsara_agent.conversation_kernel.repository_errors import (
     ConversationKernelConflict,
@@ -137,6 +138,30 @@ def test_asset_read_requires_only_existing_valid_identity(asset_connection):
         )
     with pytest.raises(CanonicalImageReferenceUnavailable):
         read_image_reference_in_connection(connection, image_ref=random_id("image"))
+
+
+@pytest.mark.postgres
+def test_asset_metadata_quote_does_not_read_payload(asset_connection, monkeypatch):
+    prompt = freeze_canonical_prompt(FrozenPromptContent((_image(),)))
+    (reference,) = publish_prompt_images(asset_connection, prompt=prompt)
+
+    def no_payload(*args, **kwargs):
+        raise AssertionError("metadata admission must precede any payload read")
+
+    monkeypatch.setattr(
+        PostgresCanonicalBlobStore, "read_exact_in_connection", no_payload
+    )
+    descriptor = read_image_reference_metadata_in_connection(
+        asset_connection, image_ref=reference
+    )
+    assert descriptor.image_ref == reference
+    assert descriptor.encoded_bytes == len(_image().immutable_bytes)
+    assert descriptor.digest == "sha256:" + sha256(_image().immutable_bytes).hexdigest()
+    assert (descriptor.width, descriptor.height, descriptor.media_type) == (
+        7,
+        5,
+        "image/png",
+    )
 
 
 @pytest.mark.postgres

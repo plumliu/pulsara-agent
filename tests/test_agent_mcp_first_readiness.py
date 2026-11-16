@@ -33,11 +33,15 @@ pytestmark = pytest.mark.postgres
 def queue_rows(dsn, agent_id):
     with psycopg.connect(dsn, row_factory=dict_row) as connection:
         connection.read_only = True
-        return connection.execute('''SELECT id,session_id,queue_sequence,input_origin,
-            source_session_id,initial_context,work_inputs,inline_content,blob_id,status,
+        rows=connection.execute('''SELECT id,session_id,queue_sequence,input_origin,
+            source_session_id,work_inputs,status,
             consumed_entry_id FROM pulsara_v3.prompt_queue_items
             WHERE session_id=%s AND input_origin='AGENT_INSTRUCTION' ORDER BY queue_sequence''',
             (agent_id,)).fetchall()
+        from pulsara_agent.conversation_kernel.content_parts import read_content_parts
+        for row in rows:
+            row['parts']=read_content_parts(connection,entry_id=row['consumed_entry_id']) if row['consumed_entry_id'] else read_content_parts(connection,queue_item_id=row['id'])
+        return rows
 
 
 def queue_identity(rows):
@@ -232,8 +236,11 @@ def test_process_loss_pending_agent_waits_before_final_provider_and_preserves_sc
                 assert len(requests) == len(prefix_installs) == 1
                 assert prefix_installs[0][0] == identities['agent_id']
                 names = {tool['function']['name'] for tool in requests[0]['tools']}
-                assert 'mcp__fixture__fake_echo' in names
-                assert not any(name.startswith(f'mcp__{root_only_id}__') for name in names)
+                assert {'query_capabilities','call_mcp_tool','read_mcp_resource'} <= names
+                assert not any(name.startswith('mcp__') for name in names)
+                catalog=child._tools._mcp_current.catalog_for_scope(ModelInputScopeKind.SUBAGENT)
+                assert 'fixture' in {item.server_id for item in catalog.servers}
+                assert root_only_id not in {item.server_id for item in catalog.servers}
                 assert not names.intersection({'query_schedules', 'manage_schedule', 'run_agent'})
                 if not root_only_ready:
                     # Actual Agent execution completed while ROOT_ONLY IO is
@@ -251,8 +258,8 @@ def test_process_loss_pending_agent_waits_before_final_provider_and_preserves_sc
             with psycopg.connect(database, row_factory=dict_row) as connection:
                 settled = connection.execute('''SELECT count(*) AS count
                     FROM pulsara_v3.tool_invocations i
-                    JOIN pulsara_v3.assistant_message_blocks b ON b.session_id=i.session_id
-                      AND b.assistant_entry_id=i.assistant_entry_id AND b.tool_call_id=i.tool_call_id
+                    JOIN pulsara_v3.content_parts b ON b.session_id=i.session_id AND b.type='tool_call'
+                      AND b.entry_id=i.assistant_entry_id AND b.tool_call_id=i.tool_call_id
                     JOIN pulsara_v3.tool_results r ON r.session_id=i.session_id AND r.invocation_id=i.id
                     WHERE i.session_id=%s AND b.tool_name='exec_process' ''',
                     (identities['agent_id'],)).fetchone()['count']

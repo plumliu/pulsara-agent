@@ -38,12 +38,17 @@ _TOKENIZERS = (
 )
 
 
-def lexical_predicate(column: str) -> str:
+def lexical_predicate(
+    column: str, *, analysis_columns: tuple[str, str] | None = None
+) -> str:
     return (
         "("
         + " OR ".join(
             f"{name} @@@ pdb.match(%s, tokenizer => %s)"
-            for name in (column, column + "_en", column + "_tech")
+            for name in (
+                column,
+                *(analysis_columns or (column + "_en", column + "_tech")),
+            )
         )
         + ")"
     )

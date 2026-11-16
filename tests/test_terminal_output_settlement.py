@@ -1,4 +1,4 @@
-"""A revision observer must not outrun its existing Host retention policy."""
+"""A revision observer settles memory pressure without losing unobserved bytes."""
 
 import os
 import sys
@@ -56,6 +56,8 @@ def test_revision_observation_settles_retention_when_append_callback_is_pending(
         assert (
             finished.output.retained_utf8_bytes + live.output.retained_utf8_bytes <= 160
         )
+        assert finished.output.body_candidate().text == "F" * 120 + "\n"
+        assert live.output.body_candidate().text == "L" * 120 + "\n"
     finally:
         release.set()
         registry.release_owner(owner, timeout_seconds=5)

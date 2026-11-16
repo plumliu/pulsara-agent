@@ -15,9 +15,9 @@ from pulsara_agent.ports.tool_execution import thaw_tool_json_object
 from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
-from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 from pulsara_agent.scheduling.requests import schedule_target
 from pulsara_agent.scheduling.service import ScheduledTaskService
+from pulsara_agent.scheduling.contracts import ScheduledTaskError
 from tests.support.model_config import test_model_resolution_snapshot as model_resolution_snapshot
 from tests.support.postgres import verified_postgres_provider
 from tests.test_hardcut_entry_parts import open_turn, read
@@ -25,7 +25,7 @@ from tests.test_hardcut_tool_settlement import executor
 
 pytestmark = pytest.mark.postgres
 VALUES = {"name": "Saved work", "prompt": "Keep this original task", "timezone": "Asia/Shanghai",
-    "permission_mode": "read-only", "schedule": {"kind": "interval", "anchor_at_utc": "2020-01-01T00:00:00+00:00", "seconds": 60}}
+    "permission_mode": "read-only", "schedule": {"kind": "interval", "anchor_at_utc": "2020-01-01T00:00:00+00:00", "seconds": 900}}
 
 
 @pytest.fixture
@@ -55,7 +55,8 @@ def service_for(repository, lease):
 
 
 def admit(repository, lease, intent, cut, tool_name, arguments):
-    assistant, call, attempt = random_id("entry"), "actual-schedule-call", random_id("attempt")
+    assistant, attempt = random_id("entry"), random_id("attempt")
+    call = "actual-schedule-call-" + assistant
     repository.commit_assistant_message(lease.guard, cut=cut, entry_id=assistant,
         blocks=(AssistantToolCallBlock(random_id("block"), call, tool_name, freeze_json(arguments)),),
         occurred_at=datetime.now(timezone.utc), actor_id="model:test", complete_turn=False,
@@ -79,7 +80,6 @@ async def produce(service, candidate, tool_name, arguments):
     return await owner._invoke_scheduled_management(tool_name=tool_name, arguments=arguments,
         tool_call_id=candidate.tool_call_id,
         invocation_context=NS(conversation_scope_kind="ROOT", effective_permission_mode=DEFAULT_PERMISSION_MODE),
-        page_budget=ToolResultPageBudget(tool_call_id=candidate.tool_call_id),
         invocation_started=monotonic(), observation_origin=ToolObservationOrigin.BUILTIN)
 
 
@@ -114,12 +114,12 @@ def test_query_producer_freezes_matching_rows_without_a_facts_reread(repository,
         service, reads = service_for(repository, lease)
         try:
             first = await service.create(session_id=lease.guard.session_id, values=VALUES)
-            second = await service.create(session_id=lease.guard.session_id, values={**VALUES, "schedule": {**VALUES["schedule"], "seconds": 120}})
+            second = await service.create(session_id=lease.guard.session_id, values={**VALUES, "schedule": {**VALUES["schedule"], "seconds": 1800}})
             arguments = {"target": schedule_target(first["id"])} if detail else {}
             candidate = admit(repository, lease, intent, cut, "query_schedules", arguments)
             reads.clear()
             result = await produce(service, candidate, "query_schedules", arguments)
-            assert [method for method, _ in reads] == (["read_scheduled_task"] if detail else ["list_scheduled_tasks"])
+            assert [method for method, _ in reads] == (["read_scheduled_task"] if detail else ["list_model_scheduled_tasks"])
             expected = {first["id"]: first["revision"]}
             if not detail:
                 expected[second["id"]] = second["revision"]
@@ -127,14 +127,14 @@ def test_query_producer_freezes_matching_rows_without_a_facts_reread(repository,
             # Later live configuration must not replace the query's original
             # config/revision pair while this known result is accepted.
             await service.mutate(task_id=first["id"], expected_revision=first["revision"],
-                action="update", values={**VALUES, "schedule": {**VALUES["schedule"], "seconds": 300}})
+                action="update", values={**VALUES, "schedule": {**VALUES["schedule"], "seconds": 3600}})
             read_count = len(reads)
             await accept(repository, lease, candidate, result, "query_schedules", arguments)
             value, facts = saved(repository, candidate)
             assert facts == {"schedule_revisions": expected}
-            public = value if detail else next(item for item in value["tasks"] if item["target"] == schedule_target(first["id"]))
-            assert public["schedule"]["seconds"] == 60
-            assert public["revision"] == first["revision"]  # E still owns this old public field.
+            public = next(item["value"] for item in value["content"] if item["type"] == "object" and item["value"]["target"] == schedule_target(first["id"]))
+            assert public["schedule"]["seconds"] == 900
+            assert set(public) == {"target", "name", "prompt", "schedule", "timezone", "permission_mode", "status", "next_run_at"}
             assert len(reads) == read_count
         finally:
             await service.aclose()
@@ -149,19 +149,26 @@ def test_management_producer_freezes_actual_post_change_rows_including_both_swit
         try:
             source = await service.create(session_id=lease.guard.session_id, values=VALUES, status="ACTIVE")
             destination = await service.create(session_id=lease.guard.session_id,
-                values={**VALUES, "schedule": {**VALUES["schedule"], "seconds": 120}})
+                values={**VALUES, "schedule": {**VALUES["schedule"], "seconds": 1800}})
             if switch:
-                arguments = {"action": "switch", "target": schedule_target(source["id"]), "expected_revision": source["revision"],
-                    "replacement": ({"kind": "existing", "target": schedule_target(destination["id"]), "expected_revision": destination["revision"]}
-                        if switch == "existing" else {"kind": "create", "values": {**VALUES, "schedule": {**VALUES["schedule"], "seconds": 120}}})}
+                arguments = {"action": "switch", "target": schedule_target(source["id"]),
+                    "replacement": ({"kind": "existing", "target": schedule_target(destination["id"])}
+                        if switch == "existing" else {"kind": "create", "values": {key: val for key, val in {**VALUES, "schedule": {**VALUES["schedule"], "seconds": 1800}}.items() if key != "permission_mode"}})}
             else:
-                arguments = {"action": "update", "target": schedule_target(source["id"]), "expected_revision": source["revision"],
-                    "values": {**VALUES, "schedule": {**VALUES["schedule"], "seconds": 300}}}
+                arguments = {"action": "update", "target": schedule_target(source["id"]),
+                    "values": {"schedule": {**VALUES["schedule"], "seconds": 3600}}}
+            # The model's revision authority comes only from an actually accepted
+            # complete query result in this session, never current live rows.
+            query_arguments = {"status": "ALL"}
+            query = admit(repository, lease, intent, cut, "query_schedules", query_arguments)
+            query_result = await produce(service, query, "query_schedules", query_arguments)
+            await accept(repository, lease, query, query_result, "query_schedules", query_arguments)
+            cut = repository.prepare_provider_input_cut(lease.guard, turn_id=intent.turn_id, deadline_monotonic=monotonic()+30)
             candidate = admit(repository, lease, intent, cut, "manage_schedule", arguments)
             result = await produce(service, candidate, "manage_schedule", arguments)
             expected = {source["id"]: source["revision"]+1}
             if switch:
-                active_id = result.content.public_fields["active"]["target"]["task_id"]
+                active_id = result.content.public_fields["target"]["task_id"]
                 expected[active_id] = destination["revision"]+1 if switch == "existing" else 1
             assert result.result_facts == {"schedule_revisions": expected}
             assert set(result.result_facts) == {"schedule_revisions"}
@@ -173,14 +180,125 @@ def test_management_producer_freezes_actual_post_change_rows_including_both_swit
             value, facts = saved(repository, candidate)
             assert facts == {"schedule_revisions": expected}
             if switch:
-                assert value["paused"]["status"] == "PAUSED" and value["active"]["status"] == "ACTIVE"
-                assert value["paused"]["revision"] == expected[source["id"]]
-                assert value["active"]["revision"] == expected[active_id]
-                assert value["active"]["schedule"]["seconds"] == 120
+                assert value["target"] == schedule_target(active_id)
+                assert value["meta"]["schedule_status"] == "ACTIVE"
+                assert value["content"] == [{"type":"text", "value":"已暂停原计划并启用替换计划。"}]
             else:
-                assert value["status"] == "ACTIVE" and value["revision"] == expected[source["id"]]
-                assert value["schedule"]["seconds"] == 300
+                assert value["target"] == schedule_target(source["id"])
+                assert value["content"] == [{"type":"text", "value":"已更新定时任务。"}]
             assert len(reads) == read_count
+        finally:
+            await service.aclose()
+    asyncio.run(run())
+
+
+def test_native_queries_are_session_scoped_and_management_uses_latest_saved_revision(repository):
+    async def run():
+        lease, intent, _, cut = open_turn(repository, text="private schedule authority\n")
+        other_lease, _, _, _ = open_turn(repository, text="other schedule session\n")
+        service, _ = service_for(repository, lease)
+        other, _ = service_for(repository, other_lease)
+        try:
+            own = await service.create(session_id=lease.guard.session_id, values=VALUES)
+            foreign = await other.create(session_id=other_lease.guard.session_id, values=VALUES)
+            with pytest.raises(ScheduledTaskError, match="先用 query_schedules"):
+                await service.invoke_manage({"action":"pause","target":schedule_target(own["id"])},
+                    default_session_id=lease.guard.session_id, permission_mode=DEFAULT_PERMISSION_MODE)
+            observed = await service.invoke_query({}, default_session_id=lease.guard.session_id,
+                permission_mode=DEFAULT_PERMISSION_MODE)
+            assert [part.value["target"] for part in observed.value.content] == [schedule_target(own["id"])]
+            with pytest.raises(ScheduledTaskError, match="不属于当前会话"):
+                await service.invoke_query({"target":schedule_target(foreign["id"])},
+                    default_session_id=lease.guard.session_id, permission_mode=DEFAULT_PERMISSION_MODE)
+
+            async def accept_query():
+                nonlocal cut
+                candidate = admit(repository, lease, intent, cut, "query_schedules", {})
+                result = await produce(service, candidate, "query_schedules", {})
+                await accept(repository, lease, candidate, result, "query_schedules", {})
+                cut = repository.prepare_provider_input_cut(lease.guard, turn_id=intent.turn_id, deadline_monotonic=monotonic()+30)
+                return candidate
+            await accept_query()
+            updated = await service.mutate(task_id=own["id"], expected_revision=own["revision"],
+                action="update", values={"prompt":"User changed the saved prompt"})
+            with pytest.raises(ScheduledTaskError, match="任务已修改，请重新加载"):
+                await service.invoke_manage({"action":"delete","target":schedule_target(own["id"])},
+                    default_session_id=lease.guard.session_id, permission_mode=DEFAULT_PERMISSION_MODE)
+            await accept_query()
+            paused = await service.invoke_manage({"action":"pause","target":schedule_target(own["id"])},
+                default_session_id=lease.guard.session_id, permission_mode=DEFAULT_PERMISSION_MODE)
+            assert paused.result_facts == {"schedule_revisions":{own["id"]:updated["revision"]}}
+            actual = await service.get(own["id"])
+            assert actual["prompt"] == "User changed the saved prompt"
+            assert actual["permission_mode"] == VALUES["permission_mode"]
+            assert actual["status"] == "PAUSED"
+        finally:
+            await service.aclose()
+            await other.aclose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("action", ["pause", "resume", "delete"])
+def test_remaining_management_actions_use_the_saved_snapshot_without_public_revision(repository, action):
+    async def run():
+        lease, intent, _, cut = open_turn(repository, text="schedule action\n")
+        service, _ = service_for(repository, lease)
+        try:
+            task = await service.create(session_id=lease.guard.session_id, values=VALUES,
+                status="PAUSED" if action == "resume" else "ACTIVE")
+            query = admit(repository, lease, intent, cut, "query_schedules", {})
+            await accept(repository, lease, query, await produce(service, query, "query_schedules", {}), "query_schedules", {})
+            cut = repository.prepare_provider_input_cut(lease.guard, turn_id=intent.turn_id, deadline_monotonic=monotonic()+30)
+            arguments = {"action":action,"target":schedule_target(task["id"])}
+            candidate = admit(repository, lease, intent, cut, "manage_schedule", arguments)
+            result = await produce(service, candidate, "manage_schedule", arguments)
+            await accept(repository, lease, candidate, result, "manage_schedule", arguments)
+            value, facts = saved(repository, candidate)
+            assert value["meta"]["status"] == "SUCCESS" and value["target"] == schedule_target(task["id"])
+            assert set(facts["schedule_revisions"]) == {task["id"]}
+            if action == "delete":
+                with pytest.raises(KeyError):
+                    await service.get(task["id"])
+                assert set(value["meta"]) == {"status"}
+            else:
+                actual = await service.get(task["id"])
+                assert actual["status"] == ("ACTIVE" if action=="resume" else "PAUSED")
+                assert actual["permission_mode"] == VALUES["permission_mode"]
+                assert value["meta"]["schedule_status"] == actual["status"]
+                assert value["meta"]["next_run_at"] == actual["next_run_at"]
+        finally:
+            await service.aclose()
+    asyncio.run(run())
+
+
+def test_creation_defaults_and_permission_are_frozen_by_the_actual_accepting_owner(repository):
+    from zoneinfo import ZoneInfo
+    from pulsara_agent.primitives.permission import PermissionMode
+    async def run():
+        lease, intent, _, cut = open_turn(repository, text="create schedule\n")
+        service, _ = service_for(repository, lease)
+        try:
+            arguments = {"action":"create", "values":{"name":" 原名称 ","prompt":"原文\r\n不变","schedule":{"kind":"interval","seconds":900}}}
+            candidate = admit(repository, lease, intent, cut, "manage_schedule", arguments)
+            before, _ = await service._read("scheduled_next_time")
+            result = await produce(service, candidate, "manage_schedule", arguments)
+            after, _ = await service._read("scheduled_next_time")
+            await accept(repository, lease, candidate, result, "manage_schedule", arguments)
+            value, facts = saved(repository, candidate)
+            task = await service.get(value["target"]["task_id"])
+            assert task["name"] == " 原名称 " and task["prompt"] == "原文\r\n不变"
+            assert task["timezone"] == "Asia/Shanghai" and task["status"] == "PAUSED"
+            assert task["permission_mode"] == DEFAULT_PERMISSION_MODE.value
+            anchor = datetime.fromisoformat(task["schedule"]["anchor_at_utc"])
+            assert before.replace(microsecond=0) <= anchor <= after
+            assert facts == {"schedule_revisions":{task["id"]:1}}
+            # A later turn's different authority cannot silently rewrite it.
+            observed = await service.invoke_query({}, default_session_id=lease.guard.session_id,
+                permission_mode=PermissionMode.BYPASS_PERMISSIONS)
+            assert observed.value.content[0].value["permission_mode"] == DEFAULT_PERMISSION_MODE.value
+            daily = await service.create(session_id=lease.guard.session_id, values={
+                "name":"daily","prompt":"p","permission_mode":"read-only","schedule":{"kind":"daily","time":"09:00"}})
+            assert daily["schedule"]["start_date"] == after.astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat()
         finally:
             await service.aclose()
     asyncio.run(run())

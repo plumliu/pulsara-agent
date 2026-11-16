@@ -11,7 +11,7 @@ from psycopg.rows import dict_row
 
 from pulsara_agent.identity import random_id
 from pulsara_agent.llm.input import PromptContent, MessageRole, text_part_values
-from pulsara_agent.model_input.lowering import decode_tool_result_observation
+from tests.test_agent_code_mode_execution import _native_fields
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.test_round4_plan_host import (
@@ -61,22 +61,22 @@ class WaitControlModel(_DetachedDraftModel):
             else:
                 self.control_requests.append(request)
                 if step == 0:
-                    arguments = {"agents": [self.selected_agent], "until": self.mode,
-                                 "timeout_seconds": 300}
+                    arguments = ({"works":[self.selected_work]} if self.mode=="works" else {"agents":[self.selected_agent]})
+                    arguments["timeout_seconds"]=300
                     code = "const outcome=await tools.wait_agent(" + json.dumps(arguments) + ");"
-                    code += ('console.log("UNREACHABLE_AFTER_STOP");' if self.mode == "work_end"
+                    code += ('console.log("UNREACHABLE_AFTER_STOP");' if self.mode == "works"
                              else 'console.log(outcome);')
                     events = _tool_call("exec_cell", random_id("call"), {"code": code})
                 elif step == 1:
                     message = next(m for m in reversed(request.compiled_input.messages)
                                    if m.role is MessageRole.TOOL_RESULT)
-                    accepted = json.loads(decode_tool_result_observation(text_part_values(message.content)[0])["body"])
+                    accepted = _native_fields(text_part_values(message.content)[0])
                     self.control_cell = accepted["target"]
                     # Keep ROOT active in a real native observation while the Cell
                     # waits; unrelated messages must not complete either wait.
                     events = (_tool_call("manage_cell", random_id("call"),
                         {"action": "wait", "target": self.control_cell, "yield_time_ms": 30_000})
-                        if self.mode == "idle" else _text("ROOT_CONTROL_FINISHED"))
+                        if self.mode == "agents" else _text("ROOT_CONTROL_FINISHED"))
                 else:
                     events = _text("ROOT_CONTROL_FINISHED")
 
@@ -109,7 +109,7 @@ class WaitControlModel(_DetachedDraftModel):
             yield event
 
 
-@pytest.mark.parametrize("mode", ["work_end", "idle"])
+@pytest.mark.parametrize("mode", ["works", "agents"])
 def test_wait_observers_settle_on_cell_stop_or_natural_completion_after_human_input(
     mode,
     tmp_path,
@@ -191,7 +191,7 @@ def test_wait_observers_settle_on_cell_stop_or_natural_completion_after_human_in
                 return await root._io.run(read, deadline_monotonic=monotonic() + 10)
 
             await eventually(wait_admitted)
-            if mode == "work_end":
+            if mode == "works":
                 await asyncio.wait_for(control, 10)
                 cell = root.code_mode_cells()[0]
                 assert cell["pending_calls"] == 1
@@ -236,17 +236,12 @@ def test_wait_observers_settle_on_cell_stop_or_natural_completion_after_human_in
                     "UNSELECTED_AGENT_MESSAGE" in rendered
                     and "HUMAN_STEER_CONTROL" in rendered
                 )
-                bodies = [
-                    decode_tool_result_observation(
-                        text_part_values(message.content)[0]
-                    )["body"]
-                    for message in final_input.messages
-                    if message.role is MessageRole.TOOL_RESULT
-                ]
-                assert any(json.loads(body).get("state") == "completed" for body in bodies)
+                bodies=[_native_fields(text_part_values(message.content)[0])
+                    for message in final_input.messages if message.role is MessageRole.TOOL_RESULT]
+                assert any(body["meta"].get("cell_status")=="completed" for body in bodies)
                 from tests.test_agent_code_mode_execution import _formal_cell_rows
                 records = [record for _, record in await asyncio.to_thread(_formal_cell_rows, root)]
-                assert any(record.get("kind") == "log" and json.loads(record["text"]).get("state") == "settled"
+                assert any(record.get("kind") == "log" and json.loads(record["text"]).get("meta",{}).get("wait_reason") == "condition_met"
                            for record in records)
             actual = await root._io.run(
                 root.repository.query_agent_work,
@@ -254,7 +249,7 @@ def test_wait_observers_settle_on_cell_stop_or_natural_completion_after_human_in
                 work_id=model.selected_work["work_id"],
                 deadline_monotonic=monotonic() + 10,
             )
-            assert actual["status"] == ("running" if mode == "work_end" else "completed")
+            assert actual["status"] == ("running" if mode == "works" else "completed")
         finally:
             model.release.set()
             model.other_send.set()

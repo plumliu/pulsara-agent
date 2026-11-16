@@ -1,7 +1,8 @@
+import { TOOL_BUSINESS_MEDIA_TYPE, decodeToolBusinessValue, toolBusinessText, type ToolBusinessValue } from './tool-business-value';
 import type { McpPromptPage, McpPromptTarget, McpPromptPreview } from './mcp-prompts';
 import { requestExecutionFromWire, type RequestExecution } from './request-execution';
 import { parseMcpAuthorizationResult, parsePublicPackageId, type McpAuthorizationRequest, type McpAuthorizationResult } from './mcp-authorization-result';
-import { parsePresentationResult, type PresentationRequest } from './presentation-targets';
+import { parsePresentationTargets, type PresentationRequest } from './presentation-targets';
 import { desktopHost } from './desktop-host';
 import { randomIdentity, isCanonicalIdentity } from './identity';
 import type { FilePreviewApi } from './file-preview';
@@ -524,6 +525,7 @@ export type RuntimeInteractionSummary =
   | {
     id: string;
     kind: 'plan-question' | 'plan-draft';
+    expiresAtUtc: string;
     workflowId: string;
     workflowRevision: number;
   };
@@ -544,7 +546,6 @@ export type RuntimeInteractionContent =
       description: string;
       recommended: boolean;
     }>;
-    allowFreeText: boolean;
   }
   | {
     kind: 'plan-draft';
@@ -802,7 +803,7 @@ export interface RuntimeConnection {
   readPromptImage(image: CanonicalPromptImagePart): Promise<Uint8Array>;
   readPromptForEdit(content: CanonicalPromptContent): Promise<EditablePromptContent>;
   compactContext(): Promise<CommandReceipt>;
-  enterPlan(reason: string, permission: PermissionMode): Promise<CommandReceipt>;
+  enterPlan(permission: PermissionMode): Promise<CommandReceipt>;
   listMcpPrompts(query: string, offset: number, signal: AbortSignal): Promise<McpPromptPage>;
   previewMcpPrompt(target: McpPromptTarget, args: Record<string, string>, signal: AbortSignal): Promise<McpPromptPreview>;
   readInteraction(interaction: RuntimeInteractionSummary): Promise<RuntimeInteractionContent>;
@@ -914,7 +915,7 @@ interface ProtocolEntry {
     source_coverage_reason?: string; output_unavailability_reason?: string; result_facts_json?: string;
   };
   input_origin?: string;
-  input_source?: { queue_item_id?: string; command_id?: string; delivery_mode?: string; source_session_id?: string; source_work_id?: string; source_turn_id?: string; source_tool_attempt_id?: string; work_title?: string };
+  input_source?: { queue_item_id?: string; command_id?: string; delivery_mode?: string; source_session_id?: string; source_work_id?: string; source_turn_id?: string; source_tool_attempt_id?: string; source_cell_id?: string; source_record_sequence?: string | number; cell_output_kind?: string; work_title?: string };
   scheduled_input?: { task_id: string; task_revision: string | number; due_at_utc: string; trigger_source: 'TIMER' | 'RUN_ONCE' };
   visualizations?: Array<{
     ordinal: string | number; state: string; content_digest?: string;
@@ -949,7 +950,7 @@ export interface ProtocolCanonicalControl {
   prompt_queue?: Array<{
     queue_item_id?: string; command_id?: string; queue_sequence?: string | number;
     status?: string; delivery_mode?: string; target_turn_id?: string; accepted_at_utc?: string; input_origin?: string;
-    source_session_id?: string; source_work_id?: string; source_turn_id?: string; source_tool_attempt_id?: string; work_title?: string; scheduled_input?: ProtocolEntry['scheduled_input']; waiting_on?: string[];
+    source_session_id?: string; source_work_id?: string; source_turn_id?: string; source_tool_attempt_id?: string; source_cell_id?: string; source_record_sequence?: string | number; cell_output_kind?: string; work_title?: string; scheduled_input?: ProtocolEntry['scheduled_input']; waiting_on?: string[];
     content?: ProtocolContent; requested_permission_mode?: string; permission?: { requested_mode?: string; effective_mode?: string };
   }>;
   prompt_queue_total_count?: string | number;
@@ -3129,11 +3130,10 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     this.presentationWatermark = sequence;
     const result = entry.tool_result;
     if (this.role !== 'controller' || entry.entry_kind !== 'TOOL_RESULT' || entry.scope_kind !== 'ROOT'
-      || entry.entry_owner_kind === 'IMPORTED_HISTORY' || result?.result_state !== 'SUCCESS'
-      || result.source_coverage !== 'COMPLETE' || result.output_omitted === true
+      || entry.entry_owner_kind === 'IMPORTED_HISTORY' || !result
       || !result.assistant_entry_id || !result.tool_call_id) return;
     const signal = this.presentationEpoch.signal;
-    const read = async (toolName: string) => {
+    const ownsCall = async (toolName: string) => {
       let assistant = this.entries.get(result.assistant_entry_id!);
       if (!assistant) {
         const window = await this.historyPost<BrowserWindow>('window', { anchor_entry_id: result.assistant_entry_id, maximum_entries: 1, maximum_serialized_bytes: 2 << 20 }, signal);
@@ -3143,18 +3143,29 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       if (signal.aborted || this.closed || assistant?.scope_kind !== 'ROOT' || assistant.turn_id !== entry.turn_id
         || assistant.entry_owner_kind === 'IMPORTED_HISTORY'
         || !assistant.blocks?.some(block => block.block_kind === 'TOOL_CALL' && block.tool_call_id === result.tool_call_id && block.tool_name === toolName)) return;
-      await this.hydrateContentReference(entry.content, { entry_id: entry.entry_id }, '展示请求暂时无法读取。', signal);
-      if (signal.aborted || this.closed || entry.content?.inline_content === undefined) return;
-      return decodeBase64(entry.content.inline_content);
+      return true;
     };
-    for (const listener of this.presentationListeners) listener({ sequence, signal, read: async () => {
-      const text = await read('open_in_pulsara');
-      return text === undefined ? undefined : parsePresentationResult(text);
-    } });
-    for (const listener of this.authorizationListeners) listener({ signal, read: async () => {
-      const text = await read('manage_capability');
-      return text === undefined ? undefined : parseMcpAuthorizationResult(text);
-    } });
+    let acceptedPresentation: ReturnType<typeof parsePresentationTargets>;
+    let acceptedAuthorization: ReturnType<typeof parseMcpAuthorizationResult>;
+    if (result.result_facts_json) {
+      try {
+        const facts: unknown = JSON.parse(result.result_facts_json);
+        if (facts && typeof facts === 'object' && !Array.isArray(facts)) {
+          acceptedPresentation = parsePresentationTargets((facts as Record<string, unknown>).presentation_targets);
+          acceptedAuthorization = parseMcpAuthorizationResult((facts as Record<string, unknown>).authorization);
+        }
+      } catch { /* An invalid private fact cannot request a view. */ }
+    }
+    if (acceptedPresentation?.targets.length) {
+      const accepted = acceptedPresentation;
+      for (const listener of this.presentationListeners) listener({ sequence, signal,
+        read: async () => await ownsCall('open_in_pulsara') ? accepted : undefined });
+    }
+    if (acceptedAuthorization) {
+      const accepted = acceptedAuthorization;
+      for (const listener of this.authorizationListeners) listener({ signal,
+        read: async () => await ownsCall('manage_capability') ? accepted : undefined });
+    }
   }
 
   chatWriteHeaders(): Record<string, string> {
@@ -3574,8 +3585,8 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     return this.command('COMPACT_CONTEXT');
   }
 
-  enterPlan(reason: string, permission: PermissionMode): Promise<CommandReceipt> {
-    return this.command('ENTER_PLAN', { plan_reason: reason, requested_permission_mode: protocolPermissionModes[permission] });
+  enterPlan(permission: PermissionMode): Promise<CommandReceipt> {
+    return this.command('ENTER_PLAN', { requested_permission_mode: protocolPermissionModes[permission] });
   }
 
   async readInteraction(
@@ -3606,7 +3617,6 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
             description?: string;
             recommended?: boolean;
           }>;
-          allow_free_text?: boolean;
         };
         error?: ProtocolError;
       }>('read-plan-question', { interaction_id: interaction.id });
@@ -3624,7 +3634,6 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
           description: option.description ?? '',
           recommended: Boolean(option.recommended),
         })),
-        allowFreeText: Boolean(question.allow_free_text),
       };
     }
 
@@ -3753,7 +3762,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       const continuationTurnId = outcome.continuation_turn_id || undefined;
       if (
         observedDecision !== resolution.decision
-        || (resolution.decision !== 'cancel') !== Boolean(continuationTurnId)
+        || (resolution.decision === 'approve') !== Boolean(continuationTurnId)
       ) {
         throw new RuntimeApiError('INTERACTION_RESPONSE_INVALID', '规划结果与本次选择不一致。', true);
       }
@@ -4649,13 +4658,6 @@ function projectCapabilitySnapshot(value: Record<string, unknown>): CapabilitySn
           })),
         };
       }),
-      collisions: recordArray(mcp.collisions).map((collision) => ({
-        name: String(collision.name ?? ''),
-        members: recordArray(collision.members).map((member) => ({
-          serverId: String(member.server_id ?? ''),
-          toolName: String(member.tool_name ?? ''),
-        })),
-      })),
     },
   };
 }
@@ -4961,6 +4963,7 @@ function projectEntries(
           : promptContent ? promptContentTextProjection(promptContent) : '',
         promptContent,
         inputOrigin: entry.input_origin || undefined,
+        cellOutput: projectCellOutput(entry.input_source, entry.input_origin),
         inputSource: projectInputSource(entry.input_source, entry.input_origin),
       });
       continue;
@@ -5014,6 +5017,7 @@ function projectEntries(
         pendingTrace.subtitle = succeeded ? '已完成' : toolFailureLabel(resultState);
         pendingTrace.resultText = result;
         pendingTrace.resultContent = projectedResult.content;
+        pendingTrace.businessValue = projectedResult.businessValue;
         pendingTrace.resultEntryId = entry.entry_id;
         pendingTrace.attemptId = resultRef?.attempt_id;
         target!.sourceEntryIds = [...(target!.sourceEntryIds ?? [target!.id]), entry.entry_id];
@@ -5032,6 +5036,7 @@ function projectEntries(
         status: toolResultStatus(resultRef?.result_state),
         resultText: projectedResult.text,
         resultContent: projectedResult.content,
+        businessValue: projectedResult.businessValue,
         resultEntryId: entry.entry_id,
         resultState: resultRef?.result_state,
         resultSummary: summarizeToolResult(undefined, projectedResult.text),
@@ -5068,7 +5073,7 @@ function projectEntries(
       kind: 'tool', toolName: source.tool_name, title: source.tool_name || '操作结果',
       argumentsJson: source.original_arguments_json, subtitle: '已记录',
       status: toolResultStatus(source.result_state), resultText: result.text,
-      resultContent: result.content, resultEntryId: entry.entry_id, resultState: source.result_state,
+      resultContent: result.content, businessValue: result.businessValue, resultEntryId: entry.entry_id, resultState: source.result_state,
       resultSummary: summarizeToolResult(source.tool_name, result.text), outputBody: projectToolOutput(source),
       resultFacts: projectToolResultFacts(source),
     };
@@ -5194,6 +5199,12 @@ function inputSourceIdentity(
   return {sourceKind: 'system'};
 }
 
+function projectCellOutput(item: {source_cell_id?: string;source_turn_id?: string;source_tool_attempt_id?: string;source_record_sequence?: string | number;cell_output_kind?: string} | undefined, origin?: string): Message['cellOutput'] {
+  if (origin !== 'CELL_OUTPUT' || !item?.source_cell_id || !item.source_turn_id || !item.source_tool_attempt_id || !item.cell_output_kind) return undefined;
+  return {cellId:item.source_cell_id, sourceTurnId:item.source_turn_id, sourceExecAttemptId:item.source_tool_attempt_id,
+    recordSequence:numeric(item.source_record_sequence),kind:item.cell_output_kind};
+}
+
 function projectInputSource(
   item: ProtocolEntry['input_source'], origin?: string,
 ): Message['inputSource'] {
@@ -5222,6 +5233,7 @@ function projectQueuedPrompts(control: ProtocolCanonicalControl): QueuedPrompt[]
         sequence: decimal(item.queue_sequence),
         status: 'pending' as const,
         inputOrigin: item.input_origin,
+        cellOutput: projectCellOutput(item, item.input_origin),
         ...(item.input_origin === 'AGENT_INSTRUCTION' ? {workTitle: item.work_title ?? null} : {}),
         scheduledInput: projectScheduledInput(item.scheduled_input),
         waitingOn: item.waiting_on?.length ? item.waiting_on : undefined,
@@ -5477,10 +5489,10 @@ function projectInteraction(
   const kind = String(open?.kind ?? '');
   if (!id || !workflowId || workflowRevision < 1) return undefined;
   if (kind === 'QUESTION') {
-    return { id, kind: 'plan-question', workflowId, workflowRevision };
+    return { id, kind: 'plan-question', workflowId, workflowRevision, expiresAtUtc: String(open?.expires_at_utc ?? '') };
   }
   if (kind === 'DRAFT_REVIEW') {
-    return { id, kind: 'plan-draft', workflowId, workflowRevision };
+    return { id, kind: 'plan-draft', workflowId, workflowRevision, expiresAtUtc: String(open?.expires_at_utc ?? '') };
   }
   return undefined;
 }
@@ -5600,15 +5612,15 @@ function decodeContent(
 
 function decodeToolResultContent(entry: ProtocolEntry): {
   text: string;
+  businessValue?: ToolBusinessValue;
   content?: CanonicalPromptContent;
 } {
-  if (entry.content?.media_type !== PROMPT_BODY_MEDIA_TYPE || entry.content.inline_content === undefined) {
-    return { text: decodeContent(entry.content) };
+  if (entry.content?.media_type === TOOL_BUSINESS_MEDIA_TYPE) {
+    if (entry.content.inline_content === undefined) return {text: ''};
+    const businessValue = decodeToolBusinessValue(decodeBase64(entry.content.inline_content));
+    return {text: toolBusinessText(businessValue), businessValue};
   }
-  const content = decodePromptContent(entry.content, {
-    kind: 'entry', entryId: entry.entry_id,
-  });
-  return { text: promptContentTextProjection(content), content };
+  return {text: decodeContent(entry.content)};
 }
 
 function projectScheduledInput(value: ProtocolEntry['scheduled_input']): Message['scheduledInput'] {

@@ -1,174 +1,143 @@
-"""Small read-only contract for recovering saved ROOT conversation content."""
+"""Complete read-only conversation tool inputs and installed-history scope."""
 
 from dataclasses import dataclass
-
 from pulsara_agent.identity import ID_PAYLOAD_PATTERN
-
 
 SESSION_QUERY_TOOL_NAMES = frozenset(
     {"search_sessions", "search_session_content", "read_session_content"}
 )
-SESSION_QUERY_MAX_ITEMS = 50  # Existing cold-search page budget, never corpus size.
-SESSION_READ_DEFAULT_CHARS = 20_000
-SESSION_READ_MAX_CHARS = 32_000
+SESSION_QUERY_MAX_ITEMS = (
+    50  # User-interface database page size, not model search scope.
+)
+
+
+def _target_schema(kind, field, id_kind):
+    return {
+        "type": "object",
+        "properties": {
+            "kind": {"const": kind},
+            field: {"type": "string", "pattern": rf"^{id_kind}:{ID_PAYLOAD_PATTERN}$"},
+        },
+        "required": ["kind", field],
+        "additionalProperties": False,
+    }
 
 
 def session_target_schema():
-    return {
-        "type": "object",
-        "properties": {
-            "kind": {"const": "SESSION"},
-            "session_id": {
-                "type": "string", "minLength": 34, "maxLength": 34,
-                "pattern": rf"^session:{ID_PAYLOAD_PATTERN}$",
-                "description": "Exact session ID.",
-            },
-        },
-        "required": ["kind", "session_id"],
-        "additionalProperties": False,
-    }
+    return _target_schema("SESSION", "session_id", "session")
 
 
 def session_entry_target_schema():
-    return {
-        "type": "object",
-        "properties": {
-            "kind": {"const": "SESSION_ENTRY"},
-            "session_id": {
-                "type": "string", "minLength": 34, "maxLength": 34,
-                "pattern": rf"^session:{ID_PAYLOAD_PATTERN}$",
-                "description": "Exact session ID; omit for this conversation.",
-            },
-            "entry_id": {
-                "type": "string", "minLength": 32, "maxLength": 32,
-                "pattern": rf"^entry:{ID_PAYLOAD_PATTERN}$",
-                "description": "Exact entry ID in the selected session.",
-            },
-        },
-        "required": ["kind", "entry_id"],
-        "additionalProperties": False,
-    }
+    return _target_schema("SESSION_ENTRY", "entry_id", "entry")
 
 
-def session_entry_target(session_id: str, entry_id: str):
-    return {"kind": "SESSION_ENTRY", "session_id": session_id, "entry_id": entry_id}
+def session_entry_target(entry_id):
+    return {"kind": "SESSION_ENTRY", "entry_id": entry_id}
 
 
 @dataclass(frozen=True, slots=True)
 class SessionContentRange:
-    """Actual call's installed raw suffix floor, with its active-request exclusion."""
-
     through_sequence: int
     excluded_entry_id: str | None = None
 
     def __post_init__(self):
         if type(self.through_sequence) is not int or self.through_sequence < 0:
             raise ValueError("invalid session content range")
-        if self.excluded_entry_id is not None and (
-            not isinstance(self.excluded_entry_id, str) or not self.excluded_entry_id
-        ):
-            raise ValueError("invalid active request exclusion")
 
 
-def session_query_input_schema(name: str, *, default_chars: int, maximum_chars: int):
-    properties = {
-        "cursor": {
-            "type": "string",
-            "minLength": 1,
-            "description": "Copy cursor from this tool's next.arguments.",
-        },
-        "limit": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": SESSION_QUERY_MAX_ITEMS,
-            "default": 20,
-        },
-    }
-    if name in {"search_sessions", "search_session_content"}:
-        properties["query"] = {
-            "type": "string",
-            "description": (
-                "Nonblank Chinese/English natural-language query or technical identifiers."
-                if name == "search_session_content"
-                else "Title/message keywords; omitted or blank lists by activity."
-            ),
-        }
-        if name == "search_session_content":
-            properties["query"].update(minLength=1, pattern=r"\S")
+def session_query_input_schema(name):
     if name == "search_sessions":
-        properties["lifecycle"] = {
-            "type": "string",
-            "enum": ["ALL", "OPEN", "ARCHIVED"],
-            "description": "Default ALL.",
+        properties = {
+            "query": {"type": "string"},
+            "lifecycle": {"type": "string", "enum": ["ALL", "OPEN", "ARCHIVED"]},
+        }
+        required = []
+    elif name == "search_session_content":
+        properties = {
+            "target": session_target_schema(),
+            "query": {"type": "string", "minLength": 1, "pattern": r"\S"},
+        }
+        required = ["target", "query"]
+    elif name == "read_session_content":
+        return {
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"target": target, "limit": limit},
+                    "required": ["target", "limit"],
+                    "additionalProperties": False,
+                }
+                for target, limit in (
+                    (session_target_schema(), {"type": "integer", "maximum": -1}),
+                    (session_entry_target_schema(), {"type": "integer", "not": {"const": 0}}),
+                )
+            ]
         }
     else:
-        properties.update(
-            {
-                "target": session_target_schema(),
-                "include_tools": {
-                    "type": "boolean",
-                    "description": (
-                        "Also search saved tool names/arguments/results, excluding the three session-query tools' own calls/results. Default false."
-                        if name == "search_session_content"
-                        else "Include historical tool calls (names/arguments) and saved public result bodies. Default false."
-                    ),
-                },
-            }
-        )
-    if name == "read_session_content":
-        properties.update(
-            {
-                "target": {"oneOf": [session_target_schema(), session_entry_target_schema()]},
-                "direction": {
-                    "type": "string",
-                    "enum": ["older", "newer"],
-                    "description": (
-                        "SESSION_ENTRY: default newer, anchor first; older reads preceding messages, newer following. Without an anchor: default older; older starts latest, newer earliest."
-                    ),
-                },
-                "max_chars": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": maximum_chars,
-                    "default": default_chars,
-                    "description": "Total message-text characters on this page.",
-                },
-            }
-        )
-    budgets = {"limit", "max_chars"} if name == "read_session_content" else {"limit"}
-    first = {key: value for key, value in properties.items() if key != "cursor"}
-    continuation = {
-        key: value for key, value in properties.items() if key in budgets | {"cursor"}
-    }
+        raise ValueError("Unknown history tool")
     return {
         "type": "object",
-        "oneOf": [
-            {
-                "type": "object",
-                "properties": first,
-                "required": ["query"] if name == "search_session_content" else [],
-                "additionalProperties": False,
-            },
-            {
-                "type": "object",
-                "properties": continuation,
-                "required": ["cursor"],
-                "additionalProperties": False,
-            },
-        ],
+        "properties": properties,
+        "required": required,
+        "additionalProperties": False,
     }
+
+
+def session_query_result_schema(name):
+    """The complete history projection returned to JS, including err.result."""
+    from pulsara_agent.ports.tool_execution import tool_business_value_schema
+
+    if name == "search_sessions":
+        properties = {
+            "target": session_target_schema(),
+            "title": {"type": "string"},
+            "workspace_path": {"type": "string"},
+            "updated_at": {"type": "string", "format": "date-time"},
+            "matched_in": {"enum": ["ENTRY", "TITLE"]},
+        }
+        required = ["target", "title", "workspace_path", "updated_at"]
+    elif name == "search_session_content":
+        properties = {"target": session_entry_target_schema(), "text": {"type": "string"}}
+        required = list(properties)
+    elif name == "read_session_content":
+        properties = {
+            "target": session_entry_target_schema(),
+            "role": {"enum": ["user message", "user steer", "assistant commentary", "assistant final answer"]},
+            "at": {"type": "string", "format": "date-time"},
+            "text": {"type": "string"},
+        }
+        required = list(properties)
+    else:
+        raise ValueError("Unknown history tool")
+    record = {"type": "object", "properties": properties, "required": required,
+        "additionalProperties": False}
+    content = {"type": "array", "items": {"oneOf": [
+        {"type": "object", "properties": {"type": {"const": "text"}, "value": {"type": "string"}},
+            "required": ["type", "value"], "additionalProperties": False},
+        {"type": "object", "properties": {"type": {"const": "object"}, "value": record},
+            "required": ["type", "value"], "additionalProperties": False},
+    ]}}
+    return tool_business_value_schema(content_schema=content, statuses=("SUCCESS", "ERROR", "CANCELLED"))
 
 
 def session_content_range(facts):
     """Use the actual installed compile cut; never read latest compaction here."""
-    from pulsara_agent.model_input.contracts import ContextBindingBaseKind, CompactionSnapshotCarrier
-    binding=facts.context_binding_fact
+    from pulsara_agent.model_input.contracts import (
+        ContextBindingBaseKind,
+        CompactionSnapshotCarrier,
+    )
+
+    binding = facts.context_binding_fact
     if binding.base_kind is ContextBindingBaseKind.FULL_HISTORY:
         return SessionContentRange(0)
-    carriers=[item.content for item in facts.canonical_input.items if isinstance(item.content,CompactionSnapshotCarrier)]
-    if len(carriers)!=1:
-        raise RuntimeError('session query lost the installed snapshot carrier')
-    carrier=carriers[0]
-    active=carrier.active_request_entry_id
-    excluded=active if active in carrier.retained_entry_ids else None
-    return SessionContentRange(binding.source_through_sequence,excluded)
+    carriers = [
+        item.content
+        for item in facts.canonical_input.items
+        if isinstance(item.content, CompactionSnapshotCarrier)
+    ]
+    if len(carriers) != 1:
+        raise RuntimeError("session query lost the installed snapshot carrier")
+    carrier = carriers[0]
+    active = carrier.active_request_entry_id
+    excluded = active if active in carrier.retained_entry_ids else None
+    return SessionContentRange(binding.source_through_sequence, excluded)

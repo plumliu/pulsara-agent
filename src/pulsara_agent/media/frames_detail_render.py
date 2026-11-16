@@ -11,7 +11,7 @@ from collections.abc import Callable, Sequence
 import io
 from typing import TYPE_CHECKING
 
-from PIL import Image, ImageChops, ImageDraw
+from PIL import Image, ImageChops
 
 from .frames_decode import VideoDecoder
 from .source import MediaError, MediaInfo, MediaSource, exact_seconds
@@ -48,12 +48,14 @@ def render_detail_images(
     minimum = scene_dimensions(plan.display_aspect)
     if width < minimum[0] or height < minimum[1]:
         raise MediaError(
-            "RESOURCE_BOUNDARY", "Clear detail images do not fit the physical page allocation"
+            "RESOURCE_BOUNDARY",
+            "Clear detail images do not fit the physical page allocation",
         )
     pixels = width * height
     if pixels > budget.image_pixels:
         raise MediaError(
-            "RESOURCE_BOUNDARY", "A clear detail image exceeds the physical pixel allocation"
+            "RESOURCE_BOUNDARY",
+            "A clear detail image exceeds the physical pixel allocation",
         )
     unique: list[Image.Image] = []
     index: list[dict] = []
@@ -66,13 +68,18 @@ def render_detail_images(
             for observation in selected:
                 visible = next(visible_frames)
                 _check(cancelled)
-                if visible.position != observation.position or visible.t != observation.t:
+                if (
+                    visible.position != observation.position
+                    or visible.t != observation.t
+                ):
                     raise MediaError(
-                        "MEDIA_SOURCE_CHANGED", "Selected presentation frame changed during rendering"
+                        "MEDIA_SOURCE_CHANGED",
+                        "Selected presentation frame changed during rendering",
                     )
                 if observation.end is None:
                     raise MediaError(
-                        "MEDIA_FRAME_UNAVAILABLE", "A detail observation has no verifiable display end"
+                        "MEDIA_FRAME_UNAVAILABLE",
+                        "A detail observation has no verifiable display end",
                     )
                 original = _crop(visible.image, plan.crop)
                 rendered = original.resize((width, height), Image.Resampling.LANCZOS)
@@ -83,18 +90,24 @@ def render_detail_images(
                         _check(cancelled)
                         # Pixel equality deliberately ignores Pillow metadata.
                         # RGB difference needs only one temporary target raster.
-                        if previous.size == rendered.size and ImageChops.difference(
-                            previous, rendered
-                        ).getbbox() is None:
+                        if (
+                            previous.size == rendered.size
+                            and ImageChops.difference(previous, rendered).getbbox()
+                            is None
+                        ):
                             image_number = number
                             break
                     if image_number is None:
                         count = len(unique) + 1
-                        if count > budget.maximum_images or count * pixels > budget.image_pixels:
+                        if (
+                            count > budget.maximum_images
+                            or count * pixels > budget.image_pixels
+                        ):
                             if index:
                                 break
                             raise MediaError(
-                                "RESOURCE_BOUNDARY", "A clear detail image exceeds the physical page allocation"
+                                "RESOURCE_BOUNDARY",
+                                "A clear detail image exceeds the physical page allocation",
                             )
                         unique.append(rendered)
                         rendered = None
@@ -118,7 +131,9 @@ def render_detail_images(
             if len(index) < len(selected):
                 visible_frames.close()
             elif next(visible_frames, None) is not None:
-                raise RuntimeError("Decoder returned more render observations than requested")
+                raise RuntimeError(
+                    "Decoder returned more render observations than requested"
+                )
 
         images = []
         encoded_bytes = 0
@@ -126,22 +141,21 @@ def render_detail_images(
         # observation number cannot prevent sharing or change its identity.
         for number, page in enumerate(unique, 1):
             _check(cancelled)
-            draw = ImageDraw.Draw(page)
-            box = draw.textbbox((4, 3), str(number))
-            draw.rectangle((0, 0, box[2] + 5, box[3] + 4), fill="black")
-            draw.text((4, 3), str(number), fill="white")
             stream = io.BytesIO()
             page.save(stream, format="JPEG", quality=90)
             data = stream.getvalue()
             if encoded_bytes + len(data) > budget.maximum_bytes:
                 if not images:
                     raise MediaError(
-                        "RESOURCE_BOUNDARY", "One encoded detail image exceeds the physical byte allocation"
+                        "RESOURCE_BOUNDARY",
+                        "One encoded detail image exceeds the physical byte allocation",
                     )
                 # Unique image numbers follow their first source occurrence.
                 # Cutting before the first reference to this image therefore
                 # retains a complete observation and encoded-image prefix.
-                stop = next(i for i, item in enumerate(index) if item["image"] == number)
+                stop = next(
+                    i for i, item in enumerate(index) if item["image"] == number
+                )
                 del index[stop:]
                 break
             encoded_bytes += len(data)

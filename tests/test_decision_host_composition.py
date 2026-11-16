@@ -2,7 +2,6 @@
 
 import asyncio
 from dataclasses import replace
-import json
 from threading import Event
 
 import pytest
@@ -14,17 +13,20 @@ pytestmark = pytest.mark.postgres
 
 
 def test_session_shares_decision_service_before_sealing_and_joins_it_on_close(
-    tmp_path, monkeypatch, isolated_migrated_postgres_database,
+    tmp_path,
+    monkeypatch,
+    isolated_migrated_postgres_database,
 ):
     async def run():
         core, session = await _open_test_session(
-            tmp_path=tmp_path, model=_DetachedDraftModel(), monkeypatch=monkeypatch,
+            tmp_path=tmp_path,
+            model=_DetachedDraftModel(),
+            monkeypatch=monkeypatch,
             postgres_dsn=isolated_migrated_postgres_database.runtime_dsn,
         )
         service = session._decision_service
         assert session._memory_tools._decision_service is service
         assert session._decision_tools._service is service
-        assert session._decision_tools._max_value_bytes == session._code_mode.limits.value_bytes
         assert not service.physical_close_complete
         try:
             await core.close_session(session.host_session_id)
@@ -37,7 +39,9 @@ def test_session_shares_decision_service_before_sealing_and_joins_it_on_close(
 
 
 def test_real_exec_cell_freezes_settings_before_vm_queue_and_new_cell_reads_changes(
-    tmp_path, monkeypatch, isolated_migrated_postgres_database,
+    tmp_path,
+    monkeypatch,
+    isolated_migrated_postgres_database,
 ):
     from pulsara_agent.identity import random_id
     from pulsara_agent.llm.input import PromptContent
@@ -67,21 +71,43 @@ def test_real_exec_cell_freezes_settings_before_vm_queue_and_new_cell_reads_chan
                 index = len(self.requests)
                 if index == 1:
                     events = (
-                        *_tool_call("exec_cell", random_id("call"), {"code":
-                            'await tools.read_file({target:{kind:"PATH",path:"hold.txt"}}); return "released";'}),
-                        *_tool_call("exec_cell", random_id("call"), {"code":
-                            'return {label:"old", available:tools.decide.available()};'}),
+                        *_tool_call(
+                            "exec_cell",
+                            random_id("call"),
+                            {
+                                "code": 'await tools.read_file({target:{kind:"PATH",path:"hold.txt"}}); return "released";'
+                            },
+                        ),
+                        *_tool_call(
+                            "exec_cell",
+                            random_id("call"),
+                            {
+                                "code": 'return {label:"old", available:tools.decide.available()};'
+                            },
+                        ),
                     )
                 elif index == 2:
                     assert await asyncio.to_thread(entered.wait, 5)
                     cells = session._code_mode.snapshot_cell_index()
-                    assert len(cells) == 2 and sum(cell["state"] == "queued" for cell in cells) == 1
+                    assert (
+                        len(cells) == 2
+                        and sum(cell["state"] == "queued" for cell in cells) == 1
+                    )
                     settings = session._decision_tools._settings
-                    settings.value = replace(settings.value, memory_retrieval=replace(
-                        settings.value.memory_retrieval, decision=None,
-                    ))
-                    events = _tool_call("exec_cell", random_id("call"), {"code":
-                        'return {label:"new", available:tools.decide.available()};'})
+                    settings.value = replace(
+                        settings.value,
+                        memory_retrieval=replace(
+                            settings.value.memory_retrieval,
+                            decision=None,
+                        ),
+                    )
+                    events = _tool_call(
+                        "exec_cell",
+                        random_id("call"),
+                        {
+                            "code": 'return {label:"new", available:tools.decide.available()};'
+                        },
+                    )
                 else:
                     release.set()
                     await asyncio.wait_for(output_ready.wait(), 10)
@@ -91,22 +117,32 @@ def test_real_exec_cell_freezes_settings_before_vm_queue_and_new_cell_reads_chan
 
         model = Model()
         core, session = await _open_test_session(
-            tmp_path=tmp_path, model=model, monkeypatch=monkeypatch,
+            tmp_path=tmp_path,
+            model=model,
+            monkeypatch=monkeypatch,
             postgres_dsn=isolated_migrated_postgres_database.runtime_dsn,
         )
         session._code_mode.limits = replace(session._code_mode.limits, vm_slots=1)
         settings = session._decision_tools._settings
-        settings.value = replace(settings.value, memory_retrieval=replace(
-            settings.value.memory_retrieval,
-            decision=RetrievalConnection("https://example.invalid/decisions", "decision", "openai_decisions", "none"),
-        ))
+        settings.value = replace(
+            settings.value,
+            memory_retrieval=replace(
+                settings.value.memory_retrieval,
+                decision=RetrievalConnection(
+                    "https://example.invalid/decisions",
+                    "decision",
+                    "openai_decisions",
+                    "none",
+                ),
+            ),
+        )
         original_append = session._code_mode._append_output
 
         def observe_output(cell, output):
             original_append(cell, output)
             if output.value is not None and output.value.get("kind") == "return":
                 try:
-                    value = json.loads(output.value["text"])
+                    value = output.value["values"][0]["value"]
                 except (ValueError, TypeError):
                     return
                 if isinstance(value, dict) and value.get("label") in {"old", "new"}:
@@ -116,13 +152,23 @@ def test_real_exec_cell_freezes_settings_before_vm_queue_and_new_cell_reads_chan
 
         monkeypatch.setattr(session._code_mode, "_append_output", observe_output)
         try:
-            await asyncio.wait_for(session.run_turn(PromptContent.text("Check frozen Decision availability."),
-                requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS), 20)
+            await asyncio.wait_for(
+                session.run_turn(
+                    PromptContent.text("Check frozen Decision availability."),
+                    requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
+                ),
+                20,
+            )
             assert outputs == {"old": True, "new": False}
-            assert all(request.compiled_input.system_prompt == model.requests[0].compiled_input.system_prompt
-                       for request in model.requests)
-            assert all(request.compiled_input.tools == model.requests[0].compiled_input.tools
-                       for request in model.requests)
+            assert all(
+                request.compiled_input.system_prompt
+                == model.requests[0].compiled_input.system_prompt
+                for request in model.requests
+            )
+            assert all(
+                request.compiled_input.tools == model.requests[0].compiled_input.tools
+                for request in model.requests
+            )
         finally:
             release.set()
             await core.shutdown()
@@ -131,13 +177,17 @@ def test_real_exec_cell_freezes_settings_before_vm_queue_and_new_cell_reads_chan
 
 
 def test_host_close_seals_decision_before_lock_wait_and_joins_active_sdk_request(
-    tmp_path, monkeypatch, isolated_migrated_postgres_database,
+    tmp_path,
+    monkeypatch,
+    isolated_migrated_postgres_database,
 ):
     import httpx2
     from time import monotonic
     from pulsara_agent.conversation_kernel.decision_tools import decision_request
     from pulsara_agent.llm.adapters.openai import client as openai_client
-    from pulsara_agent.process_credential_boundary import ProcessCredentialBoundHttpx2Client
+    from pulsara_agent.process_credential_boundary import (
+        ProcessCredentialBoundHttpx2Client,
+    )
     from pulsara_agent.retrieval.config import RetrievalConnection
     from pulsara_agent.retrieval.decision import DecisionError
 
@@ -154,17 +204,36 @@ def test_host_close_seals_decision_before_lock_wait_and_joins_active_sdk_request
                 cleaning.set()
                 await release.wait()
 
-        monkeypatch.setattr(openai_client, "ProcessCredentialBoundHttpx2Client", lambda **kwargs:
-            ProcessCredentialBoundHttpx2Client(**kwargs, transport=httpx2.MockTransport(respond), trust_env=False))
+        monkeypatch.setattr(
+            openai_client,
+            "ProcessCredentialBoundHttpx2Client",
+            lambda **kwargs: ProcessCredentialBoundHttpx2Client(
+                **kwargs, transport=httpx2.MockTransport(respond), trust_env=False
+            ),
+        )
         core, session = await _open_test_session(
-            tmp_path=tmp_path, model=_DetachedDraftModel(), monkeypatch=monkeypatch,
+            tmp_path=tmp_path,
+            model=_DetachedDraftModel(),
+            monkeypatch=monkeypatch,
             postgres_dsn=isolated_migrated_postgres_database.runtime_dsn,
         )
         service = session._decision_service
-        selected = RetrievalConnection("https://provider.example/decisions", "configured", "openai_decisions", "none")
-        batches = service.prepare_batches(selected, item_count=1,
-            build_request=lambda start, end: decision_request("condition", ("text",), start, end))
-        active = asyncio.create_task(service.evaluate(batches, deadline_monotonic=monotonic() + 10))
+        selected = RetrievalConnection(
+            "https://provider.example/decisions",
+            "configured",
+            "openai_decisions",
+            "none",
+        )
+        batches = service.prepare_batches(
+            selected,
+            item_count=1,
+            build_request=lambda start, end: decision_request(
+                "condition", ("text",), start, end
+            ),
+        )
+        active = asyncio.create_task(
+            service.evaluate(batches, deadline_monotonic=monotonic() + 10)
+        )
         closing = None
         original_stop = service.stop_admission
 
@@ -181,8 +250,13 @@ def test_host_close_seals_decision_before_lock_wait_and_joins_active_sdk_request
                 await asyncio.wait_for(sealed.wait(), 5)
                 assert sealing_tasks[0] is closing
                 with pytest.raises(DecisionError, match="closing"):
-                    service.prepare_batches(selected, item_count=1,
-                        build_request=lambda start, end: decision_request("condition", ("text",), start, end))
+                    service.prepare_batches(
+                        selected,
+                        item_count=1,
+                        build_request=lambda start, end: decision_request(
+                            "condition", ("text",), start, end
+                        ),
+                    )
                 await asyncio.wait_for(cleaning.wait(), 5)
                 assert not active.done() and not closing.done()
                 assert not service.physical_close_complete
@@ -194,7 +268,9 @@ def test_host_close_seals_decision_before_lock_wait_and_joins_active_sdk_request
             assert session.physical_close_complete
         finally:
             release.set()
-            await asyncio.gather(active, *((closing,) if closing else ()), return_exceptions=True)
+            await asyncio.gather(
+                active, *((closing,) if closing else ()), return_exceptions=True
+            )
             await core.shutdown()
 
     asyncio.run(run())

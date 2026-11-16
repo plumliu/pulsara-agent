@@ -15,6 +15,19 @@ from pulsara_agent.storage.postgres_connection_provider import PostgresConnectio
 from .locking import lock_canonical_identities, lock_session_admission
 
 
+def delete_unreferenced_workspaces(connection, memory_domain_id, workspace_ids):
+    """Remove empty workspace owners while the caller holds their identity locks."""
+    connection.execute(
+        """DELETE FROM pulsara_v3.workspaces w
+           WHERE w.memory_domain_id=%s AND w.id=ANY(%s::text[])
+           AND NOT EXISTS (SELECT 1 FROM pulsara_v3.sessions s
+             WHERE s.memory_domain_id=w.memory_domain_id AND s.workspace_id=w.id)
+           AND NOT EXISTS (SELECT 1 FROM pulsara_v3.memory_facts f
+             WHERE f.memory_domain_id=w.memory_domain_id AND f.project_workspace_id=w.id)""",
+        (memory_domain_id, list(workspace_ids)),
+    )
+
+
 class _SessionDeletionOperations:
     def canonical_session_exists(
         self, *, session_id: str, memory_domain_id: str, deadline_monotonic: float
@@ -143,14 +156,8 @@ class _SessionDeletionOperations:
                     connection.execute(
                         "DELETE FROM pulsara_v3.sessions WHERE id=%s", (session_id,)
                     )
-                    connection.execute(
-                        """DELETE FROM pulsara_v3.workspaces w
-                           WHERE w.memory_domain_id=%s AND w.id=%s
-                           AND NOT EXISTS (SELECT 1 FROM pulsara_v3.sessions s
-                             WHERE s.memory_domain_id=w.memory_domain_id AND s.workspace_id=w.id)
-                           AND NOT EXISTS (SELECT 1 FROM pulsara_v3.memory_facts f
-                             WHERE f.memory_domain_id=w.memory_domain_id AND f.project_workspace_id=w.id)""",
-                        (memory_domain_id, row["workspace_id"]),
+                    delete_unreferenced_workspaces(
+                        connection, memory_domain_id, (row["workspace_id"],)
                     )
                     connection.execute("SET CONSTRAINTS ALL IMMEDIATE")
                 return "DELETED"

@@ -1,16 +1,16 @@
-"""Media-specific execution within the existing tool authority and resources.
+"""Acquire complete media business values before native delivery or JS return.
 
-The tool port owns dispatch, cancellation and settlement. This module composes
-source, decoder, transcript and image owners into one atomic result candidate.
+PyAV/Pillow and the existing worker, cache and ASR work owners retain physical
+execution. This adapter owns public ordered content, not display pagination.
 """
 
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
-import json
+from dataclasses import dataclass, field, replace
 from time import monotonic
 
+from pulsara_agent.conversation_kernel.content_parts import ResultPart
 from pulsara_agent.conversation_kernel.io import PhysicalToolInvocationDisposition
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 from pulsara_agent.conversation_kernel.prompt_content import (
@@ -19,33 +19,26 @@ from pulsara_agent.conversation_kernel.prompt_content import (
 )
 from pulsara_agent.llm.input import (
     FrozenPromptContent,
-    LLMTextPart,
+    LLMImagePart,
     MAXIMUM_PROMPT_IMAGE_PIXELS,
-    PromptContent,
-    PromptImagePart,
 )
 from pulsara_agent.ports.tool_execution import (
     FrozenToolJsonDict,
     ToolBusinessValue,
-    ToolOutputSourceFormatHint,
-    encode_tool_public_json,
     freeze_tool_json_object,
 )
+from pulsara_agent.tools.builtins.filesystem import (
+    _relpath,
+    file_target,
+    path_target_arg,
+)
 from pulsara_agent.tools.builtins.media import validate_media_arguments
-from .asr_cache import AsrMediaKey
 from .frames import (
     FRAME_ANALYSIS_FRAMES,
-    FRAME_SELECTION_REVISION,
     FrameBudget,
     frame_page_fits_geometry,
     prepare_frame_plan,
     render_frame_page,
-)
-from .frames_paging import (
-    FramePagePosition,
-    read_frame_continuation,
-    trim_detail_page,
-    with_frame_page_continuation,
 )
 from .source import MediaError, MediaSource, probe_media, validate_range
 from .transcript import TranscriptService
@@ -54,19 +47,19 @@ from .transcript import TranscriptService
 @dataclass(frozen=True, slots=True)
 class MediaExecutionResult:
     state: str
-    content: bytes | FrozenPromptContent | ToolBusinessValue
-    public_format: ToolOutputSourceFormatHint = ToolOutputSourceFormatHint.JSON
+    content: ToolBusinessValue
     result_facts: FrozenToolJsonDict = field(default_factory=FrozenToolJsonDict)
+    pending_images: tuple[LLMImagePart, ...] = ()
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "result_facts", freeze_tool_json_object(self.result_facts))
+        object.__setattr__(
+            self, "result_facts", freeze_tool_json_object(self.result_facts)
+        )
 
 
 async def execute_media(
     tool,
     arguments,
-    context,
-    binding,
     *,
     io,
     worker,
@@ -76,16 +69,27 @@ async def execute_media(
     asr_runtime,
     memory_domain_id,
     deadline,
-    page_budget,
     reserve_read,
     observe_read,
 ) -> MediaExecutionResult:
     source = None
-
-    def result(state, body):
-        return MediaExecutionResult(state=state, content=encode_tool_public_json(body))
-
+    parts: list[ResultPart] = []
+    images: list[LLMImagePart] = []
+    fields = {}
     reserved = False
+
+    def finish(state, message=None, *, facts=None):
+        if message is not None:
+            parts.append(ResultPart("text", message))
+        referenced = {part.value["image_ref"] for part in parts if part.type == "image"}
+        return MediaExecutionResult(
+            state,
+            ToolBusinessValue(fields, tuple(parts)),
+            result_facts=facts or {},
+            pending_images=tuple(
+                image for image in images if image.image_ref in referenced
+            ),
+        )
 
     def reserve_once():
         nonlocal reserved
@@ -96,6 +100,7 @@ async def execute_media(
             reserved = True
 
     def begin(a, b):
+        reserve_once()
         observe_read(
             canonical_path=str(source.path),
             file_mtime_ns=str(source.modified_ns),
@@ -105,14 +110,6 @@ async def execute_media(
 
     try:
         validate_media_arguments(tool.name, arguments)
-        if (
-            tool.name == "read_video_frames"
-            and context.input_modalities is not None
-            and "image" not in context.input_modalities
-        ):
-            return result(
-                "APPLICATION_ERROR", {"error": "MODEL_IMAGE_INPUT_UNSUPPORTED"}
-            )
         opened = await io.run_tool_invocation(
             _open_media_source, tool, arguments, deadline_monotonic=deadline
         )
@@ -121,6 +118,7 @@ async def execute_media(
         source = opened.value
         if opened.caller_cancelled:
             raise asyncio.CancelledError
+        fields["target"] = file_target(_relpath(source.path, tool.workspace_root))
         info = await worker.run(
             probe_media,
             source,
@@ -133,18 +131,13 @@ async def execute_media(
             info.duration,
             annotation=tool.name == "annotate_media",
         )
+        start, end = span.start, span.end
         if tool.name == "annotate_media":
             source.assert_unchanged()
-            from pulsara_agent.conversation_kernel.content_parts import ResultPart
-            from pulsara_agent.tools.builtins.filesystem import _relpath, file_target
-
-            return MediaExecutionResult(
-                state="SUCCESS",
-                content=ToolBusinessValue(
-                    public_fields={"target": file_target(_relpath(source.path, tool.workspace_root))},
-                    content=(ResultPart("text", "已添加时间标注。"),),
-                ),
-                result_facts={
+            return finish(
+                "SUCCESS",
+                "已添加时间标注。",
+                facts={
                     "canonical_path": str(source.path),
                     "file_mtime_ns": str(source.modified_ns),
                 },
@@ -168,280 +161,266 @@ async def execute_media(
                     operation, *args, deadline_monotonic=deadline, **kwargs
                 )
 
-            if asr_runtime is None or read_settings is None:
-                return result(
-                    "APPLICATION_ERROR", {"error": "MEDIA_RUNTIME_UNAVAILABLE"}
+            async def load_asr_settings():
+                return await io.run(
+                    _read_media_settings, read_settings, deadline_monotonic=deadline
                 )
-            settings = await io.run(
-                _read_media_settings, read_settings, deadline_monotonic=deadline
-            )
+
             service = TranscriptService(
-                work=asr_runtime.work,
+                work=asr_runtime.work if asr_runtime is not None else None,
                 cache=cache,
-                asr_config=settings.asr,
+                asr_config=None,
                 run_media=run_media,
                 run_cache=run_cache,
-                run_asr_media=asr_runtime.run_media,
-                run_asr_cache=asr_runtime.run_cache,
-                credential_scrub_set=settings.credential_scrub_set(),
+                run_asr_media=asr_runtime.run_media
+                if asr_runtime is not None
+                else run_media,
+                run_asr_cache=asr_runtime.run_cache
+                if asr_runtime is not None
+                else run_cache,
+                load_asr_settings=load_asr_settings
+                if read_settings is not None
+                else None,
+                # These remain the existing per-upload/response ASR I/O bounds,
+                # independent of complete transcript length or model delivery.
                 maximum_upload_bytes=STAGE2_LIMITS.canonical_blob_hard_bytes,
                 maximum_response_bytes=STAGE2_LIMITS.tool_result_hard_bytes,
                 deadline_monotonic=deadline,
             )
-            page = await service.read(
+            value = await service.read(
                 source,
                 info,
                 arguments,
-                page_budget,
                 memory_domain_id=memory_domain_id,
                 on_started=begin,
             )
-            source.assert_unchanged()
-            return result(
-                "APPLICATION_ERROR" if page.is_error else "SUCCESS", page.payload
+            meta = {}
+            if value.source is not None:
+                meta["source"] = value.source
+            if value.language is not None:
+                meta["language"] = value.language
+            fields["meta"] = meta
+            parts.append(
+                ResultPart("text", f"请求 [{start:g}, {end:g}) 秒的原始时间文字。\n")
             )
+            parts.extend(
+                ResultPart("object", item.public_value((start, end)))
+                for item in value.entries
+            )
+            parts.extend(
+                ResultPart("text", str(message) + "\n") for message in value.diagnostics
+            )
+            for error in value.errors:
+                parts.append(
+                    ResultPart(
+                        "text",
+                        f"文字读取未完成：{error.get('message', error.get('error'))}\n",
+                    )
+                )
+            if value.errors and value.processed_to < end:
+                parts.append(
+                    ResultPart(
+                        "text",
+                        f"已取得连续范围 [{start:g}, {value.processed_to:g}) 秒；后续至 {end:g} 秒未完成。\n",
+                    )
+                )
+            if not value.entries:
+                parts.append(
+                    ResultPart("text", "未取得文字；这不证明没有声音或语音。\n")
+                )
+                parts.extend(
+                    ResultPart(
+                        "text",
+                        f"实际音频观察 [{item['from']:g}, {item['to']:g}) 秒：{item['state']}。\n",
+                    )
+                    for item in value.sound_observations
+                )
+            return finish("APPLICATION_ERROR" if value.errors else "SUCCESS")
         if info.video_stream_index is None:
-            return result("APPLICATION_ERROR", {"error": "NO_VIDEO_TRACK"})
-        allowance = context.image_resource_allowance
-        if (
-            allowance is None
-            or allowance.tool_call_id != context.tool_call_id
-            or allowance.executor_binding_fingerprint
-            != binding.executor_binding_fingerprint
-        ):
-            raise RuntimeError("video image allowance does not exact-join")
+            raise MediaError("NO_VIDEO_TRACK", "This source has no usable video track")
         if image_validator is None:
             raise RuntimeError("video image validation owner is unavailable")
-        mode = arguments.get("mode", "overview")
-        crop = arguments.get("crop")
-        position = (
-            read_frame_continuation(
-                arguments["continuation"], source=source, info=info,
-                start=span.start, end=span.end, mode=mode, crop=crop,
-                selection_revision=FRAME_SELECTION_REVISION,
-            ) if "continuation" in arguments else FramePagePosition()
+        action, crop = arguments.get("action", "overview"), arguments.get("crop")
+        description = {
+            "detail": "首、中、终点之前三个时间目标",
+            "overview": "稀疏代表状态",
+            "motion": "按真实时间顺序观察",
+        }[action]
+        parts.append(
+            ResultPart(
+                "text", f"{action}：请求 [{start:g}, {end:g}) 秒；{description}。\n"
+            )
         )
-        # Selection is owned by the fixed quality/physical analysis profile.
-        # Provider allowance may split its delivery, never change the plan.
-        pixels = MAXIMUM_PROMPT_IMAGE_PIXELS
+        # Selection/render batches bound the live raster working set only. They
+        # never stop the request or create a source continuation for the model.
         budget = FrameBudget(
-            maximum_bytes=MAXIMUM_PROMPT_MULTIPART_BYTES,
-            image_pixels=pixels,
-            maximum_images=max(1, pixels // (160 * 90)),
-            analysis_frames=FRAME_ANALYSIS_FRAMES,
+            MAXIMUM_PROMPT_MULTIPART_BYTES,
+            MAXIMUM_PROMPT_IMAGE_PIXELS,
+            max(1, MAXIMUM_PROMPT_IMAGE_PIXELS // (160 * 90)),
+            FRAME_ANALYSIS_FRAMES,
         )
-        touched = False
-        first_span = None
+        window = None
+        previous_t = None
+        while True:
+            plan = await worker.run(
+                prepare_frame_plan,
+                source,
+                info,
+                start=start,
+                end=end,
+                mode=action,
+                crop=crop,
+                window_start=window,
+                analysis_frames=budget.analysis_frames,
+                on_progress=lambda span: begin(*span),
+                deadline_monotonic=deadline,
+            )
+            plan = replace(
+                plan, priority=tuple(sorted(plan.priority, key=lambda item: item.t))
+            )
+            offset = 0
+            while offset < plan.observation_count:
+                count = plan.observation_count - offset
+                while not frame_page_fits_geometry(
+                    plan, offset=offset, count=count, budget=budget
+                ):
+                    if count == 1:
+                        raise MediaError(
+                            "RESOURCE_BOUNDARY",
+                            "One readable frame cannot fit the physical render allocation",
+                        )
+                    count -= 1
+                while True:
+                    try:
+                        rendered = await worker.run(
+                            render_frame_page,
+                            source,
+                            info,
+                            plan,
+                            offset=offset,
+                            count=count,
+                            budget=budget,
+                            deadline_monotonic=deadline,
+                        )
+                        break
+                    except MediaError as exc:
+                        if exc.code != "RESOURCE_BOUNDARY" or count == 1:
+                            raise
+                        count -= 1
+                bound = {}
 
-        def begin_frames_range(span):
-            nonlocal first_span
-            # A smaller-image quote retry belongs to the same logical read.
-            if first_span is None:
-                first_span = span
-                begin(*span)
+                async def validated_image(number):
+                    if number not in bound:
+                        image = rendered.images[number - 1]
+                        validated = await image_validator.freeze_local_image(
+                            image.data, deadline_monotonic=deadline
+                        )
+                        validated = bind_prompt_images(
+                            FrozenPromptContent((validated,))
+                        ).parts[0]
+                        bound[number] = validated
+                        images.append(validated)
+                    return bound[number]
 
-        async def begin_frames():
-            nonlocal touched
-            reserve_once()
-            if cache is not None and not touched:
-                touched = True
-                try:
-                    await io.run(
-                        cache.touch,
-                        AsrMediaKey(
-                            memory_domain_id,
-                            str(source.path),
-                            source.modified_ns,
-                            source.size,
-                        ),
-                        deadline_monotonic=deadline,
+                if not rendered.index:
+                    raise MediaError(
+                        "MEDIA_FRAME_UNAVAILABLE", "Rendering produced no observations"
                     )
-                except Exception:
-                    # Cache recency grants no source authority and cannot
-                    # prevent local image evidence from being read.
-                    pass
-
-        from pulsara_agent.tools.builtins.media import parse_image_tool_source
-
-        image_source = parse_image_tool_source(tool.name, arguments)
-        plan = await worker.run(
-            prepare_frame_plan, source, info,
-            start=span.start, end=span.end, mode=mode, crop=crop,
-            window_start=position.window_start,
-            analysis_frames=FRAME_ANALYSIS_FRAMES,
-            deadline_monotonic=deadline,
-            on_progress=begin_frames_range,
-            on_started=begin_frames,
-        )
-        if position.next_observation >= plan.observation_count:
-            raise MediaError("INVALID_ARGUMENTS", "Frame continuation is outside the selection plan")
-        content = await render_prepared_frame_page(
-            source=source, info=info, plan=plan, position=position,
-            budget=budget, allowance=allowance, page_budget=page_budget,
-            image_source=image_source, workspace_id=context.workspace_id,
-            worker=worker, image_validator=image_validator, deadline=deadline,
-            refresh_image_resources=context.refresh_image_resources,
-        )
+                if action == "detail":
+                    for item in rendered.index:
+                        image = await validated_image(item["image"])
+                        index = {
+                            key: value
+                            for key, value in item.items()
+                            if key in {"t", "visible_range", "dt"}
+                        }
+                        if previous_t is not None:
+                            index["dt"] = item["t"] - previous_t
+                        previous_t = item["t"]
+                        parts.extend(
+                            (
+                                ResultPart("object", index),
+                                ResultPart(
+                                    "image",
+                                    {
+                                        "kind": "IMAGE_REF",
+                                        "image_ref": image.image_ref,
+                                    },
+                                ),
+                            )
+                        )
+                else:
+                    for number in range(1, len(rendered.images) + 1):
+                        image = await validated_image(number)
+                        cells = []
+                        for item in rendered.index:
+                            if item["image"] != number:
+                                continue
+                            cell = {
+                                key: value
+                                for key, value in item.items()
+                                if key != "image"
+                            }
+                            cell["n"] = len(cells) + 1
+                            if previous_t is not None:
+                                cell["dt"] = item["t"] - previous_t
+                            previous_t = item["t"]
+                            cells.append(cell)
+                        parts.extend(
+                            (
+                                ResultPart("object", {"frames": cells}),
+                                ResultPart(
+                                    "image",
+                                    {"kind": "IMAGE_REF", "image_ref": image.image_ref},
+                                ),
+                            )
+                        )
+                offset += len(rendered.index)
+            if info.video_start is not None and info.video_start > start:
+                message = "视频轨从请求起点之后开始；开头缺少可验证画面。\n"
+                if not any(
+                    part.type == "text" and part.value == message for part in parts
+                ):
+                    parts.append(ResultPart("text", message))
+            if plan.video_ended:
+                parts.append(
+                    ResultPart(
+                        "text", "视频轨在请求终点之前结束；结尾缺少可验证画面。\n"
+                    )
+                )
+            if plan.complete:
+                break
+            following = plan.next_window_start
+            if action != "motion" or following is None or following == window:
+                raise MediaError(
+                    "MEDIA_FRAME_UNAVAILABLE",
+                    "Video analysis could not advance to its next exact frame",
+                )
+            window = following
         source.assert_unchanged()
-        processed_range = tuple(map(float, plan.processed_range))
-        if processed_range != first_span:
-            begin(*processed_range)
-        return MediaExecutionResult(
-            state="SUCCESS", content=content,
-            public_format=ToolOutputSourceFormatHint.TEXT,
-        )
-    except TimeoutError as exc:
-        return result(
-            "APPLICATION_ERROR",
-            {"error": "MEDIA_PROCESSING_DEADLINE_EXPIRED", "message": str(exc)},
-        )
-    except (MediaError, OSError, ValueError) as exc:
-        code = getattr(
-            exc,
-            "code",
-            "MEDIA_NOT_FOUND"
-            if isinstance(exc, FileNotFoundError)
-            else "INVALID_ARGUMENTS",
-        )
-        return result("APPLICATION_ERROR", {"error": code, "message": str(exc)})
+        return finish("SUCCESS")
+    except asyncio.CancelledError:
+        if parts:
+            return finish("CANCELLED", "媒体读取已取消；以上为实际已取得的内容。\n")
+        raise
+    except (MediaError, OSError, ValueError, TimeoutError) as exc:
+        if "target" not in fields:
+            try:
+                fields["target"] = file_target(
+                    _relpath(
+                        tool._resolve_read_path(path_target_arg(arguments)),
+                        tool.workspace_root,
+                    )
+                )
+            except (ValueError, OSError):
+                pass
+        return finish("APPLICATION_ERROR", f"媒体读取未完成：{exc}\n")
     finally:
         if source is not None:
             source.close()
 
 
-async def render_prepared_frame_page(
-    *, source, info, plan, position, budget, allowance, page_budget,
-    image_source, workspace_id, worker, image_validator, deadline,
-    refresh_image_resources=None,
-) -> FrozenPromptContent:
-    """Quote complete slices of one prepared plan; never reselect or reanalyse.
-
-    Detail retains one physically admitted encoded candidate and projects its
-    prefixes for joint quotes. Other modes may render smaller slices because
-    their changing collage geometry makes encoded cost non-monotone. Every
-    mode can reach the actual indexed singleton boundary without reselecting.
-    """
-    offset = position.next_observation
-    count = plan.observation_count - offset
-    if count < 1:
-        raise MediaError("INVALID_ARGUMENTS", "Frame continuation has no remaining observation")
-    floor = False
-    refresh_attempted = False
-    raw_detail_candidate = None
-    while True:
-        source.assert_unchanged()
-        if not frame_page_fits_geometry(
-            plan, offset=offset, count=count,
-            budget=budget, floor=floor,
-        ):
-            if plan.mode == "detail":
-                raise MediaError("RESOURCE_BOUNDARY", "The minimum detail geometry exceeds the physical allocation")
-            if count > 1:
-                count -= 1
-                continue
-            if plan.mode == "overview" and not floor:
-                floor = True
-                continue
-            raise MediaError("RESOURCE_BOUNDARY", "The minimum frame geometry exceeds the physical allocation")
-        try:
-            candidate = (
-                trim_detail_page(raw_detail_candidate, count)
-                if raw_detail_candidate is not None else
-                await worker.run(
-                    render_frame_page, source, info, plan,
-                    offset=offset, count=count, budget=budget,
-                    floor=floor, deadline_monotonic=deadline,
-                )
-            )
-        except MediaError as exc:
-            if exc.code != "RESOURCE_BOUNDARY":
-                raise
-            if plan.mode == "detail":
-                # A worker-wide memory/serialization boundary may happen before
-                # the renderer can return its admitted prefix. Try the actual
-                # singleton atom rather than rerendering every trailing removal.
-                if count > 1:
-                    count = 1
-                    continue
-                raise
-            if count > 1:
-                count -= 1
-                continue
-            if plan.mode == "overview" and not floor:
-                floor = True
-                continue
-            raise
-        if plan.mode == "detail":
-            # Exact RGB sharing determines physical image cost only while
-            # rendering. A full requested slice may therefore yield its
-            # actually admitted prefix; quote and continue from that prefix.
-            rendered = json.loads(candidate.text).get("frames")
-            if not isinstance(rendered, list) or not 1 <= len(rendered) <= count:
-                raise ValueError("Rendered detail page is not a nonempty requested prefix")
-            count = len(rendered)
-            if raw_detail_candidate is None:
-                raw_detail_candidate = candidate
-        candidate = with_frame_page_continuation(
-            candidate, source=source, info=info, plan=plan, position=position,
-            count=count, selection_revision=FRAME_SELECTION_REVISION,
-        )
-        content = await image_validator.freeze(
-            PromptContent((LLMTextPart(candidate.text), *(
-                PromptImagePart(image.data, image.mime) for image in candidate.images
-            ))), deadline_monotonic=deadline,
-        )
-        content = bind_prompt_images(content)
-        logical_fits = page_budget.fits_logical(candidate.text)
-        if allowance.accepts_page(
-            content=content, source=image_source, tool_name="read_video_frames",
-            page_budget=page_budget,
-        ):
-            source.assert_unchanged()
-            return content
-        if logical_fits and refresh_image_resources is not None and not refresh_attempted:
-            # The batch owner prepares only the closed-prefix successor here;
-            # it does not adopt a new epoch while physical tools are running.
-            # Keep this page and fixed plan unaccepted until its fresh quote.
-            refresh_attempted = True
-            refreshed = await refresh_image_resources()
-            source.assert_unchanged()
-            if refreshed is not None:
-                fresh_allowance, fresh_budget = refreshed
-                if (
-                    fresh_allowance.tool_call_id != allowance.tool_call_id
-                    or fresh_allowance.call_ordinal != allowance.call_ordinal
-                    or fresh_allowance.executor_binding_fingerprint
-                    != allowance.executor_binding_fingerprint
-                    or fresh_budget.tool_call_id != page_budget.tool_call_id
-                ):
-                    raise RuntimeError("Refreshed frame resources do not own this exact invocation")
-                allowance, page_budget = fresh_allowance, fresh_budget
-                # Earlier larger slices failed physical geometry/bytes or the
-                # immutable wrapped 40k limit. This is still the largest viable
-                # candidate; retest it before removing any selected observation.
-                if allowance.accepts_page(
-                    content=content, source=image_source,
-                    tool_name="read_video_frames", page_budget=page_budget,
-                ):
-                    source.assert_unchanged()
-                    return content
-        # Detail retries project its one admitted raw encoded prefix. Other
-        # modes release rejected pages before the next child renders.
-        del content, candidate
-        if count > 1:
-            count -= 1
-        elif plan.mode == "overview" and not floor:
-            floor = True
-        else:
-            raise MediaError(
-                "RESOURCE_BOUNDARY",
-                "One minimum readable frame, its complete index and continuation do not fit this call",
-            )
-
-
 def _open_media_source(tool, arguments, *, deadline_monotonic):
-    from pulsara_agent.tools.builtins.filesystem import path_target_arg
-
     if monotonic() >= deadline_monotonic:
         raise TimeoutError("Media source admission deadline expired")
     return MediaSource.open(tool._resolve_read_path(path_target_arg(arguments)))

@@ -2,7 +2,7 @@
 
 共用规则见[原生工具修订草案索引](../PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 1、2 章。
 
-状态：讨论草案，未实施。本族工具以[有序内容统一存储 hardcut 草案](../PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md#10-数据库优先与停用期间的分步实施)为存储基础，记录已经确定的参数、业务返回值及原生／JS 用法。允许停用 Pulsara、先重建新库，在停用期间逐步接通消费者，不必等待全部消费者完成才继续合同讨论。未定边界不因建库被默认定案。
+状态：当前合同已接入生产代码，正在完成 hardcut 跨层验收；正常使用仍按实施计划停用。本族工具以[有序内容统一存储 hardcut 草案](../PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md#10-数据库优先与停用期间的分步实施)为存储基础，记录已经确定的参数、业务返回值及原生／JS 用法。共同存储、原生分页和 JS 完整返回使用当前单一路径；整体验收状态以实施计划为准。
 
 Subagent 的本次初始输入顺序沿数据库草案：主指令在前，随后为 ROOT 选入的历史材料、依赖结果和其他材料，initial_entry_id 指主指令；只组装新增输入，不重排已有上下文。主指令和材料的来源身份仍然保留，不能仅因都投影为 user role 就将材料另算成开启 turn 的主指令；检索纳入范围继续沿各入口合同，不因内容存储统一而自动扩大。
 
@@ -654,4 +654,4 @@ declare namespace tools {
 - [历史问答摘录](../src/pulsara_agent/conversation_kernel/history_excerpt.py)
 - [会话工具执行与错误适配](../src/pulsara_agent/conversation_kernel/tool_runtime_management.py)
 
-这些链接用于核对实施接点，不表示当前代码已经符合本草案。后续 bundled skill 采用教程前，必须与已实施的参数、返回声明和执行值一起更新；不得先让模型按未实施接口调用工具。
+这些链接用于核对当前实现及调试接点。参数、返回声明、执行值和 bundled skill 使用同一当前合同；完整应用的验收与恢复使用条件以实施计划为准。

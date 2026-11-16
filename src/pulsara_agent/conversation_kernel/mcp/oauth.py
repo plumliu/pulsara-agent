@@ -92,6 +92,7 @@ class McpOAuthLogin:
     error: str | None = None
     settled: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     listener: web.AppRunner | None = field(default=None, repr=False)
+    accepted_authorization_task: asyncio.Task | None = field(default=None, repr=False)
 
 
 class _DraftTokenStorage:
@@ -169,6 +170,14 @@ class _BoundAuthorization:
         return self.manager._rejection_observer(
             self.owner, self.config, self.current_target, authorization
         )
+
+    def reference_identity(self):
+        """Private current grant fact; never projected to a model or diagnostic."""
+        record = self.manager.settings.read().mcp_authorization(self.owner)
+        flow = self.manager._logins.get(self.owner)
+        return (self.owner,
+            None if record is None else (record.resource_url, record.issuer, record.client_id, record.scope),
+            flow.accepted_authorization_task if flow is not None else None)
 
 
 class McpOAuthManager:
@@ -287,7 +296,8 @@ class McpOAuthManager:
                 prior.state = "cancelled"
             elif not prior.settled.is_set() and not retiring.cancelling():
                 retiring.cancel()
-        flow = McpOAuthLogin(owner, current, current_target, retiring=retiring)
+        flow = McpOAuthLogin(owner, current, current_target, retiring=retiring,
+            accepted_authorization_task=prior.accepted_authorization_task if prior else None)
         self._logins[owner] = flow
         flow.task = asyncio.create_task(self._login(flow), name="mcp-oauth-login")
         # UI may observe state without awaiting user interaction; retrieve errors
@@ -344,15 +354,20 @@ class McpOAuthManager:
         if clear_rejection:
             self._rejected.pop(owner, None)
         flow = self._logins.get(owner)
+        retain_grant_source = (
+            not clear_rejection and flow is not None
+            and flow.accepted_authorization_task is not None
+            and self.settings.read().mcp_authorization(owner) is not None
+        )
         if flow is not None and flow.task is not None and not flow.task.done():
             # Keep the existing owner slot until callback cleanup has joined.
             # A concurrent begin can then wait for this same physical listener.
             def discard(done):
-                if self._logins.get(owner) is flow:
+                if self._logins.get(owner) is flow and not retain_grant_source:
                     self._logins.pop(owner)
 
             flow.task.add_done_callback(discard)
-        else:
+        elif not retain_grant_source:
             self._logins.pop(owner, None)
         refresh = self._refreshes.pop(owner, None)
         tasks = tuple(
@@ -684,6 +699,10 @@ class McpOAuthManager:
                 await self.settings.replace_mcp_authorization(
                     owner, accepted, expected=prior
                 )
+                if flow is not None:
+                    # Only a new explicit grant changes call-reference authority.
+                    # Token refresh uses flow=None and preserves the same grant.
+                    flow.accepted_authorization_task = asyncio.current_task()
                 if self._rejected.get(owner) == prior:
                     self._rejected.pop(owner, None)
             return accepted

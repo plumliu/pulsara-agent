@@ -3,7 +3,6 @@ from pulsara_agent.primitives.permission import PermissionMode
 
 import asyncio
 from dataclasses import replace
-import json
 from types import SimpleNamespace
 
 import pytest
@@ -12,8 +11,6 @@ from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
 from pulsara_agent.conversation_kernel.image_validation import HostPromptImageValidator
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.conversation_kernel.tool_contracts import (
-    FrozenImageToolResourceAllowance,
-    FrozenImageToolResourceIncrement,
     KernelToolAuthorizationKind,
 )
 from pulsara_agent.conversation_kernel.tool_policy import (
@@ -21,11 +18,6 @@ from pulsara_agent.conversation_kernel.tool_policy import (
 )
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
 from pulsara_agent.identity import derive_id
-from pulsara_agent.llm.input import (
-    FrozenPromptContent,
-    LLMImagePart,
-    frozen_tool_result_public_text,
-)
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.tools.builtins.media import (
     MEDIA_TOOL_NAMES,
@@ -70,28 +62,7 @@ async def invoke(port, name, arguments, *, image=False):
     )
     try:
         if image:
-
-            class Quote:
-                def quote(self, **kwargs):
-                    assert isinstance(kwargs["content"], FrozenPromptContent)
-                    self.content = kwargs["content"]
-                    return FrozenImageToolResourceIncrement(0, 0, 0, 0)
-
-            allowance = FrozenImageToolResourceAllowance(
-                0,
-                context.tool_call_id,
-                borrow.execution_binding(name).executor_binding_fingerprint,
-                4 << 20,
-                4 << 20,
-                8 << 20,
-                100_000,
-                Quote(),
-            )
-            context = replace(
-                context,
-                input_modalities=("text", "image"),
-                image_resource_allowance=allowance,
-            )
+            context = replace(context, input_modalities=("text", "image"))
         return await port.invoke(
             tool_name=name,
             arguments=arguments,
@@ -107,8 +78,8 @@ async def invoke(port, name, arguments, *, image=False):
 
 def test_closed_media_fields_and_root_only_catalog():
     for name, count in [
-        ("read_video_frames", 6),
-        ("read_transcript", 4),
+        ("read_video_frames", 5),
+        ("read_transcript", 3),
         ("annotate_media", 4),
     ]:
         entry = builtin_tool_catalog_entry(name)
@@ -125,11 +96,13 @@ def test_closed_media_fields_and_root_only_catalog():
             "annotate_media",
             {"target": {"kind": "PATH", "path": "x"}, "from": 0, "to": 1, "text": "  "},
         )
-    detail = {"target": {"kind": "PATH", "path": "x"}, "mode": "detail"}
+    detail = {"target": {"kind": "PATH", "path": "x"}, "action": "detail"}
     for bounds in ({}, {"from": 0}, {"to": 1}, {"from": 12.32, "to": 14.320001}):
         with pytest.raises(ValueError, match="2 seconds"):
             validate_media_arguments("read_video_frames", dict(detail, **bounds))
-    validate_media_arguments("read_video_frames", dict(detail, **{"from": 12.32, "to": 14.32}))
+    validate_media_arguments(
+        "read_video_frames", dict(detail, **{"from": 12.32, "to": 14.32})
+    )
     for name in ("read_video_frames", "read_transcript"):
         for value in [None, {}]:
             with pytest.raises(ValueError):
@@ -150,9 +123,14 @@ def test_media_hidden_subagent_code_mode_and_forged_entry_denied(tmp_path):
         )
         assert MEDIA_TOOL_NAMES <= {s.name for s in root.model_surface.tool_specs}
         assert not MEDIA_TOOL_NAMES & {s.name for s in sub.model_surface.tool_specs}
-        assert not MEDIA_TOOL_NAMES & {
-            s.name for s in port.freeze_code_mode_tool_directory(root, effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS).tool_specs
+        code_names = {
+            s.name
+            for s in port.freeze_code_mode_tool_directory(
+                root, effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS
+            ).tool_specs
         }
+        assert {"view_image", "read_video_frames", "read_transcript"} <= code_names
+        assert "annotate_media" not in code_names
         borrow = port.borrow_tool_surface(sub)
         try:
             for name in MEDIA_TOOL_NAMES:
@@ -175,48 +153,63 @@ def test_media_hidden_subagent_code_mode_and_forged_entry_denied(tmp_path):
 
 
 def test_real_frames_and_annotation_use_production_dispatch(tmp_path):
-    path = video(tmp_path / "states.mkv", ["red"] * 4 + ["blue"] * 4 + ["red"] * 12, rate=10)
+    path = video(
+        tmp_path / "states.mkv", ["red"] * 4 + ["blue"] * 4 + ["red"] * 12, rate=10
+    )
 
     async def run():
         validator = HostPromptImageValidator()
         port = port_at(tmp_path, validator)
         try:
             for bounds in ({}, {"from": 0}, {"to": 1}, {"from": 0, "to": 5}):
-                rejected = await invoke(port, "read_video_frames", {
-                    "target": {"kind": "PATH", "path": str(tmp_path / "unopened.mkv")},
-                    "mode": "detail", **bounds,
-                }, image=True)
+                rejected = await invoke(
+                    port,
+                    "read_video_frames",
+                    {
+                        "target": {
+                            "kind": "PATH",
+                            "path": str(tmp_path / "unopened.mkv"),
+                        },
+                        "action": "detail",
+                        **bounds,
+                    },
+                    image=True,
+                )
                 assert rejected.state == "APPLICATION_ERROR"
-                error = json.loads(rejected.content)
-                assert error["error"] == "INVALID_RANGE"
-                assert "2 seconds" in error["message"]
-                assert "overview" in error["message"] and "motion" in error["message"]
+                error = rejected.content.content[0].value
+                assert "2 seconds" in error
+                assert "overview" in error and "motion" in error
             frames = await invoke(
                 port,
                 "read_video_frames",
-                {"target": {"kind": "PATH", "path": str(path)}, "mode": "detail", "from": 0, "to": 1},
+                {
+                    "target": {"kind": "PATH", "path": str(path)},
+                    "action": "detail",
+                    "from": 0,
+                    "to": 1,
+                },
                 image=True,
             )
             assert frames.state == "SUCCESS", frames.content
-            assert isinstance(frames.content, FrozenPromptContent)
-            assert (
-                len([p for p in frames.content.parts if isinstance(p, LLMImagePart)])
-                == 2
-            )
-            body = json.loads(
-                frozen_tool_result_public_text(
-                    frames.content, tool_name="read_video_frames"
-                )
-            )
-            assert body["video_frames"] is True
-            assert body["media_version"] == {
-                "modified_ns": str(path.stat().st_mtime_ns),
-                "size": path.stat().st_size,
-            }
-            assert body["frames"][0]["t"] == 0
-            assert body["frames"][-1]["t"] > 0
-            assert [frame["t"] for frame in body["frames"]] == [0, 0.5, 0.9]
-            assert [frame["image"] for frame in body["frames"]] == [1, 2, 1]
+            assert [part.type for part in frames.content.content] == [
+                "text",
+                "object",
+                "image",
+                "object",
+                "image",
+                "object",
+                "image",
+            ]
+            index = [
+                part.value for part in frames.content.content if part.type == "object"
+            ]
+            assert [item["t"] for item in index] == [0, 0.5, 0.9]
+            images = [
+                part.value["image_ref"]
+                for part in frames.content.content
+                if part.type == "image"
+            ]
+            assert images[0] == images[2] and images[0] != images[1]
             annotation = await invoke(
                 port,
                 "annotate_media",
@@ -268,7 +261,7 @@ def test_audio_annotation_and_no_video_modality_boundary(tmp_path):
                 {"target": {"kind": "PATH", "path": str(path)}},
                 image=True,
             )
-            assert json.loads(result.content)["error"] == "NO_VIDEO_TRACK"
+            assert "no usable video track" in result.content.content[0].value
         finally:
             await port.aclose()
 
@@ -323,7 +316,7 @@ def test_forged_root_indirect_provenance_is_denied_before_source_read(tmp_path):
                 prepared.authorization.kind
                 is KernelToolAuthorizationKind.TOOL_UNAVAILABLE
             )
-            with pytest.raises(RuntimeError, match="direct ROOT"):
+            with pytest.raises(RuntimeError, match="direct native ROOT authority"):
                 await port.invoke(
                     tool_name="annotate_media",
                     arguments={
@@ -346,14 +339,17 @@ def test_forged_root_indirect_provenance_is_denied_before_source_read(tmp_path):
     asyncio.run(run())
 
 
-def test_text_only_video_denies_before_source_probe(tmp_path):
+def test_text_only_video_still_completes_physical_read(tmp_path):
+    path = video(tmp_path / "physical.mkv", ["red", "blue", "red"], rate=3)
+
     async def run():
-        port = port_at(tmp_path)
+        validator = HostPromptImageValidator()
+        port = port_at(tmp_path, validator)
         borrow, context = direct_tool_invocation_context(
             port,
             session_id=SESSION,
             tool_name="read_video_frames",
-            tool_call_id="external-provider-call",
+            tool_call_id="physical-read",
             attempt_id=ATTEMPT,
             turn_id=TURN,
             assistant_entry_id=ENTRY,
@@ -361,43 +357,30 @@ def test_text_only_video_denies_before_source_probe(tmp_path):
         try:
             result = await port.invoke(
                 tool_name="read_video_frames",
-                arguments={"target": {"kind": "PATH", "path": "missing.mkv"}},
-                tool_call_id="external-provider-call",
+                arguments={
+                    "target": {"kind": "PATH", "path": path.name},
+                    "action": "detail",
+                    "from": 0,
+                    "to": 1,
+                },
+                tool_call_id="physical-read",
                 attempt_id=ATTEMPT,
                 turn_id=TURN,
                 assistant_entry_id=ENTRY,
                 invocation_context=replace(context, input_modalities=("text",)),
             )
-            assert result.state == "APPLICATION_ERROR"
-            assert json.loads(result.content) == {
-                "error": "MODEL_IMAGE_INPUT_UNSUPPORTED"
-            }
+            assert result.state == "SUCCESS"
+            assert (
+                len([part for part in result.content.content if part.type == "image"])
+                == 3
+            )
+            assert result.pending_images
         finally:
             borrow.close()
             await port.aclose()
+            await validator.aclose()
 
     asyncio.run(run())
-
-
-def test_video_public_projection_requires_trusted_tool_and_true_index():
-    from pulsara_agent.llm.input import LLMTextPart
-    from tests.support.images import bound_test_image
-
-    image = bound_test_image("image/png", b"test-image", 1, 1)
-    content = FrozenPromptContent(
-        (LLMTextPart('{"video_frames":true,"frames":[]}'), image, image)
-    )
-    with pytest.raises(ValueError, match="exactly one"):
-        frozen_tool_result_public_text(content)
-    assert (
-        json.loads(
-            frozen_tool_result_public_text(content, tool_name="read_video_frames")
-        )["video_frames"]
-        is True
-    )
-    false_index = FrozenPromptContent((LLMTextPart('{"video_frames":false}'), image))
-    with pytest.raises(ValueError, match="complete time index"):
-        frozen_tool_result_public_text(false_index, tool_name="read_video_frames")
 
 
 def test_media_settings_freeze_once_off_main_loop_only_for_transcript(tmp_path):
@@ -438,7 +421,12 @@ def test_media_settings_freeze_once_off_main_loop_only_for_transcript(tmp_path):
             frames = await invoke(
                 port,
                 "read_video_frames",
-                {"target": {"kind": "PATH", "path": str(path)}, "mode": "detail", "from": 0, "to": 0.05},
+                {
+                    "target": {"kind": "PATH", "path": str(path)},
+                    "action": "detail",
+                    "from": 0,
+                    "to": 0.05,
+                },
                 image=True,
             )
             assert frames.state == "SUCCESS", frames.content
@@ -446,7 +434,25 @@ def test_media_settings_freeze_once_off_main_loop_only_for_transcript(tmp_path):
             text = await invoke(
                 port, "read_transcript", {"target": {"kind": "PATH", "path": str(path)}}
             )
-            assert json.loads(text.content)["error"] == "NO_AUDIO_TRACK"
+            assert "没有音轨" in text.content.content[
+                -2
+            ].value or "没有音轨" in "".join(
+                part.value for part in text.content.content if part.type == "text"
+            )
+            assert reads == []
+            wav(tmp_path / "sound.wav")
+            from tests.test_media_transcript import Cache
+
+            port._media_cache = Cache()
+            missing = await invoke(
+                port,
+                "read_transcript",
+                {"target": {"kind": "PATH", "path": "sound.wav"}},
+            )
+            assert missing.state == "APPLICATION_ERROR"
+            assert "Configure an ASR service" in "".join(
+                part.value for part in missing.content.content if part.type == "text"
+            )
             assert reads == [True]
         finally:
             await port.aclose()

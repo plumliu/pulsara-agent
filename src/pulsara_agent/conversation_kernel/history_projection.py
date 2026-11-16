@@ -168,6 +168,8 @@ def canonical_history_message(
             )
             shown.append(display)
             offset += len(display)
+        if not any(shown):
+            return None
         label = "用户补充" if kind == "USER_STEER" else "用户输入"
     else:
         if kind not in {"ASSISTANT_MESSAGE", "ASSISTANT_TOOL_REQUEST"}:
@@ -198,7 +200,7 @@ def canonical_history_message(
             )
             shown.append(text)
             offset += len(text)
-        if not shown:
+        if not any(shown):
             return None
         role, annotated = "assistant", False
         label = (

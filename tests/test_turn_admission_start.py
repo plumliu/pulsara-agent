@@ -205,6 +205,8 @@ def test_preparation_resource_failure_cannot_strand_started_turn(
     stage2_migrated_postgres_database, monkeypatch,
 ):
     from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
+    from pulsara_agent.conversation_kernel.content_parts import read_content_parts
+    from psycopg.rows import dict_row
     from pulsara_agent.conversation_kernel.repository import ConversationKernelRepository
     from pulsara_agent.conversation_kernel.runner import ConversationKernelRunner
     from pulsara_agent.model_input.contracts import (
@@ -264,23 +266,25 @@ def test_preparation_resource_failure_cannot_strand_started_turn(
     assert runner._safe_point.is_idle()
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
+        row_factory=dict_row,
         deadline_monotonic=monotonic() + 10,
     ) as connection:
         assert connection.execute(
             "SELECT status, terminal_reason FROM pulsara_v3.turns WHERE session_id=%s",
             (session_id,),
-        ).fetchone() == ("INTERRUPTED", "PROVIDER_INPUT_RESOURCE_EXHAUSTED")
+        ).fetchone() == {"status": "INTERRUPTED", "terminal_reason": "PROVIDER_INPUT_RESOURCE_EXHAUSTED"}
         entries = connection.execute(
-            "SELECT entry_kind, inline_content FROM pulsara_v3.transcript_entries "
+            "SELECT id, entry_kind FROM pulsara_v3.transcript_entries "
             "WHERE session_id=%s ORDER BY entry_sequence", (session_id,),
         ).fetchall()
         assert len(entries) == 1
-        assert entries[0][0] == "USER_MESSAGE"
-        assert b"retain the original request" in bytes(entries[0][1])
+        assert entries[0]["entry_kind"] == "USER_MESSAGE"
+        parts = read_content_parts(connection, entry_id=entries[0]["id"])
+        assert [(part.type, part.value) for part in parts] == [("text", "retain the original request")]
         assert connection.execute(
             "SELECT count(*) FROM pulsara_v3.agent_events "
             "WHERE session_id=%s AND event_type='TurnInterrupted'", (session_id,),
-        ).fetchone() == (1,)
+        ).fetchone() == {"count": 1}
 
 
 def test_waiter_cancel_without_explicit_cause_prevents_none_reissue():

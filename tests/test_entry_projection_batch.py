@@ -1,15 +1,14 @@
 """Bounded relation reads preserve the canonical per-entry projection owner."""
 
+from pulsara_agent.conversation_kernel.content_parts import ResultPart
 from datetime import datetime, timezone
 from time import monotonic
 
 import pytest
 
 from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader
-from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.repository import build_prepared_tool_result_acceptance
 from pulsara_agent.identity import random_id
-from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from tests.test_conversation_fork import new_session, repo as repo, rows as read_rows, turn
 from tests.test_session_snapshot_loading import _interrupted_attempt
@@ -40,10 +39,10 @@ def _tool_outcome(repo, lease):
         guard=lease.guard, workspace_id=attempt["workspace_id"], result_id=random_id("result"),
         result_entry_id=result_entry_id, turn_id=attempt["turn_id"],
         assistant_entry_id=attempt["assistant_entry_id"], tool_call_id=attempt["tool_call_id"], attempt_id=attempt_id,
-        result_state="SUCCESS", canonical_preview_content=InlineContent.from_bytes(b"outcome"),
-        output_body=InlineContent.from_bytes(b"outcome"), source_coverage=ToolOutputSourceCoverage.COMPLETE,
-        output_omitted=False, source_coverage_reason=None,
-        output_unavailability_reason=None, observed_at=datetime.now(timezone.utc),
+        result_state="SUCCESS", public_fields={}, content_parts=(ResultPart("text", b"outcome".decode("utf-8")),),
+
+
+         observed_at=datetime.now(timezone.utc),
         observation_duration_microseconds=None, observation_origin_kind=ToolObservationOrigin.TERMINAL_PROCESS,
         trusted_tool_reported_duration_microseconds=None, actor_id="terminal",
     )
@@ -128,7 +127,7 @@ def test_user_and_tool_result_projection_uses_one_small_relation_query(repo):
         assert [value.SerializeToString(deterministic=True) for value in batched] == [
             value.SerializeToString(deterministic=True) for value in individual
         ]
-        assert len(measured.queries) == 1
+        assert sum("AS relation_entry_id" in query and "FROM pulsara_v3.transcript_entries" in query for query in measured.queries) == 1
         assert "payload_bytes" not in measured.queries[0]
 
 
@@ -155,7 +154,7 @@ def test_fork_owner_is_called_only_when_its_root_candidate_is_projected(repo, mo
         measured = RecordingConnection(connection)
         relations = reader._entry_relations(measured, rows)
         assert not touched
-        assert len(measured.queries) == 1
+        assert sum("AS relation_entry_id" in query and "FROM pulsara_v3.transcript_entries" in query for query in measured.queries) == 1
         assert "model_call_binding" not in measured.queries[0]
         latest = reader._entry(connection, rows[-1], relations=relations)
         assert latest.fork_eligible

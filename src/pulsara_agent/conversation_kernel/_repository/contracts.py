@@ -24,7 +24,6 @@ from pulsara_agent.conversation_kernel.contracts import (
     canonical_digest,
 )
 from pulsara_agent.conversation_kernel.limits import (
-    PLAN_CONTROL_RESULT_INLINE_HARD_BYTES,
     STAGE2_LIMITS,
 )
 from pulsara_agent.conversation_kernel.prompt_content import (
@@ -41,13 +40,13 @@ from pulsara_agent.conversation_kernel.repository_errors import (
 )
 from pulsara_agent.ports.tool_output import ToolOutputUnavailableReason
 from pulsara_agent.ports.tool_execution import ToolBusinessValue
+from pulsara_agent.llm.input import LLMImagePart
 from pulsara_agent.conversation_kernel.content_parts import ResultPart
 from pulsara_agent.ports.tool_execution import (
     FrozenToolJsonDict, freeze_tool_json_object,
 )
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
-    canonical_json_bytes,
     thaw_json,
 )
 from pulsara_agent.primitives.permission import PermissionMode
@@ -56,10 +55,6 @@ from pulsara_agent.primitives.tool_observation import (
     ToolObservationOrigin,
     canonical_utc_timestamp,
     normalize_observation_duration,
-)
-from pulsara_agent.primitives.tool_result_projection import (
-    MAXIMUM_TOOL_RESULT_MEMORY_PROVENANCE_ITEMS,
-    MAXIMUM_TOOL_RESULT_MEMORY_PROVENANCE_UTF8_BYTES,
 )
 from pulsara_agent.primitives.plan_workflow import (
     ExtractedPlanDraft,
@@ -151,13 +146,6 @@ class AcceptedEntry:
     pending_steer_at_settlement: bool = False
 
 
-@dataclass(frozen=True, slots=True)
-class AcceptedMemoryToolResult(AcceptedEntry):
-    """The writer-determined body and exposure of a direct memory mutation."""
-
-    canonical_body: str = ""
-    result_state: str = "SUCCESS"
-    model_visible_memory_fact_ids: tuple[str, ...] = ()
 
 
 class TurnAdmissionConfirmationKind(StrEnum):
@@ -393,8 +381,10 @@ class PreparedToolResultAcceptance:
     trusted_tool_reported_duration_microseconds: int | None
     actor_id: str
     tool_result_occurrence: CommittedEventDraft
-    model_visible_memory_fact_ids: tuple[str, ...] = ()
     result_facts: FrozenToolJsonDict = field(default_factory=FrozenToolJsonDict)
+    source_result_entry_id: str | None = None
+    native_projection: FrozenToolJsonDict | None = None
+    pending_images: tuple[LLMImagePart, ...] = ()
     invocation_source: ToolInvocationSource | None = field(default_factory=current_tool_invocation.get)
 
     def __post_init__(self) -> None:
@@ -409,6 +399,17 @@ class PreparedToolResultAcceptance:
         object.__setattr__(self, "public_fields", declared.public_fields)
         object.__setattr__(self, "content_parts", declared.content)
         object.__setattr__(self, "result_facts", freeze_tool_json_object(self.result_facts))
+        if self.native_projection is not None and self.source_result_entry_id is None:
+            raise ValueError("actual native projection requires its resolved source")
+        if self.source_result_entry_id is not None:
+            require_id(self.source_result_entry_id, "entry")
+            if self.native_projection is not None:
+                object.__setattr__(self, "native_projection", freeze_tool_json_object(self.native_projection))
+            if self.source_result_entry_id != self.result_entry_id and (self.content_parts or self.public_fields):
+                raise ValueError("native continuation cannot duplicate its source business value")
+        for image in self.pending_images:
+            if not isinstance(image, LLMImagePart) or image.image_ref is None:
+                raise TypeError("pending tool assets must be validated and identity-bound images")
         if self.output_unavailability_reason is not None and not isinstance(
             self.output_unavailability_reason, ToolOutputUnavailableReason
         ):
@@ -445,16 +446,6 @@ class PreparedToolResultAcceptance:
             self.attempt_id is not None and self.result_state not in attempted_states
         ):
             raise ValueError("prepared tool result attempt/state union is invalid")
-        if (
-            len(self.model_visible_memory_fact_ids)
-            > MAXIMUM_TOOL_RESULT_MEMORY_PROVENANCE_ITEMS
-            or len(set(self.model_visible_memory_fact_ids))
-            != len(self.model_visible_memory_fact_ids)
-            or any(not value for value in self.model_visible_memory_fact_ids)
-            or len(canonical_json_bytes(self.model_visible_memory_fact_ids))
-            > MAXIMUM_TOOL_RESULT_MEMORY_PROVENANCE_UTF8_BYTES
-        ):
-            raise ValueError("prepared model-visible memory header is invalid")
         canonical_utc_timestamp(self.observed_at)
         if self.observation_duration_microseconds != normalize_observation_duration(
             self.observation_duration_microseconds
@@ -615,6 +606,8 @@ class PreparedPlanToolBatch:
     idempotent_existing: bool = False
     selected_disposition: PlanToolBatchDisposition = PlanToolBatchDisposition.APPLY
     resume_permission_mode: PermissionMode | None = None
+    plan_file_path: str | None = None
+    plan_file_error: str | None = None
     candidate_fingerprint: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -687,6 +680,10 @@ class PreparedPlanToolBatch:
             raise ValueError("only Plan enter may be idempotent")
         elif not self.expected_workflow_revision or self.expected_workflow_revision < 1:
             raise ValueError("Plan interaction workflow revision is invalid")
+        if self.plan_file_path is not None and self.plan_file_error is not None:
+            raise ValueError("Plan file publication facts are mutually exclusive")
+        if self.control_kind is not PlanToolControlKind.DRAFT and (self.plan_file_path is not None or self.plan_file_error is not None):
+            raise ValueError("only a draft review publishes a plan file")
         payload = {
             "session_id": self.session_id,
             "workspace_id": self.workspace_id,
@@ -720,6 +717,8 @@ class PreparedPlanToolBatch:
             "idempotent_existing": self.idempotent_existing,
             "selected_disposition": self.selected_disposition.value,
             "resume_permission_mode": self.resume_permission_mode,
+            "plan_file_path": self.plan_file_path,
+            "plan_file_error": self.plan_file_error,
         }
         object.__setattr__(
             self,
@@ -741,8 +740,11 @@ class AcceptedPlanToolBatch:
     continuation_entry_id: str | None
     origin_turn_completed: bool
     tool_result_settlements: tuple[AcceptedCanonicalToolResultSettlement, ...] = ()
+    interaction_accepted_at: datetime | None = None
 
     def __post_init__(self) -> None:
+        if (self.interaction_id is not None) != (self.interaction_accepted_at is not None):
+            raise ValueError("Plan interaction requires its actual acceptance time")
         if tuple(item.call_ordinal for item in self.tool_result_settlements) != tuple(
             sorted(item.call_ordinal for item in self.tool_result_settlements)
         ):
@@ -1140,8 +1142,6 @@ def _plan_inline(payload: Mapping[str, object]) -> InlineContent:
         separators=(",", ":"),
         allow_nan=False,
     ).encode("utf-8")
-    if len(encoded) > PLAN_CONTROL_RESULT_INLINE_HARD_BYTES:
-        raise ValueError("Plan control result exceeds its inline bound")
     return InlineContent.from_bytes(
         encoded,
         media_type="application/vnd.pulsara.plan-control+json",
@@ -1157,7 +1157,10 @@ def plan_question_resolution_semantic_fingerprint(
     answer: PlanQuestionAnswer | None,
     result_id: str,
     result_entry_id: str,
+    timed_out: bool = False,
 ) -> str:
+    if timed_out and answer is not None:
+        raise ValueError("a Plan question timeout cannot carry an answer")
     return canonical_digest(
         "pulsara:resolve-plan-question:v1",
         {
@@ -1171,6 +1174,7 @@ def plan_question_resolution_semantic_fingerprint(
             },
             "result_id": result_id,
             "result_entry_id": result_entry_id,
+            "timed_out": timed_out,
         },
     )
 
@@ -1204,7 +1208,10 @@ def plan_draft_review_semantic_candidate(
     continuation_entry_id: str | None,
     continuation_context_binding_revision_id: str | None,
     source_queue_item_id: str | None = None,
+    timed_out: bool = False,
 ) -> tuple[FrozenCanonicalPrompt | None, tuple[str | None, str | None, str | None], str]:
+    if timed_out and decision is not PlanDraftDecision.CANCEL:
+        raise ValueError("a Plan review timeout must cancel the interaction")
     if (decision is PlanDraftDecision.REVISE) != (canonical_prompt is not None):
         raise ValueError("Plan revision requires a complete canonical prompt")
     if source_queue_item_id is not None and decision is not PlanDraftDecision.REVISE:
@@ -1224,6 +1231,7 @@ def plan_draft_review_semantic_candidate(
             "expected_workflow_revision": expected_workflow_revision,
             "interaction_id": interaction_id,
             "decision": decision.value,
+            "timed_out": timed_out,
             "prompt": None if canonical_prompt is None else _canonical_prompt_identity(canonical_prompt),
             "source_queue_item_id": source_queue_item_id,
             "continuation": continuation_values,
@@ -1280,8 +1288,10 @@ def build_prepared_tool_result_acceptance(
     trusted_tool_reported_duration_microseconds: int | None,
     actor_id: str,
     output_unavailability_reason: ToolOutputUnavailableReason | None = None,
-    model_visible_memory_fact_ids: tuple[str, ...] = (),
     result_facts: Mapping[str, object] | None = None,
+    source_result_entry_id: str | None = None,
+    native_projection: Mapping[str, object] | None = None,
+    pending_images: tuple[LLMImagePart, ...] = (),
 ) -> PreparedToolResultAcceptance:
     """Freeze every semantic field before the first canonical write."""
 
@@ -1309,6 +1319,9 @@ def build_prepared_tool_result_acceptance(
         public_fields=freeze_tool_json_object(public_fields),
         content_parts=content_parts,
         result_facts=freeze_tool_json_object(result_facts or {}),
+        source_result_entry_id=source_result_entry_id,
+        native_projection=None if native_projection is None else freeze_tool_json_object(native_projection),
+        pending_images=pending_images,
         output_unavailability_reason=output_unavailability_reason,
         observed_at=observed_at,
         observation_duration_microseconds=observation_duration_microseconds,
@@ -1318,5 +1331,4 @@ def build_prepared_tool_result_acceptance(
         ),
         actor_id=actor_id,
         tool_result_occurrence=tool_result_occurrence,
-        model_visible_memory_fact_ids=model_visible_memory_fact_ids,
     )

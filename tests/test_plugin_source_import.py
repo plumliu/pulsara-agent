@@ -1,8 +1,5 @@
+from tests.support.capability_management_targets import plugin_target
 
-from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
-from pulsara_agent.identity import random_id as _new_management_call_id
-
-from pulsara_agent.identity import derive_id as _capability_page_id
 
 import json
 from pathlib import Path
@@ -28,9 +25,6 @@ from pulsara_agent.process_credential_boundary import (
     ProcessCredentialBoundary,
     ProcessCredentialScrubSet,
 )
-
-
-_CAPABILITY_PAGE_BUDGET = ToolResultPageBudget(_capability_page_id("call", "capability-query-test", __name__))
 
 
 def fixture(tmp_path, manifest, source_format="codex"):
@@ -309,10 +303,14 @@ def test_external_validation_reports_original_skill_files_after_cleanup(tmp_path
     for relative, name in (("custom/alpha", "alpha"), ("elsewhere/beta", "beta")):
         path = source / relative / "SKILL.md"
         path.parent.mkdir(parents=True)
-        path.write_text(f"---\nname: {name}\ndescription: Read {name}\n---\nBody {name}.\n")
+        path.write_text(
+            f"---\nname: {name}\ndescription: Read {name}\n---\nBody {name}.\n"
+        )
     service = PluginManagementService(credential_boundary=ProcessCredentialBoundary())
     result = service.validate_local_plugin_source(
-        ValidateLocalPluginSourceRequest(source, monotonic() + 20, source_format="codex")
+        ValidateLocalPluginSourceRequest(
+            source, monotonic() + 20, source_format="codex"
+        )
     )
     assert result.disposition.value == "VALID"
     paths = {item.name: Path(item.skill_path) for item in result.summary.skills.skills}
@@ -327,7 +325,9 @@ def test_external_validation_reports_original_skill_files_after_cleanup(tmp_path
 def test_external_install_uses_native_disabled_instance_and_preserves_source(tmp_path):
     import asyncio
 
-    from pulsara_agent.capability.management_form import AcceptedCapabilityFormSubmission
+    from pulsara_agent.capability.management_form import (
+        AcceptedCapabilityFormSubmission,
+    )
     from pulsara_agent.capability.render import render_catalog_prompt
     from pulsara_agent.capability.resolver import _catalog_entry
     from pulsara_agent.cli import _plugin_summary_payload
@@ -394,22 +394,23 @@ def test_external_install_uses_native_disabled_instance_and_preserves_source(tmp
 
         async def query(arguments, *, inspect=False):
             return await CapabilitySourceQuery(
-                service, runtime=None, plan=None, scope=ModelInputScopeKind.ROOT
-            , fits_result=_CAPABILITY_PAGE_BUDGET.fits).execute(arguments)
+                service, runtime=None, scope=ModelInputScopeKind.ROOT, inspect_tool=None,
+            ).execute(arguments)
 
-        listed = await query({"kind": "SKILL", "source_kind": "PLUGIN"})
-        row = next(item for item in listed["items"] if item["name"] == "example")
+        listed = await query({"kind":"SKILL"})
+        row = next(item for item in [part["value"] for part in listed["content"] if part["type"]=="object"] if item["name"] == "example")
         assert row["target"] == {"kind": "SKILL", "skill_path": str(installed_path)}
-        detail = await query({"target": row["target"]}, inspect=True)
-        assert detail["skill_path"] == str(installed_path)
-        assert detail["skill_root"] == str(installed_path.parent)
+        detail = await query({"kind":"SKILL","target":row["target"]},inspect=True)
+        assert detail["content"][0]["value"]["target"]["skill_path"] == str(installed_path)
         enable = CapabilityManagementCall(
             service,
-            await service.prepare({
-                "action": "SET_PLUGIN_ENABLED",
-                "enabled": True,
-                "target": {"kind": "PLUGIN", "scope": "USER", "plugin_id": "example"},
-            }),
+            await service.prepare(
+                {
+                    "action": "SET_PLUGIN_ENABLED",
+                    "enabled": True,
+                    "target": plugin_target(service, "example", scope="USER"),
+                }
+            ),
         )
         form = enable.form("review")
         shown = thaw_json(form.public_projection)["plugin"]["skills"][0]
@@ -419,7 +420,7 @@ def test_external_install_uses_native_disabled_instance_and_preserves_source(tmp
                 await form.prepare_submission({"enable_review_accepted": True})
             )
         )
-        assert (await enable.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call"))))["status"] == "APPLIED"
+        assert (await enable.execute()).state == "SUCCESS"
         view = EnabledPluginViewOwner(
             store=service.plugins._store(),
             credential_boundary=service.plugins._credential_boundary,
@@ -430,17 +431,19 @@ def test_external_install_uses_native_disabled_instance_and_preserves_source(tmp
         )
         try:
             candidate = PluginSkillDefinitionProducer().observe(view).candidates[0]
-            row = json.loads(render_catalog_prompt((_catalog_entry(candidate),)))["skills"][0]
-            assert row["skill_path"] == str(installed_path)
+            row = json.loads(render_catalog_prompt((_catalog_entry(candidate),)))[
+                "skills"
+            ][0]
+            assert row["target"]["skill_path"] == str(installed_path)
             read = ReadFileTool(service.workspace_root).execute(
                 ToolCall(
                     "read-plugin",
                     "read_file",
-                    {"target": {"kind": "PATH", "path": row["skill_path"]}},
+                    {"target": {"kind": "PATH", "path": row["target"]["skill_path"]}},
                 )
             )
             assert read.status is ToolResultState.SUCCESS
-            assert "Fixture body." in read.output
+            assert "Fixture body." in read.business_value.content[0].value
         finally:
             view.close()
         await service.mcp.aclose()
@@ -517,14 +520,27 @@ def test_unreferenced_gemini_commands_are_resources_in_claude_import(tmp_path):
         assert any(item.component == "commands" for item in observed.diagnostics)
 
 
-def test_import_prevalidation_uses_declarations_without_hook_binding(tmp_path, monkeypatch):
+def test_import_prevalidation_uses_declarations_without_hook_binding(
+    tmp_path, monkeypatch
+):
     from pulsara_agent.plugins import package_core
 
-    source = fixture(tmp_path, {"hooks": {"hooks": {"SessionStart": [
-        {"hooks": [{"type": "command", "command": "echo imported"}]}
-    ]}}})
+    source = fixture(
+        tmp_path,
+        {
+            "hooks": {
+                "hooks": {
+                    "SessionStart": [
+                        {"hooks": [{"type": "command", "command": "echo imported"}]}
+                    ]
+                }
+            }
+        },
+    )
+
     def forbidden(*args, **kwargs):
         raise AssertionError("prevalidation must not bind executable Hook provenance")
+
     monkeypatch.setattr(package_core, "parse_hook_config", forbidden)
     with observe(source) as observation:
         assert observation.hook_config is None

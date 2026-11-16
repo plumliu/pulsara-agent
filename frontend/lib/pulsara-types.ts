@@ -129,10 +129,6 @@ export interface CapabilitySnapshot {
   mcp: {
     configPath: string;
     servers: McpServerCapability[];
-    collisions: Array<{
-      name: string;
-      members: Array<{ serverId: string; toolName: string }>;
-    }>;
   };
 }
 
@@ -345,6 +341,7 @@ export interface ToolTrace {
   argumentsJson?: string;
   resultText?: string;
   resultContent?: CanonicalPromptContent;
+  businessValue?: import('./tool-business-value').ToolBusinessValue;
   resultEntryId?: string;
   resultState?: string;
   resultSummary?: string;

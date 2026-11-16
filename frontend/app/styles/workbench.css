@@ -332,6 +332,7 @@
 .interaction-skeleton.is-short { width: 60%; margin-top: 10px; }
 .interaction-error { display: flex; align-items: flex-start; gap: 10px; margin: 16px 22px; padding: 10px 14px; border: 1px solid color-mix(in srgb,var(--red) 14%,var(--line)); border-radius: 9px; background: color-mix(in srgb,var(--red-soft) 25%,var(--paper-solid)); color: var(--red); font-size: 12px; line-height: 1.8; }
 .interaction-error svg { flex: none; margin-top: 2px; }
+.interaction-plan-deadline { display: flex; align-items: center; gap: 6px; margin: 0; padding: 12px 22px 0; color: var(--muted); font: 12px var(--sans); }
 .interaction-question { margin: 0; padding: 16px 22px; color: var(--ink-soft); font-size: 14px; font-weight: 400; line-height: 1.85; overflow-wrap: anywhere; }
 .interaction-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; padding: 10px 22px; }
 .interaction-actions button, .interaction-text-answer > button { display: inline-flex; align-items: center; justify-content: center; gap: 9px; min-height: 34px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--paper-solid); color: var(--muted); font: 500 12px/1.5 var(--sans); }
@@ -451,12 +452,6 @@
 .presentation-result__copy strong { color: var(--ink); font-size: var(--type-caption); font-weight: 500; }
 .presentation-result__copy small { margin-top: 2px; color: var(--faint); font: var(--type-micro)/1.5 var(--mono); }
 .presentation-result__target > svg { flex: none; color: var(--faint); }
-.presentation-result__errors { display: grid; gap: 7px; list-style: none; margin: 7px 0 0; padding: 9px; border-radius: 7px; background: var(--red-soft); color: var(--red); }
-.presentation-result__errors:first-child { margin-top: 0; }
-.presentation-result__errors li { display: flex; align-items: flex-start; gap: 7px; }
-.presentation-result__errors svg { flex: none; margin-top: 2px; }
-.presentation-result__errors strong { margin-right: 8px; font-weight: 500; }
-.presentation-result__errors span { min-width: 0; overflow-wrap: anywhere; }
 .terminal-output > div { white-space: pre-wrap; overflow-wrap: anywhere; }
 .terminal-command { margin-bottom: 4px; color: var(--ink); }
 .terminal-command span { color: var(--faint); }
@@ -536,11 +531,12 @@
 
 .tool-output-scroll { overflow: auto; overscroll-behavior: contain; scrollbar-color: color-mix(in srgb,var(--ink) 24%,transparent) transparent; scrollbar-gutter: stable; }
 .tool-result-diff { max-height: min(300px,42vh); box-sizing: border-box; margin: 0 0 10px; padding: 10px 11px; border: 1px solid var(--line); border-radius: 8px; background: color-mix(in srgb,var(--paper-solid) 52%,transparent); color: var(--ink-soft); white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.62; }
-.tool-result-raw { display: grid; gap: 7px; margin-top: 8px; }
+.tool-result-raw { display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; gap: 10px; min-width: 0; margin-top: 8px; }
+.tool-result-raw.tool-result-images { max-height: min(560px, 60vh); overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
 .tool-result-raw header { display: flex; align-items: center; gap: 8px; }
 .tool-result-raw header button { border: 1px solid var(--line-strong); border-radius: 6px; background: transparent; color: inherit; cursor: pointer; }
 .tool-result-raw header button:first-of-type { margin-left: auto; }
-.tool-result-raw pre { max-height: min(340px,42vh); font-family: var(--mono); font-size: var(--type-label); }
+.tool-result-raw pre { min-width: 0; max-height: min(340px,42vh); overflow: auto; overscroll-behavior: contain; font-family: var(--mono); font-size: var(--type-label); }
 .empty-result { color: var(--faint); }
 
 .tool-output-page { display: grid; min-width: 0; margin: 12px -12px 0; border-top: 1px solid var(--line); background: linear-gradient(180deg,color-mix(in srgb,var(--paper-solid) 26%,transparent),transparent 68%); }
@@ -694,7 +690,7 @@
 .queue-action-tooltip[data-open='true'] { opacity: 1; visibility: visible; transform: translateY(0) scale(1); transition-delay: 0s; }
 @starting-style { .queue-action-tooltip[data-open='true'] { opacity: 0; transform: translateY(var(--queue-tooltip-offset)) scale(.97); } }
 :root[data-theme='dark'] .composer-wrap { --composer-surface-shadow: 0 4px 16px rgba(0, 0, 0, .22), inset 0 1px 0 rgba(255, 255, 255, .045); }
-.tool-result-raw pre { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+.tool-result-raw pre { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 @container (max-width: 480px) {
   .composer-queue article:has(> .composer-queue__actions) { grid-template-columns: 24px minmax(0, 1fr); gap: 5px 8px; }
   .composer-queue article:has(> .composer-queue__actions) > .composer-queue__body { grid-column: 1 / -1; grid-row: 2; }
@@ -733,13 +729,16 @@
 .conversation-run > [data-source-entry]:last-child .assistant-turn,
 .conversation-run > [data-source-entry]:last-child .assistant-copy { margin-bottom: 0; }
 
-/* The resident span slides as one drawer; its body unmounts after closing.
-   Keep text opaque so the motion reads as a drawer, rather than a crossfade. */
-.conversation-run__drawer.animated-disclosure { opacity: 1; visibility: visible; overflow: clip; align-content: end; transition: grid-template-rows .26s cubic-bezier(.2,.7,.2,1); }
+/* Position the reading anchor once, then reveal pixels without animating the
+   scroll range. Fractional height frames otherwise fight scrollTop rounding.
+   Keep the closing layout until its clip finishes and the body can unmount. */
+.conversation-run__drawer.animated-disclosure { opacity: 1; visibility: visible; overflow: clip; align-content: end; clip-path: inset(100% 0 0); transition: clip-path .26s cubic-bezier(.2,.7,.2,1), grid-template-rows 0s .26s; }
+.conversation-run__drawer.animated-disclosure.is-open { clip-path: inset(0); transition: clip-path .26s cubic-bezier(.2,.7,.2,1), grid-template-rows 0s; }
 .conversation-run__drawer > .animated-disclosure__content { display: flex; flex-direction: column; justify-content: flex-end; overflow: visible; }
 /* Top control keeps the upper content fixed and removes the lower edge.
    Bottom control keeps the lower content fixed and removes the upper edge. */
 .conversation-run[data-process-motion-edge="top"] .conversation-run__drawer { align-content: start; }
+.conversation-run[data-process-motion-edge="top"] .conversation-run__drawer:not(.is-open) { clip-path: inset(0 0 100%); }
 .conversation-run[data-process-motion-edge="top"] .conversation-run__drawer > .animated-disclosure__content { justify-content: flex-start; }
 /* The drawer owns process spacing, including its trailing gap before the
    persistent lower control. Closing folds content and spacing together. */
@@ -1144,3 +1143,13 @@
 .media-evidence-index { display: flex; flex-wrap: wrap; gap: 5px; padding: 9px 12px; }
 .media-evidence-index > button { border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; background: var(--paper-raised); color: var(--ink); font: 12px var(--mono); }
 .media-evidence-index > button:hover { border-color: var(--ink-soft); background: var(--paper-deep); }
+
+.media-transcript-segment { display: grid; gap: 5px; padding: 8px 0; }
+.media-transcript-segment header { display: flex; gap: 10px; color: var(--muted); font-size: var(--type-caption); }
+.media-transcript-segment header button { padding: 0; border: 0; background: transparent; color: var(--blue); cursor: pointer; }
+.media-transcript-segment p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tool-result-details { min-width: 0; }
+.tool-result-details summary { padding: 3px 0; cursor: pointer; color: var(--muted); font: 500 var(--type-label)/1.5 var(--sans); }
+.tool-result-details[open] > summary { color: var(--ink-soft); }
+.tool-result-details > header { margin-top: 6px; }
+.tool-result-details > pre { padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: color-mix(in srgb, var(--paper-deep) 72%, var(--paper-raised)); color: var(--ink-soft); font: var(--type-label)/1.65 var(--mono); scrollbar-gutter: stable; }

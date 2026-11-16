@@ -2,7 +2,7 @@
 
 Choose `WORKSPACE` to install for the current project or `USER` to install for
 the current user. The installer selects the destination and returns the absolute
-`identity.skill_path`. Use that path to read or edit the installed Skill; resolve
+`target.skill_path`. Use that path to read or edit the installed Skill; resolve
 its scripts, references and assets relative to the directory containing `SKILL.md`.
 
 The Runtime also discovers workspace and user `.agents/skills` roots. Loose Skills are ordinary files, with no receipt or ownership marker. Models may edit their installed contents in place under ordinary file permissions; see `pulsara-skill-creator`. Direct user copy, edit, rename and deletion remain supported.
@@ -17,14 +17,14 @@ The Runtime also discovers workspace and user `.agents/skills` roots. Loose Skil
 - Ordinary files and directories are copied, including useful `scripts/`, `references/`, and `assets/` resources.
 - Symlinks, sockets, devices, and FIFOs are outside the official loose-copy domain. `__pycache__` directories and `.DS_Store` files are ignored. `.pulsara-skill-source.json`, if present, is ordinary inert resource data and is copied byte-for-byte; it has no ownership or provenance authority.
 
-The official installer validates and copies one frozen source observation into a hidden sibling stage, verifies exact contents and portable modes, and publishes with the platform's exclusive no-replace directory rename. Existing destinations are never overwritten. The exclusive primitive guarantees final-name no-replace within the held root; it is not a sandbox or a power-loss durability promise, and same-UID replacement of the private stage or target-root namespace after the final binding cut is outside the product concurrency contract.
+The installer copies one frozen source observation and publishes without
+overwriting an existing destination. Source races, unsafe entries or validation
+failures must be resolved through that owner, not bypassed by a manual package copy.
 
-After installation, copy the returned `identity.skill_path` into
-`query_capabilities.target={kind:"SKILL",skill_path:<returned path>}` to inspect the copy, its selection,
-diagnostics and management eligibility. Read its instructions and resources
-through the ordinary Skill/read-file route. Management changes notify affected
-live sessions at their existing safe points; inspect adoption separately from
-the completed filesystem mutation. Current provider roots remain unchanged.
+After installation, query with kind SKILL and the confirmed SKILL Target to
+observe source/status. Read its instructions with a read_file PATH Target for
+skill_path; resolve resources beside SKILL.md. Read management meta.status and
+content for actual filesystem effects and cleanup/refresh failures.
 
 Pulsara package Skills are read-only defaults loaded directly from the installed package. They are not copied into these roots and have no sync, status, reset, manifest, backup, or opt-out state. A loose same-name Skill shadows the package definition until the user removes that loose directory.
 
@@ -35,6 +35,7 @@ Installing one loose directory does not execute neighboring host plugins.
 
 Standalone `pulsara skills` commands are an explicitly out-of-band administration
 path; inspect their actual help. They do not supply live-Host review/adoption.
-Conversation installation, removal and enablement use `manage_capability`.
+Conversation installation, removal and enablement use ROOT-native
+`manage_capability`.
 Content edits are observed by subsequent Skill snapshots without reinstalling or
 routinely reloading; already prepared snapshots and provider prefixes stay unchanged.

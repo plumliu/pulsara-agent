@@ -36,12 +36,10 @@ from pulsara_agent.primitives.plan_workflow import (
 from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from pulsara_agent.model_input.contracts import PreparedProviderInputCut
-from pulsara_agent.conversation_kernel.memory.writes import PreparedMemoryMutation
 
 from ._repository.contracts import (
     AcceptedCapabilityDecision,
     AcceptedEntry,
-    AcceptedMemoryToolResult,
     AcceptedInteractionDecision,
     AcceptedPlanResolution,
     AcceptedPlanToolBatch,
@@ -174,7 +172,6 @@ __all__ = [
     "AssistantToolCallBlock",
     "ConversationKernelConflict",
     "ConversationKernelRepository",
-    "AcceptedMemoryToolResult",
     "PreparedToolResultAcceptance",
     "PlanDraftIdentityConflict",
     "PlanContinuationDisposition",

@@ -22,12 +22,11 @@ from pulsara_agent.conversation_kernel.context_sources import (
     ContextSourceCollectorPort,
     FrozenNonTriggerContextSources,
     build_compaction_context_source,
-    build_memory_context_source,
-    replace_compaction_context_sources,
     replace_frozen_compaction_context_sources,
-    replace_frozen_hook_context_source,
-    replace_hook_context_source,
+    replace_frozen_hook_context_message,
+    replace_hook_context_message,
     replace_memory_context_sources,
+    observation_source,
 )
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     FrozenCompactionCanonicalRead,
@@ -39,7 +38,6 @@ from pulsara_agent.conversation_kernel.compaction.runtime import (
 from pulsara_agent.conversation_kernel.compaction.retained_skill import (
     FrozenRetainedSkillContextSelection,
     freeze_retained_skill_context,
-    remove_full_tail_duplicates,
 )
 from pulsara_agent.conversation_kernel.cold_epoch import (
     AdoptedCompactionContinuationSeed,
@@ -88,6 +86,7 @@ from pulsara_agent.llm.input import (
 )
 from pulsara_agent.llm.explicit_references import explicit_skill_reference_surfaces
 from pulsara_agent.conversation_kernel.steer import QueuedInputContent
+from pulsara_agent.ports.terminal_observation import CellOutputContent
 from pulsara_agent.llm.request import (
     MAXIMUM_PROVIDER_WIRE_INPUT_BYTES,
     FrozenProviderWireInputQuote,
@@ -127,11 +126,13 @@ from pulsara_agent.conversation_kernel.execution_watchdogs import (
     KernelWatchdogOwner,
 )
 from pulsara_agent.conversation_kernel.memory.contracts import (
+    MemoryObservationState,
     AutomaticMemoryTriggerDisposition,
     FrozenModelCallMemoryContext,
     MemoryUsePolicy,
     strongest_memory_use_policy,
 )
+from pulsara_agent.conversation_kernel.memory.hints import MEMORY_WRITE_HINT_BODY
 from pulsara_agent.conversation_kernel.memory.dispatch import MemoryDispatchSupport
 from pulsara_agent.conversation_kernel.tool_contracts import (
     ToolSurfacePlanningPort,
@@ -155,7 +156,6 @@ from pulsara_agent.conversation_kernel.safe_point import (
     SealedProviderInputPreparationBasis,
 )
 from pulsara_agent.conversation_kernel.steer import (
-    MemorySourceInvalidationReservation,
     AcceptedSteerDispatchBatch as AcceptedSteerDispatchBatch,
     PendingPromptSteerFact,
     PreparedActiveRootInputAdmission,
@@ -178,8 +178,6 @@ from pulsara_agent.model_input.contracts import (
     CapabilityActivationSubjectKind,
     CanonicalInputOriginKind,
     CollectedContextSources,
-    ContextSourceAbsentFact,
-    ContextSourceAbsenceKind,
     ContextSourceCandidate,
     ContextSourceKind,
     FrozenCanonicalCompileSnapshot,
@@ -198,7 +196,6 @@ from pulsara_agent.model_input.contracts import (
     ModelInputScopeKind,
     StructuredModelInputCompileError,
     StructuredModelInputCompileRequest,
-    ToolResultProviderRenderMode,
     canonical_compile_snapshot_fingerprint,
     canonical_model_input_identity_fingerprint,
     canonical_model_input_snapshot_fingerprint,
@@ -206,6 +203,8 @@ from pulsara_agent.model_input.contracts import (
     provider_input_item_fingerprint,
 )
 from pulsara_agent.model_input.continuity import (
+    InstalledObservationState,
+    RuntimeObservationItem,
     NewTriggerAnchor,
     FrozenDirectSwitchAdmission,
     FrozenProviderInputAppendCompileResult,
@@ -271,63 +270,6 @@ from pulsara_agent.conversation_kernel.dispatch_resources import (
 )
 
 
-def _remaining_invalidation_input_tokens(
-    candidate: ProviderWireMeasurementCandidate,
-    reservations: tuple[MemorySourceInvalidationReservation, ...],
-) -> int:
-    """Reserve only while the stale head remains in the installed epoch."""
-    from pulsara_agent.model_input.continuity import SourceObservationPresence
-
-    if (
-        isinstance(candidate, PreparedProviderWireCandidate)
-        and candidate.cold_semantic is not None
-    ):
-        return 0
-    heads = (
-        {}
-        if not isinstance(candidate, PreparedProviderWireCandidate)
-        or candidate.append_result is None
-        else {head.source_kind: head for head in candidate.append_result.source_heads}
-    )
-    resolved_values = (
-        {}
-        if not isinstance(candidate, PreparedProviderWireCandidate)
-        or candidate.sources is None
-        else {
-            source.source_kind: MemoryDispatchSupport._memory_source_occurrence_fingerprint(
-                source
-            )
-            for source in candidate.sources.candidates
-            if source.source_kind
-            in {
-                ContextSourceKind.MEMORY_RECALL,
-                ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
-            }
-        }
-    )
-    return sum(
-        reservation.invalidation_input_token_ceiling
-        for reservation in reservations
-        if reservation.source_kind not in heads
-        or (
-            heads[reservation.source_kind].presence
-            not in {
-                SourceObservationPresence.CLEARED,
-                SourceObservationPresence.UNAVAILABLE,
-            }
-            and heads[reservation.source_kind].semantic_fingerprint
-            == reservation.prior_semantic_fingerprint
-            # A successful retrieval can reaffirm the same VALUE. The compiler
-            # then correctly emits no SNAPSHOT_ON_CHANGE suffix; the installed
-            # head already satisfies the actual resolved source, not its earlier
-            # planning placeholder.
-            and heads[reservation.source_kind].semantic_fingerprint
-            != resolved_values.get(reservation.source_kind)
-        )
-    )
-
-
-
 @dataclass(frozen=True, slots=True)
 class PreparedWireMeasurementDecision:
     """Closed quote and, only after hard admission, its same-pass plan."""
@@ -343,7 +285,6 @@ class PreparedWireMeasurementDecision:
         admitted = (
             self.quote.budget_input_tokens <= self.quote.effective_input_budget_tokens
             and self.quote.final_wire_utf8_bytes <= MAXIMUM_PROVIDER_WIRE_INPUT_BYTES
-
         )
         if admitted != (self.wire_input_plan is not None):
             raise ValueError("wire measurement decision has invalid admission union")
@@ -433,7 +374,12 @@ class PreparedProspectiveActiveRootInput:
                     dispatch.retire_hook_context_reservation()
                 finally:
                     if abandon is not None:
-                        abandon(error or RuntimeError("active input published without continuation"))
+                        abandon(
+                            error
+                            or RuntimeError(
+                                "active input published without continuation"
+                            )
+                        )
 
 
 class ProviderDispatchCoordinator:
@@ -460,7 +406,10 @@ class ProviderDispatchCoordinator:
         maximum_input_tokens_per_call: int | None,
         workspace_resolver: SessionWorkspaceResolver,
         compaction_owner: HostCompactionRuntimeOwner | None,
-        take_user_actions: Callable[[], Awaitable[str | None]] | None = None,
+        take_user_actions: Callable[
+            [], Awaitable[tuple[RuntimeObservationItem, ...] | None]
+        ]
+        | None = None,
     ) -> None:
         self._repository = repository
         self._writer_lease = writer_lease
@@ -479,6 +428,9 @@ class ProviderDispatchCoordinator:
         self._maximum_input_tokens_per_call = maximum_input_tokens_per_call
         self._workspace_resolver = workspace_resolver
         self._memory_support = memory_support
+        self._memory_support.bind_installed_observation_reader(
+            self._installed_memory_state
+        )
         self._steer_consumption = SteerConsumptionCoordinator(
             repository=repository,
             writer_lease=writer_lease,
@@ -495,9 +447,11 @@ class ProviderDispatchCoordinator:
         semantic_only: bool,
         compaction_candidate_family: bool,
         noninstallable_preparation: bool,
-    ) -> str | None:
+        eligible_entry: bool,
+    ) -> tuple[RuntimeObservationItem, ...] | None:
         if (
-            self._take_user_actions is None
+            not eligible_entry
+            or self._take_user_actions is None
             or scope is not ModelInputScopeKind.ROOT
             or semantic_only
             or compaction_candidate_family
@@ -509,14 +463,17 @@ class ProviderDispatchCoordinator:
     def _canonical_deadline(self) -> float:
         return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
 
-    async def wait_for_cold_epoch_readiness(self, *, scope_kind: ModelInputScopeKind) -> None:
+    async def wait_for_cold_epoch_readiness(
+        self, *, scope_kind: ModelInputScopeKind
+    ) -> None:
         """Wait before any actual-execution snapshot, borrow or compile deadline.
 
         Installed/inherited roots and adopted compaction candidates retain their
         frozen tools. Read-only projections never enter this execution seam.
         """
         scope = ProviderInputContinuityScope(
-            session_id=self._writer_lease.guard.session_id, scope_kind=scope_kind,
+            session_id=self._writer_lease.guard.session_id,
+            scope_kind=scope_kind,
         )
         if self._continuity.current_view(scope) is not None:
             return
@@ -683,9 +640,7 @@ class ProviderDispatchCoordinator:
             | CompactionDryProjectionSeed
         ),
         existing_handle: PreparedProviderInputHandle,
-        source_replacements: tuple[
-            ContextSourceCandidate | ContextSourceAbsentFact, ...
-        ],
+        source_replacements: tuple[ContextSourceCandidate, ...],
         retained_skill_read: FrozenCompactionCanonicalRead,
         prepared_target_override: PreparedKernelModelTarget | None = None,
         dry_projection: bool = False,
@@ -714,7 +669,6 @@ class ProviderDispatchCoordinator:
         )
         assert isinstance(result, PreparedCompactionCandidateFamily)
         return result
-
 
     async def prepare_prospective_active_root_input(
         self,
@@ -783,7 +737,7 @@ class ProviderDispatchCoordinator:
                         ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
                         if wire.quote.budget_input_tokens
                         > wire.quote.effective_input_budget_tokens
-                        else ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
+                        else ModelInputCompileFailureKind.PROVIDER_INPUT_WIRE_BYTES_EXCEEDED
                     )
                     raise StructuredModelInputCompileError(kind)
                 admission = PreparedActiveRootInputAdmission(
@@ -850,7 +804,6 @@ class ProviderDispatchCoordinator:
             else:
                 publication_handle.close()
 
-
     async def prepare(
         self,
         *,
@@ -867,9 +820,7 @@ class ProviderDispatchCoordinator:
         existing_handle: PreparedProviderInputHandle | None = None,
         headroom_preflight_override: FrozenCompactionHeadroomPreflight | None = None,
         prepared_target_override: PreparedKernelModelTarget | None = None,
-        compaction_source_replacements: tuple[
-            ContextSourceCandidate | ContextSourceAbsentFact, ...
-        ] = (),
+        compaction_source_replacements: tuple[ContextSourceCandidate, ...] = (),
         compaction_retained_skill_read: FrozenCompactionCanonicalRead | None = None,
         include_hook_context: bool = True,
         semantic_only: bool = False,
@@ -952,7 +903,6 @@ class ProviderDispatchCoordinator:
             )
         borrow: ProcessLocalToolSurfaceBorrow | None = None
         hook_context_reservation: HookContextReservation | None = None
-        memory_sources_task: asyncio.Task[CollectedContextSources] | None = None
 
         planning: FrozenProviderInputAppendPlanningInput | None = None
         try:
@@ -1017,12 +967,9 @@ class ProviderDispatchCoordinator:
                 and current_epoch.canonical_frontier.context_base_semantic_identity
                 != base_frontier.context_base_semantic_identity
             )
-            if (
-                context_base_changed
-                and not isinstance(
-                    cold_seed_override,
-                    (AdoptedCompactionContinuationSeed, CompactionDryProjectionSeed),
-                )
+            if context_base_changed and not isinstance(
+                cold_seed_override,
+                (AdoptedCompactionContinuationSeed, CompactionDryProjectionSeed),
             ):
                 raise StructuredModelInputCompileError(
                     ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
@@ -1128,7 +1075,6 @@ class ProviderDispatchCoordinator:
                         direct_projection_set=(
                             current_epoch.direct_native_projection_set
                         ),
-                        mcp_route_projection=current_epoch.mcp_route_projection,
                     )
                     retained_direct_inputs = tuple(
                         zip(
@@ -1140,7 +1086,7 @@ class ProviderDispatchCoordinator:
                 native_eligibility = self._model.freeze_native_tool_eligibility(
                     prepared_target=prepared_target,
                     conversation_scope_kind=identity.conversation_scope_kind,
-                    tool_facts=registry.tool_facts,
+                    tool_facts=builtin_owner.source_snapshot.facts,
                     retained_direct_inputs=retained_direct_inputs,
                     deadline_monotonic=deadline,
                 )
@@ -1218,27 +1164,26 @@ class ProviderDispatchCoordinator:
                 ) from exc
             retained_skill_selection = None
             if compaction_retained_skill_read is not None:
-                inherited_active_skill = self._context_source_collector.freeze_compaction_active_skill_source(
-                    current_epoch
-                )
                 retained_skill_selection = freeze_retained_skill_context(
                     canonical_read=compaction_retained_skill_read,
                     predecessor_epoch=current_epoch,
                     inspection=skill_owner.inspection,
                     estimator=prepared_call.compile_binding.estimator,
                 )
+                handoff_texts = tuple(
+                    item.text
+                    for item in compaction_source_replacements
+                    if item is not None
+                )
                 retained_source = build_compaction_context_source(
-                    kind=ContextSourceKind.RETAINED_SKILL_CONTEXT,
-                    texts=(retained_skill_selection.rendered_body,)
-                    if retained_skill_selection.ordered_items
-                    else None,
-                    domain_identity=(retained_skill_selection.selection_fingerprint),
-                    absence_kind=ContextSourceAbsenceKind.EXPLICIT_EMPTY,
+                    text="\n\n".join(
+                        (*handoff_texts, retained_skill_selection.rendered_body)
+                        if retained_skill_selection.rendered_body
+                        else handoff_texts
+                    )
                 )
                 compaction_source_replacements = (
-                    *compaction_source_replacements,
-                    inherited_active_skill,
-                    retained_source,
+                    () if retained_source is None else (retained_source,)
                 )
             try:
                 user_actions = await self._take_user_actions_for_preparation(
@@ -1246,6 +1191,16 @@ class ProviderDispatchCoordinator:
                     semantic_only=semantic_only,
                     compaction_candidate_family=_compaction_candidate_family,
                     noninstallable_preparation=_noninstallable_preparation,
+                    eligible_entry=(
+                        current_epoch is None
+                        or current_epoch.observation_state.last_turn_id
+                        != identity.turn_id
+                        or _input_origin_for_anchor(base_input, base_anchor)
+                        in {
+                            CanonicalInputOriginKind.HUMAN_MESSAGE,
+                            CanonicalInputOriginKind.HUMAN_STEER,
+                        }
+                    ),
                 )
                 frozen_sources = await self._io.run(
                     self._context_source_collector.freeze_non_trigger_sources,
@@ -1254,7 +1209,25 @@ class ProviderDispatchCoordinator:
                     tool_exposure_plan=tool_exposure_plan,
                     skill_dispatch_view=skill_view,
                     skill_owner_snapshot=skill_owner,
-                    mcp_catalog_snapshot=mcp_owner.catalog_snapshot,
+                    mcp_owner_snapshot=mcp_owner,
+                    previous_state=(
+                        current_epoch.observation_state
+                        if current_epoch is not None
+                        else InstalledObservationState()
+                    ),
+                    new_context=(
+                        current_epoch is None
+                        or context_base_changed
+                        or model_switch_requested
+                    ),
+                    active_compaction=(
+                        compaction_retained_skill_read is not None
+                        and compaction_retained_skill_read.turn_status == "RUNNING"
+                    ),
+                    allow_turn_observations=(
+                        compaction_retained_skill_read is None
+                        or compaction_retained_skill_read.turn_status == "RUNNING"
+                    ),
                     user_actions=user_actions,
                     hook_context_estimator=(
                         None
@@ -1274,6 +1247,16 @@ class ProviderDispatchCoordinator:
                 if compaction_source_replacements:
                     frozen_sources = replace_frozen_compaction_context_sources(
                         frozen_sources, compaction_source_replacements
+                    )
+                if retained_skill_selection is not None:
+                    # Recompiling an adopted initial trigger or steer uses
+                    # these same frozen sources; keep its handoff identities.
+                    frozen_sources = replace(
+                        frozen_sources,
+                        previous_state=replace(
+                            frozen_sources.previous_state,
+                            reread_skills=retained_skill_selection.ordered_items,
+                        ),
                     )
             except StructuredModelInputCompileError:
                 raise
@@ -1464,91 +1447,20 @@ class ProviderDispatchCoordinator:
                     ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
                 ) from exc
             base_sources = sources
-            preference_source = None
-            recall_reservation = None
-            preference_reservation = None
-            trigger_disposition = None
-            write_hint = False
             memory_use_policy = inherited_memory_use_policy
-            if (
-                not _read_only_context_preview
-                and not _compaction_source_projection
-                and self._memory_support.available
-                and activation_subject
-                is CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT
-            ):
-                trigger_policy = self._memory_support.classify_trigger(activation_text)
-                trigger_origin = _input_origin_for_anchor(base_input, base_anchor)
-                memory_use_policy = (
-                    trigger_policy.memory_use
-                    if trigger_origin is CanonicalInputOriginKind.HUMAN_MESSAGE
-                    else strongest_memory_use_policy(
-                        inherited_memory_use_policy,
-                        trigger_policy.memory_use,
-                    )
-                )
-                trigger_disposition = str(trigger_policy.automatic_recall)
-                if memory_use_policy is MemoryUsePolicy.ALL_DISABLED_BY_USER:
-                    trigger_disposition = str(
-                        AutomaticMemoryTriggerDisposition.DISABLED_BY_EXPLICIT_USER_DIRECTIVE
-                    )
-                write_hint = (
-                    trigger_policy.write_hint
-                    and memory_use_policy.allows_writes
-                    and base_facts.run_permission_snapshot.effective_mode
-                    is not PermissionMode.READ_ONLY
-                    and any(
-                        item.name == "remember" for item in model_surface.tool_specs
-                    )
-                )
-                if memory_use_policy is MemoryUsePolicy.ALL_DISABLED_BY_USER:
-                    preference_source = build_memory_context_source(
-                        kind=(ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD),
-                        texts=None,
-                        absence_kind=ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-                    )
-                else:
-                    preference_source = (
-                        await self._memory_support.freeze_response_preference_source()
-                    )
-                base_sources = replace_memory_context_sources(
-                    sources,
-                    (
-                        build_memory_context_source(
-                            kind=ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
-                            texts=None,
-                            absence_kind=ContextSourceAbsenceKind.NOT_APPLICABLE,
-                        ),
-                        build_memory_context_source(
-                            kind=ContextSourceKind.MEMORY_RECALL,
-                            texts=None,
-                            absence_kind=ContextSourceAbsenceKind.NOT_APPLICABLE,
-                        ),
+            if not _read_only_context_preview and not _compaction_source_projection:
+                base_sources, memory_use_policy = await self._prepare_human_memory(
+                    sources=sources,
+                    facts=base_facts,
+                    activation=activation_subject,
+                    human_texts=(activation_text,),
+                    inherited_policy=inherited_memory_use_policy,
+                    resets_policy=(
+                        _input_origin_for_anchor(base_input, base_anchor)
+                        is CanonicalInputOriginKind.HUMAN_MESSAGE
                     ),
+                    model_surface=model_surface,
                 )
-            elif (
-                not _read_only_context_preview
-                and not _compaction_source_projection
-                and self._memory_support.available
-                and activation_subject is None
-                and scope.scope_kind is ModelInputScopeKind.ROOT
-            ):
-                # A same-turn tool continuation is not a new activation, but
-                # canonical preferences may have changed since the last call
-                # (including writes from another Host or memory-page deletion).
-                refreshed = (
-                    build_memory_context_source(
-                        kind=ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
-                        texts=None,
-                        absence_kind=ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-                    )
-                    if memory_use_policy is MemoryUsePolicy.ALL_DISABLED_BY_USER
-                    else await self._memory_support.freeze_response_preference_source()
-                )
-                if self._memory_support.preference_changed_since_installed(
-                    scope=scope, planning=planning, desired=refreshed
-                ):
-                    preference_source = refreshed
             compile_request = StructuredModelInputCompileRequest(
                 context_id=random_id("context"),
                 model_call_index=model_call_index,
@@ -1577,17 +1489,6 @@ class ProviderDispatchCoordinator:
                 cold_seed = CanonicalColdContinuationSeed(base_read)
             if _compaction_source_projection:
                 projection_sources = base_sources
-                if preference_source is not None and trigger_disposition is not None:
-                    projection_sources = await self._memory_support.apply_sources(
-                        sources,
-                        activation_subject=activation_subject,
-                        activation_text=activation_text,
-                        include_recall=True,
-                        canonical_facts=base_facts,
-                        frozen_preference=preference_source,
-                        trigger_disposition=trigger_disposition,
-                        write_hint=write_hint,
-                    )
                 projection_memory = self._memory_support.freeze_call_context(
                     memory_use_policy=memory_use_policy,
                 )
@@ -1656,23 +1557,6 @@ class ProviderDispatchCoordinator:
                     raise
             cold_semantic: PreparedColdEpochSemanticAssembly | None = None
             replay_target = provider_replay_target(prepared_call)
-            if preference_source is not None and trigger_disposition is not None:
-                # Recall reads the already frozen canonical facts. It does not
-                # depend on the base semantic compilation or its optional
-                # memory allocation, so this dispatch owns both in parallel.
-                memory_sources_task = asyncio.create_task(
-                    self._memory_support.apply_sources(
-                        sources,
-                        activation_subject=activation_subject,
-                        activation_text=activation_text,
-                        include_recall=True,
-                        canonical_facts=base_facts,
-                        frozen_preference=preference_source,
-                        trigger_disposition=trigger_disposition,
-                        write_hint=write_hint,
-                    ),
-                    name="provider-memory-sources",
-                )
             if cold_seed is not None:
                 cold_semantic = await self._io.run(
                     self._cold_epoch_assembler.prepare_semantic,
@@ -1699,123 +1583,6 @@ class ProviderDispatchCoordinator:
                 )
             final_sources = base_sources
             append = base_append
-            if preference_source is not None and trigger_disposition is not None:
-                recall_desired = build_memory_context_source(
-                    kind=ContextSourceKind.MEMORY_RECALL,
-                    texts=("", "", "") if trigger_disposition == "ELIGIBLE" else None,
-                    absence_kind=ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-                    domain_identity={
-                        "dispatch_anchor": (
-                            None
-                            if not isinstance(base_anchor, NewTriggerAnchor)
-                            else base_anchor.provider_input_item_fingerprint
-                        ),
-                        "disposition": trigger_disposition,
-                    },
-                )
-                recall_reservation, preference_reservation = (
-                    self._memory_support.planning_reservations(
-                        planning=planning,
-                        prepared_preference=preference_source,
-                        recall_desired=recall_desired,
-                        prepared_call=prepared_call,
-                        new_epoch=cold_seed is not None,
-                    )
-                )
-                assert memory_sources_task is not None
-                final_sources = await memory_sources_task
-                final_request = replace(
-                    compile_request,
-                    sources=final_sources,
-                )
-                (
-                    append,
-                    final_sources,
-                ) = await self._memory_support.compile_with_fallback(
-                    request=final_request,
-                    planning=planning,
-                    new_epoch=cold_seed is not None,
-                    canonical_facts=base_facts,
-                    sources=final_sources,
-                    preference_source=preference_source,
-                    recall_reservation=recall_reservation,
-                    preference_reservation=preference_reservation,
-                    scope=scope,
-                    memory_use_policy=memory_use_policy,
-                    deadline=deadline,
-                )
-                if cold_seed is not None:
-                    final_request = replace(
-                        final_request,
-                        sources=final_sources,
-                    )
-                    cold_semantic = await self._io.run(
-                        self._cold_epoch_assembler.prepare_semantic,
-                        seed=cold_seed,
-                        compile_request=final_request,
-                        planning=planning,
-                        prepared_call=prepared_call,
-                        capability_dispatch_cut=capability_dispatch_cut,
-                        tool_view=tool_view,
-                        skill_view=skill_view,
-                        tool_exposure_plan=tool_exposure_plan,
-                        non_trigger_sources=frozen_sources,
-                        replay_target=replay_target,
-                        deadline_monotonic=deadline,
-                    )
-                    append = cold_semantic.compiled_result
-            elif preference_source is not None:
-                preference_reservation = (
-                    self._memory_support.planning_preference_refresh_reservation(
-                        planning=planning,
-                        desired=preference_source,
-                        prepared_call=prepared_call,
-                        new_epoch=cold_seed is not None,
-                    )
-                )
-                final_sources = replace_memory_context_sources(
-                    base_sources, (preference_source,)
-                )
-                final_request = replace(
-                    compile_request,
-                    sources=final_sources,
-                )
-                (
-                    append,
-                    final_sources,
-                ) = await self._memory_support.compile_with_fallback(
-                    request=final_request,
-                    planning=planning,
-                    new_epoch=cold_seed is not None,
-                    canonical_facts=base_facts,
-                    sources=final_sources,
-                    preference_source=preference_source,
-                    recall_reservation=None,
-                    preference_reservation=preference_reservation,
-                    scope=scope,
-                    memory_use_policy=memory_use_policy,
-                    deadline=deadline,
-                )
-                if cold_seed is not None:
-                    final_request = replace(
-                        final_request,
-                        sources=final_sources,
-                    )
-                    cold_semantic = await self._io.run(
-                        self._cold_epoch_assembler.prepare_semantic,
-                        seed=cold_seed,
-                        compile_request=final_request,
-                        planning=planning,
-                        prepared_call=prepared_call,
-                        capability_dispatch_cut=capability_dispatch_cut,
-                        tool_view=tool_view,
-                        skill_view=skill_view,
-                        tool_exposure_plan=tool_exposure_plan,
-                        non_trigger_sources=frozen_sources,
-                        replay_target=replay_target,
-                        deadline_monotonic=deadline,
-                    )
-                    append = cold_semantic.compiled_result
             memory_snapshot = self._memory_support.freeze_call_context(
                 memory_use_policy=memory_use_policy,
             )
@@ -1860,17 +1627,6 @@ class ProviderDispatchCoordinator:
                 _hook_context_reservation=hook_context_reservation,
             )
         except BaseException:
-            if memory_sources_task is not None:
-                memory_sources_task.cancel()
-                while not memory_sources_task.done():
-                    try:
-                        await asyncio.shield(memory_sources_task)
-                    except asyncio.CancelledError:
-                        continue
-                    except BaseException:
-                        break
-                if not memory_sources_task.cancelled():
-                    memory_sources_task.exception()
             if planning is not None:
                 self._continuity.abort_planning(planning)
             if handle is not None:
@@ -1964,8 +1720,10 @@ class ProviderDispatchCoordinator:
             )
             prepared.select_wire_candidate(decision.candidate)
             if base_dispatch.direct_switch_admission is not None:
-                prepared.direct_switch_admission, _ = self.freeze_direct_switch_admission(
-                    candidate=decision.candidate, decision=decision
+                prepared.direct_switch_admission, _ = (
+                    self.freeze_direct_switch_admission(
+                        candidate=decision.candidate, decision=decision
+                    )
                 )
             return prepared, decision
         except BaseException as error:
@@ -1996,7 +1754,7 @@ class ProviderDispatchCoordinator:
         activation, text = _activation_subject_for_anchor(
             canonical, base.planning.dispatch_anchor
         )
-        frozen = _without_prebound_activation(semantic.non_trigger_sources)
+        frozen = semantic.non_trigger_sources
         sources = await self._io.run(
             self._context_source_collector.complete_frozen_sources,
             frozen,
@@ -2007,61 +1765,19 @@ class ProviderDispatchCoordinator:
             ),
             deadline_monotonic=deadline,
         )
-        policy = inherited_memory_use_policy
-        preference = None
-        if self._memory_support.available and activation is (
-            CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT
-        ):
-            trigger = self._memory_support.classify_trigger(text)
-            policy = (
-                trigger.memory_use
-                if _input_origin_for_anchor(canonical, base.planning.dispatch_anchor)
-                is CanonicalInputOriginKind.HUMAN_MESSAGE
-                else strongest_memory_use_policy(policy, trigger.memory_use)
-            )
-            disposition = str(trigger.automatic_recall)
-            if policy is MemoryUsePolicy.ALL_DISABLED_BY_USER:
-                disposition = str(
-                    AutomaticMemoryTriggerDisposition.DISABLED_BY_EXPLICIT_USER_DIRECTIVE
-                )
-                preference = build_memory_context_source(
-                    kind=ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
-                    texts=None,
-                    absence_kind=ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-                )
-            else:
-                preference = await self._memory_support.freeze_response_preference_source()
-            write_hint = (
-                trigger.write_hint
-                and policy.allows_writes
-                and facts.run_permission_snapshot.effective_mode is not PermissionMode.READ_ONLY
-                and any(item.name == "remember" for item in base.prepared_call.tool_surface.model_surface.tool_specs)
-            )
-            sources = await self._memory_support.apply_sources(
-                sources,
-                activation_subject=activation,
-                activation_text=text,
-                include_recall=True,
-                canonical_facts=facts,
-                frozen_preference=preference,
-                trigger_disposition=disposition,
-                write_hint=write_hint,
-            )
-        request = replace(base.compile_request, sources=sources)
-        _append, sources = await self._memory_support.compile_with_fallback(
-            request=request,
-            planning=base.planning,
-            new_epoch=True,
-            canonical_facts=facts,
+        sources, policy = await self._prepare_human_memory(
             sources=sources,
-            preference_source=preference,
-            recall_reservation=None,
-            preference_reservation=None,
-            scope=base.planning.scope,
-            memory_use_policy=policy,
-            deadline=deadline,
+            facts=facts,
+            activation=activation,
+            human_texts=(text,),
+            inherited_policy=inherited_memory_use_policy,
+            resets_policy=(
+                _input_origin_for_anchor(canonical, base.planning.dispatch_anchor)
+                is CanonicalInputOriginKind.HUMAN_MESSAGE
+            ),
+            model_surface=base.prepared_call.tool_surface.model_surface,
         )
-        request = replace(request, sources=sources)
+        request = replace(base.compile_request, sources=sources)
         semantic = await self._io.run(
             self._cold_epoch_assembler.prepare_semantic,
             seed=semantic.seed,
@@ -2087,9 +1803,13 @@ class ProviderDispatchCoordinator:
             cold_semantic=semantic,
             sources=sources,
             tool_exposure_plan=base.tool_exposure_plan,
-            memory_context=self._memory_support.freeze_call_context(memory_use_policy=policy),
+            memory_context=self._memory_support.freeze_call_context(
+                memory_use_policy=policy
+            ),
         )
-        decision = await self.measure_prepared_wire_candidate(candidate, deadline=deadline)
+        decision = await self.measure_prepared_wire_candidate(
+            candidate, deadline=deadline
+        )
         selected = decision.candidate
         authority = base.take_execution_authority()
         hook = base.take_hook_context_reservation()
@@ -2238,7 +1958,6 @@ class ProviderDispatchCoordinator:
             # prebound activation head. An actual suffix is a new activation;
             # reuse the exact frozen catalog owner and recompute only that
             # trigger-derived head. Every non-trigger root and Hook stays pinned.
-            frozen_sources = _without_prebound_activation(frozen_sources)
             selected_plan: PreparedSteerSuffixAdmissionPlan | None = None
             selected_facts: FrozenCanonicalCompileSnapshot | None = None
             selected_sources: CollectedContextSources | None = None
@@ -2246,10 +1965,6 @@ class ProviderDispatchCoordinator:
             selected_cold_semantic: PreparedColdEpochSemanticAssembly | None = None
             selected_memory_context: FrozenModelCallMemoryContext | None = None
             selected_dispatch_read: FrozenCanonicalProviderDispatchRead | None = None
-            prepared_preference: (
-                ContextSourceCandidate | ContextSourceAbsentFact | None
-            ) = None
-
             # A steer batch is appended to the already-admitted ROOT prompt.
             # Classify that exact base prompt first so a new HUMAN_MESSAGE
             # resets the policy epoch even when busy-Enter steers arrived
@@ -2337,54 +2052,26 @@ class ProviderDispatchCoordinator:
                         for index, (fact, prompt) in enumerate(prefix, start=1)
                     )
                     human_prefix = tuple(
-                        prompt for fact, prompt in prefix
-                        if fact.input_origin in {
+                        prompt
+                        for fact, prompt in prefix
+                        if fact.input_origin
+                        in {
                             CanonicalInputOriginKind.HUMAN_MESSAGE,
                             CanonicalInputOriginKind.HUMAN_STEER,
                         }
                     )
                     activation_text = (
                         prompt_text_projection(human_prefix[-1].content)
-                        if human_prefix else base_activation_text
+                        if human_prefix
+                        else base_activation_text
                     )
                     activation_subject = (
                         CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT
-                        if human_prefix or base_activation_subject is (
-                            CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT
-                        ) else CapabilityActivationSubjectKind.ROOT_NON_HUMAN_TRIGGER
+                        if human_prefix
+                        or base_activation_subject
+                        is (CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT)
+                        else CapabilityActivationSubjectKind.ROOT_NON_HUMAN_TRIGGER
                     )
-                    memory_use_policy = steer_base_memory_use_policy
-                    trigger_disposition = "ELIGIBLE"
-                    write_hint = False
-                    if self._memory_support.available and activation_subject is (
-                        CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT
-                    ):
-                        trigger_policies = tuple(
-                            self._memory_support.classify_trigger(
-                                prompt_text_projection(prompt.content)
-                            )
-                            for prompt in human_prefix
-                        ) or (self._memory_support.classify_trigger(activation_text),)
-                        for trigger_policy in trigger_policies:
-                            memory_use_policy = strongest_memory_use_policy(
-                                memory_use_policy,
-                                trigger_policy.memory_use,
-                            )
-                        trigger_disposition = str(trigger_policies[-1].automatic_recall)
-                        if memory_use_policy is MemoryUsePolicy.ALL_DISABLED_BY_USER:
-                            trigger_disposition = str(
-                                AutomaticMemoryTriggerDisposition.DISABLED_BY_EXPLICIT_USER_DIRECTIVE
-                            )
-                        write_hint = (
-                            trigger_policies[-1].write_hint
-                            and memory_use_policy.allows_writes
-                            and prospective.run_permission_snapshot.effective_mode
-                            is not PermissionMode.READ_ONLY
-                            and any(
-                                item.name == "remember"
-                                for item in model_surface.tool_specs
-                            )
-                        )
                     try:
                         sources = await self._io.run(
                             self._context_source_collector.complete_frozen_sources,
@@ -2411,55 +2098,17 @@ class ProviderDispatchCoordinator:
                         raise StructuredModelInputCompileError(
                             ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
                         ) from exc
-                    effective_preference = prepared_preference
-                    if (
-                        self._memory_support.available
-                        and memory_use_policy
-                        is not MemoryUsePolicy.ALL_DISABLED_BY_USER
-                        and effective_preference is None
-                    ):
-                        prepared_preference = await self._memory_support.freeze_response_preference_source()
-                        effective_preference = prepared_preference
-                    if (
-                        self._memory_support.available
-                        and memory_use_policy is MemoryUsePolicy.ALL_DISABLED_BY_USER
-                    ):
-                        effective_preference = build_memory_context_source(
-                            kind=(ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD),
-                            texts=None,
-                            absence_kind=ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-                        )
-                    recall_desired = build_memory_context_source(
-                        kind=ContextSourceKind.MEMORY_RECALL,
-                        texts=("", "", "")
-                        if trigger_disposition == "ELIGIBLE"
-                        else None,
-                        absence_kind=ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-                        domain_identity={
-                            "pending_trigger": anchor.provider_input_item_fingerprint,
-                            "disposition": trigger_disposition,
-                        },
-                    )
-                    # Phase A never materializes optional memory.  The exact
-                    # current preference carrier and recall trigger are bound
-                    # into typed reservations below; only their mandatory
-                    # invalidation ceilings can reject a steer.
-                    sources = replace_memory_context_sources(
-                        sources,
-                        (
-                            build_memory_context_source(
-                                kind=(
-                                    ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD
-                                ),
-                                texts=None,
-                                absence_kind=ContextSourceAbsenceKind.NOT_APPLICABLE,
-                            ),
-                            build_memory_context_source(
-                                kind=ContextSourceKind.MEMORY_RECALL,
-                                texts=None,
-                                absence_kind=ContextSourceAbsenceKind.NOT_APPLICABLE,
-                            ),
+                    sources, memory_use_policy = await self._prepare_human_memory(
+                        sources=sources,
+                        facts=prospective,
+                        activation=activation_subject,
+                        human_texts=(
+                            *((base_activation_text,) if base_activation_subject is CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT else ()),
+                            *(prompt_text_projection(prompt.content) for prompt in human_prefix),
                         ),
+                        inherited_policy=steer_base_memory_use_policy,
+                        resets_policy=False,
+                        model_surface=model_surface,
                     )
                     compile_request = StructuredModelInputCompileRequest(
                         context_id=random_id("context"),
@@ -2495,33 +2144,11 @@ class ProviderDispatchCoordinator:
                             ModelInputCompileFailureKind.PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET,
                             ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET,
                             ModelInputCompileFailureKind.PREFIX_EPOCH_BUDGET_EXHAUSTED,
-                            ModelInputCompileFailureKind.STATEFUL_SOURCE_REPLACEMENT_OVER_BUDGET,
-                            ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET,
                         }:
                             raise
                         if planning_basis is None:
                             self._continuity.abort_planning(planning)
                         continue
-                    recall_reservation = None
-                    preference_reservation = None
-                    if effective_preference is not None:
-                        recall_reservation, preference_reservation = (
-                            self._memory_support.planning_reservations(
-                                planning=planning,
-                                prepared_preference=effective_preference,
-                                recall_desired=recall_desired,
-                                prepared_call=prepared_call,
-                                new_epoch=steer_new_epoch,
-                            )
-                        )
-                    reservations = tuple(
-                        item
-                        for item in (
-                            recall_reservation,
-                            preference_reservation,
-                        )
-                        if item is not None
-                    )
                     quote = build_steer_suffix_quote(
                         candidates=candidates,
                         prospective_snapshot_hydrated_bytes=(
@@ -2543,8 +2170,6 @@ class ProviderDispatchCoordinator:
                             if planning.predecessor_view is None
                             else planning.predecessor_view.semantic_prefix_fingerprint
                         ),
-                        memory_recall_reservation=recall_reservation,
-                        memory_response_preference_reservation=(preference_reservation),
                     )
                     trial_plan = build_prepared_steer_suffix_plan(
                         scope=scope,
@@ -2568,62 +2193,11 @@ class ProviderDispatchCoordinator:
                         quote=quote,
                         prospective_compiled_input=append.compiled_input,
                     )
-                    final_sources = await self._memory_support.apply_sources(
-                        sources,
-                        activation_subject=activation_subject,
-                        activation_text=activation_text,
-                        include_recall=True,
-                        canonical_facts=prospective,
-                        frozen_preference=effective_preference,
-                        trigger_disposition=trigger_disposition,
-                        write_hint=write_hint,
-                    )
+                    final_sources = sources
+                    final_request = compile_request
+                    final_append = append
                     final_memory = self._memory_support.freeze_call_context(
-                        memory_use_policy=memory_use_policy,
-                    )
-                    final_request = StructuredModelInputCompileRequest(
-                        context_id=random_id("context"),
-                        model_call_index=model_call_index,
-                        canonical_input=prospective_input,
-                        canonical_facts=prospective,
-                        compile_binding=prepared_call.compile_binding,
-                        sources=final_sources,
-                        dispatch_anchor_entry_id=(
-                            prospective_input.items[-1].source_entry_id
-                        ),
-                    )
-                    try:
-                        (
-                            final_append,
-                            final_sources,
-                        ) = await self._memory_support.compile_with_fallback(
-                            request=final_request,
-                            planning=planning,
-                            new_epoch=steer_new_epoch,
-                            canonical_facts=prospective,
-                            sources=final_sources,
-                            preference_source=effective_preference,
-                            recall_reservation=recall_reservation,
-                            preference_reservation=preference_reservation,
-                            scope=scope,
-                            memory_use_policy=memory_use_policy,
-                            deadline=deadline,
-                        )
-                    except StructuredModelInputCompileError as exc:
-                        if exc.kind not in {
-                            ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED,
-                            ModelInputCompileFailureKind.PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET,
-                            ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET,
-                            ModelInputCompileFailureKind.PREFIX_EPOCH_BUDGET_EXHAUSTED,
-                            ModelInputCompileFailureKind.STATEFUL_SOURCE_REPLACEMENT_OVER_BUDGET,
-                            ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET,
-                        }:
-                            raise
-                        if planning_basis is None:
-                            self._continuity.abort_planning(planning)
-                        continue
-                    final_memory = self._memory_support.freeze_call_context(
-                        memory_use_policy=memory_use_policy,
+                        memory_use_policy=memory_use_policy
                     )
                     prospective_read = _prospective_steer_dispatch_read(
                         base_read,
@@ -2638,7 +2212,9 @@ class ProviderDispatchCoordinator:
                         trial_cold_semantic = await self._io.run(
                             self._cold_epoch_assembler.prepare_semantic,
                             seed=(
-                                _compaction_seed_with_dispatch_read(continuation_seed, prospective_read)
+                                _compaction_seed_with_dispatch_read(
+                                    continuation_seed, prospective_read
+                                )
                                 if continuation_seed is not None
                                 else CanonicalColdContinuationSeed(prospective_read)
                             ),
@@ -2670,14 +2246,10 @@ class ProviderDispatchCoordinator:
                     trial_wire = await self.measure_prepared_wire_candidate(
                         trial_candidate,
                         deadline=deadline,
-                        invalidation_reservations=reservations,
                     )
                     if (
                         trial_wire.wire_input_plan is None
                         or trial_wire.quote.budget_input_tokens
-                        + _remaining_invalidation_input_tokens(
-                            trial_wire.candidate, reservations
-                        )
                         > trial_wire.quote.effective_input_budget_tokens
                     ):
                         if planning_basis is None:
@@ -2763,6 +2335,57 @@ class ProviderDispatchCoordinator:
                 except BaseException:
                     await self._steer_consumption.settle_plan_conflict(selected_plan)
                     raise
+                if any(
+                    item.input_origin
+                    in {
+                        CanonicalInputOriginKind.HUMAN_MESSAGE,
+                        CanonicalInputOriginKind.HUMAN_STEER,
+                    }
+                    for item in selected_plan.ordered_pending_queue_facts[
+                        : len(accepted_entries)
+                    ]
+                ):
+                    if not any(
+                        item.source_kind is ContextSourceKind.USER_ACTIONS
+                        for item in selected_sources.candidates
+                    ):
+                        actions = await self._take_user_actions_for_preparation(
+                            scope=identity.conversation_scope_kind,
+                            semantic_only=False,
+                            compaction_candidate_family=False,
+                            noninstallable_preparation=False,
+                            eligible_entry=True,
+                        )
+                        if actions:
+                            selected_sources = replace(
+                                selected_sources,
+                                candidates=(
+                                    *selected_sources.candidates,
+                                    observation_source(
+                                        ContextSourceKind.USER_ACTIONS,
+                                        actions,
+                                        90,
+                                        optional=True,
+                                    ),
+                                ),
+                            )
+                            selected_compile_request = replace(
+                                selected_compile_request, sources=selected_sources
+                            )
+                            selected_append = await self._io.run(
+                                self._compiler.compile_new_epoch
+                                if selected_cold_semantic is not None
+                                else self._compiler.compile_installed_append,
+                                selected_compile_request,
+                                planning=selected_plan.predecessor,
+                                deadline_monotonic=deadline,
+                            )
+                            if selected_cold_semantic is not None:
+                                selected_cold_semantic = replace(
+                                    selected_cold_semantic,
+                                    compile_request=selected_compile_request,
+                                    compiled_result=selected_append,
+                                )
                 batch = build_accepted_steer_dispatch_batch(
                     session_id=identity.session_id,
                     target_turn_id=turn_id,
@@ -2829,7 +2452,6 @@ class ProviderDispatchCoordinator:
                         if abandoned_planning is not None:
                             self._continuity.abort_planning(abandoned_planning)
             raise
-
 
     async def prepare_compaction_candidate(
         self,
@@ -2913,68 +2535,6 @@ class ProviderDispatchCoordinator:
             deadline_monotonic=deadline,
         )
         append = semantic.compiled_result
-        if retained_skill_selection is not None:
-            for iteration in range(9):
-                full_results = frozenset(
-                    item.source_entry_fingerprint
-                    for item in append.compiled_input.tool_result_decisions
-                    if item.selected_mode is ToolResultProviderRenderMode.FULL
-                )
-                reduced = remove_full_tail_duplicates(
-                    retained_skill_selection,
-                    full_source_entry_fingerprints=full_results,
-                    estimator=family.prepared_call.compile_binding.estimator,
-                )
-                if reduced == retained_skill_selection:
-                    break
-                if iteration >= 8:
-                    raise StructuredModelInputCompileError(
-                        ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
-                    )
-                retained_skill_selection = reduced
-                retained_source = build_compaction_context_source(
-                    kind=ContextSourceKind.RETAINED_SKILL_CONTEXT,
-                    texts=(reduced.rendered_body,) if reduced.ordered_items else None,
-                    domain_identity=reduced.selection_fingerprint,
-                    absence_kind=ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-                )
-                sources = replace_compaction_context_sources(
-                    sources, (retained_source,)
-                )
-                non_trigger_sources = replace_frozen_compaction_context_sources(
-                    non_trigger_sources, (retained_source,)
-                )
-                memory = self._memory_support.freeze_call_context(
-                    memory_use_policy=family.memory_use_policy,
-                )
-                compile_request = replace(
-                    compile_request,
-                    sources=sources,
-                )
-                semantic = await self._io.run(
-                    self._cold_epoch_assembler.prepare_semantic,
-                    seed=seed,
-                    compile_request=compile_request,
-                    planning=planning,
-                    prepared_call=family.prepared_call,
-                    capability_dispatch_cut=family.capability_dispatch_cut,
-                    tool_view=family.tool_view,
-                    skill_view=family.skill_view,
-                    tool_exposure_plan=family.tool_exposure_plan,
-                    non_trigger_sources=non_trigger_sources,
-                    replay_target=family.replay_target,
-                    deadline_monotonic=deadline,
-                )
-                append = semantic.compiled_result
-                recompiled_full = {
-                    item.source_entry_fingerprint
-                    for item in append.compiled_input.tool_result_decisions
-                    if item.selected_mode is ToolResultProviderRenderMode.FULL
-                }
-                if not full_results.issubset(recompiled_full):
-                    raise StructuredModelInputCompileError(
-                        ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
-                    )
         memory = self._memory_support.freeze_call_context(
             memory_use_policy=family.memory_use_policy,
         )
@@ -3133,7 +2693,7 @@ class ProviderDispatchCoordinator:
         canonical_facts = canonical_read.compile_snapshot
         identity = canonical_facts.canonical_input.identity
         replacement, reservation = (
-            self._context_source_collector.freeze_hook_context_source(
+            self._context_source_collector.freeze_hook_context_message(
                 scope_kind=identity.conversation_scope_kind.value,
                 session_id=identity.session_id,
                 estimator=base.prepared_call.compile_binding.estimator,
@@ -3142,7 +2702,7 @@ class ProviderDispatchCoordinator:
         if reservation is None:
             return None
         try:
-            hook_sources = replace_hook_context_source(base.sources, replacement)
+            hook_sources = replace_hook_context_message(base.sources, replacement)
             anchor = base.planning.dispatch_anchor
             compile_request = StructuredModelInputCompileRequest(
                 context_id=random_id("context"),
@@ -3157,7 +2717,7 @@ class ProviderDispatchCoordinator:
                     else None
                 ),
             )
-            hook_non_trigger = replace_frozen_hook_context_source(
+            hook_non_trigger = replace_frozen_hook_context_message(
                 semantic.non_trigger_sources,
                 replacement,
                 reservation=None,
@@ -3185,15 +2745,7 @@ class ProviderDispatchCoordinator:
                 raise StructuredModelInputCompileError(
                     ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
                 )
-            hook_decision = next(
-                (
-                    item
-                    for item in compiled.source_decisions
-                    if item.source_kind is ContextSourceKind.HOOK_CONTEXT
-                ),
-                None,
-            )
-            if hook_decision is None or not hook_decision.included:
+            if replacement is None or replacement not in compiled.messages:
                 reservation.retire()
                 return None
             candidate = PreparedProviderWireCandidate(
@@ -3257,11 +2809,12 @@ class ProviderDispatchCoordinator:
             request,
             planning=candidate.planning,
             deadline_monotonic=deadline,
-            source_render_floors=((ContextSourceKind.USER_ACTIONS, None),),
+            omitted_sources=(ContextSourceKind.USER_ACTIONS,),
             wire_selection=candidate.append_result.compiled_input,
         )
         cold = (
-            None if candidate.cold_semantic is None
+            None
+            if candidate.cold_semantic is None
             else replace(candidate.cold_semantic, compiled_result=append)
         )
         reduced = replace(
@@ -3341,7 +2894,6 @@ class ProviderDispatchCoordinator:
                         reservation.retire()
             raise
 
-
     async def _freeze_candidate_wire_measurement(
         self,
         candidate: ProviderWireMeasurementCandidate,
@@ -3379,7 +2931,58 @@ class ProviderDispatchCoordinator:
             replay_hydration=replay_hydration,
             tool_choice=candidate.tool_choice,
             usage_anchor=usage_anchor,
-            **({"validate_content_capability": False} if not validate_content_capability else {}),
+            **(
+                {"validate_content_capability": False}
+                if not validate_content_capability
+                else {}
+            ),
+        )
+
+    async def measure_with_unavailable_tool_pages(self, dispatch, *, deadline):
+        """Final admission after the caller has exhausted legal compaction."""
+        candidate = self.wire_candidate_for_dispatch(dispatch)
+        if (
+            candidate.compile_request is None
+            or candidate.planning is None
+            or candidate.append_result is None
+        ):
+            return None
+        if not any(
+            decision.native_projection is not None
+            for decision in candidate.append_result.compiled_input.tool_result_decisions
+        ):
+            return None
+        method = (
+            self._compiler.compile_installed_append
+            if candidate.cold_semantic is None
+            else self._compiler.compile_new_epoch
+        )
+        omitted = tuple(
+            decision.source_kind
+            for decision in candidate.append_result.compiled_input.source_decisions
+            if not decision.included
+        )
+        append = await self._io.run(
+            method,
+            candidate.compile_request,
+            planning=candidate.planning,
+            omitted_sources=omitted,
+            unavailable_native_pages=True,
+            deadline_monotonic=deadline,
+        )
+        cold = (
+            None
+            if candidate.cold_semantic is None
+            else replace(candidate.cold_semantic, compiled_result=append)
+        )
+        candidate = replace(
+            candidate,
+            semantic_input=append.compiled_input,
+            append_result=append,
+            cold_semantic=cold,
+        )
+        return await self.measure_prepared_wire_candidate(
+            candidate, deadline=deadline, unavailable_native_pages=True
         )
 
     async def measure_prepared_wire_candidate(
@@ -3388,7 +2991,7 @@ class ProviderDispatchCoordinator:
         *,
         deadline: float,
         reusable_observation: HandleFreeProviderWireObservation | None = None,
-        invalidation_reservations: tuple[MemorySourceInvalidationReservation, ...] = (),
+        unavailable_native_pages: bool = False,
     ) -> PreparedWireMeasurementDecision:
         usage_anchor = None
         if (
@@ -3415,14 +3018,9 @@ class ProviderDispatchCoordinator:
                 measurement=measurement,
             ).take_for(candidate)
         try:
-            source_floors, tool_floors = (), ()
-            memory_fallbacks = None
-            fallback_basis = candidate
+            omitted_sources, omit_hook_context = (), False
             while (
                 measurement.quote.budget_input_tokens
-                + _remaining_invalidation_input_tokens(
-                    candidate, invalidation_reservations
-                )
                 > measurement.quote.effective_input_budget_tokens
                 or measurement.quote.final_wire_utf8_bytes
                 > MAXIMUM_PROVIDER_WIRE_INPUT_BYTES
@@ -3435,115 +3033,43 @@ class ProviderDispatchCoordinator:
                     or candidate.sources is None
                 ):
                     break
-                next_floors = await self._io.run(
-                    self._compiler.next_wire_render_floors,
-                    deadline_monotonic=deadline,
+                omissions = await self._io.run(
+                    self._compiler.next_wire_omissions,
                     request=candidate.compile_request,
                     compiled=candidate.append_result.compiled_input,
-                    planning=(
-                        candidate.planning if candidate.cold_semantic is None else None
-                    ),
-                    source_floors=source_floors,
-                    tool_floors=tool_floors,
+                    omitted_sources=omitted_sources,
+                    omit_hook_context=omit_hook_context,
+                    deadline_monotonic=deadline,
                 )
-                request = candidate.compile_request
-                wire_selection = candidate.append_result.compiled_input
-                if next_floors is None:
-                    if memory_fallbacks is None:
-                        memory_fallbacks = iter(())
-                        if (
-                            isinstance(fallback_basis, PreparedProviderWireCandidate)
-                            and fallback_basis.planning is not None
-                            and fallback_basis.sources is not None
-                            and fallback_basis.append_result is not None
-                            and any(
-                                item.source_kind
-                                in {
-                                    ContextSourceKind.MEMORY_RECALL,
-                                    ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
-                                }
-                                for item in fallback_basis.sources.candidates
-                            )
-                        ):
-                            memory_sources = {
-                                item.source_kind: item
-                                for item in (
-                                    *fallback_basis.sources.candidates,
-                                    *fallback_basis.sources.absent_facts,
-                                )
-                            }
-                            preference = memory_sources.get(
-                                ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD
-                            )
-                            recall = memory_sources.get(ContextSourceKind.MEMORY_RECALL)
-                            if preference is not None and recall is not None:
-                                recall_reservation, preference_reservation = (
-                                    self._memory_support.planning_reservations(
-                                        planning=fallback_basis.planning,
-                                        prepared_preference=preference,
-                                        recall_desired=recall,
-                                        prepared_call=fallback_basis.prepared_call,
-                                        new_epoch=fallback_basis.cold_semantic
-                                        is not None,
-                                    )
-                                )
-                                memory_fallbacks = iter(
-                                    self._memory_support.optional_value_fallbacks(
-                                        sources=fallback_basis.sources,
-                                        preference_source=preference,
-                                        recall_reservation=recall_reservation,
-                                        preference_reservation=preference_reservation,
-                                    )
-                                )
-                    fallback = next(memory_fallbacks, None)
-                    while fallback is not None and fallback == candidate.sources:
-                        fallback = next(memory_fallbacks, None)
-                    if fallback is None:
-                        break
-                    request = replace(request, sources=fallback)
-                    # The source collection changed. Preserve other sacrifices via
-                    # their floors, without reusing an incompatible wire selection.
-                    value_kinds = {item.source_kind for item in fallback.candidates}
-                    next_floors = (
-                        tuple(
-                            (kind, mode)
-                            for kind, mode in source_floors
-                            if kind in value_kinds
-                        ),
-                        tool_floors,
-                    )
-                    wire_selection = None
+                if omissions is None:
+                    break
                 consumed, measurement = measurement, None
                 consumed.discard_materialization_to_quote()
-                _require_dispatch_planning_deadline(deadline)
-                if candidate.cold_semantic is None:
-                    append = await self._io.run(
-                        self._compiler.compile_installed_append,
-                        request,
-                        planning=candidate.planning,
-                        deadline_monotonic=deadline,
-                        source_render_floors=next_floors[0],
-                        tool_render_floors=next_floors[1],
-                        wire_selection=wire_selection,
-                    )
-                    cold = None
-                else:
-                    # The seed has already been exact-joined by the cold assembler.
-                    # Recompile its frozen basis without another read or authority.
-                    append = await self._io.run(
-                        self._compiler.compile_new_epoch,
-                        request,
-                        planning=candidate.planning,
-                        deadline_monotonic=deadline,
-                        source_render_floors=next_floors[0],
-                        tool_render_floors=next_floors[1],
-                        wire_selection=wire_selection,
-                    )
-                    cold = replace(
+                request = candidate.compile_request
+                method = (
+                    self._compiler.compile_installed_append
+                    if candidate.cold_semantic is None
+                    else self._compiler.compile_new_epoch
+                )
+                append = await self._io.run(
+                    method,
+                    request,
+                    planning=candidate.planning,
+                    omitted_sources=omissions[0],
+                    omit_hook_context=omissions[1],
+                    wire_selection=candidate.append_result.compiled_input,
+                    deadline_monotonic=deadline,
+                    unavailable_native_pages=unavailable_native_pages,
+                )
+                cold = (
+                    None
+                    if candidate.cold_semantic is None
+                    else replace(
                         candidate.cold_semantic,
                         compile_request=request,
                         compiled_result=append,
                     )
+                )
                 candidate = replace(
                     candidate,
                     compile_request=request,
@@ -3552,7 +3078,7 @@ class ProviderDispatchCoordinator:
                     append_result=append,
                     cold_semantic=cold,
                 )
-                source_floors, tool_floors = next_floors
+                omitted_sources, omit_hook_context = omissions
                 measurement = await self._freeze_candidate_wire_measurement(
                     candidate, deadline=deadline, usage_anchor=usage_anchor
                 )
@@ -3561,7 +3087,6 @@ class ProviderDispatchCoordinator:
             admitted = (
                 quote.budget_input_tokens <= quote.effective_input_budget_tokens
                 and quote.final_wire_utf8_bytes <= MAXIMUM_PROVIDER_WIRE_INPUT_BYTES
-
             )
             consumed, measurement = measurement, None
             if admitted:
@@ -3628,7 +3153,7 @@ class ProviderDispatchCoordinator:
                 ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
                 if decision.quote.budget_input_tokens
                 > decision.quote.effective_input_budget_tokens
-                else ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
+                else ModelInputCompileFailureKind.PROVIDER_INPUT_WIRE_BYTES_EXCEEDED
             )
             raise StructuredModelInputCompileError(kind)
         selected = decision.candidate
@@ -3857,19 +3382,39 @@ class ProviderDispatchCoordinator:
                     ModelInputCompileFailureKind.FINAL_INPUT_BINDING_MISMATCH
                 ) from exc
             _require_dispatch_planning_deadline(deadline)
-            permit = self._safe_point.install_provider_input_candidate(
-                preparation_basis,
-                self._continuity,
-                candidate=append_candidate,
-                execution=execution,
+            page_decisions = tuple(
+                item
+                for item in compiled_input.tool_result_decisions
+                if item.native_projection is not None
             )
-            installed = True
-            self._tools.install_provider_input_tool_result_deliveries(
-                permit=permit,
-                canonical_facts=canonical_facts,
-                compiled_input=compiled_input,
-                surface_borrow=borrow,
-            )
+            installed_permits = []
+
+            def install_input(*, deadline_monotonic):
+                def freeze_pages():
+                    if page_decisions:
+                        self._repository.freeze_native_tool_page_decisions(
+                            self._writer_lease.guard,
+                            decisions=page_decisions,
+                            deadline_monotonic=deadline_monotonic,
+                        )
+
+                result = self._safe_point.install_provider_input_candidate(
+                    preparation_basis,
+                    self._continuity,
+                    candidate=append_candidate,
+                    execution=execution,
+                    before_install=freeze_pages,
+                )
+                installed_permits.append(result)
+                return result
+
+            try:
+                permit = await self._io.run(install_input, deadline_monotonic=deadline)
+            finally:
+                # KernelSessionIO drains a started physical operation before
+                # surfacing cancellation or timeout. Its actual outcome decides
+                # whether this registered candidate can still be discarded.
+                installed = bool(installed_permits)
             installed_open = InstalledProviderOpen(
                 request=request,
                 execution=execution,
@@ -3885,11 +3430,6 @@ class ProviderDispatchCoordinator:
                 prepared_wire=prepared_wire,
                 installed_open=installed_open,
             )
-            self._memory_support.note_installed_preference(
-                scope=permit.scope,
-                epoch_nonce=permit.epoch_nonce,
-                sources=dispatch.sources,
-            )
             return installed_open
         except BaseException:
             if not installed and registered:
@@ -3901,27 +3441,100 @@ class ProviderDispatchCoordinator:
                 self._continuity.discard(append_candidate)
             raise
 
+    def _installed_memory_state(self):
+        scope = ProviderInputContinuityScope(
+            session_id=self._writer_lease.guard.session_id,
+            scope_kind=ModelInputScopeKind.ROOT,
+        )
+        view = self._continuity.current_view(scope)
+        return (
+            MemoryObservationState()
+            if view is None or view.observation_state.memory is None
+            else view.observation_state.memory
+        )
+
+    async def _prepare_human_memory(
+        self,
+        *,
+        sources,
+        facts,
+        activation,
+        human_texts,
+        inherited_policy,
+        resets_policy,
+        model_surface,
+    ):
+        policy = inherited_policy
+        if (
+            not self._memory_support.available
+            or activation is not CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT
+            or facts.canonical_input.identity.conversation_scope_kind
+            is not ModelInputScopeKind.ROOT
+        ):
+            return sources, policy
+        triggers = tuple(
+            self._memory_support.classify_trigger(text) for text in human_texts
+        )
+        if not triggers:
+            return sources, policy
+        policy = (
+            triggers[0].memory_use
+            if resets_policy
+            else strongest_memory_use_policy(policy, triggers[0].memory_use)
+        )
+        for trigger in triggers[1:]:
+            policy = strongest_memory_use_policy(policy, trigger.memory_use)
+        automatic=(AutomaticMemoryTriggerDisposition.ELIGIBLE
+            if any(item.automatic_recall is AutomaticMemoryTriggerDisposition.ELIGIBLE for item in triggers)
+            else triggers[-1].automatic_recall)
+        trigger = replace(triggers[-1], memory_use=policy,automatic_recall=automatic)
+        previous = sources.observation_state.memory or MemoryObservationState()
+        candidate = await self._memory_support.prepare_observation(
+            "\n".join(human_texts),
+            previous_state=previous,
+            canonical_facts=facts,
+            trigger_policy=trigger,
+        )
+        replacements = []
+        if candidate.body:
+            replacements.append(
+                observation_source(
+                    ContextSourceKind.MEMORY_RECALL,
+                    tuple(
+                        RuntimeObservationItem(item.text, item.target)
+                        for item in candidate.body
+                    ),
+                    60,
+                )
+            )
+        if (
+            any(value.write_hint for value in triggers)
+            and policy.allows_writes
+            and facts.run_permission_snapshot.effective_mode
+            is not PermissionMode.READ_ONLY
+            and any(item.name == "remember" for item in model_surface.tool_specs)
+        ):
+            replacements.append(
+                observation_source(
+                    ContextSourceKind.MEMORY_WRITE_HINT,
+                    (RuntimeObservationItem(MEMORY_WRITE_HINT_BODY),),
+                    61,
+                )
+            )
+        result = replace_memory_context_sources(sources, tuple(replacements))
+        if candidate.next_state is not None:
+            result = replace(
+                result,
+                observation_state=replace(
+                    result.observation_state, memory=candidate.next_state
+                ),
+            )
+        return result, policy
+
     async def _resolved_workspace_id(self, *, deadline: float | None = None) -> str:
         return await self._workspace_resolver.resolve(
             deadline=self._canonical_deadline() if deadline is None else deadline
         )
-
-
-def _without_prebound_activation(
-    frozen: FrozenNonTriggerContextSources,
-) -> FrozenNonTriggerContextSources:
-    """Reopen only the trigger-derived Skill head over the same frozen roots."""
-    return replace(
-        frozen,
-        candidates=tuple(
-            item for item in frozen.candidates
-            if item.source_kind is not ContextSourceKind.ACTIVE_SKILL
-        ),
-        absent_facts=tuple(
-            item for item in frozen.absent_facts
-            if item.source_kind is not ContextSourceKind.ACTIVE_SKILL
-        ),
-    )
 
 
 def _skill_reference_surfaces_for_anchor(
@@ -3976,9 +3589,7 @@ def _activation_subject_for_anchor(
                 prompt_text_projection(FrozenPromptContent(item.content)),
             )
         return CapabilityActivationSubjectKind.ROOT_NON_HUMAN_TRIGGER, ""
-    # NoNewTriggerAnchor represents a same-turn tool/result continuation.  It
-    # must preserve the last activation snapshot rather than re-evaluating the
-    # turn as a fresh non-human trigger.
+    # An ordinary same-turn tool/result continuation is not a new activation.
     return None, ""
 
 
@@ -4286,9 +3897,11 @@ def _prospective_steer_compile_snapshot(
             raise ValueError("prospective steer fact target differs from input cut")
         appended.append(
             FrozenProviderInputItem(
-                item_kind=(FrozenProviderInputItemKind.TERMINAL_OBSERVATION
-                           if fact.input_origin is CanonicalInputOriginKind.CELL_OUTPUT
-                           else FrozenProviderInputItemKind.USER),
+                item_kind=(
+                    FrozenProviderInputItemKind.TERMINAL_OBSERVATION
+                    if fact.input_origin is CanonicalInputOriginKind.CELL_OUTPUT
+                    else FrozenProviderInputItemKind.USER
+                ),
                 source_entry_id=derive_id(
                     "entry", "steer", fact.session_id, fact.queue_item_id
                 ),
@@ -4297,6 +3910,7 @@ def _prospective_steer_compile_snapshot(
                 content=prompt.content.parts,
                 input_origin=fact.input_origin,
                 scheduled_input=fact.scheduled_input,
+                cell_output_source=prompt.source if isinstance(prompt, CellOutputContent) else None,
             )
         )
     return _prospective_provider_input_suffix_compile_snapshot(
@@ -4422,6 +4036,7 @@ def _prospective_provider_input_suffix_compile_snapshot(
         "plan_handoff_fact": base.plan_handoff_fact,
         "approved_plan_materialization_fact": (base.approved_plan_materialization_fact),
         "previous_turn_outcome_fact": base.previous_turn_outcome_fact,
+        "plan_mode_original_input": base.plan_mode_original_input,
     }
     provisional = FrozenCanonicalCompileSnapshot.__new__(FrozenCanonicalCompileSnapshot)
     for name, value in values.items():
@@ -4609,7 +4224,7 @@ def prepared_append_candidate(
         resulting_compiled_input=compiled_result.compiled_input,
         wire_input_plan=wire_input_plan,
         resulting_canonical_frontier=compiled_result.canonical_frontier,
-        resulting_source_heads=compiled_result.source_heads,
+        resulting_observation_state=compiled_result.observation_state,
         appended_message_count=compiled_result.appended_message_count,
         tool_exposure_plan=tool_exposure_plan,
         _preparation_basis=preparation_basis,

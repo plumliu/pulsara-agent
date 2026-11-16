@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 from time import monotonic
 
@@ -9,6 +10,7 @@ import pytest
 from psycopg.rows import dict_row
 
 from pulsara_agent.identity import random_id
+from pulsara_agent.mcp_config import default_user_mcp_config_path
 from pulsara_agent.llm.input import PromptContent, text_part_values
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
@@ -17,6 +19,11 @@ from pulsara_agent.terminal_protocol.v3_gateway import TerminalKernelProtocolSer
 from tests.test_round4_plan_host import _DetachedDraftModel, _open_test_session, _text, _tool_call
 
 pytestmark = pytest.mark.postgres
+
+
+@pytest.fixture(autouse=True)
+def private_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "home"))
 
 
 class _BlockingModel(_DetachedDraftModel):
@@ -30,7 +37,7 @@ class _BlockingModel(_DetachedDraftModel):
     async def stream(self, request):
         self.requests.append(request)
         if len(self.requests) == 1:
-            first = _tool_call('manage_capability', 'call:configuration', {'action': 'ADD_LOCAL_MCP', 'target': {"kind": "MCP_CONNECTION", 'scope': 'USER', 'source_kind': 'LOCAL', 'server_id': 'steer-fixture'}}) if self.capability else _tool_call('write_file', 'call:first-write', {
+            first = _tool_call('manage_capability', 'call:configuration', {'action': 'ADD_LOCAL_MCP', 'target': {"kind": "MCP_CONNECTION", 'config_path': str(default_user_mcp_config_path()), 'server_id': 'steer-fixture'}}) if self.capability else _tool_call('write_file', 'call:first-write', {
                 "target": {"kind": "PATH", "path": str(self.root/'first.txt')}, 'content': 'first write completed',
             })
             events = [*first, *_tool_call('write_file', 'call:second-write', {
@@ -224,9 +231,9 @@ def test_gateway_steer_waits_for_real_batch_then_delivers_fifo(tmp_path, monkeyp
     asyncio.run(exercise())
 
 
-@pytest.mark.parametrize('meta', [False, True], ids=['native-sdk', 'meta-sdk'])
+@pytest.mark.parametrize('installed_epoch', [False, True], ids=['cold-meta-sdk', 'existing-epoch-meta-sdk'])
 @pytest.mark.parametrize('blocked_lane', [None, 'server', 'host'], ids=['permission-card', 'waiting-server-lane', 'waiting-host-lane'])
-def test_real_stdio_mcp_supplement_waits_for_effect(tmp_path, monkeypatch, stage2_migrated_postgres_database, meta, blocked_lane):
+def test_real_stdio_mcp_supplement_waits_for_effect(tmp_path, monkeypatch, stage2_migrated_postgres_database, installed_epoch, blocked_lane):
     import json
     import sys
     from tempfile import TemporaryDirectory
@@ -257,7 +264,7 @@ if __name__ == "__main__":
     class Model(_DetachedDraftModel):
         def __init__(self):
             super().__init__()
-            self.warmed = not meta
+            self.warmed = not installed_epoch
             self.inspected = False
             self.called = False
             self.finished = asyncio.Event()
@@ -267,24 +274,21 @@ if __name__ == "__main__":
             if not self.warmed:
                 self.warmed = True
                 events = _text('epoch installed before MCP discovery')
-            elif meta and not self.inspected:
+            elif not self.inspected:
                 self.inspected = True
                 assert 'mcp__fixture__write_mark' not in {spec.name for spec in request.compiled_input.tools}
                 events = _tool_call('query_capabilities', 'call:inspect-effect', {
-                    'target':{'kind':'MCP_TOOL','server_id':'fixture','tool_name':'mcp__fixture__write_mark'},
+                    'kind':'MCP', 'target':{'kind':'MCP_TOOL','server_id':'fixture','remote_tool_name':'write_mark'},
                 })
             elif not self.called:
                 self.called = True
-                name, arguments = 'mcp__fixture__write_mark', {'value':'effect completed'}
-                if meta:
-                    bodies = [text for message in request.compiled_input.messages for text in text_part_values(message.content)]
-                    inspected = next(json.loads(json.loads(body)['pulsara_tool_result']['body'])
-                        for body in reversed(bodies) if '"pulsara_tool_result"' in body)
-                    assert inspected['invocation']['mode'] == 'META'
-                    name, arguments = 'use_new_mcp_tool', {'arguments': arguments, 'target': {"kind":"MCP_TOOL_REF", "tool_ref":inspected['invocation']['target']['tool_ref']}}
-                else:
-                    assert name in {spec.name for spec in request.compiled_input.tools}
-                events = _tool_call(name, 'call:external-effect', arguments)
+                bodies = [text for message in request.compiled_input.messages for text in text_part_values(message.content)]
+                token = next((match.group() for body in reversed(bodies)
+                    if (match := re.search(r"mcpref:[a-z2-7]{26}", body)) is not None), None)
+                assert token is not None
+                arguments = {'arguments': {'value':'effect completed'},
+                    'target': {'kind':'MCP_TOOL_REF', 'tool_ref':token}}
+                events = _tool_call('call_mcp_tool', 'call:external-effect', arguments)
             else:
                 original = self.requests[0].compiled_input
                 current = request.compiled_input
@@ -314,7 +318,7 @@ if __name__ == "__main__":
         try:
             await gateway.start()
             connection = await bridge.connect(session.session_id, browser_instance_id='00000000-0000-4000-8000-000000000001')
-            if meta:
+            if installed_epoch:
                 await session.run_turn(PromptContent.text('warm'), command_id=random_id('command'),
                     requested_permission_mode=PermissionMode.ASK_PERMISSIONS)
             await session.reload_mcp_configs(configs, deadline_monotonic=monotonic()+20)
@@ -420,11 +424,21 @@ def test_pending_review_hook_observes_submission_but_permission_freezes_at_deliv
         model = Model()
         core, session = await _open_test_session(tmp_path=tmp_path, model=model,
             postgres_dsn=stage2_migrated_postgres_database.runtime_dsn, monkeypatch=monkeypatch)
+        running = None
         try:
-            entered = await session.enter_plan(command_id=random_id('command'), entry_reason='review',
+            entered = await session.enter_plan(command_id=random_id('command'),
                 resume_permission_mode=PermissionMode.ACCEPT_EDITS)
-            await session.run_turn(PromptContent.text('prepare'), command_id=random_id('command'),
-                requested_permission_mode=PermissionMode.ACCEPT_EDITS)
+            running = asyncio.create_task(session.run_turn(PromptContent.text('prepare'), command_id=random_id('command'),
+                requested_permission_mode=PermissionMode.ACCEPT_EDITS))
+            async with asyncio.timeout(10):
+                while await session._plan_interactions.current_open() is None:
+                    if running.done():
+                        await running
+                        pytest.fail('planning runner ended before draft review')
+                    await asyncio.sleep(0.005)
+            opened = await session._plan_interactions.current_open()
+            assert opened.draft is not None
+            origin_turn_id = model.requests[0].turn_id
             command_id = random_id('command')
             accepted = await session.submit_prompt(command_id=command_id, content=PromptContent.text('AFTER_REVIEW_QUEUE'),
                 requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
@@ -434,11 +448,25 @@ def test_pending_review_hook_observes_submission_but_permission_freezes_at_deliv
             assert submissions[0]['permission_mode'] == 'plan'
             with session.repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,
                 row_factory=dict_row, deadline_monotonic=monotonic()+10) as connection:
-                review = connection.execute("SELECT i.id, w.workflow_revision FROM pulsara_v3.plan_interactions i JOIN pulsara_v3.plan_workflows w ON w.id=i.plan_workflow_id WHERE i.session_id=%s AND i.kind='DRAFT_REVIEW' AND i.status='OPEN'", (session.session_id,)).fetchone()
-            await session.resolve_plan_draft_review(command_id=random_id('command'), workflow_id=entered.target_id,
+                review = connection.execute("SELECT i.id, i.control_tool_result_id, w.workflow_revision, t.status AS turn_status FROM pulsara_v3.plan_interactions i JOIN pulsara_v3.plan_workflows w ON w.id=i.plan_workflow_id JOIN pulsara_v3.turns t ON t.session_id=i.session_id AND t.id=i.origin_turn_id WHERE i.session_id=%s AND i.kind='DRAFT_REVIEW' AND i.status='OPEN'", (session.session_id,)).fetchone()
+                assert review['id'] == opened.interaction_id
+                assert review['control_tool_result_id'] is None and review['turn_status'] == 'RUNNING'
+            assert not running.done()
+            resolution = await session.resolve_plan_draft_review(command_id=random_id('command'), workflow_id=entered.target_id,
                 expected_workflow_revision=review['workflow_revision'], interaction_id=review['id'],
                 decision=PlanDraftDecision.APPROVE if approve else PlanDraftDecision.CANCEL)
             await asyncio.wait_for(model.implementation_seen.wait(), 10)
+            await asyncio.wait_for(asyncio.shield(running), 10)
+            resumed = model.requests[1]
+            if approve:
+                assert resumed.turn_id == resolution.continuation_turn_id != origin_turn_id
+            else:
+                assert resolution.continuation_turn_id is None
+                assert resumed.turn_id == origin_turn_id
+                original = model.requests[0].compiled_input
+                assert resumed.compiled_input.system_prompt == original.system_prompt
+                assert resumed.compiled_input.tools == original.tools
+                assert resumed.compiled_input.messages[:len(original.messages)] == original.messages
             retry = await session.submit_prompt(command_id=command_id, content=PromptContent.text('AFTER_REVIEW_QUEUE'),
                 requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
             assert retry.prompt_delivery.queue_status == 'CONSUMED'
@@ -448,9 +476,16 @@ def test_pending_review_hook_observes_submission_but_permission_freezes_at_deliv
                 row_factory=dict_row, deadline_monotonic=monotonic()+10) as connection:
                 turn = connection.execute('SELECT t.requested_permission_mode, t.effective_permission_mode, t.permission_overlay FROM pulsara_v3.prompt_queue_items q JOIN pulsara_v3.turns t ON t.initial_entry_id=q.consumed_entry_id AND t.session_id=q.session_id WHERE q.session_id=%s AND q.command_id=%s',
                     (session.session_id, command_id)).fetchone()
-                assert turn == {'requested_permission_mode':'bypass-permissions', 'effective_permission_mode':'bypass-permissions', 'permission_overlay':'NONE'}
+                assert turn == {'requested_permission_mode':'bypass-permissions',
+                    'effective_permission_mode':'bypass-permissions' if approve else 'read-only',
+                    'permission_overlay':'NONE' if approve else 'PLAN_READ_ONLY'}
+                results = connection.execute('SELECT result_state FROM pulsara_v3.tool_results WHERE session_id=%s AND tool_call_id=%s',
+                    (session.session_id, 'call:hook-draft')).fetchall()
+                assert results == [{'result_state':'SUCCESS' if approve else 'CANCELLED'}]
         finally:
             await core.close_session(session.host_session_id)
+            if running is not None:
+                await asyncio.gather(running, return_exceptions=True)
             await core.shutdown()
 
     asyncio.run(exercise())
@@ -459,24 +494,40 @@ def test_pending_review_hook_observes_submission_but_permission_freezes_at_deliv
 def test_queue_to_plan_question_steer_survives_lost_commit_response(
     tmp_path, monkeypatch, stage2_migrated_postgres_database,
 ):
-    from tests.test_round4_plan_host import _QuestionSteerModel
     from pulsara_agent.conversation_kernel.repository import PlanQuestionAnswer
     from pulsara_agent.primitives.plan_workflow import PlanQuestionAnswerKind
 
+    class Model(_DetachedDraftModel):
+        async def stream(self, request):
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                events = _tool_call('ask_plan_question', 'call:steer-question', {'question':'Which path?'})
+            elif len(self.requests) == 2:
+                self.implementation_seen.set()
+                events = _text('QUESTION_STEER_RESUMED')
+            else:
+                raise AssertionError('unexpected question Steer provider cycle')
+            for event in events:
+                yield event
+
     async def exercise():
-        model = _QuestionSteerModel()
+        model = Model()
         core, session = await _open_test_session(tmp_path=tmp_path, model=model,
             postgres_dsn=stage2_migrated_postgres_database.runtime_dsn, monkeypatch=monkeypatch)
         committed, release = asyncio.Event(), asyncio.Event()
         running = caller = None
         try:
-            await session.enter_plan(command_id=random_id('command'), entry_reason='question',
+            await session.enter_plan(command_id=random_id('command'),
                 resume_permission_mode=PermissionMode.ACCEPT_EDITS)
             running = asyncio.create_task(session.run_turn(PromptContent.text('ask'),
                 command_id=random_id('command'), requested_permission_mode=PermissionMode.ACCEPT_EDITS))
             async with asyncio.timeout(10):
                 while await session._plan_interactions.current_open() is None:
+                    if running.done():
+                        await running
+                        pytest.fail('planning runner ended before question')
                     await asyncio.sleep(0.005)
+            origin_turn_id = model.requests[0].turn_id
             queued = await session.submit_prompt(command_id=random_id('command'), content=PromptContent.text('QUEUE_QUESTION_REDIRECT'),
                 requested_permission_mode=PermissionMode.READ_ONLY)
             command_id = random_id('command')
@@ -522,6 +573,7 @@ def test_queue_to_plan_question_steer_survives_lost_commit_response(
             )
             await asyncio.wait_for(running, 10)
             assert model.implementation_seen.is_set()
+            assert [request.turn_id for request in model.requests] == [origin_turn_id, origin_turn_id]
             assert await session._plan_interactions.current_open() is None
             retry = await session.steer_queued_prompt(command_id=command_id,
                 source_queue_item_id=queued.prompt_delivery.queue_item_id, target_turn_id=target)
@@ -530,6 +582,12 @@ def test_queue_to_plan_question_steer_survives_lost_commit_response(
             assert rendered.count('QUEUE_QUESTION_REDIRECT') == 1
             assert '被用户取消' not in rendered
             assert rendered.index('Use the first path') < rendered.index('QUEUE_QUESTION_REDIRECT')
+            with session.repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,
+                row_factory=dict_row, deadline_monotonic=monotonic()+10) as connection:
+                assert connection.execute('SELECT effective_permission_mode, permission_overlay FROM pulsara_v3.turns WHERE session_id=%s AND id=%s',
+                    (session.session_id, origin_turn_id)).fetchone() == {'effective_permission_mode':'read-only', 'permission_overlay':'PLAN_READ_ONLY'}
+                assert connection.execute('SELECT result_state FROM pulsara_v3.tool_results WHERE session_id=%s AND tool_call_id=%s',
+                    (session.session_id, 'call:steer-question')).fetchall() == [{'result_state':'SUCCESS'}]
         finally:
             release.set()
             await core.close_session(session.host_session_id)

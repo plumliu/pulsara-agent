@@ -72,7 +72,7 @@ def test_host_compaction_excludes_new_supplement_and_resends_original_once(
                     auto_trigger_ratio=0.99
                 )
                 _seed_history(root, segments=5, repetitions=250)
-                original_batch = root._runner._execute_tool_batch_with_page_recovery
+                original_batch = root._runner._tool_batches.execute
                 original_install = root._runner._provider_dispatch.install_provider_open
                 installed = []
                 queued = []
@@ -114,8 +114,8 @@ def test_host_compaction_excludes_new_supplement_and_resends_original_once(
                     return result
 
                 monkeypatch.setattr(
-                    root._runner,
-                    "_execute_tool_batch_with_page_recovery",
+                    root._runner._tool_batches,
+                    "execute",
                     after_settled_batch,
                 )
                 monkeypatch.setattr(

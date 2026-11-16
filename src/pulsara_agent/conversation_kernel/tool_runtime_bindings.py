@@ -14,10 +14,8 @@ from pulsara_agent.primitives.model_call import sha256_fingerprint
 
 
 _TERMINAL_PROCESS_ACTION_EFFECTS = (
-    ("poll", "TERMINAL_OBSERVATION"),
     ("wait", "TERMINAL_OBSERVATION"),
     ("write", "TERMINAL_EFFECT"),
-    ("submit", "TERMINAL_EFFECT"),
     ("close_stdin", "TERMINAL_EFFECT"),
     ("kill", "TERMINAL_EFFECT"),
 )

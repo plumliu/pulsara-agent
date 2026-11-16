@@ -5,7 +5,7 @@ import { LocalScheduledTasksApi, ScheduledApiError, type ScheduledTask } from '.
 import type { ModelConfigurationSummary } from '../../frontend/lib/runtime-adapter';
 import type { SessionSummary } from '../../frontend/lib/pulsara-types';
 afterEach(() => { cleanup(); vi.restoreAllMocks(); notify.mockClear(); });
-const task: ScheduledTask = { id:'scheduled:a',session_id:'session:a',name:'每日报告',prompt:'检查进展',status:'ACTIVE',revision:1,next_run_at:'2026-10-06T00:00:00Z',timezone:'Asia/Shanghai',permission_mode:'ask-permissions',schedule:{kind:'once',run_at_utc:'2026-10-06T00:00:13Z'} };
+const task: ScheduledTask = { id:'scheduled:a',session_id:'session:a',name:'每日报告',prompt:'检查进展',status:'ACTIVE',revision:1,next_run_at:'2026-10-06T00:00:00Z',timezone:'Asia/Shanghai',permission_mode:'ask-permissions',schedule:{kind:'once',run_at:'2026-10-06T08:00:13'} };
 const model:ModelConfigurationSummary={id:'model:a',source:'models_dev',route_id:'test',route_name:'测试供应商',wire_api:'openai_responses',model_id:'test-model',status:'ready',base_url:'http://localhost',authentication:'none',credential_configured:false,reasoning:{kind:'selectable',effort:{values:['high','max']}},default_reasoning:{kind:'effort',value:'high'}};
 function setup() {
  const api=new LocalScheduledTasksApi();
@@ -63,26 +63,29 @@ it('confirms an unknown submission through the toolbar after the once row disapp
  expect(retry).toEqual(original);
  await waitFor(()=>expect(screen.queryByRole('button',{name:'确认上次提交'})).toBeNull());
 });
-it('editing preserves the saved timezone, permission and exact once UTC including seconds',async()=>{
+it('unchanged editing preserves the saved instant and issues no configuration write',async()=>{
  const api=setup();const local=vi.spyOn(api,'localOnce');show(api);fireEvent.click(await screen.findByRole('button',{name:'编辑'}));
- expect(screen.queryByRole('combobox',{name:'时区'})).toBeNull();
- expect(screen.queryByRole('combobox',{name:'权限'})).toBeNull();
+ expect((screen.getByRole('textbox',{name:'时区'}) as HTMLInputElement).value).toBe(task.timezone);
+ expect((screen.getByRole('combobox',{name:'执行权限'}) as HTMLSelectElement).value).toBe(task.permission_mode);
  expect(screen.queryByRole('combobox',{name:'会话'})).toBeNull();
- fireEvent.click(screen.getByRole('button',{name:'保存任务'}));await waitFor(()=>expect(api.update).toHaveBeenCalled());
- const saved=vi.mocked(api.update).mock.calls[0][1];expect(saved.schedule).toEqual(task.schedule);expect(saved.timezone).toBe(task.timezone);expect(saved.permission_mode).toBe(task.permission_mode);expect(local).not.toHaveBeenCalled();
+ fireEvent.click(screen.getByRole('button',{name:'保存任务'}));
+ await waitFor(()=>expect(screen.queryByRole('dialog')).toBeNull());
+ expect(api.update).not.toHaveBeenCalled();expect(local).not.toHaveBeenCalled();
 });
+
 it('reloads all editor fields on CAS conflict rather than resubmitting stale values',async()=>{
  const api=setup();vi.mocked(api.update).mockRejectedValueOnce(new ScheduledApiError('配置已变更',409));
  vi.mocked(api.get).mockResolvedValue({...task,revision:2,name:'另一个窗口的配置',schedule:{kind:'monthly',start_date:'2026-10-01',time:'09:30',day:31}});
- show(api);fireEvent.click(await screen.findByRole('button',{name:'编辑'}));fireEvent.click(screen.getByRole('button',{name:'保存任务'}));
+ show(api);fireEvent.click(await screen.findByRole('button',{name:'编辑'}));fireEvent.change(screen.getByRole('textbox',{name:'名称'}),{target:{value:'我的修改'}});fireEvent.click(screen.getByRole('button',{name:'保存任务'}));
  await waitFor(()=>expect((screen.getByRole('textbox',{name:'名称'}) as HTMLInputElement).value).toBe('另一个窗口的配置'));
  expect((screen.getByRole('combobox',{name:'时间规则'}) as HTMLSelectElement).value).toBe('monthly');
  expect((screen.getByRole('spinbutton',{name:'每月几号'}) as HTMLInputElement).value).toBe('31');
  await waitFor(()=>expect(screen.getByRole('button',{name:'保存任务'}).hasAttribute('disabled')).toBe(false));
+ fireEvent.change(screen.getByRole('textbox',{name:'名称'}),{target:{value:'更新后的配置'}});
  fireEvent.click(screen.getByRole('button',{name:'保存任务'}));
  await waitFor(()=>expect(api.update).toHaveBeenCalledTimes(2));
  expect(vi.mocked(api.update).mock.calls[1][0].revision).toBe(2);
- expect(vi.mocked(api.update).mock.calls[1][1].name).toBe('另一个窗口的配置');
+ expect(vi.mocked(api.update).mock.calls[1][1]).toEqual({name:'更新后的配置'});
 });
 it('keeps the session link and expands only the prompt in the compact paused card',async()=>{
  const api=setup();vi.mocked(api.list).mockResolvedValue({tasks:[{...task,status:'PAUSED',next_run_at:null,last_turn_status:'INTERRUPTED',last_entry_id:'entry:user'}],next_cursor:null});const open=vi.fn();show(api,open);
@@ -121,8 +124,8 @@ it('does not replace a newer filter result with a late older page',async()=>{
 it('new task creation is lazy and Escape restores focus',async()=>{
  const api=setup();show(api);const button=await screen.findByRole('button',{name:'新建任务'});button.focus();fireEvent.click(button);
  const dialog=await screen.findByRole('dialog',{name:'新建定时任务'});
- expect(screen.queryByRole('combobox',{name:'权限'})).toBeNull();
- expect(screen.queryByRole('combobox',{name:'时区'})).toBeNull();
+ expect(screen.getByRole('combobox',{name:'执行权限'})).toBeTruthy();
+ expect(screen.getByRole('textbox',{name:'时区'})).toBeTruthy();
  expect(screen.queryByRole('combobox',{name:'会话'})).toBeNull();
  expect(api.create).not.toHaveBeenCalled();
  fireEvent.keyDown(dialog,{key:'Escape'});expect(screen.queryByRole('dialog')).toBeNull();expect(document.activeElement).toBe(button);
@@ -131,7 +134,7 @@ it.each([
  {fold:0 as const,instant:'2026-11-01T05:30:00Z',label:'第一次',offset:'GMT-04:00'},
  {fold:1 as const,instant:'2026-11-01T06:30:00Z',label:'第二次',offset:'GMT-05:00'},
 ])('ambiguous local preview states the actual occurrence $label and UTC offset',async({fold,instant,label,offset})=>{
- const api=setup();vi.mocked(api.list).mockResolvedValue({tasks:[{...task,timezone:'America/New_York',schedule:{kind:'once',run_at_utc:instant}}],next_cursor:null});
+ const api=setup();vi.mocked(api.list).mockResolvedValue({tasks:[{...task,timezone:'America/New_York',schedule:{kind:'once',run_at:'2026-11-01T01:30:00'}}],next_cursor:null});
  vi.mocked(api.preview).mockResolvedValue({next_run_at:instant,local_time_fold:fold});
  show(api);fireEvent.click(await screen.findByRole('button',{name:'编辑'}));
  const preview=await screen.findByText(new RegExp('重复时间的'+label));expect(preview.textContent).toContain(offset);

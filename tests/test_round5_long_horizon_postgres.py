@@ -4,6 +4,8 @@ from tests.support.model_config import scheduled_task_service
 from pulsara_agent.identity import derive_id
 
 from pulsara_agent.identity import random_id
+from pulsara_agent.ports.tool_execution import ToolBusinessValue
+from pulsara_agent.conversation_kernel.content_parts import ResultPart
 
 from tests.support.model_config import frozen_test_prompt
 from pulsara_agent.llm.input import FrozenPromptContent
@@ -90,6 +92,16 @@ def _name(prefix: str) -> str:
     return random_id(prefix)
 
 
+def _accepted_result_values(provider, session_id):
+    from psycopg.rows import dict_row
+    from pulsara_agent.conversation_kernel.tool_outputs import read_accepted_tool_business_value
+    with provider.connection(lane=PostgresConnectionLane.INSPECTOR, row_factory=dict_row,
+            deadline_monotonic=monotonic()+10) as connection:
+        rows=connection.execute("SELECT r.* FROM pulsara_v3.tool_results r JOIN pulsara_v3.transcript_entries e ON e.id=r.result_entry_id AND e.session_id=r.session_id WHERE r.session_id=%s ORDER BY e.entry_sequence",
+            (session_id,)).fetchall()
+        return [read_accepted_tool_business_value(connection,row) for row in rows]
+
+
 def _text_stream(text: str, *, block_id: str) -> list[object]:
     return [
         TextStartPayload(block_id),
@@ -106,9 +118,23 @@ def _text_stream(text: str, *, block_id: str) -> list[object]:
 def _tool_stream(
     index: int,
     *,
-    tool_name: str = "test_tool",
+    tool_name: str = "read_file",
     arguments: str = "{}",
 ) -> list[object]:
+    args = json.loads(arguments)
+    if tool_name == "read_file" and not args:
+        args = {"target":{"kind":"PATH", "path":"input.txt"}}
+    elif tool_name == "write_file" and not args:
+        args = {"target":{"kind":"PATH", "path":"output.txt"}, "content":"fixture effect"}
+    elif tool_name == "manage_schedule" and not args:
+        args = {"action":"delete", "target":{"kind":"SCHEDULE", "task_id":derive_id("task", "effect fixture")}}
+    elif tool_name == "manage_process":
+        args["target"] = {"kind":"PROCESS", "process_id":derive_id("process", "effect fixture")}
+        if args["action"] == "write":
+            args["data"] = "fixture input"
+        elif args["action"] == "wait":
+            args["timeout_seconds"] = 0
+    arguments = json.dumps(args)
     tool_call_id = f"tool-call:{index}"
     block_id = tool_call_id
     return [
@@ -140,7 +166,7 @@ class _KnownReadOnlyTool:
 
     async def invoke(self, **_kwargs: object) -> KernelToolResult:
         self.invocations += 1
-        return KernelToolResult(state="SUCCESS", content=b"ok")
+        return KernelToolResult(state="SUCCESS", content=ToolBusinessValue(content=(ResultPart("text", 'ok'),)))
 
 
 class _LostRootAdmissionAckRepository(ConversationKernelRepository):
@@ -266,7 +292,7 @@ class _TakeoverDuringTool(_KnownReadOnlyTool):
         await self.release.wait()
         return KernelToolResult(
             state="SUCCESS",
-            content=b"late exact result",
+            content=ToolBusinessValue(content=(ResultPart("text", 'late exact result'),)),
             physical_timing="LATE_AFTER_WATCHDOG",
         )
 
@@ -295,7 +321,7 @@ class _SettlementTokenTool(_KnownReadOnlyTool):
         self.invocations += 1
         return KernelToolResult(
             state="SUCCESS",
-            content=b"known exact result",
+            content=ToolBusinessValue(content=(ResultPart("text", 'known exact result'),)),
             process_local_settlement=ProcessLocalEffectSettlementToken(
                 token_id="tool-effect-token:test",
                 prepared=self,
@@ -324,7 +350,7 @@ class _RemoteIdentityTool(_KnownReadOnlyTool):
         self.invocations += 1
         return KernelToolResult(
             state="SUCCESS",
-            content=b"known exact result",
+            content=ToolBusinessValue(content=(ResultPart("text", 'known exact result'),)),
             remote_identity=derive_id(self.remote_kind, "test-exact"),
             remote_identity_verification=("sha256:" + "a" * 64 if self.remote_kind == "mcp-tool" else None),
         )
@@ -361,7 +387,7 @@ class _DeadlineMarkerTool(_KnownReadOnlyTool):
     async def invoke(self, **_kwargs: object) -> KernelToolResult:
         self.invocations += 1
         self.owner_count_at_physical_return = len(self._factory.owners)
-        return KernelToolResult(state="SUCCESS", content=b"long exact result")
+        return KernelToolResult(state="SUCCESS", content=ToolBusinessValue(content=(ResultPart("text", 'long exact result'),)))
 
 
 class _RecordingDeadlineFactory(KernelExecutionDeadlineFactory):
@@ -409,7 +435,7 @@ def _runner(
     model,
     tool=None,
     *,
-    tool_names: tuple[str, ...] = ("test_tool",),
+    tool_names: tuple[str, ...] = ("read_file",),
     deadline_factory: KernelExecutionDeadlineFactory | None = None,
 ):
     # These fixtures run a bare Runner, without KernelHostSession's renewal
@@ -1008,7 +1034,7 @@ def test_round5_cancelled_root_admission_joins_transient_confirmation_failures(
     ("effect_class", "tool_name", "arguments"),
     (
         ("read_only", "read_file", "{}"),
-        ("TERMINAL_OBSERVATION", "manage_process", '{"action":"poll"}'),
+        ("TERMINAL_OBSERVATION", "manage_process", '{"action":"wait"}'),
         ("admission", "read_file", "{}"),
     ),
 )
@@ -1042,16 +1068,20 @@ def test_round5_observation_physical_exception_becomes_one_known_failure_result(
     assert result.final_text == "recovered"
     assert tool.invocations == 1
     bodies = [
-        json.loads(part.text)["pulsara_tool_result"]["body"]
+        part.text
         for message in model.requests[-1].compiled_input.messages
         if message.role is MessageRole.TOOL_RESULT
         for part in message.content
         if isinstance(part, LLMTextPart)
     ]
     assert len(bodies) == 1
-    assert "reliable result" in bodies[0]
-    assert json.loads(bodies[0])["error"] == "OSError"
-    assert json.loads(bodies[0])["message"] == "injected physical failure"
+    assert "未取得可靠结果" in bodies[0]
+    accepted = _accepted_result_values(provider, session_id)
+    assert len(accepted) == 1
+    assert accepted[0]["content"][0] == {"type":"text", "value":"OSError: injected physical failure"}
+    assert "不能据此判断资源不存在" in accepted[0]["content"][1]["value"]
+    assert "未自动重试" in accepted[0]["content"][1]["value"]
+    assert "injected physical failure" in bodies[0]
     assert "not started" not in bodies[0]
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
@@ -1064,11 +1094,46 @@ def test_round5_observation_physical_exception_becomes_one_known_failure_result(
     assert rows == [("SYSTEM_ERROR",)]
 
 
+def test_unavailable_tool_preserves_its_reason_without_physical_dispatch(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id, _, lease = _lease(repository)
+    reason = "The selected connection is unavailable; query its current configuration."
+
+    class UnavailableTool(_KnownReadOnlyTool):
+        async def authorize(self, **_kwargs):
+            return KernelToolAuthorization(KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
+                "round5:unavailable", public_message=reason)
+
+    tool = UnavailableTool()
+    model = ScriptedKernelModel([
+        _tool_stream(1, tool_name="read_file"),
+        _text_stream("choose another step", block_id="answer"),
+    ])
+    result = asyncio.run(_runner(repository, lease, model, tool,
+        tool_names=("read_file",)).run_turn(frozen_test_prompt("start")))
+    assert result.final_text == "choose another step" and tool.invocations == 0
+    accepted = _accepted_result_values(provider, session_id)
+    assert len(accepted) == 1
+    assert accepted[0]["meta"]["status"] == "ERROR"
+    assert accepted[0]["content"] == [{"type": "text", "value": reason}]
+    assert any(reason in part.text for message in model.requests[-1].compiled_input.messages
+        if message.role is MessageRole.TOOL_RESULT for part in message.content if isinstance(part, LLMTextPart))
+    with provider.connection(lane=PostgresConnectionLane.INSPECTOR,
+            deadline_monotonic=monotonic()+10) as connection:
+        assert connection.execute("SELECT result_state FROM pulsara_v3.tool_results WHERE session_id=%s",
+            (session_id,)).fetchall() == [("TOOL_UNAVAILABLE",)]
+        assert connection.execute("SELECT count(*) FROM pulsara_v3.tool_execution_attempts WHERE session_id=%s",
+            (session_id,)).fetchone() == (0,)
+
+
 @pytest.mark.parametrize(
     ("effect_class", "tool_name", "arguments"),
     (
         ("bounded_write", "write_file", "{}"),
-        ("unknown_effect", "test_tool", "{}"),
+        ("unknown_effect", "manage_schedule", "{}"),
         ("TERMINAL_EFFECT", "manage_process", '{"action":"write"}'),
     ),
 )
@@ -1106,17 +1171,18 @@ def test_effectful_tool_failure_preserves_unknown_result_and_continues(
         result = asyncio.run(runner.run_turn(frozen_test_prompt("start")))
         assert result.final_text == "inspect before retrying"
         bodies = [
-            json.loads(part.text)["pulsara_tool_result"]["body"]
+            part.text
             for message in model.requests[-1].compiled_input.messages
             if message.role is MessageRole.TOOL_RESULT
             for part in message.content
             if isinstance(part, LLMTextPart)
         ]
         assert len(bodies) == 1
-        body = json.loads(bodies[0])
-        assert body["message"] == "injected physical failure"
-        assert body["physical_outcome"] == "UNKNOWN"
-        assert body["retry_performed"] is False
+        body = _accepted_result_values(provider, session_id)[0]
+        assert body["content"][0] == {"type":"text", "value":"OSError: injected physical failure"}
+        assert "injected physical failure" in bodies[0]
+        assert "操作可能已部分或全部执行，实际结果未确认" in body["content"][1]["value"]
+        assert "未自动重试" in body["content"][1]["value"]
 
     assert tool.invocations == 1
     with provider.connection(
@@ -1155,7 +1221,7 @@ def test_write_tool_io_error_is_model_visible(
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
-    _, _, lease = _lease(repository)
+    session_id, _, lease = _lease(repository)
     tool = _PhysicalFailureTool("bounded_write", raw=True)
     model = ScriptedKernelModel(
         [
@@ -1171,15 +1237,18 @@ def test_write_tool_io_error_is_model_visible(
     assert result.final_text == "can continue"
     assert tool.invocations == 1
     bodies = [
-        json.loads(part.text)["pulsara_tool_result"]["body"]
+        part.text
         for message in model.requests[-1].compiled_input.messages
         if message.role is MessageRole.TOOL_RESULT
         for part in message.content
         if isinstance(part, LLMTextPart)
     ]
     assert len(bodies) == 1
-    assert json.loads(bodies[0])["message"] == "injected physical failure"
-    assert json.loads(bodies[0])["physical_outcome"] == "UNKNOWN"
+    accepted = _accepted_result_values(provider, session_id)[0]
+    assert accepted["content"][0] == {"type":"text", "value":"OSError: injected physical failure"}
+    assert "操作可能已部分或全部执行，实际结果未确认" in accepted["content"][1]["value"]
+    assert "未自动重试" in accepted["content"][1]["value"]
+    assert "injected physical failure" in bodies[0]
 
 
 @pytest.mark.parametrize("raw", (False, True))
@@ -1286,20 +1355,26 @@ def test_real_file_write_failure_can_be_inspected_without_replaying_write(
     assert calls == 1
     assert (tmp_path / "result.txt").exists() is after_write
     bodies = [
-        json.loads(part.text)["pulsara_tool_result"]["body"]
+        part.text
         for message in model.requests[-1].compiled_input.messages
         if message.role is MessageRole.TOOL_RESULT
         for part in message.content
         if isinstance(part, LLMTextPart)
     ]
     assert len(bodies) == 2
-    failure = json.loads(bodies[0])
-    assert failure["physical_outcome"] == "UNKNOWN"
-    assert failure["message"] == (
-        "post-write inspection failed"
-        if after_write
-        else "target filesystem denied creation"
-    )
+    failure = _accepted_result_values(provider, session_id)[0]
+    assert failure["meta"]["status"] == "ERROR"
+    if after_write:
+        assert "操作可能已部分或全部执行，实际结果未确认" in failure["content"][1]["value"]
+        assert "未自动重试" in failure["content"][1]["value"]
+        assert failure["content"][0]["value"] == "RuntimeError: post-write inspection failed"
+    else:
+        assert failure["target"] == {"kind":"PATH", "path":"result.txt"}
+        assert failure["content"][0]["value"].endswith(": target filesystem denied creation")
+    with provider.connection(lane=PostgresConnectionLane.INSPECTOR,
+            deadline_monotonic=monotonic()+10) as connection:
+        assert connection.execute("SELECT result_state FROM pulsara_v3.tool_results WHERE session_id=%s ORDER BY observed_at LIMIT 1",
+            (session_id,)).fetchone() == (("SYSTEM_ERROR" if after_write else "APPLICATION_ERROR"),)
     if after_write:
         assert "written before failure" in bodies[1]
     for before, after in zip(model.requests, model.requests[1:]):

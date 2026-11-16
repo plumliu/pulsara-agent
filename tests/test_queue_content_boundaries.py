@@ -75,9 +75,9 @@ def test_cell_provider_projection_preserves_original_stored_code_units():
         random_id("turn"),
         random_id("attempt"),
         1,
-        {"kind": "log", "text": "汉字\n\ud800"},
+        {"kind": "log", "content": [{"type": "text", "value": "汉字\n\ud800"}]},
     )
-    assert value.storage_text == "汉字\n\ud800"
+    assert value.storage_parts[0]["value"] == "汉字\n\ud800"
     assert value.content.parts[0].text == "汉字\n\\ud800"
     assert json.loads(value.body) == {
         "parts": [{"type": "text", "text": "汉字\n\\ud800"}]

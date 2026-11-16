@@ -69,7 +69,7 @@ class TerminalRequest:
     command: str
     workdir: str | None = None
     yield_time_ms: int = 10_000
-    max_output_chars: int = 20_000
+    max_output_chars: int | None = None
     tty: bool = False
     max_lifetime_seconds: int | None = None
 
@@ -78,7 +78,7 @@ class TerminalRequest:
             raise ValueError("terminal command must not be empty")
         if self.yield_time_ms < 0:
             raise ValueError("terminal yield time must be non-negative")
-        if self.max_output_chars <= 0:
+        if self.max_output_chars is not None and self.max_output_chars <= 0:
             raise ValueError("terminal output bound must be positive")
         if self.max_lifetime_seconds is not None and self.max_lifetime_seconds <= 0:
             raise ValueError("terminal lifetime must be positive")
@@ -91,6 +91,7 @@ class TerminalResult:
     exit_code: int
     cwd: str
     timed_out: bool = False
+    cancelled: bool = False
     truncated: bool = False
     error: str | None = None
     reason: TerminalFailureReason | None = None

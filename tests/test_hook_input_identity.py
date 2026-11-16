@@ -101,6 +101,10 @@ def test_code_tool_pre_and_post_owners_send_actual_program_source(tmp_path):
         scope = HookDispatchScopeRef(object(), object(), HookScopeKind.ROOT, "session:root")
         owner = object.__new__(ToolBatchExecutor)
         owner._hooks, owner._hook_context = dispatcher, None
+        from unittest.mock import AsyncMock
+        accepted_value = {"meta": {"status":"SUCCESS"}, "content":[{"type":"text", "value":"saved actual result"}]}
+        owner._repository = SimpleNamespace(read_accepted_tool_result_observation=object())
+        owner._io = SimpleNamespace(run=AsyncMock(return_value={"value":accepted_value}))
         owner._tools = SimpleNamespace(snapshot_workspace_root=lambda: tmp_path)
         owner._deadlines = SimpleNamespace(deadline=lambda _: monotonic()+5)
         request = CodeModeToolRequest("session:root", "model:test", None, None)
@@ -120,6 +124,9 @@ def test_code_tool_pre_and_post_owners_send_actual_program_source(tmp_path):
                 settlement=settlement, request=request, canonical_facts=canonical, continuity_scope=None)
             payloads = [item.public_stdin for item in executor.calls]
             assert [item["hook_event_name"] for item in payloads] == ["PreToolUse", "PostToolUse"]
+            owner._io.run.assert_awaited_once_with(owner._repository.read_accepted_tool_result_observation,
+                session_id="session:root", result_id="result:actual", deadline_monotonic=pytest.approx(monotonic()+5,abs=1))
+            assert payloads[1]["tool_response"] == accepted_value
             assert all(item["session_id"] == "session:root" and item["session_kind"] == "ROOT" and item["input_origin"] == "CODE_MODE_CALL" for item in payloads)
         finally:
             _code_snapshot.reset(snapshot_token)

@@ -70,8 +70,7 @@ def test_todo_commit_and_media_ranges_are_independent_values_in_one_owner(tmp_pa
     prepared = owner.prepare_replace(scope_kind=ModelInputScopeKind.ROOT,
         exact_turn_id=turn, attempt_id=derive_id('attempt', 'test', 'todo'),
         proposed_result_entry_id=derive_id('entry', 'test', 'todo'),
-        candidate=parse_todo_replacement({'items': [{'text': 'Review evidence', 'status': 'pending'}]}),
-        acknowledgement=b'ok')
+        candidate=parse_todo_replacement({'items': [{'text': 'Review evidence', 'status': 'pending'}]}),)
     assert owner.current_work_snapshot().todos[0].ordered_items == ()
     owner.commit(prepared)
     snapshot = owner.current_work_snapshot()

@@ -76,7 +76,7 @@ export function McpEditor({ server, onClose, onSave, onTest, onNotify, onAuthori
   const [resource, setResource] = useState(String(previousAuth.resource ?? ''));
   const [clientMetadata, setClientMetadata] = useState(String(previousAuth.client_metadata_url ?? ''));
   const [enabled, setEnabled] = useState(server?.enabled ?? true);
-  const [subagents, setSubagents] = useState(server?.availableToSubagents ?? false);
+  const [subagents, setSubagents] = useState(server?.availableToSubagents ?? true);
   const [allowLocal, setAllowLocal] = useState(Boolean(previousTransport.allow_http_localhost));
   const [stateless, setStateless] = useState(Boolean(previousTransport.stateless_http_asserted));
   const [policies, setPolicies] = useState<Record<string, unknown>>({});

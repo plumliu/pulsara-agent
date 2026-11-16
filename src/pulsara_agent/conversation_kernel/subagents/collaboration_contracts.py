@@ -69,27 +69,89 @@ def target_schema(kind: str, *, allow_root: bool = False) -> dict:
     }
 
 
-def query_agents_input_schema() -> dict:
-    page = {
-        "cursor": {"type": "string", "minLength": 1, "maxLength": 512},
-        # The existing collaboration per-page boundary, not a membership cap.
-        "max_items": {"type": "integer", "minimum": 1, "maximum": 50, "default": 50},
-    }
+def collaboration_output_schema(tool_name: str) -> dict:
+    """The complete JS value produced by the collaboration business owner."""
+    from pulsara_agent.ports.tool_execution import tool_business_value_schema
 
+    def record(properties, required=None):
+        return {
+            "type": "object", "properties": properties,
+            "required": list(properties) if required is None else required,
+            "additionalProperties": False,
+        }
+
+    def part(value):
+        return record({"type": {"const": "object"}, "value": value})
+
+    def content(*parts, **constraints):
+        return {"type": "array", "items": {"oneOf": list(parts)}, **constraints}
+
+    text = record({"type": {"const": "text"}, "value": {"type": "string"}})
+    agent, work = target_schema("AGENT"), target_schema("WORK")
+    status = {"type": "string", "enum": ["queued", "running", "completed", "stopped"]}
+    run_record = part(record({"agent": agent, "work": work, "work_status": status}))
+    idle_record = part(record({"agent": agent, "is_idle": {"type": "boolean"}}))
+    failure_parts = (text,)
+    failure_meta = {}
+    if tool_name == "query_agents":
+        agent_record = part(record({
+            "target": agent,
+            "current_work": {"anyOf": [work, {"type": "null"}],
+                             "description": "当前 Work；没有当前工作时为 null。"},
+            "current_work_title": {"type": ["string", "null"],
+                                   "description": "当前 Work 标题；空闲或该 Work 无标题时为 null。"},
+            "queued_work_count": {"type": "integer", "minimum": 0},
+            "name": {"type": "string"},
+        }, ["target", "current_work", "current_work_title", "queued_work_count"]))
+        work_record = part(record({
+            "target": work, "agent": agent, "work_status": status,
+            "work_title": {"type": ["string", "null"], "description": "本次 Work 的标题；无标题时为 null。"},
+            "instruction": {"type": "string"},
+            "final": {"type": "string"}, "diagnostic": {"type": "string"},
+            "failed_dependency": work,
+        }, ["target", "agent", "work_status", "work_title"]))
+        failure_parts = (text, agent_record, work_record)
+        success = tool_business_value_schema(content_schema=content(*failure_parts, minItems=1))
+    elif tool_name == "send_agent_message":
+        success = tool_business_value_schema(content_schema=content(text, minItems=1, maxItems=1))
+    elif tool_name == "run_agent":
+        failure_parts = (text, run_record)
+        success = tool_business_value_schema(content_schema=content(run_record, minItems=1))
+    elif tool_name == "stop_agent":
+        stopped_record = part(record({"target": work, "work_status": status}))
+        failure_parts = (text, stopped_record)
+        failure_meta = {state + "_work_count": {"type": "integer", "minimum": 0}
+                        for state in ("queued", "running", "completed", "stopped")}
+        success = tool_business_value_schema(meta=failure_meta, required_meta=tuple(failure_meta),
+            content_schema=content(*failure_parts, minItems=1))
+    elif tool_name == "wait_agent":
+        failure_parts = (text, run_record, idle_record)
+        wait_reason = {"type": "string", "enum": ["condition_met", "timeout"]}
+        success = {"oneOf": [
+            tool_business_value_schema(meta={"wait_reason": wait_reason}, required_meta=("wait_reason",),
+                content_schema=content(run_record, minItems=1)),
+            tool_business_value_schema(meta={"wait_reason": wait_reason}, required_meta=("wait_reason",),
+                content_schema=content(idle_record, minItems=1)),
+            tool_business_value_schema(meta={
+                "wait_reason": {"const": "message_available"},
+                "message_sources": {"type": "array", "items": agent, "minItems": 1},
+            }, required_meta=("wait_reason", "message_sources"),
+                content_schema=content(idle_record, minItems=1)),
+        ]}
+    else:
+        raise ValueError(f"no collaboration output contract for {tool_name}")
+    failure = tool_business_value_schema(statuses=("ERROR", "CANCELLED"),
+        meta=failure_meta, content_schema=content(*failure_parts))
+    return {"oneOf": [success, failure]}
+
+
+def query_agents_input_schema() -> dict:
     return {
-        "oneOf": [
-            {
-                "type": "object",
-                "properties": fields,
-                "required": required,
-                "additionalProperties": False,
-            }
-            for fields, required in (
-                (page, []),
-                ({"target": target_schema("AGENT"), **page}, ["target"]),
-                ({"target": target_schema("WORK")}, ["target"]),
-            )
-        ]
+        "type": "object",
+        "properties": {
+            "target": {"oneOf": [target_schema("AGENT"), target_schema("WORK")]}
+        },
+        "additionalProperties": False,
     }
 
 
@@ -101,40 +163,32 @@ def assignment_parameters_schema() -> dict:
             "target": target_schema("AGENT"),
             "work_title": {"type": "string", "minLength": 1, "maxLength": 256},
             "instruction": {"type": "string", "minLength": 1, "maxLength": 65_536},
-            "context": {
-                "oneOf": [
-                    {
-                        "type": "object",
-                        "properties": {"mode": {"const": "none"}},
-                        "required": ["mode"],
-                        "additionalProperties": False,
-                    },
-                    {
-                        "type": "object",
-                        "properties": {
-                            "mode": {"const": "last_n"},
-                            "turns": {"type": "integer", "minimum": 1, "maximum": 3},
+            "materials": {
+                "type": "array",
+                "items": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "kind": {"const": "CONTEXT_MATERIAL"},
+                                "turns": {"type": "integer", "enum": [1, 2, 3]},
+                            },
+                            "required": ["kind", "turns"],
+                            "additionalProperties": False,
                         },
-                        "required": ["mode", "turns"],
-                        "additionalProperties": False,
-                    },
-                ]
+                        target_schema("WORK"),
+                    ]
+                },
             },
-            **{
-                field: {
-                    "type": "array",
-                    "items": target_schema("WORK"),
-                    "maxItems": 16,
-                    "uniqueItems": True,
-                }
-                for field in ("materials", "depends_on")
+            "depends_on": {
+                "type": "array",
+                "items": target_schema("WORK"),
+                "maxItems": 16,
+                "uniqueItems": True,
             },
         },
         "required": ["instruction"],
         "additionalProperties": False,
-        "allOf": [
-            {"if": {"required": ["target"]}, "then": {"not": {"required": ["context"]}}}
-        ],
     }
 
 
@@ -163,6 +217,12 @@ def run_agent_parameters_schema() -> dict:
     }
 
 
+def run_agent_script_input_schema() -> dict:
+    """The JS assignment array, before the existing identity preparation step."""
+    batch = run_agent_parameters_schema()["properties"]["members"]
+    return {**batch, "items": assignment_parameters_schema()}
+
+
 def _wait_timeout_schema() -> dict:
     return {"type": "number", "minimum": 0, "maximum": 300, "default": 30}
 
@@ -176,25 +236,28 @@ def wait_message_parameters_schema() -> dict:
 
 
 def wait_agent_parameters_schema() -> dict:
+    shared = {
+        "settle": {"enum": ["all", "first"], "default": "all"},
+        "timeout_seconds": _wait_timeout_schema(),
+    }
     return {
-        "type": "object",
-        "properties": {
-            "agents": {
-                "type": "array",
-                "minItems": 1,
-                "uniqueItems": True,
-                "items": target_schema("AGENT"),
-            },
-            "until": {
-                "type": "string",
-                "enum": ["work_end", "idle"],
-                "default": "idle",
-            },
-            "settle": {"type": "string", "enum": ["all", "first"], "default": "all"},
-            "timeout_seconds": _wait_timeout_schema(),
-        },
-        "required": ["agents"],
-        "additionalProperties": False,
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    key: {
+                        "type": "array",
+                        "minItems": 1,
+                        "uniqueItems": True,
+                        "items": target_schema(kind),
+                    },
+                    **shared,
+                },
+                "required": [key],
+                "additionalProperties": False,
+            }
+            for key, kind in [("works", "WORK"), ("agents", "AGENT")]
+        ]
     }
 
 
@@ -240,39 +303,36 @@ def _text(value: object, name: str, maximum_utf8_bytes: int | None = None) -> st
     return value
 
 
+def material_selection(value: object) -> tuple[tuple[int, ...], tuple[str, ...]]:
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("materials must be an array")
+    contexts, works = [], []
+    for material in value:
+        if isinstance(material, Mapping) and material.get("kind") == "CONTEXT_MATERIAL":
+            item = closed(material, {"kind", "turns"}, {"kind", "turns"})
+            if type(item["turns"]) is not int or item["turns"] not in {1, 2, 3}:
+                raise ValueError("CONTEXT_MATERIAL turns must be 1, 2, or 3")
+            contexts.append(item["turns"])
+        else:
+            works.append(target_id(material, "WORK"))
+    if len(works) > 16 or len(set(works)) != len(works):
+        raise ValueError("materials accepts at most 16 distinct WORK references")
+    return tuple(contexts), tuple(works)
+
+
 def validate_assignment_parameters(arguments: Mapping[str, object]) -> None:
     a = closed(
         arguments,
-        {
-            "instruction",
-            "target",
-            "work_title",
-            "context",
-            "materials",
-            "depends_on",
-        },
+        {"instruction", "target", "work_title", "materials", "depends_on"},
         {"instruction"},
     )
-    # Preserve the existing per-request text boundaries; these are not history caps.
     _text(a["instruction"], "instruction", 65_536)
     if "target" in a:
         target_id(a["target"], "AGENT")
-        if "context" in a:
-            raise ValueError("context is available only when creating an Agent")
     if "work_title" in a:
         _text(a["work_title"], "work_title", 256)
-    if "context" in a:
-        context = closed(a["context"], {"mode", "turns"}, {"mode"})
-        if context["mode"] == "none":
-            closed(context, {"mode"}, {"mode"})
-        elif context["mode"] == "last_n":
-            if type(context.get("turns")) is not int or not 1 <= context["turns"] <= 3:
-                raise ValueError("last_n context requires turns in 1..3")
-        else:
-            raise ValueError("unknown context mode")
-    for field in ("materials", "depends_on"):
-        if field in a:
-            _targets(a[field], "WORK", maximum=16)
+    material_selection(a.get("materials", []))
+    _targets(a.get("depends_on", []), "WORK", maximum=16)
 
 
 def validate_work_inputs(value: object) -> tuple[dict, ...]:
@@ -355,7 +415,7 @@ def validate_collaboration_parameters(
         validate_run_parameters(arguments)
         return
     if name == "query_agents":
-        a = closed(arguments, {"target", "cursor", "max_items"})
+        a = closed(arguments, {"target"})
         if not Draft202012Validator(query_agents_input_schema()).is_valid(dict(a)):
             raise ValueError("use one query_agents branch; WORK accepts only target")
         if "target" in a:
@@ -374,26 +434,16 @@ def validate_collaboration_parameters(
         a = closed(arguments, {"timeout_seconds"})
         _validate_wait_timeout(a)
     elif name == "wait_agent":
-        a = closed(
-            arguments,
-            {"agents", "until", "settle", "timeout_seconds"},
-            {"agents"},
-        )
-        _targets(a["agents"], "AGENT", nonempty=True)
-        until = a.get("until", "idle")
-        if not isinstance(until, str) or until not in {"work_end", "idle"}:
-            raise ValueError("until must be work_end or idle")
+        a = closed(arguments, {"works", "agents", "settle", "timeout_seconds"})
+        if ("works" in a) == ("agents" in a):
+            raise ValueError("provide exactly one of works or agents")
+        key = "works" if "works" in a else "agents"
+        _targets(a[key], "WORK" if key == "works" else "AGENT", nonempty=True)
         if a.get("settle", "all") not in {"all", "first"}:
             raise ValueError("settle must be all or first")
         _validate_wait_timeout(a)
     else:
         raise ValueError("unknown collaboration operation")
-    if "cursor" in a:
-        _text(a["cursor"], "cursor", 512)
-    if "max_items" in a and (
-        type(a["max_items"]) is not int or not 1 <= a["max_items"] <= 50
-    ):
-        raise ValueError("max_items must be in 1..50")
 
 
 @dataclass(frozen=True, slots=True)
@@ -403,8 +453,7 @@ class PreparedAgentRequest:
     instruction: str
     create_agent: bool
     work_title: str | None = None
-    context_mode: str = "none"
-    context_turns: int | None = None
+    context_turns: tuple[int, ...] = ()
     materials: tuple[str, ...] = ()
     depends_on: tuple[str, ...] = ()
     initial_context: tuple[str, ...] = ()
@@ -414,7 +463,12 @@ class PreparedAgentRequest:
             raise ValueError("create_agent must be a frozen boolean")
         if any(
             not isinstance(value, tuple)
-            for value in (self.materials, self.depends_on, self.initial_context)
+            for value in (
+                self.materials,
+                self.depends_on,
+                self.initial_context,
+                self.context_turns,
+            )
         ):
             raise ValueError("prepared request collections must be immutable tuples")
         if any(not isinstance(value, str) for value in self.initial_context):
@@ -428,19 +482,11 @@ class PreparedAgentRequest:
         }
         if self.work_title is not None:
             arguments["work_title"] = self.work_title
-        if self.create_agent:
-            arguments["context"] = {
-                "mode": self.context_mode,
-                **(
-                    {"turns": self.context_turns}
-                    if self.context_turns is not None
-                    else {}
-                ),
-            }
-        else:
+        arguments["materials"] = [
+            {"kind": "CONTEXT_MATERIAL", "turns": turns} for turns in self.context_turns
+        ] + [work_target(x) for x in self.materials]
+        if not self.create_agent:
             arguments["target"] = agent_target(self.agent_id)
-            if self.context_mode != "none" or self.context_turns is not None:
-                raise ValueError("reused Agent cannot carry creation options")
         validate_assignment_parameters(arguments)
 
 
@@ -475,16 +521,15 @@ def prepared_request(
     )
     if agent_id is not None and actual_agent != agent_id:
         raise ValueError("batch target changed after identities were prepared")
-    context = parameters.get("context", {"mode": "none"})
+    contexts, materials = material_selection(parameters.get("materials", []))
     return PreparedAgentRequest(
         agent_id=actual_agent,
         work_id=work_id or random_id("queue"),
         instruction=parameters["instruction"],
         create_agent=create,
         work_title=parameters.get("work_title"),
-        context_mode=context["mode"],
-        context_turns=context.get("turns"),
-        materials=_targets(parameters.get("materials", []), "WORK", maximum=16),
+        context_turns=contexts,
+        materials=materials,
         depends_on=_targets(parameters.get("depends_on", []), "WORK", maximum=16),
     )
 

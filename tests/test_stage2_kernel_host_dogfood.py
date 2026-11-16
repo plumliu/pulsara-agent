@@ -404,15 +404,15 @@ def test_k2_public_host_validates_image_input_and_reaches_existing_compiler(
     assert images == (bound_test_image("image/png", image_bytes, 7, 5),)
     with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
         ref = connection.execute(
-            """SELECT r.ref_ordinal, b.body, b.media_type, b.codec
-               FROM pulsara_v3.canonical_image_refs r
+            """SELECT r.ordinal, b.body, b.media_type, b.codec
+               FROM pulsara_v3.content_parts r
                JOIN pulsara_v3.blobs b ON b.id=r.blob_id
-               WHERE r.session_id=%s AND r.transcript_entry_id IS NOT NULL""",
+               WHERE r.session_id=%s AND r.entry_id IS NOT NULL AND r.type='image'""",
             (session_id,),
         ).fetchone()
     assert ref is not None
     assert (ref[0], bytes(ref[1]), ref[2], ref[3]) == (
-        0,
+        1 if mixed else 0,
         image_bytes,
         "image/png",
         "binary",
@@ -649,16 +649,16 @@ def test_k2_public_host_consumes_typed_image_steer_at_provider_safe_point(
     )
     with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
         ref = connection.execute(
-            """SELECT e.entry_kind, r.ref_ordinal, b.body
+            """SELECT e.entry_kind, r.ordinal, b.body
                FROM pulsara_v3.transcript_entries e
-               JOIN pulsara_v3.canonical_image_refs r
-                 ON r.session_id=e.session_id AND r.transcript_entry_id=e.id
+               JOIN pulsara_v3.content_parts r
+                 ON r.session_id=e.session_id AND r.entry_id=e.id
                JOIN pulsara_v3.blobs b ON b.id=r.blob_id
-               WHERE e.session_id=%s AND e.turn_id=%s AND e.entry_kind='USER_STEER'""",
+               WHERE e.session_id=%s AND e.turn_id=%s AND e.entry_kind='USER_STEER' AND r.type='image'""",
             (session_id, turn_id),
         ).fetchone()
     assert ref is not None
-    assert (ref[0], ref[1], bytes(ref[2])) == ("USER_STEER", 0, image_bytes)
+    assert (ref[0], ref[1], bytes(ref[2])) == ("USER_STEER", 1, image_bytes)
 
 
 def test_k3_queued_root_resource_failure_interrupts_consumed_request(
@@ -756,7 +756,7 @@ def test_k3_queued_root_resource_failure_interrupts_consumed_request(
             assert len(queued_tasks) == 1
             with pytest.raises(StructuredModelInputCompileError) as rejected:
                 await asyncio.shield(queued_tasks[0])
-            assert rejected.value.kind is ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
+            assert rejected.value.kind is ModelInputCompileFailureKind.PROVIDER_INPUT_WIRE_BYTES_EXCEEDED
             return session.session_id, queue_item_id
         finally:
             await core.close_session(
@@ -777,8 +777,8 @@ def test_k3_queued_root_resource_failure_interrupts_consumed_request(
             "SELECT "
             "(SELECT count(*) FROM pulsara_v3.turns WHERE session_id=%s), "
             "(SELECT count(*) FROM pulsara_v3.transcript_entries WHERE session_id=%s), "
-            "(SELECT count(*) FROM pulsara_v3.canonical_image_refs "
-            " WHERE session_id=%s AND queue_item_id=%s)",
+            "(SELECT count(*) FROM pulsara_v3.content_parts "
+            " WHERE session_id=%s AND entry_id=(SELECT consumed_entry_id FROM pulsara_v3.prompt_queue_items WHERE id=%s) AND type='image')",
             (session_id, session_id, session_id, queue_item_id),
         ).fetchone()
         failed_turn = connection.execute(

@@ -156,7 +156,7 @@ def read_fork_anchor(
            WHERE session_id=%s AND entry_id=%s AND type='text' ORDER BY ordinal""",
         (session_id, entry_id),
     ).fetchall()
-    for block in blocks:
+    for block in sorted(blocks, key=lambda candidate: int(candidate["ordinal"])):
         if block["type"] != "text":
             continue
         part = decode_content_part(connection, block)
@@ -278,6 +278,37 @@ def read_fork_historical_material(
     groups = {}
     decoded_parts = {}
     blocks_by_entry = {}
+    # A retained native page can depend on an original result before the
+    # effective floor. Copy that source occurrence and its call as child-owned
+    # content. Their original sequence remains below the same floor, so these
+    # dependencies never become additional provider-visible history.
+    source_dependencies = connection.execute(
+        """SELECT source.result_entry_id, source.tool_call_entry_id,
+                  source.source_result_entry_id AS source_parent,
+                  se.entry_sequence AS source_sequence
+           FROM pulsara_v3.tool_results AS page
+           JOIN pulsara_v3.transcript_entries AS pe
+             ON pe.session_id=page.session_id AND pe.id=page.result_entry_id
+           JOIN pulsara_v3.tool_results AS source
+             ON source.session_id=page.session_id
+            AND source.result_entry_id=page.source_result_entry_id
+           JOIN pulsara_v3.transcript_entries AS se
+             ON se.session_id=source.session_id AND se.id=source.result_entry_id
+           WHERE page.session_id=%s
+             AND page.source_result_entry_id<>page.result_entry_id
+             AND pe.entry_sequence<=%s
+             AND (pe.entry_sequence>%s OR pe.id=ANY(%s))""",
+        (source_session_id, anchor.source_entry_sequence,
+         anchor.source_through_sequence, list(retained_entry_ids)),
+    ).fetchall()
+    support_ids = set(retained_entry_ids)
+    for dependency in source_dependencies:
+        source_id = str(dependency["result_entry_id"])
+        if dependency["source_parent"] not in (None, source_id):
+            raise ConversationKernelConflict("Fork native source is another continuation")
+        if int(dependency["source_sequence"]) > anchor.source_entry_sequence:
+            raise ConversationKernelConflict("Fork native source is outside its historical cut")
+        support_ids.update((source_id, str(dependency["tool_call_entry_id"])))
     # Prefix references and the effective suffix share the original row copy
     # path, so child ownership, image refs and every cut use the same mapping.
     last = (0, "")
@@ -302,7 +333,7 @@ def read_fork_historical_material(
             (
                 source_session_id,
                 anchor.source_through_sequence,
-                list(retained_entry_ids),
+                list(support_ids),
                 *last,
                 anchor.source_entry_sequence,
             ),
@@ -414,10 +445,9 @@ def read_fork_historical_material(
                 outcome,
             )
             attributed = historical_source_attribution(raw)
-            if raw["entry_kind"] in {"PLAN_CONTINUATION", "TERMINAL_OBSERVATION"}:
+            if raw["entry_kind"] == "PLAN_CONTINUATION":
                 text = reader._entry_text(connection, str(raw["id"]), source_session_id)
-                if raw["entry_kind"] == "PLAN_CONTINUATION":
-                    _project_plan_continuation_storage(attributed, text)
+                _project_plan_continuation_storage(attributed, text)
             entry = {
                 key: value
                 for key, value in raw.items()
@@ -443,14 +473,17 @@ def read_fork_historical_material(
     call_ids = {
         str(b["entry_id"]) for b in blocks if b["type"] == "tool_call"
     }
-    # Results are copied only when their request is in the effective window.
+    # Copy results whose actual occurrences were selected, including hidden
+    # native dependencies. Other calls on a support entry retain their real
+    # historical closure instead of pulling additional result occurrences.
     raw_results = (
         connection.execute(
             """SELECT r.*, e.entry_sequence FROM pulsara_v3.tool_results AS r
            JOIN pulsara_v3.transcript_entries AS e ON e.session_id = r.session_id AND e.id = r.result_entry_id
            WHERE r.session_id = %s AND r.tool_call_entry_id = ANY(%s)
+             AND r.result_entry_id = ANY(%s)
              AND e.entry_sequence <= %s ORDER BY e.entry_sequence""",
-            (source_session_id, list(call_ids), anchor.source_entry_sequence),
+            (source_session_id, list(call_ids), list(entry_ids), anchor.source_entry_sequence),
         ).fetchall()
         if call_ids
         else []

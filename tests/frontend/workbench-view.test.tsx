@@ -1,5 +1,6 @@
-import { FileMediaContext } from '../../frontend/components/file-link-context';
+import { FileLinkContext, FileMediaContext } from '../../frontend/components/file-link-context';
 import type { FilePreviewApi } from '../../frontend/lib/file-preview';
+import type { ToolBusinessValue } from '../../frontend/lib/tool-business-value';
 import { PresentationContext } from '../../frontend/components/presentation-provider';
 import type { PulsaraDesktop } from '../../frontend/lib/desktop-host';
 import { createHash, webcrypto } from 'node:crypto';
@@ -1001,7 +1002,7 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
     const viewProps = props({ isRunning: true, onReadToolOutput: readOutput, messages: [{
       id: 'assistant', role: 'assistant', time: '现在', body: '', status: 'running', traces: [{
         id: 'edit', kind: 'edit', toolName: 'edit_file', title: '更新文件', subtitle: 'file',
-        status: 'completed', resultText: JSON.stringify({ diff: '-old\n+new', secret: 'raw body' }),
+        status: 'completed', businessValue: {meta:{status:'SUCCESS'},content:[{type:'text',value:'-old\n+new'}]},
         resultSummary: 'raw body', resultEntryId: 'result',
         outputBody: { available: true, sourceCoverage: 'COMPLETE', omitted: true },
       }, {
@@ -1028,7 +1029,7 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
     expect(readOutput).not.toHaveBeenCalled();
 
     view.rerender(display(true));
-    expect(screen.getAllByRole('region', { name: '工具展示结果' })).toHaveLength(2);
+    expect(screen.getAllByRole('region', { name: '工具展示结果' })).toHaveLength(1);
     fireEvent.click(screen.getByRole('button', { name: '查看完整输出' }));
     expect(await screen.findByText('retained output')).toBeTruthy();
     view.rerender(display(false));
@@ -1056,10 +1057,10 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
     expect(view.container.querySelector('.trace-card')?.textContent).not.toMatch(/private-|mark_memory_relation/);
   });
 
-  it('streams terminal output in an expanded card and unwraps only the final terminal envelope', () => {
-    const terminalTrace = (resultText: string, status: 'running' | 'completed', resultState?: string) => ({
+  it('streams exact terminal text and uses the final saved typed process value', () => {
+    const terminalTrace = (resultText: string, status: 'running' | 'completed', resultState?: string, businessValue?: ToolBusinessValue) => ({
       id: 'terminal-stream', kind: 'terminal' as const, toolName: 'exec_process', title: '运行命令',
-      subtitle: 'printf', status, command: 'printf output', resultText, resultState,
+      subtitle: 'printf', status, command: 'printf output', resultText, resultState, businessValue,
     });
     const viewProps = (trace: ReturnType<typeof terminalTrace>) => props({
       isRunning: true,
@@ -1103,7 +1104,7 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
     const finalEnvelope = JSON.stringify({
       status: 'success', terminal_process_action: 'start', output: 'first\nsecond', exit_code: 0,
     });
-    view.rerender(display(terminalTrace(finalEnvelope, 'completed', 'SUCCESS')));
+    view.rerender(display(terminalTrace(finalEnvelope, 'completed', 'SUCCESS', {meta:{status:'SUCCESS',process_status:'EXITED',exit_code:0},content:[{type:'text',value:'first\nsecond'}]})));
     const output = screen.getByRole('region', { name: '命令输出' });
     expect(output.textContent).toContain('first\nsecond');
     expect(output.textContent).not.toContain('terminal_process_action');
@@ -1115,14 +1116,14 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
       status: 'running', terminal_process_action: 'start', output: 'first\nsecond',
       exit_code: -1, yielded_to_background: true,
     });
-    view.rerender(display(terminalTrace(backgroundEnvelope, 'completed', 'SUCCESS')));
+    view.rerender(display(terminalTrace(backgroundEnvelope, 'completed', 'SUCCESS', {meta:{status:'SUCCESS',process_status:'RUNNING',exit_code:null},content:[{type:'text',value:'first\nsecond'}]})));
     const backgroundNotice = screen.getByText('已转到后台运行');
     expect(backgroundNotice.tagName).toBe('EM');
     expect(backgroundNotice.closest('[aria-label="命令输出"]')).toBeTruthy();
   });
 
-  it('keeps exact raw text/copy, exact edit diff, and paginates the retained output', async () => {
-    const raw = '{"diff":"--- a/file\\n+++ b/file\\n@@ -1 +1 @@\\n-old\\n+new","literal":"N| 不清洗"}';
+  it('keeps exact typed edit diff and copy, and reads exported output on request', async () => {
+    const raw = '--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new';
     const writeText = vi.fn(async () => undefined);
     stubClipboard(writeText);
     const pages: ToolOutputPage[] = [{
@@ -1139,7 +1140,7 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
         id: 'assistant-one', role: 'assistant', time: '现在', body: '文件已处理。', status: 'completed',
         traces: [{
           id: 'trace-edit', kind: 'edit', toolName: 'edit_file', title: '更新文件', subtitle: '已完成',
-          status: 'completed', meta: '操作完成', resultText: raw, resultEntryId: 'entry-result',
+          status: 'completed', meta: '操作完成', businessValue:{meta:{status:'SUCCESS'},content:[{type:'text',value:raw}]}, resultEntryId: 'entry-result',
           outputBody: { available: true, sourceCoverage: 'COMPLETE', omitted: true },
         }],
       }],
@@ -1148,10 +1149,8 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '展开处理过程' }));
     fireEvent.click(screen.getByRole('button', { name: '展开工具详情：edit_file' }));
-    const rawRegion = screen.getByRole('region', { name: '工具展示结果' });
-    expect(within(rawRegion).getByText(raw).textContent).toBe(raw);
-    expect(screen.getByLabelText('文件差异').textContent).toBe('--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new');
-    fireEvent.click(within(rawRegion).getByRole('button', { name: '复制工具展示结果' }));
+    expect(screen.getByLabelText('文件差异').textContent).toBe(raw);
+    fireEvent.click(screen.getByRole('button', {name:'复制文件差异'}));
     expect(writeText).toHaveBeenCalledWith(raw);
 
     fireEvent.click(screen.getByRole('button', { name: '查看完整输出' }));
@@ -3449,10 +3448,10 @@ it('keeps a Cell steer inside the same process as a bounded Markdown bubble',()=
  {id:'answer',turnId:'turn:a',role:'assistant',assistantKind:'terminal',body:'Answer',time:''}];
  const view=render(<ConversationMessages messages={messages} outputOwnerKey="session:a" onReadToolOutput={vi.fn()} onNotify={vi.fn()}/>);
  expect(view.container.querySelectorAll('.conversation-run')).toHaveLength(1);
- const material=screen.getByRole('article',{name:'cell日志(cell:a)'});
+ const material=screen.getByRole('article',{name:'脚本输出'});
  expect(material.querySelector('details')).toBeNull();
  expect(material.querySelector('.user-message .user-steer__preview')).toBeTruthy();
- expect(material.querySelector('strong')?.textContent).toBe('cell日志(cell:a)');
+ expect(material.querySelector('strong')?.textContent).toBe('脚本输出');
  expect(within(material).getByRole('heading',{name:'Result'})).toBeTruthy();
  expect(material.querySelector('[data-skill-reference]')).toBeNull();
 });
@@ -3549,16 +3548,44 @@ it('keeps a detached live view out of canonical history targets', () => {
 });
 
 
-it('renders media time navigation in the actual completed result card alongside canonical images', () => {
+it('renders media time navigation in the actual completed result card alongside canonical images', async () => {
   const open=vi.fn();
   const api: FilePreviewApi={open:vi.fn(),close:vi.fn(),snapshot:vi.fn(),page:vi.fn(),action:vi.fn(),annotations:vi.fn()};
-  const body=JSON.stringify({target:{kind:'PATH',path:'/project/movie.mp4'},media_version:{modified_ns:'1234567890123456789',size:200},crop:[0,0,1,1],frames:[{n:1,image:1,t:12.125}]});
-  render(<FileMediaContext.Provider value={{api,ownerKey:'owner',sessionId:'session',open}}><WorkbenchView {...props({isRunning:false,messages:[{id:'media-answer',role:'assistant',time:'现在',body:'',status:'completed',traces:[{id:'media-read',kind:'read',toolName:'read_video_frames',title:'读取画面',subtitle:'已完成',status:'completed',resultContent:{parts:[{type:'text',text:body}]}}]}]})}/></FileMediaContext.Provider>);
+  const ref='image:aaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const read=vi.fn(async()=>({bytes:new Uint8Array([1,2,3]),mediaType:'image/png',width:2,height:1}));
+  const businessValue={target:{kind:'PATH',path:'/project/movie.mp4'},meta:{status:'SUCCESS' as const},content:[
+    {type:'text' as const,value:'已读取所请求的画面。\n'},
+    {type:'object' as const,value:{frames:[{n:1,t:12.125}]}},
+    {type:'image' as const,value:{kind:'IMAGE_REF' as const,image_ref:ref}},
+  ]};
+  render(<FileLinkContext.Provider value={{imageOwnerKey:'images',open:vi.fn(),readImageReference:read}}>
+    <FileMediaContext.Provider value={{api,ownerKey:'owner',sessionId:'session',open}}><WorkbenchView {...props({isRunning:false,messages:[{id:'media-answer',role:'assistant',time:'现在',body:'',status:'completed',traces:[{id:'media-read',kind:'read',toolName:'read_video_frames',title:'读取画面',subtitle:'已完成',status:'completed',businessValue}]}]})}/></FileMediaContext.Provider>
+  </FileLinkContext.Provider>);
   expect(open).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole('button',{name:'展开处理过程'}));
   fireEvent.click(screen.getByRole('button',{name:'展开工具详情：read_video_frames'}));
-  expect(screen.getByRole('region',{name:'工具读取的图片'})).toBeDefined();
-  fireEvent.click(screen.getByRole('button',{name:'定位第 1 帧到 12.125 秒'}));
-  expect(open).toHaveBeenCalledExactlyOnceWith('/project/movie.mp4',12.125,{modified_ns:'1234567890123456789',size:200});
+  expect(screen.getByRole('region',{name:'工具完整结果'})).toBeDefined();
+  await waitFor(()=>expect(read).toHaveBeenCalledExactlyOnceWith(ref,expect.any(AbortSignal)));
+  expect(await screen.findByRole('img',{name:'工具读取的图片'})).toBeDefined();
+  fireEvent.click(screen.getByRole('button',{name:'0:12.125'}));
+  expect(open).toHaveBeenCalledExactlyOnceWith('/project/movie.mp4',12.125);
   expect(api.open).not.toHaveBeenCalled();
+});
+
+it('expands and copies an MCP structured-only business result through the trace card',async()=>{
+ const copy=vi.fn(async(_text:string)=>{});
+ stubClipboard(copy);
+ const structuredContent={forecast:'sunny',days:[{high:23,low:15}]};
+ render(<WorkbenchView {...props({isRunning:false,messages:[{id:'mcp-answer',role:'assistant',time:'现在',body:'',status:'completed',traces:[{
+   id:'mcp-read',kind:'read',toolName:'call_mcp_tool',title:'读取天气',subtitle:'已完成',status:'completed',
+   businessValue:{meta:{status:'SUCCESS'},content:[],structuredContent},
+ }]}]})}/>);
+ fireEvent.click(screen.getByRole('button',{name:'展开处理过程'}));
+ fireEvent.click(screen.getByRole('button',{name:'展开工具详情：call_mcp_tool'}));
+ const details=screen.getByText('查看结构化结果').closest('details')!;
+ expect(details.open).toBe(false);
+ details.open=true;
+ expect(details.querySelector('pre')?.textContent).toBe(JSON.stringify(structuredContent,null,2));
+ fireEvent.click(screen.getByRole('button',{name:'复制结构化结果'}));
+ await waitFor(()=>expect(copy).toHaveBeenCalledExactlyOnceWith(JSON.stringify(structuredContent,null,2)));
 });

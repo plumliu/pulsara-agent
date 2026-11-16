@@ -15,10 +15,8 @@ from pathlib import Path
 from typing import Mapping, Protocol, TYPE_CHECKING, Callable, Awaitable
 
 from pulsara_agent.llm.input import (
-    FrozenPromptContent,
     LLMImagePart,
     LLMTextPart,
-    frozen_tool_result_public_text,
 )
 
 if TYPE_CHECKING:
@@ -45,36 +43,25 @@ from pulsara_agent.capability.contracts import (
     FrozenToolCapabilityExposurePlan,
 )
 from pulsara_agent.model_input.contracts import (
-    FrozenCanonicalCompileSnapshot,
-    FrozenCompiledModelInput,
     ModelInputScopeKind,
     ProviderToolResultContextMetadata,
-)
-from pulsara_agent.model_input.continuity import (
-    ProcessLocalProviderInputInstallPermit,
 )
 from pulsara_agent.conversation_kernel.agent_context import (
     FrozenAgentInvocationSnapshot,
 )
 from pulsara_agent.ports.tool_execution import (
     ToolBusinessValue,
-    ToolOutputSourceFormatHint,
 )
 from .tool_invocations import (
     ToolInvocationSource,
     ToolInvocationSourceKind,
     current_tool_invocation,
 )
-from pulsara_agent.ports.tool_output import ToolOutputBodyCandidate, ToolOutputUnavailableReason
-from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+from pulsara_agent.ports.tool_output import NativeToolContinuation, ToolOutputUnavailableReason
 from pulsara_agent.ports.tool_execution import freeze_tool_json_object
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.ports.session_content import SessionContentRange
-from pulsara_agent.primitives.context import FrozenJsonObjectFact, thaw_json
-from pulsara_agent.primitives.tool_result_projection import (
-    FrozenToolResultDeliveryRequirement,
-    classify_tool_result_delivery,
-)
+from pulsara_agent.primitives.context import FrozenJsonObjectFact
 from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 from pulsara_agent.primitives.tool_observation import (
     PhysicalToolObservationSupplement,
@@ -82,7 +69,6 @@ from pulsara_agent.primitives.tool_observation import (
     TrustedToolObservationSupplement,
     freeze_tool_observation_timing_fact,
 )
-from pulsara_agent.tools.builtins.filesystem import ViewImageSource
 
 
 def valid_tool_remote_identity(identity: str | None, verification: str | None) -> bool:
@@ -101,69 +87,31 @@ def valid_tool_remote_identity(identity: str | None, verification: str | None) -
 @dataclass(frozen=True, slots=True)
 class KernelToolResult:
     state: str
-    content: bytes | FrozenPromptContent | ToolBusinessValue
+    content: ToolBusinessValue
     remote_identity: str | None = None
     remote_identity_verification: str | None = None
-    output_body_candidate: ToolOutputBodyCandidate | None = None
-    native_output: bytes | None = None
-    page_complete: bool = False
-    required_facts: Mapping[str, object] = field(default_factory=dict)
     result_facts: Mapping[str, object] = field(default_factory=dict)
+    pending_images: tuple[LLMImagePart, ...] = ()
+    acceptance_succeeded: Callable[[], None | Awaitable[None]] | None = field(default=None, repr=False, compare=False)
+    native_continuation: NativeToolContinuation | None = None
     process_local_settlement: ProcessLocalEffectSettlementToken | None = None
     physical_timing: str = "ON_TIME"
     caller_cancelled_while_running: bool = False
     effect_class: str | None = None
     physical_observation: PhysicalToolObservationSupplement | None = None
     trusted_observation: TrustedToolObservationSupplement | None = None
-    model_visible_memory_fact_ids: tuple[str, ...] = ()
-    public_format: ToolOutputSourceFormatHint = ToolOutputSourceFormatHint.TEXT
     delivery_succeeded: Callable[[], None | Awaitable[None]] | None = field(default=None, repr=False, compare=False)
-    page_budget: ToolResultPageBudget | None = field(default=None, repr=False, compare=False)
 
     def public_value(self) -> object:
-        """Decode only the format explicitly declared by the business owner."""
-        import json
-
-        if isinstance(self.content, ToolBusinessValue):
-            from pulsara_agent.conversation_kernel.tool_outputs import assemble_tool_business_value
-            return assemble_tool_business_value(public_fields=self.content.public_fields,
-                content_parts=self.content.content, result_state=self.state)
-        if not isinstance(self.content, bytes):
-            raise TypeError("image content has no Code Mode business value")
-        text = self.content.decode("utf-8")
-        return (
-            json.loads(text)
-            if self.public_format is ToolOutputSourceFormatHint.JSON
-            else text
-        )
+        from pulsara_agent.conversation_kernel.tool_outputs import assemble_tool_business_value
+        return assemble_tool_business_value(public_fields=self.content.public_fields,
+            content_parts=self.content.content, result_state=self.state)
 
     def __post_init__(self) -> None:
         if not valid_tool_remote_identity(self.remote_identity, self.remote_identity_verification):
             raise ValueError("invalid remote identity and verification")
-        if not isinstance(self.public_format, ToolOutputSourceFormatHint):
-            raise TypeError("public tool result format must be explicit TEXT or JSON")
-        if isinstance(self.content, ToolBusinessValue):
-            pass
-        elif isinstance(self.content, bytes):
-            self.content.decode("utf-8")
-        elif isinstance(self.content, FrozenPromptContent):
-            images = tuple(
-                part for part in self.content.parts if isinstance(part, LLMImagePart)
-            )
-            if (
-                not images
-                or not any(isinstance(part, LLMTextPart) for part in self.content.parts)
-            ):
-                raise ValueError("typed image content is invalid for this Tool result")
-        else:
-            raise TypeError(
-                "kernel Tool result content must be bytes, frozen content or a declared business value"
-            )
-        if self.native_output is not None:
-            self.native_output.decode("utf-8")
-        if not isinstance(self.page_complete, bool):
-            raise TypeError("page completeness must be boolean")
-        object.__setattr__(self, "required_facts", freeze_tool_json_object(self.required_facts))
+        if not isinstance(self.content, ToolBusinessValue):
+            raise TypeError("kernel tool result requires a complete declared business value")
         object.__setattr__(self, "result_facts", freeze_tool_json_object(self.result_facts))
 
 
@@ -204,11 +152,6 @@ class KernelToolInvocationContext:
     attempt_permission_snapshot_fingerprint: str
     surface_borrow: ProcessLocalToolSurfaceBorrow = field(repr=False, compare=False)
     input_modalities: tuple[str, ...] | None = None
-    image_resource_allowance: "FrozenImageToolResourceAllowance | None" = None
-    page_budget: ToolResultPageBudget | None = field(default=None, repr=False, compare=False)
-    refresh_image_resources: Callable[
-        [], Awaitable[tuple["FrozenImageToolResourceAllowance", ToolResultPageBudget] | None]
-    ] | None = field(default=None, repr=False, compare=False)
     session_content_range: SessionContentRange | None = None
     permission_confirmation_granted: bool = False
     cell_cancel_event: asyncio.Event | None = field(default=None, repr=False, compare=False)
@@ -291,93 +234,10 @@ class ProcessLocalEffectSettlementToken:
             raise ValueError("process-local settlement token is invalid")
 
 
-@dataclass(frozen=True, slots=True)
-class FrozenImageToolResourceAllowance:
-    call_ordinal: int
-    tool_call_id: str
-    executor_binding_fingerprint: str
-    canonical_bytes: int
-    logical_bytes: int
-    wire_bytes: int
-    input_tokens: int
-    quote_owner: "ImageToolResourceQuotePort" = field(repr=False, compare=False)
-
-    def __post_init__(self) -> None:
-        if (
-            isinstance(self.call_ordinal, bool)
-            or self.call_ordinal < 0
-            or not self.tool_call_id
-            or not self.executor_binding_fingerprint
-            or min(
-                self.canonical_bytes,
-                self.logical_bytes,
-                self.wire_bytes,
-                self.input_tokens,
-            )
-            < 0
-        ):
-            raise ValueError("image Tool resource allowance is invalid")
-
-    def accepts_page(
-        self,
-        *,
-        content: FrozenPromptContent,
-        source: ViewImageSource,
-        tool_name: str,
-        page_budget: ToolResultPageBudget,
-        model_visible_memory_fact_ids: tuple[str, ...] = (),
-    ) -> bool:
-        """Admit one complete text/index and image page, without double charge."""
-        if page_budget.tool_call_id != self.tool_call_id:
-            raise ValueError("image page budget does not own this call")
-        if not page_budget.fits_logical(
-            frozen_tool_result_public_text(content, tool_name=tool_name),
-            model_visible_memory_fact_ids=model_visible_memory_fact_ids,
-        ):
-            return False
-        increment = self.quote_owner.quote(
-            tool_call_id=self.tool_call_id,
-            tool_name=tool_name,
-            source=source,
-            content=content,
-            model_visible_memory_fact_ids=model_visible_memory_fact_ids,
-        )
-        return all(
-            getattr(increment, name) <= getattr(self, name)
-            for name in ("canonical_bytes", "logical_bytes", "wire_bytes", "input_tokens")
-        )
 
 
-@dataclass(frozen=True, slots=True)
-class FrozenImageToolResourceIncrement:
-    canonical_bytes: int
-    logical_bytes: int
-    wire_bytes: int
-    input_tokens: int
-
-    def __post_init__(self) -> None:
-        if (
-            min(
-                self.canonical_bytes,
-                self.logical_bytes,
-                self.wire_bytes,
-                self.input_tokens,
-            )
-            < 0
-        ):
-            raise ValueError("image Tool resource increment is invalid")
 
 
-class ImageToolResourceQuotePort(Protocol):
-    def quote(
-        self,
-        *,
-        tool_call_id: str,
-        tool_name: str = "view_image",
-        source: ViewImageSource,
-        content: FrozenPromptContent,
-        model_visible_memory_fact_ids: tuple[str, ...] = (),
-    ) -> FrozenImageToolResourceIncrement: ...
 
 
 class ProcessLocalEffectSettlementDisposition(StrEnum):
@@ -549,14 +409,11 @@ class PreparedPermissionRequest:
 class FrozenToolResultPublicProjectionInput:
     canonical_body: str = field(repr=False)
     metadata: ProviderToolResultContextMetadata
-    delivery: FrozenToolResultDeliveryRequirement
 
     def __post_init__(self) -> None:
         self.canonical_body.encode("utf-8")
         if not isinstance(self.metadata, ProviderToolResultContextMetadata):
             raise TypeError("ToolResult public metadata must be frozen")
-        if not isinstance(self.delivery, FrozenToolResultDeliveryRequirement):
-            raise TypeError("ToolResult delivery requirement must be frozen")
 
 
 @dataclass(frozen=True, slots=True)
@@ -574,7 +431,7 @@ class AcceptedCanonicalToolResultSettlement:
     result_state: str
     result_origin_kind: str
     public_projection: FrozenToolResultPublicProjectionInput
-    canonical_content: FrozenPromptContent | None = field(default=None, repr=False)
+    canonical_content: tuple[LLMTextPart | LLMImagePart, ...] | None = field(default=None, repr=False)
     invocation_source: ToolInvocationSource | None = field(
         default_factory=current_tool_invocation.get
     )
@@ -601,8 +458,8 @@ class AcceptedCanonicalToolResultSettlement:
         ):
             raise ValueError("accepted canonical ToolResult settlement is invalid")
         if self.canonical_content is not None:
-            if not isinstance(self.canonical_content, FrozenPromptContent):
-                raise TypeError("canonical ToolResult content must be frozen")
+            if not isinstance(self.canonical_content, tuple) or any(not isinstance(part, (LLMTextPart, LLMImagePart)) for part in self.canonical_content):
+                raise TypeError("native ToolResult projection must contain typed frozen parts")
 
 
 def build_accepted_canonical_tool_result_settlement(
@@ -626,8 +483,8 @@ def build_accepted_canonical_tool_result_settlement(
     observation_duration_microseconds: int | None = None,
     tool_reported_duration_microseconds: int | None = None,
     output_unavailability_reason: ToolOutputUnavailableReason | None = None,
-    model_visible_memory_fact_ids: tuple[str, ...] = (),
-    canonical_content: FrozenPromptContent | None = None,
+    canonical_content: tuple[LLMTextPart | LLMImagePart, ...] | None = None,
+    public_fields: Mapping[str, object] | None = None,
 ) -> AcceptedCanonicalToolResultSettlement:
     """Freeze the one post-FULL, repository-neutral ToolResult carrier."""
 
@@ -640,12 +497,12 @@ def build_accepted_canonical_tool_result_settlement(
         observation_origin=observation_origin,
     )
     metadata = ProviderToolResultContextMetadata(
+        public_fields={} if public_fields is None else public_fields,
         session_id=session_id,
         result_id=result_id,
         result_entry_id=result_entry_id,
         result_state=result_state,
         output_unavailability_reason=output_unavailability_reason,
-        model_visible_memory_fact_ids=model_visible_memory_fact_ids,
         timing=timing,
     )
     return AcceptedCanonicalToolResultSettlement(
@@ -664,18 +521,6 @@ def build_accepted_canonical_tool_result_settlement(
         public_projection=FrozenToolResultPublicProjectionInput(
             canonical_body=canonical_body,
             metadata=metadata,
-            delivery=classify_tool_result_delivery(
-                tool_name=tool_name,
-                public_arguments=thaw_json(public_arguments),
-                result_state=result_state,
-                has_image_attachment=(
-                    canonical_content is not None
-                    and any(
-                        isinstance(part, LLMImagePart)
-                        for part in canonical_content.parts
-                    )
-                ),
-            ),
         ),
         canonical_content=canonical_content,
     )
@@ -734,15 +579,6 @@ class ToolSurfacePlanningPort(Protocol):
         self,
         *,
         scope_kind: ModelInputScopeKind,
-    ) -> None: ...
-
-    def install_provider_input_tool_result_deliveries(
-        self,
-        *,
-        permit: ProcessLocalProviderInputInstallPermit,
-        canonical_facts: FrozenCanonicalCompileSnapshot,
-        compiled_input: FrozenCompiledModelInput,
-        surface_borrow: ProcessLocalToolSurfaceBorrow,
     ) -> None: ...
 
     async def freeze_compaction_runtime_handoff(
@@ -836,8 +672,6 @@ class ToolInvocationPort(Protocol):
 __all__ = [
     "AcceptedCanonicalToolResultSettlement",
     "build_accepted_canonical_tool_result_settlement",
-    "FrozenImageToolResourceAllowance",
-    "FrozenImageToolResourceIncrement",
     "FrozenToolResultPublicProjectionInput",
     "KernelToolAuthorization",
     "KernelToolAuthorizationKind",
@@ -845,7 +679,6 @@ __all__ = [
     "KernelToolLiveSink",
     "KernelToolPhysicalInvocationError",
     "KernelToolResult",
-    "ImageToolResourceQuotePort",
     "ProcessLocalEffectSettlementDisposition",
     "ProcessLocalEffectSettlementOutcome",
     "ProcessLocalEffectSettlementResult",

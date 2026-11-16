@@ -65,7 +65,7 @@ def test_omitted_images_do_not_return_after_cold_compaction_and_two_forks(
     workspace_id = repository.read_session_workspace_id(
         lease.guard, deadline_monotonic=monotonic() + 30
     )
-    image = _image(workspace_id=workspace_id)
+    image = _image()
     original = FrozenPromptContent(
         (LLMTextPart("before"), image, LLMTextPart("between"), image)
     )
@@ -76,20 +76,20 @@ def test_omitted_images_do_not_return_after_cold_compaction_and_two_forks(
     final(repository, lease.guard, intent.turn_id, "source answer")
     original_refs = rows(
         repository,
-        "SELECT ref_ordinal, blob_id FROM pulsara_v3.canonical_image_refs WHERE session_id=%s AND transcript_entry_id=%s ORDER BY ref_ordinal",
+        "SELECT ordinal, blob_id FROM pulsara_v3.content_parts WHERE type='image' AND session_id=%s AND entry_id=%s ORDER BY ordinal",
         (source_session, intent.entry_id),
     )
     assert len(original_refs) == 2
     text_runtime = model_runtime(
         model_id="text-destination",
         wire_api=wire_api,
-        connection_id=ModelConnectionId('connection:ytw3elhyjuqyshh2v6bdqzshli'),
+        connection_id=ModelConnectionId("connection:ytw3elhyjuqyshh2v6bdqzshli"),
         input_modalities=("text",),
     )
     vision_runtime = model_runtime(
         model_id="vision-return",
         wire_api=wire_api,
-        connection_id=ModelConnectionId('connection:bx3rsdxruwnyw3gwh4qltipqlq'),
+        connection_id=ModelConnectionId("connection:bx3rsdxruwnyw3gwh4qltipqlq"),
         input_modalities=("text", "image"),
     )
     owned = []
@@ -138,9 +138,7 @@ def test_omitted_images_do_not_return_after_cold_compaction_and_two_forks(
             summary=summaries,
         )
         owner = HostCompactionRuntimeOwner(
-            policy=ResolvedCompactionPolicy(
-                automatic_enabled=False
-            )
+            policy=ResolvedCompactionPolicy(automatic_enabled=False)
         )
         runner = ConversationKernelRunner(
             model_resolution_snapshot_provider=runtime.freeze_resolution_snapshot,
@@ -198,11 +196,14 @@ def test_omitted_images_do_not_return_after_cold_compaction_and_two_forks(
         )
         assert outcome.disposition.value == "COMPACTED", outcome
         assert len(model.requests) == ordinary_count
-        assert rows(
-            repository,
-            "SELECT id FROM pulsara_v3.turns WHERE session_id=%s ORDER BY id",
-            (source_session,),
-        ) == turns_before
+        assert (
+            rows(
+                repository,
+                "SELECT id FROM pulsara_v3.turns WHERE session_id=%s ORDER BY id",
+                (source_session,),
+            )
+            == turns_before
+        )
         await runner.run_turn(frozen_test_prompt(label), command_id=_name("command"))
 
     async def exercise():
@@ -217,7 +218,9 @@ def test_omitted_images_do_not_return_after_cold_compaction_and_two_forks(
                     "Historical user said before and between; [Image omitted]; [Image omitted]."
                 ],
             )
-            first_result = await first.run_turn(frozen_test_prompt("continue with text"))
+            first_result = await first.run_turn(
+                frozen_test_prompt("continue with text")
+            )
             adopted = rows(
                 repository,
                 """SELECT t.status, r.revision_ordinal, r.base_kind,
@@ -238,7 +241,9 @@ def test_omitted_images_do_not_return_after_cold_compaction_and_two_forks(
             assert len(first_model.summary_transport.contexts) == 1
             assert (
                 sum(
-                    join_text_content(message.content).count("[历史图片引用；此处未包含图像内容]")
+                    join_text_content(message.content).count(
+                        "[历史图片引用；此处未包含图像内容]"
+                    )
                     for message in first_model.summary_transport.contexts[0].messages
                 )
                 == 2
@@ -265,12 +270,8 @@ def test_omitted_images_do_not_return_after_cold_compaction_and_two_forks(
                 message.content == (LLMTextPart(literal),)
                 for message in cold_model.requests[0].compiled_input.messages
             )
-            await compact_next(
-                cold, "continue after first idle compaction"
-            )
-            await compact_next(
-                cold, "continue after second idle compaction"
-            )
+            await compact_next(cold, "continue after first idle compaction")
+            await compact_next(cold, "continue after second idle compaction")
             assert len(cold_model.summary_transport.contexts) == 2
             assert_no_images(cold_model)
             await cold_owner.aclose()
@@ -312,7 +313,7 @@ def test_omitted_images_do_not_return_after_cold_compaction_and_two_forks(
             assert (
                 rows(
                     repository,
-                    "SELECT ref_ordinal, blob_id FROM pulsara_v3.canonical_image_refs WHERE session_id=%s AND transcript_entry_id=%s ORDER BY ref_ordinal",
+                    "SELECT ordinal, blob_id FROM pulsara_v3.content_parts WHERE type='image' AND session_id=%s AND entry_id=%s ORDER BY ordinal",
                     (source_session, intent.entry_id),
                 )
                 == original_refs
@@ -322,14 +323,15 @@ def test_omitted_images_do_not_return_after_cold_compaction_and_two_forks(
             # in any later effective model input checked above.
             original_snapshot = CanonicalProviderInputReader(
                 repository.connection_provider
-            ).read_frozen_snapshot(
-                original_cut, deadline_monotonic=monotonic() + 30
+            ).read_frozen_snapshot(original_cut, deadline_monotonic=monotonic() + 30)
+            assert (
+                next(
+                    item.content
+                    for item in original_snapshot.items
+                    if item.source_entry_id == intent.entry_id
+                )
+                == original.parts
             )
-            assert next(
-                item.content
-                for item in original_snapshot.items
-                if item.source_entry_id == intent.entry_id
-            ) == original.parts
             with repository.connection_provider.connection(
                 lane=PostgresConnectionLane.INSPECTOR,
                 row_factory=dict_row,

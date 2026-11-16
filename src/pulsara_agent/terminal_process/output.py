@@ -19,6 +19,8 @@ from hashlib import sha256
 import json
 from threading import Condition, RLock
 from time import monotonic
+from tempfile import SpooledTemporaryFile
+from shutil import copyfileobj
 from typing import Callable, Iterator
 
 from pulsara_agent.ports.tool_execution import (
@@ -29,8 +31,8 @@ from pulsara_agent.ports.tool_execution import (
 from pulsara_agent.ports.tool_output import ToolOutputBodyCandidate
 
 
-TERMINAL_RETAINED_OUTPUT_HARD_BYTES = 16 * 1024 * 1024
-TERMINAL_HOST_RETAINED_HARD_BYTES = 128 * 1024 * 1024
+TERMINAL_OUTPUT_MEMORY_BYTES = 16 * 1024 * 1024
+TERMINAL_HOST_OUTPUT_MEMORY_BYTES = 128 * 1024 * 1024
 TERMINAL_SANITIZER_CARRY_HARD_BYTES = 4096
 _ESCAPE_SUPPRESSED_MARKER = "[TERMINAL_ESCAPE_SEQUENCE_SUPPRESSED]"
 _SENSITIVE_TOKEN_MARKER = "[REDACTED_OVERSIZE_TOKEN]"
@@ -316,24 +318,25 @@ OutputSubscriber = Callable[[bytes, int, int], None]
 
 
 class TerminalOutputOwner:
-    """Bounded retained UTF-8 ring and cursor authority for one process."""
+    """Sanitized output with bounded memory and transparent temporary-file spill."""
 
     def __init__(
         self,
         *,
         owner_epoch: str,
         process_id: str,
-        maximum_bytes: int = TERMINAL_RETAINED_OUTPUT_HARD_BYTES,
+        maximum_bytes: int = TERMINAL_OUTPUT_MEMORY_BYTES,
         retained_bytes_changed: Callable[["TerminalOutputOwner"], None] | None = None,
     ) -> None:
-        if maximum_bytes <= 0 or maximum_bytes > TERMINAL_RETAINED_OUTPUT_HARD_BYTES:
+        if maximum_bytes <= 0 or maximum_bytes > TERMINAL_OUTPUT_MEMORY_BYTES:
             raise ValueError("terminal retained output bound is invalid")
         self.owner_epoch = owner_epoch
         self.process_id = process_id
         self.stream_id = random_id("stream")
         self.maximum_bytes = maximum_bytes
         self._sanitizer = IncrementalTerminalSanitizer()
-        self._retained = bytearray()
+        self._retained = SpooledTemporaryFile(max_size=maximum_bytes, mode="w+b")
+        self._observed_through = 0
         self._retained_from = 0
         self._through = 0
         self._revision = 0
@@ -352,7 +355,7 @@ class TerminalOutputOwner:
     @property
     def retained_utf8_bytes(self) -> int:
         with self._lock:
-            return len(self._retained)
+            return 0 if self._retained._rolled else self._through - self._retained_from
 
     @property
     def through_offset(self) -> int:
@@ -401,6 +404,7 @@ class TerminalOutputOwner:
             if self._inflight_reads or self._observation_leases:
                 return False
             self._reads_closed = True
+            self._retained.close()
             self._condition.notify_all()
             return True
 
@@ -458,9 +462,15 @@ class TerminalOutputOwner:
         # The sanitizer only returns valid UTF-8.  Assert that invariant before
         # it can become retained authority.
         public.decode("utf-8")
-        self._retained.extend(public)
+        try:
+            self._retained.seek(0, 2)
+            self._retained.write(public)
+        except (OSError, ValueError):
+            self._unavailable = True
+            self._revision += 1
+            self._condition.notify_all()
+            return start, start
         self._through += len(public)
-        self._evict_to_bound_locked(self.maximum_bytes)
         self._revision += 1
         self._condition.notify_all()
         return start, self._through
@@ -473,27 +483,48 @@ class TerminalOutputOwner:
             callback(self)
         self._notify_subscribers(public, start, end)
 
-    def evict_oldest_to(self, maximum_retained_bytes: int) -> int:
+    def spill_to_disk(self) -> int:
+        """Release the memory cache without discarding unobserved bytes."""
         with self._lock:
-            before = len(self._retained)
-            self._evict_to_bound_locked(max(0, maximum_retained_bytes))
-            removed = before - len(self._retained)
-            if removed:
-                self._revision += 1
-                self._condition.notify_all()
-            return removed
+            before = (
+                0 if self._retained._rolled else self._through - self._retained_from
+            )
+            self._retained.rollover()
+            return before
 
-    def _evict_to_bound_locked(self, maximum: int) -> None:
-        excess = len(self._retained) - maximum
-        if excess <= 0:
-            return
-        boundary = min(excess, len(self._retained))
-        while (
-            boundary < len(self._retained) and self._retained[boundary] & 0xC0 == 0x80
-        ):
-            boundary += 1
-        del self._retained[:boundary]
-        self._retained_from += boundary
+    def observation_cursor(self) -> str:
+        with self._lock:
+            return encode_terminal_output_cursor(self._cursor(self._observed_through))
+
+    def accept_observation(self, cursor: str) -> None:
+        frozen = decode_terminal_output_cursor(cursor)
+        with self._lock:
+            if (
+                frozen.owner_epoch != self.owner_epoch
+                or frozen.process_id != self.process_id
+                or frozen.stream_id != self.stream_id
+                or frozen.sanitized_utf8_offset > self._through
+            ):
+                raise InvalidTerminalOutputCursor()
+            through = max(self._observed_through, frozen.sanitized_utf8_offset)
+            if through <= self._retained_from or self._reads_closed:
+                self._observed_through = through
+                return
+            suffix = SpooledTemporaryFile(max_size=self.maximum_bytes, mode="w+b")
+            try:
+                self._retained.seek(through - self._retained_from)
+                copyfileobj(self._retained, suffix, length=64 * 1024)
+            except BaseException:
+                suffix.close()
+                raise
+            self._retained.close()
+            self._retained = suffix
+            self._retained_from = through
+            self._observed_through = through
+
+    def _read_retained(self, offset=0) -> bytes:
+        self._retained.seek(offset)
+        return self._retained.read(self._through - self._retained_from - offset)
 
     def subscribe(self, callback: OutputSubscriber) -> tuple[str, TerminalOutputCursor]:
         with self._lock:
@@ -538,6 +569,17 @@ class TerminalOutputOwner:
                 # A process-local consumer can detach itself after a failure;
                 # it never owns subprocess progress.
                 continue
+
+    def metadata_snapshot(self) -> TerminalOutputSnapshot:
+        """Observe stream and lifecycle facts without reading pending log bytes."""
+        with self._lock:
+            return self._snapshot_from_range_locked(
+                maximum_chars=None,
+                since_cursor=None,
+                disposition=TerminalOutputReadDisposition.CURRENT_SNAPSHOT,
+                gap=False,
+                text="",
+            )
 
     def snapshot(
         self, *, maximum_chars: int, since_cursor: str | None = None
@@ -599,7 +641,6 @@ class TerminalOutputOwner:
                 self._inflight_reads -= 1
                 self._condition.notify_all()
 
-
     def _snapshot_locked(
         self, *, maximum_chars: int, since_cursor: str | None
     ) -> TerminalOutputSnapshot:
@@ -621,7 +662,7 @@ class TerminalOutputOwner:
         gap: bool,
         text: str,
     ) -> TerminalOutputSnapshot:
-        if maximum_chars <= 0:
+        if maximum_chars is not None and maximum_chars <= 0:
             raise ValueError("terminal output response bound must be positive")
         range_start = self._retained_from
         if (
@@ -631,7 +672,11 @@ class TerminalOutputOwner:
             range_start = decode_terminal_output_cursor(
                 since_cursor
             ).sanitized_utf8_offset
-        visible, response_truncated = _tail_by_chars(text, maximum_chars)
+        visible, response_truncated = (
+            (text, False)
+            if maximum_chars is None
+            else _tail_by_chars(text, maximum_chars)
+        )
         return TerminalOutputSnapshot(
             process_id=self.process_id,
             stream_id=self.stream_id,
@@ -661,7 +706,7 @@ class TerminalOutputOwner:
         disposition = TerminalOutputReadDisposition.CURRENT_SNAPSHOT
         gap = self._retained_from > 0
         if since_cursor is None:
-            return disposition, gap, bytes(self._retained)
+            return disposition, gap, self._read_retained()
         cursor = decode_terminal_output_cursor(since_cursor)
         if (
             cursor.owner_epoch != self.owner_epoch
@@ -671,12 +716,12 @@ class TerminalOutputOwner:
         ):
             raise InvalidTerminalOutputCursor()
         if cursor.sanitized_utf8_offset < self._retained_from:
-            return TerminalOutputReadDisposition.GAP, True, bytes(self._retained)
+            return TerminalOutputReadDisposition.GAP, True, self._read_retained()
         relative = cursor.sanitized_utf8_offset - self._retained_from
         return (
             TerminalOutputReadDisposition.EXACT_DELTA,
             False,
-            bytes(memoryview(self._retained)[relative:]),
+            self._read_retained(relative),
         )
 
     def _source_coverage_locked(self) -> TerminalOutputSourceCoverage:
@@ -802,8 +847,8 @@ def _tail_by_chars(value: str, maximum_chars: int) -> tuple[str, bool]:
 __all__ = [
     "IncrementalTerminalSanitizer",
     "InvalidTerminalOutputCursor",
-    "TERMINAL_HOST_RETAINED_HARD_BYTES",
-    "TERMINAL_RETAINED_OUTPUT_HARD_BYTES",
+    "TERMINAL_HOST_OUTPUT_MEMORY_BYTES",
+    "TERMINAL_OUTPUT_MEMORY_BYTES",
     "TERMINAL_SANITIZER_CARRY_HARD_BYTES",
     "TerminalOutputCursor",
     "TerminalOutputOwner",

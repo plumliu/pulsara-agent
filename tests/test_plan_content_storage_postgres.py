@@ -153,7 +153,7 @@ def _batch(
     )
 
 
-def _assert_result(database, session_id, result_id, expected_control):
+def _assert_result(database, session_id, result_id, expected_text):
     with psycopg.connect(database.runtime_dsn, row_factory=dict_row) as connection:
         result = connection.execute(
             "SELECT * FROM pulsara_v3.tool_results WHERE id=%s", (result_id,)
@@ -161,12 +161,12 @@ def _assert_result(database, session_id, result_id, expected_control):
         parts = read_content_parts(
             connection, session_id=session_id, entry_id=result["result_entry_id"]
         )
-        assert len(parts) == 1 and parts[0].type == "object"
-        assert parts[0].value["plan_control"] == expected_control
+        assert len(parts) == 1 and parts[0].type == "text"
+        assert parts[0].value == expected_text
         assert result["result_facts"] == {}
         assert result["public_fields"] == {}
         value = read_accepted_tool_business_value(connection, result)
-        assert value["content"][0]["value"]["plan_control"] == expected_control
+        assert value["content"][0]["value"] == expected_text
         return value
 
 
@@ -182,7 +182,7 @@ def test_plan_enter_and_rejected_results_save_only_public_parts(
         lease,
         turn_id,
         control=PlanToolControlKind.ENTER,
-        arguments={"reason": "inspect implementation"},
+        arguments={},
         workflow_id=_id("plan"),
     )
     accepted = repository.accept_plan_tool_batch(
@@ -195,7 +195,7 @@ def test_plan_enter_and_rejected_results_save_only_public_parts(
         == accepted
     )
     value = _assert_result(
-        database, lease.guard.session_id, candidate.calls[0].result_id, "ENTERED_PLAN"
+        database, lease.guard.session_id, candidate.calls[0].result_id, "已进入计划模式。"
     )
     assert value["meta"]["status"] == "SUCCESS"
     rejected = _batch(
@@ -203,7 +203,7 @@ def test_plan_enter_and_rejected_results_save_only_public_parts(
         lease,
         accepted.continuation_turn_id,
         control=PlanToolControlKind.ENTER,
-        arguments={"reason": "rejected"},
+        arguments={},
         workflow_id=None,
         disposition=PlanToolBatchDisposition.HOOK_BLOCKED,
     )
@@ -218,7 +218,7 @@ def test_plan_enter_and_rejected_results_save_only_public_parts(
     )
     assert (
         _assert_result(
-            database, lease.guard.session_id, rejected.calls[0].result_id, "REJECTED"
+            database, lease.guard.session_id, rejected.calls[0].result_id, "这项 Plan 操作已被 Hook 阻止。"
         )["meta"]["status"]
         == "ERROR"
     )
@@ -232,7 +232,7 @@ def test_plan_question_arguments_and_answer_use_the_shared_content_path(
     lease = _lease(repository)
     workflow_id, _ = _open_user_plan(repository, lease)
     turn_id, _ = _start_root(repository, lease)
-    arguments = {"question": "Which path?", "options": [], "allow_free_text": True}
+    arguments = {"question": "Which path?", "options": []}
     candidate = _batch(
         repository,
         lease,
@@ -284,9 +284,9 @@ def test_plan_question_arguments_and_answer_use_the_shared_content_path(
     )
     assert resolved.interaction_status == "ANSWERED"
     value = _assert_result(
-        database, lease.guard.session_id, result_id, "QUESTION_ANSWERED"
+        database, lease.guard.session_id, result_id, answer.free_text
     )
-    assert value["content"][0]["value"]["answer"]["text"] == answer.free_text
+    assert value["content"][0]["value"] == answer.free_text
 
 
 def _open_draft(database):

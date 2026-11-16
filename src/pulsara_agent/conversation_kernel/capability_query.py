@@ -1,1278 +1,443 @@
-"""Read-only Host adaptation of native source owners and the borrowed MCP catalog.
-
-Every instance is one invocation. No query inventory, identity registry or cached
-projection survives the call. Native inspection anchors are closed after rendering.
-"""
+"""Complete capability observations through existing source and runtime owners."""
 
 from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from yaml import YAMLError
+from time import monotonic
+from types import SimpleNamespace
 
-from pulsara_agent.capability.source_query import (
-    CHILD_KINDS,
-    CapabilityQueryError,
-    minimal_row,
-    parse_query,
-    plugin_source,
-    plugin_target,
-    public_diagnostics,
-    render_page,
-)
 from pulsara_agent.capability.local_skill_publisher import LocalSkillInstallScope
-from pulsara_agent.capability.mcp_management import LocalMcpTarget
-from pulsara_agent.mcp_config import (
-    LocalConfiguredMcpRuntimeSource,
-    ManagedPackageMcpRuntimeSource,
-    StdioTransportConfig,
-    ExactAbsoluteMcpCwd,
-)
-from pulsara_agent.identity import derive_id
+from pulsara_agent.capability.source_query import CapabilityQueryError, parse_query
+from pulsara_agent.conversation_kernel.capability_targets import (plugin_target_from_inspection, resolve_capability_target)
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
-from pulsara_agent.plugins.contracts import (
-    InspectLocalPluginsRequest,
-    PluginInspectionAbort,
-    PluginInspectionOutcome,
-    PluginInspectionDisposition,
-    PluginScopeKind,
-    public_package_id,
-)
-from pulsara_agent.plugins.management import (
-    EventPluginCancellationPort,
-    _request_identity,
-)
-from pulsara_agent.plugins.mcp_adapter import (
-    framed_plugin_mcp_server_id,
-    plugin_configured_connection,
-)
-from .mcp.directory import runtime_rows, frozen_runtime_config
-from pulsara_agent.public_projection import public_record
-from pulsara_agent.capability.public_projection import (
-    public_diagnostic, public_source, public_target, public_transport,
-)
+from pulsara_agent.plugins.contracts import (InspectLocalPluginsRequest, PluginInspectionAbort,
+    PluginInspectionDisposition, PluginScopeKind)
+from pulsara_agent.plugins.management import EventPluginCancellationPort, _request_identity
+from pulsara_agent.plugins.mcp_adapter import framed_plugin_mcp_server_id
+from pulsara_agent.mcp_config import (LocalConfiguredMcpRuntimeSource, ManagedPackageMcpRuntimeSource, McpScopePolicy)
+from pulsara_agent.primitives.context import canonical_json_bytes
 
 
-def transport_summary(transport):
-    value = {"type": transport.kind.value}
-    if isinstance(transport, StdioTransportConfig):
-        value.update(
-            command=transport.command,
-            args=list(transport.args),
-            cwd=str(transport.cwd.absolute_path)
-            if isinstance(transport.cwd, ExactAbsoluteMcpCwd)
-            else transport.cwd.relative_path,
-        )
-    else:
-        value["endpoint"] = transport.endpoint
-    return value
+def _text(value):
+    return {"type": "text", "value": value}
+
+
+def _object(value):
+    return {"type": "object", "value": value}
+
+
+def _status(enabled, selected=None):
+    return "已禁用。" if not enabled else "当前已选择。" if selected else "当前未选择。" if selected is False else "已启用；当前选择情况未知。"
 
 
 class CapabilitySourceQuery:
-    def __init__(self, service, *, runtime, plan, scope, fits_result, code_direct_specs=None):
-        self.fits_result = fits_result
-        self.code_direct_specs = code_direct_specs
-        self.service, self.runtime, self.plan, self.scope = (
-            service,
-            runtime,
-            plan,
-            scope,
-        )
+    def __init__(self, service, *, runtime, scope, inspect_tool):
+        self.service, self.runtime, self.scope = service, runtime, scope
+        self.inspect_tool = inspect_tool
         self.deadline = service.deadline() if service is not None else None
         self.cancellation = EventPluginCancellationPort()
         self.held = []
-        self.diagnostics = []
-        self.rows = []
-        self.details = {}
-        self.runtime_ids = {}
-        self.unavailable_kinds = set()
+        self.content = []
+        self.failed = False
+
+    @property
+    def root(self):
+        return self.service.workspace_root if self.service is not None and self.service.workspace_kind == "project" else None
 
     async def _native(self, function, *args, **kwargs):
         from .capability_management_execution import _settled_call
-
-        result = await _settled_call(
-            function, *args, _cancellation=self.cancellation, **kwargs
-        )
+        result = await _settled_call(function, *args, _cancellation=self.cancellation, **kwargs)
         if self.cancellation.cancellation_requested():
-            if isinstance(result, PluginInspectionOutcome):
-                result.close()
+            close = getattr(result, "close", None)
+            if close is not None:
+                close()
             raise asyncio.CancelledError
+        self._check()
         return result
 
     def _check(self):
-        from time import monotonic
-
         if self.cancellation.cancellation_requested():
             raise asyncio.CancelledError
         if self.deadline is not None and monotonic() >= self.deadline:
-            raise CapabilityQueryError(
-                "QUERY_TIMED_OUT", "The source observation deadline expired."
-            )
+            raise CapabilityQueryError("QUERY_TIMED_OUT", "能力来源查询超时。")
 
-    def _root(self, scope):
-        if scope == "USER":
-            return None
-        if self.service.workspace_kind != "project":
-            raise CapabilityQueryError(
-                "WORKSPACE_UNAVAILABLE",
-                "WORKSPACE sources require the current GUI project directory.",
-            )
-        return self.service.workspace_root
+    def _failure(self, message):
+        self.failed = True
+        self.content.append(_text(message))
 
-    def _add(self, row, detail):
-        self.rows.append(row)
-        self.details[self._key(row["target"])] = detail
+    async def _plugins(self, target=None):
+        if self.service is None:
+            raise CapabilityQueryError("SOURCE_UNAVAILABLE", "当前调用者没有本地能力来源查询入口。")
+        identity = None
+        if target is not None:
+            selector = resolve_capability_target(self.service, target)
+            if selector.get("source_kind") == "LOCAL":
+                return ()
+            identity = _request_identity(PluginScopeKind(selector["scope"]), selector["plugin_id"],
+                self.root if selector["scope"] == "WORKSPACE" else None)
+        outcome = await self._native(self.service.plugins.inspect_local_plugins,
+            InspectLocalPluginsRequest(self.deadline, workspace_root=self.root, cancellation=self.cancellation), identity=identity)
+        if isinstance(outcome, PluginInspectionAbort):
+            raise CapabilityQueryError("SOURCE_UNAVAILABLE", "插件来源查询未完成。")
+        self.held.append(outcome)
+        if outcome.disposition is not PluginInspectionDisposition.COMPLETE:
+            self.failed = True
+            for diagnostic in outcome.diagnostics:
+                message = str(getattr(diagnostic, "message", diagnostic))
+                path = getattr(diagnostic, "path", None)
+                self.content.append(_text((str(path) + ": " if path else "") + message))
+            if not outcome.diagnostics:
+                self.content.append(_text("部分插件来源未能完整读取。"))
+        return outcome.instances
 
-    @staticmethod
-    def _key(target):
-        from pulsara_agent.primitives.context import canonical_json_bytes
+    def _scopes(self, arguments):
+        target = arguments.get("target")
+        if target is not None and target["kind"] in {"MCP_CONNECTION", "HOOK_SOURCE"}:
+            selector = resolve_capability_target(self.service, target)
+            if selector.get("source_kind") == "LOCAL":
+                return [selector["scope"]]
+            return []
+        if arguments.get("scope") == "WORKSPACE" and self.root is None:
+            raise CapabilityQueryError("WORKSPACE_UNAVAILABLE", "当前没有可用项目工作区。")
+        return [arguments["scope"]] if "scope" in arguments else (["USER", "WORKSPACE"] if self.root is not None else ["USER"])
 
-        return canonical_json_bytes(target)
-
-    async def _plugins(self, target=None, *, package_path=None):
-        root = (
-            self._root(target["scope"])
-            if target is not None
-            else (
-                self.service.workspace_root
-                if self.service.workspace_kind == "project"
-                else None
-            )
-        )
-        identity = (
-            _request_identity(
-                PluginScopeKind(target["scope"]), target["plugin_id"], root
-            )
-            if target
-            else None
-        )
-        result = await self._native(
-            self.service.plugins.inspect_local_plugins,
-            InspectLocalPluginsRequest(
-                self.deadline, workspace_root=root, cancellation=self.cancellation
-            ),
-            identity=identity,
-            package_path=package_path,
-        )
-        if isinstance(result, PluginInspectionAbort):
-            raise CapabilityQueryError(
-                f"QUERY_{result.reason.value}",
-                f"Plugin source observation {result.reason.value.lower()}.",
-            )
-        self.held.append(result)
-        if result.disposition is not PluginInspectionDisposition.COMPLETE:
-            if target or package_path is not None:
-                self.diagnostics.extend(public_diagnostics(result.diagnostics))
-            else:
-                self.diagnostics.append(
-                    {
-                        "code": "PLUGIN_SOURCES_INCOMPLETE",
-                        "message": "Plugin capability declarations could not be fully observed; inspect an exact known source or use the GUI for package inventory.",
-                    }
-                )
-        elif (
-            target is None
-            and package_path is None
-            and any(
-                value.value != "COMPLETE"
-                for value in (
-                    result.skill_composition_disposition,
-                    result.mcp_composition_disposition,
-                    result.hook_composition_disposition,
-                )
-            )
-        ):
-            self.diagnostics.append(
-                {
-                    "code": "CAPABILITY_SELECTION_UNKNOWN",
-                    "message": "Capability composition or selection is unknown.",
-                }
-            )
-        return result
-
-    def _plugin_rows(self, item, *, composition=False, hook_composition=False):
-        source = plugin_source(item)
-        scope, plugin_id = item.identity.scope.value, item.identity.plugin_id
-        disabled = "来源已禁用；" if not item.enabled else ""
-        for skill in item.summary.skills.skills:
-            path = Path(skill.skill_path)
-            target = {"kind": "SKILL", "skill_path": str(path)}
-            selected = (
-                (skill.name in item.effective_skill_names) if composition else None
-            )
-            if not item.enabled:
-                selected = False
-            status = disabled + (
-                "当前已选择。"
-                if selected
-                else "当前未选择。"
-                if selected is False
-                else "当前选择情况未知。"
-            )
-            self._add(
-                minimal_row(
-                    "SKILL", skill.name, target, source, status, skill.description
-                ),
-                {
-                    "target": target,
-                    "source": source,
-                    "name": skill.name,
-                    "description": skill.description,
-                    "skill_root": str(path.parent),
-                    "skill_path": str(path),
-                    "selected": selected,
-                    "enabled": item.enabled,
-                    "manage_eligible": False,
-                    "diagnostics": [],
-                },
-            )
-        for diagnostic in item.summary.skills.diagnostics:
-            path = getattr(diagnostic, "path", None)
-            if path is None or Path(path).name != "SKILL.md":
-                continue
-            path = Path(path)
-            target = {"kind": "SKILL", "skill_path": str(path)}
-            if self._key(target) in self.details:
-                continue
-            self._add(
-                minimal_row(
-                    "SKILL",
-                    path.parent.name,
-                    target,
-                    source,
-                    disabled + "定义无效。",
-                ),
-                {
-                    "target": target,
-                    "source": source,
-                    "skill_root": str(path.parent),
-                    "skill_path": str(path),
-                    "selected": False,
-                    "manage_eligible": False,
-                    "diagnostics": public_diagnostics(item.summary.skills.diagnostics),
-                },
-            )
-        for server in item.summary.mcp.mcp_servers:
-            target = {
-                "kind": "MCP_CONNECTION",
-                "scope": scope,
-                "source_kind": "PLUGIN",
-                "plugin_id": plugin_id,
-                "server_id": server.local_server_id,
-            }
-            runtime_id = framed_plugin_mcp_server_id(plugin_id, server.local_server_id)
-            origin = self._runtime_origin(runtime_id)
-            expected_scope = (
-                "user"
-                if scope == "USER"
-                else f"workspace:{item.identity.workspace_state_key}"
-            )
-            linked = (
-                isinstance(origin, ManagedPackageMcpRuntimeSource)
-                and origin.store_scope_key == expected_scope
-                and origin.package_owner_key == plugin_id
-                and origin.package_install_id == item.package_install_id
-            )
-            detail = {
-                "target": target,
-                "source": source,
-                "name": server.local_server_id,
-                "config_path": str(item.package_root / "mcp.json"),
-                "enabled": item.enabled,
-                "diagnostics": [],
-            }
-            try:
-                detail["connection"] = transport_summary(
-                    plugin_configured_connection(
-                        server,
-                        identity=item.identity,
-                        overlays=item.mcp_connection_overlays,
-                        package_root=item.package_root,
-                        data_root=item.data_root,
-                    )[0]
-                )
-            except (ValueError, OSError) as exc:
-                detail["diagnostics"].append(
-                    {"code": "MCP_DECLARATION_INVALID", "message": str(exc)}
-                )
-            status = disabled + "已声明。"
-            if linked:
-                self.runtime_ids[self._key(target)] = runtime_id
-                detail["runtime_target"] = {
-                    "kind": "MCP_SERVER",
-                    "runtime_server_id": derive_id("mcp-server", "runtime-target", runtime_id),
-                }
-                live = self.runtime_details.get(("MCP_SERVER", runtime_id))
-                if live:
-                    detail.update(
-                        connection_status=live["connection_status"],
-                        catalog_discovered=live["catalog_discovered"],
-                    )
-                    status = live["connection_status"]
-            else:
-                detail["catalog_discovered"] = False
-                detail["diagnostics"].append(
-                    {
-                        "code": "MCP_RUNTIME_NOT_ASSOCIATED",
-                        "message": "No runtime catalog is associated with this connection; remote inventory is unknown.",
-                    }
-                )
-            self._add(
-                minimal_row(
-                    "MCP_SERVER", server.local_server_id, target, source, status
-                ),
-                detail,
-            )
-        if item.summary.hooks.disposition.value != "MISSING":
-            target = {
-                "kind": "HOOK_SOURCE",
-                "scope": scope,
-                "source_kind": "PLUGIN",
-                "plugin_id": plugin_id,
-            }
-            snapshot = self.service._plugin_hook_snapshot(item)
-            detail, status = self._hook_detail(snapshot, target, source)
-            detail["selected"] = (
-                item.effective_hook
-                if hook_composition and item.enabled
-                else False
-                if not item.enabled
-                else None
-            )
-            if not item.enabled:
-                detail["diagnostics"].append(
-                    {
-                        "code": "PLUGIN_DISABLED",
-                        "message": "The source Plugin is disabled.",
-                    }
-                )
-            self.details[self._key(target)] = detail
-            if item.summary.hooks.hook_definitions:
-                self._add(
-                    minimal_row(
-                        "HOOK_SOURCE", plugin_id, target, source, disabled + status
-                    ),
-                    detail,
-                )
-        component_diagnostics = [
-            *item.summary.skills.diagnostics,
-            *item.summary.mcp.diagnostics,
-            *item.summary.hooks.diagnostics,
-        ]
-        # Exact-source requests may explain rejected declarations; a global query
-        # must not turn package diagnostics into an alternate Plugin inventory.
-        if self.exact_plugin:
-            self.diagnostics.extend(
-                public_diagnostics((*item.diagnostics, *component_diagnostics))
-            )
-        elif any(
-            component.disposition.value in {"INVALID", "UNAVAILABLE"}
-            or component.diagnostics
-            for component in (item.summary.skills, item.summary.mcp, item.summary.hooks)
-        ):
-            generic = {
-                "code": "PLUGIN_COMPONENTS_INCOMPLETE",
-                "message": "Some Plugin capability declarations were rejected or could not be observed; inspect a known source for details.",
-            }
-            if generic not in self.diagnostics:
-                self.diagnostics.append(generic)
-
-    def _hook_detail(self, snapshot, target, source):
-        from pulsara_agent.hooks.presentation import hook_model_enabled
-
-        trust = snapshot.trust.disposition.value
-        detail = {
-            "target": target,
-            "source": source,
-            "config_path": str(snapshot.provenance.identity.canonical_path),
-            "enabled": hook_model_enabled(snapshot),
-            "source_disposition": snapshot.disposition.value,
-            "authorization": trust,
-            "diagnostics": public_diagnostics(snapshot.diagnostics),
-            "definitions": [
-                {
-                    "event": item.event_type.external_name,
-                    "matcher": item.matcher.pattern,
-                    "command": item.command,
-                    "command_windows": item.command_windows,
-                    "cwd": str(self.service.workspace_root),
-                    "timeout_seconds": item.timeout_seconds,
-                    "asynchronous": item.asynchronous,
-                }
-                for item in snapshot.definitions
-            ],
-        }
-        from pulsara_agent.hooks.presentation import add_matching_tool_review
-
-        subjects, complete = (
-            self.service.hook_review_tools()
-            if self.service.hook_review_tools
-            else ((), False)
-        )
-        review = {"definitions": [{} for _ in snapshot.definitions]}
-        add_matching_tool_review(
-            review,
-            snapshot,
-            subjects=subjects,
-            complete=complete,
-            workspace_root=self.service.workspace_root,
-        )
-        for definition, advisory in zip(
-            detail["definitions"], review["definitions"], strict=True
-        ):
-            if (
-                complete
-                and advisory["is_tool_event"]
-                and not advisory["matched_operations"]
-            ):
-                definition["diagnostics"] = [
-                    {
-                        "code": "HOOK_MATCHER_NO_CURRENT_TOOL",
-                        "message": "This matcher matches no tool in the current observed catalog.",
-                    }
-                ]
-        status = (
-            "已禁用；" if not snapshot.trust.enabled else ""
-        ) + f"当前定义授权状态：{trust}。"
-        if snapshot.disposition.value != "COMPLETE":
-            status += "定义观察不完整。"
-        return detail, status
-
-    async def _local_sources(self, arguments):
-        scope_filter = arguments.get("scope")
-        scopes = (
-            [scope_filter]
-            if scope_filter
-            else (
-                ["USER", "WORKSPACE"]
-                if self.service.workspace_kind == "project"
-                else ["USER"]
-            )
-        )
-        kinds = (
-            {arguments["kind"]}
-            if arguments.get("kind")
-            else {"SKILL", "MCP_SERVER", "HOOK_SOURCE"}
-        )
-        source_filter = arguments.get("source_kind")
-        plugin_definitions = None
-        if "SKILL" in kinds:
-            try:
-                plugin_definitions = await self._native(
-                    self.service.inspect_plugin_skill_definitions,
-                    self.service.workspace_root
-                    if self.service.workspace_kind == "project"
-                    else None,
-                    cancellation=self.cancellation,
-                    deadline_monotonic=self.deadline,
-                )
-            except (ValueError, OSError, RuntimeError) as exc:
-                self.diagnostics.append(
-                    {"code": "SKILL_SELECTION_UNKNOWN", "message": str(exc)}
-                )
-        bundled = None
-        winner_paths = None
-        if "SKILL" in kinds:
-            try:
-                _, bundled, effective = await self._native(
-                    self.service.skills.inspect_definition_sources,
-                    workspace_root=self.service.workspace_root
-                    if self.service.workspace_kind == "project"
-                    else None,
-                    plugin_definitions=plugin_definitions,
-                    deadline_monotonic=self.deadline,
-                    cancellation=self.cancellation,
-                )
-                if effective is not None and effective.disposition.value == "COMPLETE":
-                    winner_paths = {item.path for item in effective.winners}
-                else:
-                    self.diagnostics.append(
-                        {
-                            "code": "SKILL_SELECTION_UNKNOWN",
-                            "message": "Current Skill selection could not be fully observed.",
-                        }
-                    )
-            except (OSError, ValueError) as exc:
-                self.diagnostics.append(
-                    {"code": "SKILL_SOURCES_INCOMPLETE", "message": str(exc)}
-                )
-        if "SKILL" in kinds and source_filter in {None, "LOCAL"}:
-            for scope in scopes:
-                self._check()
-                root = self._root(scope)
-                try:
-                    inventory, manifests, _ = await self._native(
-                        self.service.skills.inspect_loose_skills,
-                        scope=LocalSkillInstallScope(scope.lower()),
-                        workspace_root=root,
-                        plugin_definitions=plugin_definitions,
-                        deadline_monotonic=self.deadline,
-                        cancellation=self.cancellation,
-                    )
-                except (OSError, ValueError) as exc:
-                    self.diagnostics.append(
-                        {"code": "SKILL_SOURCES_INCOMPLETE", "message": str(exc)}
-                    )
-                    continue
-                if (
-                    inventory["status"] != "COMPLETE"
-                    or not inventory["config_available"]
-                ):
-                    self.diagnostics.append(
-                        {
-                            "code": "SKILL_SOURCES_INCOMPLETE",
-                            "message": "; ".join(inventory["details"])
-                            or "Skill declarations or enablement could not be fully observed.",
-                        }
-                    )
-                by_path = {str(item.path): item for item in manifests}
+    async def _skills(self, arguments):
+        target, parent = arguments.get("target"), arguments.get("parent")
+        plugins = await self._plugins(parent)
+        definitions = await self._native(self.service.inspect_plugin_skill_definitions, self.root,
+            cancellation=self.cancellation, deadline_monotonic=self.deadline)
+        _loose, bundled, effective = await self._native(self.service.skills.inspect_definition_sources,
+            workspace_root=self.root, plugin_definitions=definitions,
+            deadline_monotonic=self.deadline, cancellation=self.cancellation)
+        winners = {item.path for item in effective.winners} if effective is not None and effective.disposition.value == "COMPLETE" else None
+        records = []
+        if parent is None:
+            for scope in self._scopes(arguments):
+                inventory, _manifests, _ = await self._native(self.service.skills.inspect_loose_skills,
+                    scope=LocalSkillInstallScope(scope.lower()), workspace_root=self.root if scope == "WORKSPACE" else None,
+                    plugin_definitions=definitions, deadline_monotonic=self.deadline, cancellation=self.cancellation)
+                if inventory["status"] != "COMPLETE" or not inventory["config_available"]:
+                    self._failure("部分技能来源或启用设置未能完整读取。")
                 for item in inventory["items"]:
-                    target = {"kind": "SKILL", "skill_path": item["path"]}
-                    source = {"kind": "LOCAL", "scope": scope}
-                    selected = (
-                        (Path(item["path"]) in winner_paths and item["enabled"])
-                        if winner_paths is not None
-                        else False
-                        if not item["enabled"]
-                        else None
-                    )
-                    status = (
-                        "已禁用。"
-                        if not item["enabled"]
-                        else "当前已选择。"
-                        if selected
-                        else "被其他来源覆盖。"
-                        if selected is False
-                        else "当前选择情况未知。"
-                    )
-                    manifest = by_path[item["path"]]
-                    self._add(
-                        minimal_row(
-                            "SKILL",
-                            item["name"],
-                            target,
-                            source,
-                            status,
-                            item["description"],
-                        ),
-                        {
-                            "target": target,
-                            "source": source,
-                            "name": item["name"],
-                            "description": item["description"],
-                            "skill_root": str(manifest.base_dir),
-                            "skill_path": item["path"],
-                            "license": manifest.license,
-                            "compatibility": manifest.compatibility,
-                            "enabled": item["enabled"],
-                            "selected": selected,
-                            "enable_eligible": item["enable_eligible"],
-                            "remove_eligible": item["remove_eligible"],
-                            "diagnostics": [],
-                        },
-                    )
+                    selected = Path(item["path"]) in winners if winners is not None else None
+                    records.append({"target": {"kind": "SKILL", "skill_path": item["path"]},
+                        "name": item["name"], "description": item["description"],
+                        "source": {"kind": "LOCAL", "scope": scope}, "status": _status(item["enabled"], selected)})
                 for issue in inventory["issues"]:
-                    target = {"kind": "SKILL", "skill_path": issue["path"]}
-                    source = {"kind": "LOCAL", "scope": scope}
-                    diagnostics = [
-                        {
-                            "code": "SKILL_INVALID",
-                            "message": text,
-                            "path": issue["path"],
-                        }
-                        for text in issue["details"]
-                    ]
-                    self._add(
-                        minimal_row(
-                            "SKILL",
-                            Path(issue["path"]).parent.name,
-                            target,
-                            source,
-                            "定义无效。",
-                        ),
-                        {
-                            "target": target,
-                            "source": source,
-                            "skill_root": str(Path(issue["path"]).parent),
-                            "skill_path": issue["path"],
-                            "selected": False,
-                            "enable_eligible": False,
-                            "remove_eligible": issue["remove_eligible"],
-                            "diagnostics": diagnostics,
-                        },
-                    )
-                    self.diagnostics.extend(diagnostics)
-        if (
-            "SKILL" in kinds
-            and source_filter in {None, "BUNDLED"}
-            and scope_filter is None
-        ):
-            if bundled is None:
-                candidates = ()
-            else:
-                candidates = bundled.candidates
-            if bundled is not None and bundled.disposition.value != "COMPLETE":
-                self.diagnostics.extend(
-                    public_diagnostics((bundled.unavailable_cause,))
-                )
-            for item in candidates:
-                target = {"kind": "SKILL", "skill_path": str(item.path)}
-                source = {"kind": "BUNDLED"}
-                selected = (
-                    item.path in winner_paths if winner_paths is not None else None
-                )
-                self._add(
-                    minimal_row(
-                        "SKILL",
-                        item.name,
-                        target,
-                        source,
-                        "当前已选择。"
-                        if selected
-                        else "当前未选择。"
-                        if selected is False
-                        else "当前选择情况未知。",
-                        item.description,
-                    ),
-                    {
-                        "target": target,
-                        "source": source,
-                        "name": item.name,
-                        "description": item.description,
-                        "skill_root": str(item.base_dir),
-                        "skill_path": str(item.path),
-                        "selected": selected,
-                        "manage_eligible": False,
-                        "diagnostics": [],
-                    },
-                )
-        if source_filter not in {None, "LOCAL"}:
-            return
-        if "MCP_SERVER" in kinds:
-            for scope in scopes:
-                self._check()
-                root = self._root(scope)
-                try:
-                    configs = await self._native(
-                        self.service.mcp.inspect_declarations, root
-                    )
-                except (OSError, ValueError, YAMLError) as exc:
-                    self.unavailable_kinds.add("MCP_SERVER")
-                    self.diagnostics.append(
-                        {
-                            "code": "MCP_CONFIG_UNAVAILABLE",
-                            "message": "MCP configuration could not be parsed." if isinstance(exc, YAMLError) else str(exc),
-                            "path": str(
-                                self.service.mcp.path(LocalMcpTarget("inventory", root))
-                            ),
-                        }
-                    )
-                    continue
-                for config in configs:
-                    target = {
-                        "kind": "MCP_CONNECTION",
-                        "scope": scope,
-                        "source_kind": "LOCAL",
-                        "server_id": config.server_id,
-                    }
-                    source = {"kind": "LOCAL"}
-                    runtime_origin = self._runtime_origin(config.server_id)
-                    linked = (
-                        runtime_origin is not None
-                        and runtime_origin == config.runtime_source
-                    )
-                    status = (
-                        "已禁用。"
-                        if not config.enabled
-                        else "已配置，尚未关联当前连接；远端目录未知。"
-                    )
-                    detail = {
-                        "target": target,
-                        "source": source,
-                        "name": config.display_name,
-                        "config_path": str(
-                            self.service.mcp.path(
-                                LocalMcpTarget(config.server_id, root)
-                            )
-                        ),
-                        "enabled": config.enabled,
-                        "connection": transport_summary(config.transport),
-                        "diagnostics": [],
-                    }
-                    if linked:
-                        self.runtime_ids[self._key(target)] = config.server_id
-                        detail["runtime_target"] = {
-                            "kind": "MCP_SERVER",
-                            "runtime_server_id": derive_id("mcp-server", "runtime-target", config.server_id),
-                        }
-                        live = self.runtime_details.get(
-                            ("MCP_SERVER", config.server_id)
-                        )
-                        if live:
-                            detail.update(
-                                connection_status=live["connection_status"],
-                                catalog_discovered=live["catalog_discovered"],
-                            )
-                            status = live["connection_status"]
-                    self._add(
-                        minimal_row(
-                            "MCP_SERVER", config.display_name, target, source, status
-                        ),
-                        detail,
-                    )
-        if "HOOK_SOURCE" in kinds:
-            for scope in scopes:
-                self._root(scope)
-                from pulsara_agent.hooks.contracts import HookVisibilityScope
+                    records.append({"target": {"kind": "SKILL", "skill_path": issue["path"]},
+                        "source": {"kind": "LOCAL", "scope": scope}, "status": "定义无效。"})
+                    if target is None or issue["path"] == target["skill_path"]:
+                        self.content.extend(_text(message) for message in issue["details"])
+            if "scope" not in arguments:
+                if bundled.disposition.value != "COMPLETE":
+                    self._failure("内置技能来源未能完整读取。")
+                for item in bundled.candidates:
+                    records.append({"target": {"kind": "SKILL", "skill_path": str(item.path)},
+                        "name": item.name, "description": item.description, "source": {"kind": "BUNDLED"},
+                        "status": _status(True, item.path in winners if winners is not None else None)})
+        for plugin in plugins:
+            if arguments.get("scope") not in {None, plugin.identity.scope.value}:
+                continue
+            if plugin.summary.skills.disposition.value not in {"COMPLETE", "MISSING"}:
+                self._failure(f"插件 {plugin.summary.manifest.name} 的技能声明未能完整读取。")
+            for skill in plugin.summary.skills.skills:
+                records.append({"target": {"kind": "SKILL", "skill_path": skill.skill_path},
+                    "name": skill.name, "description": skill.description,
+                    "source": {"kind": "PLUGIN", "target": plugin_target_from_inspection(plugin)},
+                    "status": _status(plugin.enabled, Path(skill.skill_path) in winners if winners is not None else None)})
+        if parent is not None and arguments.get("scope") is not None:
+            selector = resolve_capability_target(self.service, parent)
+            if selector["scope"] != arguments["scope"]:
+                raise CapabilityQueryError("INVALID_ARGUMENTS", "scope 与所选插件的归属不一致。")
+        if target is not None:
+            records = [item for item in records if item["target"] == target]
+            if not records:
+                if self.failed:
+                    return
+                raise CapabilityQueryError("NOT_FOUND", "未找到该技能；其说明文件或来源当前不可读取。")
+        records.sort(key=lambda item: canonical_json_bytes(item["target"]))
+        self.content.extend(_object(item) for item in records)
+        if not records:
+            self.content.append(_text("没有找到符合条件的技能。"))
 
-                try:
-                    view = await self._native(
-                        self.service.hooks.discover,
-                        deadline_monotonic=self.deadline,
-                        visibility_scope=HookVisibilityScope(scope),
-                    )
-                except (OSError, ValueError) as exc:
-                    self.unavailable_kinds.add("HOOK_SOURCE")
-                    self.diagnostics.append(
-                        {"code": "HOOK_SOURCE_UNAVAILABLE", "message": str(exc)}
-                    )
-                    continue
+    def _hook_record(self, snapshot):
+        from pulsara_agent.hooks.presentation import hook_model_enabled
+        trust = snapshot.trust.disposition.value
+        trusted = {"TRUSTED": "已信任", "UNTRUSTED": "尚未信任", "STALE": "定义已变化，需重新审阅"}.get(trust, trust)
+        enabled = hook_model_enabled(snapshot)
+        enabled_text = "已启用；" if enabled is True else "已停用；" if enabled is False else "启用状态未知；"
+        return {"target": {"kind": "HOOK_SOURCE", "config_path": str(snapshot.provenance.identity.canonical_path)},
+            "status": enabled_text + trusted + "。",
+            "definitions": [{"event": item.event_type.external_name, "matcher": item.matcher.pattern, "command": item.command}
+                for item in snapshot.definitions]}
+
+    async def _hooks(self, arguments):
+        from pulsara_agent.hooks.contracts import HookVisibilityScope
+        target, parent = arguments.get("target"), arguments.get("parent")
+        records = []
+        plugins = await self._plugins(parent or target)
+        if parent is None:
+            for scope in self._scopes(arguments):
+                view = await self._native(self.service.hooks.discover,
+                    deadline_monotonic=self.deadline, visibility_scope=HookVisibilityScope(scope))
                 for snapshot in view.source_snapshots:
                     if snapshot.provenance.identity.visibility_scope.value != scope:
                         continue
-                    target = {
-                        "kind": "HOOK_SOURCE",
-                        "scope": scope,
-                        "source_kind": "LOCAL",
-                    }
-                    source = {"kind": "LOCAL"}
-                    detail, status = self._hook_detail(snapshot, target, source)
-                    self._add(
-                        minimal_row(
-                            "HOOK_SOURCE", f"{scope} Hook", target, source, status
-                        ),
-                        detail,
-                    )
-                    self.diagnostics.extend(detail["diagnostics"])
-
-    async def _inspect_skill(self, target):
-        if self.service is None:
-            raise CapabilityQueryError(
-                "SOURCE_OBSERVATION_UNAVAILABLE",
-                "No native source observation service is bound.",
-            )
-        path = Path(target["skill_path"])
-        try:
-            directory = await self._native(
-                self.service.skills.inspect_loose_skill_directory,
-                skill_path=path,
-                workspace_root=self.service.workspace_root if self.service.workspace_kind == "project" else None,
-            )
-        except OSError as exc:
-            raise CapabilityQueryError("SOURCE_OBSERVATION_UNAVAILABLE", "The Skill directory could not be observed.") from exc
-        if directory is not None and (directory[1] is None or not path.exists()):
-            scope, identity = directory
-            return await self._scrub({
-                "target": target,
-                "source": {"kind": "LOCAL", "scope": scope.value.upper()},
-                "skill_root": str(path.parent), "skill_path": str(path),
-                "directory_exists": identity is not None,
-                "enable_eligible": False,
-                "remove_eligible": identity is not None,
-                "selected": False, "enabled": None,
-                "diagnostics": [{"code": "SKILL_DOCUMENT_MISSING" if identity is not None else "SKILL_DIRECTORY_MISSING", "message": "Skill document is missing; the owned directory can still be removed." if identity is not None else "The exact Skill installation directory is absent."}],
-            })
-        observed = await self._plugins(package_path=path)
-        if observed.disposition is not PluginInspectionDisposition.COMPLETE:
-            raise CapabilityQueryError(
-                "SOURCE_OBSERVATION_UNAVAILABLE",
-                "The exact Skill source could not be observed.",
-                diagnostics=await self._scrub(self.diagnostics),
-            )
-        if observed.instances:
-            self.exact_plugin = plugin_target(observed.instances[0])
-            for item in observed.instances:
-                self._plugin_rows(item)
-        else:
-            await self._local_sources({"kind": "SKILL"})
-        self._check()
-        detail = self.details.get(self._key(target))
-        if detail is None:
-            raise CapabilityQueryError(
-                "SOURCE_OBSERVATION_UNAVAILABLE"
-                if self.diagnostics
-                else "CAPABILITY_NOT_FOUND",
-                "The exact Skill target was not observed.",
-                diagnostics=await self._scrub(self.diagnostics),
-            )
-        return await self._scrub(detail)
-
-    async def execute(self, arguments):
-        arguments = parse_query(arguments)
-        inspect = "target" in arguments
-        self.runtime_rows, self.runtime_details, runtime_diagnostics = runtime_rows(
-            self.runtime, self.plan, self.scope, code_direct_specs=self.code_direct_specs
-        )
-        self.exact_plugin = None
-        try:
-            target = arguments.get("target" if inspect else "parent")
-            kind = target["kind"] if inspect else arguments.get("kind")
-            if (
-                self.service is not None
-                and arguments.get("scope") == "WORKSPACE"
-            ):
-                self._root("WORKSPACE")
-            native_target = target and (
-                target["kind"] == "PLUGIN" or target.get("source_kind") == "PLUGIN"
-            )
-            if native_target:
-                self.exact_plugin = {
-                    "kind": "PLUGIN",
-                    "scope": target["scope"],
-                    "plugin_id": target["plugin_id"],
-                }
-            if inspect and kind == "SKILL":
-                return await self._inspect_skill(target)
-            need_sources = not (
-                kind in CHILD_KINDS or (target and "runtime_server_id" in target)
-            )
-            if (
-                target
-                and target["kind"] == "MCP_CONNECTION"
-            ):
-                need_sources = True
-            if need_sources:
-                if self.service is None:
-                    raise CapabilityQueryError(
-                        "SOURCE_OBSERVATION_UNAVAILABLE",
-                        "No native source observation service is bound.",
-                    )
-                if "scope" in arguments:
-                    self._root(arguments["scope"])
-                source_filter = (
-                    target.get("source_kind")
-                    if target
-                    else arguments.get("source_kind")
-                )
-                if self.exact_plugin or source_filter in {None, "PLUGIN"}:
-                    observed = await self._plugins(self.exact_plugin)
-                    if inspect and target["kind"] == "PLUGIN":
-                        if not observed.instances:
-                            root = self._root(target["scope"])
-                            identity = _request_identity(PluginScopeKind(target["scope"]), target["plugin_id"], root)
-                            try:
-                                state = await self._native(
-                                    self.service.plugins.observe_local_plugin_instance,
-                                    InspectLocalPluginsRequest(self.deadline, workspace_root=root, cancellation=self.cancellation),
-                                    identity=identity,
-                                )
-                            except (OSError, ValueError, RuntimeError):
-                                state = None
-                            if state is not None and state.current is not None:
-                                current = state.current
-                                layout = self.service.plugins._store().layout(identity)
-                                return await self._scrub({
-                                    "target": target,
-                                    "enabled": current.enabled,
-                                    "package_install_id": current.current_package_install_id,
-                                    "package_root": str(layout.plugin_package_parent / current.current_package_install_id),
-                                    "data_root": str(layout.data_root),
-                                    "status": "UNAVAILABLE",
-                                    "remove_eligible": True,
-                                    "components": {name: {"count": None} for name in ("skills", "mcp_servers", "hook_definitions")},
-                                    "diagnostics": self.diagnostics,
-                                })
-                            raise CapabilityQueryError(
-                                "PLUGIN_NOT_FOUND"
-                                if observed.disposition
-                                is PluginInspectionDisposition.COMPLETE
-                                else "PLUGIN_UNAVAILABLE",
-                                "The exact Plugin is absent or could not be observed.",
-                                diagnostics=await self._scrub(self.diagnostics),
-                            )
-                        return await self._scrub(
-                            self._plugin_detail(observed.instances[0])
-                        )
-                    if (
-                        inspect
-                        and self.exact_plugin
-                        and observed.disposition
-                        is not PluginInspectionDisposition.COMPLETE
-                    ):
-                        raise CapabilityQueryError(
-                            "SOURCE_OBSERVATION_UNAVAILABLE",
-                            "The exact Plugin source could not be observed.",
-                            diagnostics=await self._scrub(self.diagnostics),
-                        )
-                    for item in observed.instances:
-                        if (
-                            inspect
-                            and kind == "MCP_CONNECTION"
-                            and item.summary.mcp.disposition.value
-                            in {"INVALID", "UNAVAILABLE"}
-                        ):
-                            self.unavailable_kinds.add("MCP_SERVER")
-                        self._plugin_rows(
-                            item,
-                            composition=not self.exact_plugin
-                            and observed.skill_composition_disposition.value
-                            == "COMPLETE",
-                            hook_composition=not self.exact_plugin
-                            and observed.hook_composition_disposition.value
-                            == "COMPLETE",
-                        )
-                if not self.exact_plugin:
-                    local_arguments = dict(arguments)
-                    if target and target["kind"] == "MCP_CONNECTION":
-                        local_arguments.update(
-                            kind="MCP_SERVER",
-                            scope=target.get("scope"),
-                            source_kind=target.get("source_kind"),
-                        )
-                    if inspect and kind != "SKILL":
-                        local_arguments.update(
-                            kind="MCP_SERVER" if kind == "MCP_CONNECTION" else kind,
-                            scope=target.get("scope"),
-                            source_kind=target.get("source_kind"),
-                        )
-                    await self._local_sources(local_arguments)
-            self._merge_runtime(include_servers=not self.exact_plugin)
-            self._check()
-            if inspect:
-                detail = self.details.get(self._key(target))
-                if detail is None:
-                    runtime_target = (
-                        "runtime_server_id" in target or kind in CHILD_KINDS
-                    )
-                    if runtime_target:
-                        self.diagnostics.extend(runtime_diagnostics)
-                        server_id = (self._runtime_source_key(target["runtime_server_id"])
-                                     if "runtime_server_id" in target else target.get("server_id"))
-                        live = self.runtime_details.get(("MCP_SERVER", server_id))
-                        if (
-                            kind in CHILD_KINDS
-                            and live is not None
-                            and not live["catalog_discovered"]
-                        ):
-                            self.diagnostics.append(
-                                {
-                                    "code": "MCP_CATALOG_NOT_DISCOVERED",
-                                    "message": "Remote catalog not yet observed.",
-                                }
-                            )
-                        if runtime_diagnostics or (
-                            kind in CHILD_KINDS
-                            and live is not None
-                            and not live["catalog_discovered"]
-                        ):
-                            self.unavailable_kinds.add(kind)
-                    unavailable = ("MCP_SERVER" if kind == "MCP_CONNECTION" else kind) in self.unavailable_kinds
-                    raise CapabilityQueryError(
-                        "SOURCE_OBSERVATION_UNAVAILABLE"
-                        if unavailable
-                        else "CAPABILITY_NOT_FOUND",
-                        "The exact target source could not be observed."
-                        if unavailable
-                        else "The exact target is not present in this caller's current observation.",
-                        diagnostics=await self._scrub(self.diagnostics)
-                        if unavailable
-                        else (),
-                    )
-                return await self._scrub(detail)
-            rows = self.rows
-            if target:
-                if target["kind"] == "PLUGIN":
-                    rows = [
-                        item
-                        for item in rows
-                        if item["kind"] not in CHILD_KINDS
-                        and (item["source"] or {}).get("target") == target
-                    ]
-                else:
-                    runtime_id = (self._runtime_source_key(target["runtime_server_id"])
-                                  if "runtime_server_id" in target
-                                  else self.runtime_ids.get(self._key(target)))
-                    if runtime_id is None:
-                        self.diagnostics.append(
-                            {
-                                "code": "MCP_RUNTIME_NOT_ASSOCIATED",
-                                "message": "No runtime catalog is associated with this connection; remote inventory is unknown.",
-                            }
-                        )
-                    rows = [
-                        item
-                        for item in rows
-                        if item["kind"] in CHILD_KINDS
-                        and item["target"]["server_id"] == runtime_id
-                    ]
-                    live = self.runtime_details.get(("MCP_SERVER", runtime_id))
-                    if runtime_id and (live is None or not live["catalog_discovered"]):
-                        self.diagnostics.append(
-                            {
-                                "code": "MCP_CATALOG_NOT_DISCOVERED",
-                                "message": "Remote catalog not yet observed.",
-                            }
-                        )
-            elif kind is None:
-                rows = [item for item in rows if item["kind"] not in CHILD_KINDS]
-            if kind:
-                rows = [item for item in rows if item["kind"] == kind]
-            if arguments.get("source_kind"):
-                rows = [
-                    item
-                    for item in rows
-                    if (item["source"] or {}).get("kind") == arguments["source_kind"]
-                ]
-            if arguments.get("scope"):
-
-                def row_scope(item):
-                    source = item["source"] or {}
-                    return (
-                        item["target"].get("scope")
-                        or source.get("scope")
-                        or source.get("target", {}).get("scope")
-                    )
-
-                rows = [item for item in rows if row_scope(item) == arguments["scope"]]
-            if (
-                kind in CHILD_KINDS
-                or self.scope is not ModelInputScopeKind.ROOT
-                or (target and "runtime_server_id" in target)
-            ):
-                self.diagnostics.extend(runtime_diagnostics)
-                if target is None:
-                    for live in self.runtime_details.values():
-                        if live.get("catalog_discovered") is False:
-                            self.diagnostics.append(
-                                {
-                                    "code": "MCP_CATALOG_NOT_DISCOVERED",
-                                    "message": "Some visible servers have no discovered catalog; the remote inventory is incomplete.",
-                                }
-                            )
-                            break
-            public = await self._scrub({"rows": rows, "diagnostics": self.diagnostics})
-            return render_page(
-                public["rows"],
-                arguments,
-                fits_result=self.fits_result,
-                diagnostics=public["diagnostics"],
-                completeness="PARTIAL" if self.diagnostics else "COMPLETE",
-            )
-        finally:
-            for outcome in self.held:
-                outcome.close()
-
-    def _merge_runtime(self, *, include_servers):
-        linked_sources = {}
-        for row in self.rows:
-            runtime_id = self.runtime_ids.get(self._key(row["target"]))
-            if runtime_id:
-                linked_sources[runtime_id] = dict(row["source"])
-                if row["source"]["kind"] == "LOCAL" and "scope" in row["target"]:
-                    linked_sources[runtime_id]["scope"] = row["target"]["scope"]
-        for row in self.runtime_rows:
-            target = row["target"]
-            server_id = (self._runtime_source_key(target["runtime_server_id"])
-                         if "runtime_server_id" in target else target.get("server_id"))
-            if row["kind"] == "MCP_SERVER" and (
-                not include_servers or server_id in linked_sources
-            ):
-                # Runtime targets remain inspectable even when their list row is
-                # replaced by an associated installation row.
-                self.details[self._key(target)] = self._runtime_detail(
-                    server_id,
-                    target,
-                    linked_sources.get(server_id) or self._runtime_source(server_id),
-                )
+                    if snapshot.disposition.value == "MISSING":
+                        continue
+                    records.append(self._hook_record(snapshot))
+                    if snapshot.disposition.value != "COMPLETE":
+                        self._failure("部分 Hook 来源未能完整读取。")
+        for plugin in plugins:
+            if arguments.get("scope") not in {None, plugin.identity.scope.value}:
                 continue
-            projected = dict(row)
-            projected["source"] = (
-                (linked_sources.get(server_id) or self._runtime_source(server_id))
-                if self.service is not None
-                else None
-            )
-            if projected["source"] is None and row["kind"] != "MCP_SERVER":
-                projected["status"] += " 来源信息未在当前观察范围提供。"
-            self.rows.append(projected)
-            key = (
-                (row["kind"], server_id)
-                if row["kind"] == "MCP_SERVER"
-                else (
-                    row["kind"],
-                    server_id,
-                    target.get("uri", target.get("uri_template", target.get("name"))),
-                )
-            )
-            detail = (
-                self._runtime_detail(server_id, target, projected["source"])
-                if row["kind"] == "MCP_SERVER"
-                else self.runtime_details.get(key)
-            )
-            if detail is not None:
-                self.details[self._key(target)] = {
-                    **detail,
-                    "source": projected["source"],
-                }
-
-    def _runtime_source_key(self, target_id):
-        matches = [key[1] for key in self.runtime_details
-                   if len(key) == 2 and key[0] == "MCP_SERVER"
-                   and derive_id("mcp-server", "runtime-target", key[1]) == target_id]
-        if len(matches) > 1:
-            raise ValueError("MCP runtime target identity collision")
-        return matches[0] if matches else None
-
-    def _runtime_detail(self, server_id, target, source):
-        detail = {**self.runtime_details[("MCP_SERVER", server_id)], "source": source}
-        if self.service is not None:
-            config = frozen_runtime_config(self.runtime, server_id)
-            if config is not None:
-                detail["connection"] = transport_summary(config.transport)
-            else:
-                detail["diagnostics"] = [
-                    *detail["diagnostics"],
-                    {
-                        "code": "MCP_CONFIG_SUMMARY_UNAVAILABLE",
-                        "message": "Runtime configuration summary unavailable.",
-                    },
-                ]
-        return detail
-
-    def _runtime_origin(self, server_id):
-        # Read provenance from the same borrowed, scope-checked catalog that
-        # supplied the runtime row, including disabled/undiscovered services.
-        if self.runtime is None or ("MCP_SERVER", server_id) not in self.runtime_details:
-            return None
-        return next(
-            (entry.runtime_source for entry in self.runtime.catalog_for_scope(self.scope).servers
-             if entry.server_id == server_id),
-            None,
-        )
-
-    def _runtime_source(self, server_id):
-        source = self._runtime_origin(server_id)
-        if isinstance(source, LocalConfiguredMcpRuntimeSource):
-            if source.source_kind.value in {"USER", "WORKSPACE"}:
-                return {"kind": "LOCAL", "scope": source.source_kind.value}
-            return None
-        if isinstance(source, ManagedPackageMcpRuntimeSource):
-            scope = "USER" if source.store_scope_key == "user" else None
-            if (
-                scope is None
-                and self.service is not None
-                and self.service.workspace_kind == "project"
-            ):
-                identity = _request_identity(
-                    PluginScopeKind.WORKSPACE,
-                    source.package_owner_key,
-                    self.service.workspace_root,
-                )
-                if (
-                    source.store_scope_key
-                    == f"workspace:{identity.workspace_state_key}"
-                ):
-                    scope = "WORKSPACE"
-            if scope is not None:
-                return {
-                    "kind": "PLUGIN",
-                    "target": {
-                        "kind": "PLUGIN",
-                        "scope": scope,
-                        "plugin_id": source.package_owner_key,
-                    },
-                }
-        return None
+            if plugin.summary.hooks.disposition.value == "MISSING":
+                continue
+            if plugin.summary.hooks.disposition.value != "COMPLETE":
+                self._failure(f"插件 {plugin.summary.manifest.name} 的 Hook 定义未能完整读取。")
+            records.append(self._hook_record(self.service._plugin_hook_snapshot(plugin)))
+        if target is not None:
+            records = [item for item in records if item["target"] == target]
+            if not records:
+                if self.failed:
+                    return
+                raise CapabilityQueryError("NOT_FOUND", "未找到该 Hook 来源。")
+        if parent is not None and arguments.get("scope") not in {None, resolve_capability_target(self.service, parent)["scope"]}:
+            raise CapabilityQueryError("INVALID_ARGUMENTS", "scope 与所选插件的归属不一致。")
+        records.sort(key=lambda item: canonical_json_bytes(item["target"]))
+        self.content.extend(_object(item) for item in records)
+        if not records:
+            self.content.append(_text("没有找到符合条件的 Hook 来源。"))
 
     @staticmethod
-    def _plugin_detail(item):
-        def count(component, name):
-            return (
-                len(getattr(component, name))
-                if component.disposition.value == "COMPLETE"
-                else 0
-                if component.disposition.value == "MISSING"
-                else None
-            )
+    def _component_count(component, field):
+        return len(getattr(component, field)) if component.disposition.value == "COMPLETE" else 0 if component.disposition.value == "MISSING" else None
 
-        return {
-            "target": plugin_target(item),
-            "version": item.summary.manifest.version,
-            "description": item.summary.manifest.description,
-            "package_root": str(item.package_root),
-            "enabled": item.enabled,
-            "components": {
-                "skills": {"count": count(item.summary.skills, "skills")},
-                "mcp_servers": {"count": count(item.summary.mcp, "mcp_servers")},
-                "hook_definitions": {
-                    "count": count(item.summary.hooks, "hook_definitions")
-                },
-            },
-            "diagnostics": public_diagnostics(
-                (
-                    *item.diagnostics,
-                    *item.summary.skills.diagnostics,
-                    *item.summary.mcp.diagnostics,
-                    *item.summary.hooks.diagnostics,
-                )
-            ),
-        }
+    async def _plugin_records(self, arguments):
+        target = arguments.get("target")
+        plugins = await self._plugins(target)
+        if target is not None and not plugins:
+            if self.failed:
+                return
+            raise CapabilityQueryError("NOT_FOUND", "未找到该插件。")
+        for plugin in plugins:
+            if arguments.get("scope") not in {None, plugin.identity.scope.value}:
+                continue
+            manifest = plugin.summary.manifest
+            status = "已启用。" if plugin.enabled else "已禁用。"
+            if target is None:
+                self.content.append(_object({"target": plugin_target_from_inspection(plugin),
+                    "name": manifest.name, "description": manifest.description or "",
+                    "status": status, "components": {
+                        "skills": self._component_count(plugin.summary.skills, "skills"),
+                        "hooks": self._component_count(plugin.summary.hooks, "hook_definitions"),
+                        "mcp_servers": self._component_count(plugin.summary.mcp, "mcp_servers")}}))
+                continue
+            self.content.append(_text(f"{manifest.name}：{manifest.description or ''}\n{status}"))
+            groups = [
+                ("SKILL", [{"kind": "SKILL", "skill_path": item.skill_path} for item in plugin.summary.skills.skills]),
+                ("HOOK", [{"kind": "HOOK_SOURCE", "config_path": str(plugin.package_root / "dev.pulsara/hooks/hooks.json")}]
+                    if plugin.summary.hooks.hook_definitions else []),
+                ("MCP", [{"kind": "MCP_CONNECTION", "config_path": str(plugin.package_root / "mcp.json"),
+                    "server_id": item.local_server_id} for item in plugin.summary.mcp.mcp_servers]),
+            ]
+            for label, targets in groups:
+                if targets:
+                    self.content.append(_text(label + "：\n"))
+                    self.content.extend({"type": "target", "value": item} for item in targets)
+            if not any(targets for _label, targets in groups):
+                self.content.append(_text("该插件没有可查询的组件。"))
+        if not self.content:
+            self.content.append(_text("没有找到符合条件的插件。"))
 
-    async def _scrub(self, value):
+    def _visible_runtime_servers(self, arguments):
+        if self.runtime is None:
+            return []
+        result = []
+        for server in self.runtime.catalog_for_scope(self.scope).servers:
+            target = server.connection_target
+            if target is None:
+                continue
+            source = server.runtime_source
+            scope = source.source_kind.value if isinstance(source, LocalConfiguredMcpRuntimeSource) else "USER" if source.store_scope_key == "user" else "WORKSPACE"
+            if arguments.get("scope") not in {None, scope}:
+                continue
+            parent = arguments.get("parent")
+            if parent is not None and (not isinstance(source, ManagedPackageMcpRuntimeSource)
+                or not Path(target["config_path"]).is_relative_to(Path(parent["plugin_path"]))):
+                continue
+            result.append(server)
+        return result
+
+    def _service_record(self, server):
+        status = {"READY": "已连接，目录已发现。", "DISABLED": "已禁用。", "CONNECTING": "连接中，目录未知。",
+            "DISCOVERING": "正在发现目录。", "FAILED_RETRYABLE": "连接暂不可用。", "FAILED_TERMINAL": "连接失败。"}.get(server.status.value, server.status.value)
+        record = {"target": dict(server.connection_target), "name": server.display_name, "status": status}
+        if server.sanitized_instructions:
+            record["instructions"] = server.sanitized_instructions
+        candidate = self._current_candidate(server.server_id)
+        if server.status.value == "READY" and candidate is None:
+            record["status"] = "连接或目录暂不可用。"
+        if candidate is not None:
+            record["resource_count"] = len(candidate.discovery_snapshot.resources)
+            record["resource_template_count"] = len(candidate.discovery_snapshot.resource_templates)
+        return record
+
+    def _current_candidate(self, server_id):
+        candidate = self.runtime.candidates.get(server_id) if self.runtime is not None else None
+        if candidate is not None:
+            lease = candidate.slot_lease
+            if lease._slot.lease_is_current(lease):
+                return candidate
+        return None
+
+    async def _mcp_servers(self, arguments):
+        """Combine installed source declarations with the accepted runtime view.
+
+        Disabled Plugin components need no physical runtime but remain visible
+        as installed connections. Unknown discovery never becomes a zero count.
+        """
+        servers = self._visible_runtime_servers(arguments)
         if self.service is None:
-            return value
-        scrub = await self._native(
-            self.service.plugins._capture_scrub_set,
-            InspectLocalPluginsRequest(self.deadline, cancellation=self.cancellation),
-        )
-        for outcome in self.held:
-            observed = getattr(outcome, "scrub_set", None)
-            if observed is not None:
-                for secret in observed.values:
-                    scrub.observe(secret)
-        if isinstance(value, list):
-            return [public_diagnostic(item, scrub) for item in value]
-        if "rows" in value:
-            return {
-                "rows": [_public_query_detail(item, scrub) for item in value["rows"]],
-                "diagnostics": [public_diagnostic(item, scrub) for item in value["diagnostics"]],
-            }
-        return _public_query_detail(value, scrub)
+            return servers
+        seen = {canonical_json_bytes(item.connection_target) for item in servers}
+        declared = set()
+        parent = arguments.get("parent")
+        if parent is not None and arguments.get("scope") not in {None, resolve_capability_target(self.service, parent)["scope"]}:
+            raise CapabilityQueryError("INVALID_ARGUMENTS", "scope 与所选插件的归属不一致。")
 
+        def append(target, server_id, name, enabled, source):
+            key = canonical_json_bytes(target)
+            declared.add(key)
+            if key in seen:
+                return
+            seen.add(key)
+            servers.append(SimpleNamespace(connection_target=target, server_id=server_id,
+                display_name=name, sanitized_instructions="", runtime_source=source,
+                status=SimpleNamespace(value="CONNECTING" if enabled else "DISABLED")))
 
-def _public_query_detail(value, scrub):
-    children = {}
-    for name in ("target", "runtime_target"):
-        if name in value:
-            children[name] = public_target(value[name], scrub)
-    if "source" in value:
-        children["source"] = public_source(value["source"], scrub)
-    if "package_install_id" in value:
-        children["package_install_id"] = public_package_id(value["package_install_id"], scrub)
-    if "diagnostics" in value:
-        children["diagnostics"] = [public_diagnostic(item, scrub) for item in value["diagnostics"]]
-    if "connection" in value:
-        children["connection"] = public_transport(value["connection"], scrub)
-    if "components" in value:
-        children["components"] = {name: public_record(component, scrub) for name, component in value["components"].items()}
-    for name in ("tool_listing", "prompt_listing"):
-        if name in value:
-            listing = value[name]
-            arguments = listing["arguments"]
-            children[name] = public_record(listing, scrub, fixed=("tool",), children={
-                "arguments": public_record(arguments, scrub, fixed=("kind",), children={
-                    "parent": public_target(arguments["parent"], scrub),
-                }),
-            })
-    if "arguments" in value:
-        children["arguments"] = [public_record(item, scrub) for item in value["arguments"]]
-    if "definitions" in value:
-        children["definitions"] = [public_record(item, scrub, fixed=("event",), children={
-            "diagnostics": [public_diagnostic(d, scrub) for d in item["diagnostics"]],
-        } if "diagnostics" in item else {}) for item in value["definitions"]]
-    fixed = ("kind", "source_disposition", "authorization", "connection_status")
-    # List rows carry explanatory text; the exact Plugin detail's status is a
-    # compiled disposition. Neither takes meaning from an external field name.
-    if "kind" not in value:
-        fixed += ("status",)
-    return public_record(value, scrub, fixed=fixed, children=children,
-                         external=("input_schema", "output_schema"))
+        if parent is None:
+            from pulsara_agent.capability.mcp_management import LocalMcpTarget
+            for scope in self._scopes(arguments):
+                root = self.root if scope == "WORKSPACE" else None
+                declarations = await self._native(self.service.mcp.inspect_declarations, root)
+                for item in declarations:
+                    if self.scope is ModelInputScopeKind.SUBAGENT and item.scope_policy.value != "ROOT_AND_SUBAGENTS":
+                        continue
+                    target = {"kind": "MCP_CONNECTION", "config_path": str(self.service.mcp.path(LocalMcpTarget(item.server_id, root))), "server_id": item.server_id}
+                    append(target, item.server_id, item.display_name, item.enabled, item.runtime_source)
+        component = arguments.get("target")
+        for plugin in await self._plugins(parent or component):
+            if arguments.get("scope") not in {None, plugin.identity.scope.value}:
+                continue
+            if plugin.summary.mcp.disposition.value not in {"COMPLETE", "MISSING"}:
+                self._failure(f"插件 {plugin.summary.manifest.name} 的 MCP 声明未能完整读取。")
+            policies = {overlay.local_server_id: overlay.scope_policy
+                        for overlay in plugin.mcp_connection_overlays}
+            for item in plugin.summary.mcp.mcp_servers:
+                if (self.scope is ModelInputScopeKind.SUBAGENT
+                    and policies.get(item.local_server_id, McpScopePolicy.ROOT_AND_SUBAGENTS)
+                    is not McpScopePolicy.ROOT_AND_SUBAGENTS):
+                    continue
+                target = {"kind": "MCP_CONNECTION", "config_path": str(plugin.package_root / "mcp.json"), "server_id": item.local_server_id}
+                append(target, framed_plugin_mcp_server_id(plugin.identity.plugin_id, item.local_server_id),
+                    f"{plugin.summary.manifest.name}:{item.local_server_id}", plugin.enabled, None)
+        servers = [item for item in servers if canonical_json_bytes(item.connection_target) in declared]
+        servers.sort(key=lambda item: canonical_json_bytes(item.connection_target))
+        return servers
+
+    async def _mcp(self, arguments):
+        target = arguments.get("target")
+        servers = (self._visible_runtime_servers(arguments) if target is not None and target["kind"] == "MCP_TOOL"
+            else await self._mcp_servers(arguments))
+        if target is None and "query" not in arguments:
+            self.content.extend(_object(self._service_record(server)) for server in servers)
+            if not servers:
+                self.content.append(_text("没有找到符合条件的 MCP 服务。"))
+            return
+        if target is not None and target["kind"] == "MCP_CONNECTION":
+            servers = [server for server in servers if dict(server.connection_target) == target]
+            if not servers:
+                if self.failed:
+                    return
+                raise CapabilityQueryError("NOT_FOUND", "未找到当前范围内的 MCP 连接。")
+            server = servers[0]
+            candidate = self._current_candidate(server.server_id)
+            if candidate is None:
+                raise CapabilityQueryError("DIRECTORY_UNAVAILABLE", "该服务当前目录未知或不可读取。")
+            specs = self.runtime.root_tool_specs if self.scope is ModelInputScopeKind.ROOT else self.runtime.subagent_tool_specs
+            tools = [tool for tool in specs if tool.server_id == server.server_id]
+            self.content.extend(_object({"target": {"kind": "MCP_TOOL", "server_id": tool.server_id,
+                "remote_tool_name": tool.remote_tool_name}, "description": tool.description,
+                "status": "可通过 call_mcp_tool 调用；参数请查询工具详情。"}) for tool in tools)
+            if not tools:
+                self.content.append(_text("该服务当前没有可见工具。"))
+            return
+        ids = {server.server_id for server in servers}
+        specs = (() if self.runtime is None else self.runtime.root_tool_specs
+            if self.scope is ModelInputScopeKind.ROOT else self.runtime.subagent_tool_specs)
+        tools = [tool for tool in specs if tool.server_id in ids]
+        if target is not None:
+            tools = [tool for tool in tools if tool.server_id == target["server_id"] and tool.remote_tool_name == target["remote_tool_name"]]
+            if not tools:
+                raise CapabilityQueryError("NOT_FOUND", "未找到当前范围内的 MCP 工具。")
+            executor = (self.runtime.executors.get((tools[0].server_id, tools[0].remote_tool_name))
+                if self._current_candidate(tools[0].server_id) is not None else None)
+            if executor is None:
+                self.content.append(_object({"target": target, "description": tools[0].description, "invocation": {"mode": "UNAVAILABLE"}}))
+                self.content.append(_text("该工具当前没有可用执行连接。"))
+            else:
+                self.content.append(_object(self.inspect_tool(executor)))
+            return
+        from pulsara_agent.capability.mcp_search import search_mcp
+        matches = await self._native(search_mcp, arguments["query"], tools=tools, servers=servers)
+        for kind, item, description in matches:
+            if kind == "service":
+                self.content.append(_object(self._service_record(item)))
+            else:
+                executor = (self.runtime.executors.get((item.server_id, item.remote_tool_name))
+                    if self._current_candidate(item.server_id) is not None else None)
+                if executor is not None:
+                    record = self.inspect_tool(executor)
+                else:
+                    record = {"target": {"kind": "MCP_TOOL", "server_id": item.server_id, "remote_tool_name": item.remote_tool_name},
+                              "invocation": {"mode": "UNAVAILABLE"}}
+                if description:
+                    record["description"] = description
+                else:
+                    record.pop("description", None)
+                self.content.append(_object(record))
+        if not matches:
+            self.content.append(_text("没有找到匹配的 MCP 工具或服务。"))
+
+    async def execute(self, arguments):
+        status = "SUCCESS"
+        try:
+            values = parse_query(arguments, subagent=self.scope is ModelInputScopeKind.SUBAGENT)
+            kind = values["kind"]
+            if kind == "MCP":
+                await self._mcp(values)
+            elif kind == "SKILL":
+                await self._skills(values)
+            elif kind == "HOOK":
+                await self._hooks(values)
+            else:
+                await self._plugin_records(values)
+            if self.failed:
+                status = "ERROR"
+        except asyncio.CancelledError:
+            status = "CANCELLED"
+            self.content.insert(0, _text("能力查询已取消。"))
+        except (CapabilityQueryError, ValueError, OSError) as exc:
+            status = "ERROR"
+            self.content.insert(0, _text(str(exc)))
+        finally:
+            for held in self.held:
+                held.close()
+        result = {"meta": {"status": status}, "content": self.content}
+        if self.service is not None:
+            scrub = await asyncio.to_thread(self.service.plugins._capture_scrub_set,
+                InspectLocalPluginsRequest(self.deadline))
+            result = scrub.scrub_json(result)
+        return result

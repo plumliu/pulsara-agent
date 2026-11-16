@@ -1,90 +1,53 @@
-from __future__ import annotations
+"""Complete ripgrep scopes retain SDK matching and subprocess cleanup semantics."""
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
 import json
 import os
 import subprocess
 import sys
 import threading
 import time
-
 import pytest
-
 from pulsara_agent.identity import random_id
+from pulsara_agent.message import ToolResultState
 from pulsara_agent.ports.tool_execution import ToolCall
-from pulsara_agent.primitives.tool_result_budget import (
-    ToolResultPageBudget,
-    ToolResultPageBoundary,
-)
 from pulsara_agent.tools.builtins.filesystem import (
     FindFilesTool,
     SearchContentTool,
     ReadFileTool,
-    EditFileTool,
 )
 from pulsara_agent.tools.builtins import filesystem_search as owner
 
 
-def invoke(tool, arguments, **options):
-    call = ToolCall(random_id("call"), tool.name, arguments, **options)
-    result = tool.execute(call)
-    assert result.page_complete
-    assert ToolResultPageBudget(tool_call_id=call.id).fits(result.output)
-    return json.loads(result.output)
+def invoke(tool, arguments):
+    result = tool.execute(ToolCall(random_id("call"), tool.name, arguments))
+    assert result.status is ToolResultState.SUCCESS
+    return result.business_value.content
 
 
-def test_matching_excerpt_contains_late_match_and_source_can_be_read(tmp_path):
+def test_matching_line_is_complete_and_source_read_is_exact(tmp_path):
     line = "前" * 10_000 + "needle" + "尾" * 10_000
     (tmp_path / "long.txt").write_text(line)
-    page = invoke(SearchContentTool(tmp_path), {"pattern": "needle"})
-    record = page["matches"][0]
-    assert "needle" in record["excerpt"]
-    assert record["excerpt_partial"] and record["match_char_offset"] == 10_000
-    assert record["line_chars"] == len(line)
-    assert "content" not in record and "total_count" not in page
-    read = invoke(ReadFileTool(tmp_path), {"target": record["target"]})
-    assert read["next"] is not None
+    record = invoke(SearchContentTool(tmp_path), {"pattern": "needle"})[0].value
+    assert record == {
+        "target": {"kind": "PATH", "path": "long.txt"},
+        "line": 1,
+        "text": line,
+    }
+    assert invoke(ReadFileTool(tmp_path), {"target": record["target"]})[0].value == line
 
 
-def test_excerpt_does_not_strip_a_real_carriage_return_match(tmp_path):
-    (tmp_path / "crlf.txt").write_bytes(b"line\r\n")
-    page = invoke(SearchContentTool(tmp_path), {"pattern": r"\r"})
-    assert "\r" in page["matches"][0]["excerpt"]
+def test_real_carriage_return_and_every_unicode_match_are_preserved(tmp_path):
+    text = '\\"中🙂' * 200 + "needle\r\n"
+    (tmp_path / "many.txt").write_bytes((text * 120).encode())
+    parts = invoke(SearchContentTool(tmp_path), {"pattern": r"needle\r"})
+    assert [p.value["line"] for p in parts] == list(range(1, 121))
+    assert all(p.value["text"] == text for p in parts)
 
 
-def test_search_full_quote_and_continuations_cover_all_escaped_unicode_records(
-    tmp_path,
-):
-    text = '\\"中🙂' * 200 + "needle"
-    (tmp_path / "many.txt").write_text("\n".join(text for _ in range(120)))
-    tool = SearchContentTool(tmp_path)
-    arguments = {"pattern": "needle", "limit": 1000}
-    lines = []
-    while True:
-        page = invoke(tool, arguments)
-        lines.extend(record["line"] for record in page["matches"])
-        if page["next"] is None:
-            break
-        assert page["next"]["arguments"]["limit"] == 1000
-        arguments = page["next"]["arguments"]
-    assert lines == list(range(1, 121))
-
-
-def test_native_component_order_and_deleted_cursor_are_not_whole_path_sort(tmp_path):
-    (tmp_path / "a").mkdir()
-    (tmp_path / "a/b.txt").write_text("hit")
-    (tmp_path / "a+.txt").write_text("hit")
-    first = invoke(FindFilesTool(tmp_path), {"glob": "*.txt", "limit": 1})
-    assert first["targets"][0]["path"] == "a/b.txt"
-    (tmp_path / "a/b.txt").unlink()
-    second = invoke(FindFilesTool(tmp_path), first["next"]["arguments"])
-    assert second["targets"] == [{"kind": "PATH", "path": "a+.txt"}]
-
-
-def test_completed_file_content_is_not_searched_again(tmp_path, monkeypatch):
-    (tmp_path / "a.txt").write_text("hit\n")
-    (tmp_path / "b.txt").write_text("hit\n")
+def test_full_search_reads_each_selected_file_once(tmp_path, monkeypatch):
+    for name in ("a.txt", "b.txt"):
+        (tmp_path / name).write_text("hit\n")
     commands = []
     real = subprocess.Popen
 
@@ -93,14 +56,31 @@ def test_completed_file_content_is_not_searched_again(tmp_path, monkeypatch):
         return real(command, *args, **kwargs)
 
     monkeypatch.setattr(owner.subprocess, "Popen", popen)
-    tool = SearchContentTool(tmp_path)
-    first = invoke(tool, {"pattern": "hit", "output_mode": "files_only", "limit": 1})
-    commands.clear()
-    second = invoke(tool, first["next"]["arguments"])
-    assert second["targets"][0]["path"] == "b.txt"
-    searches = [command for command in commands if "-l" in command]
-    assert searches and all("/a.txt" not in command for command in searches)
-    assert any("/b.txt" in command for command in searches)
+    parts = invoke(
+        SearchContentTool(tmp_path), {"pattern": "hit", "output_mode": "files_only"}
+    )
+    assert [p.value["path"] for p in parts] == ["a.txt", "b.txt"]
+    searches = [c for c in commands if "--json" in c]
+    assert len(searches) == 1
+
+
+def test_full_diagnostic_is_an_error_with_obtained_records(tmp_path, monkeypatch):
+    (tmp_path / "a.txt").write_text("hit\n")
+    original = owner._Producer._stderr
+    diagnostic = b"a local file could not be read " * 1000
+
+    def stderr(self):
+        if "--json" in self.process.args:
+            self.diagnostics.add(diagnostic)
+        original(self)
+
+    monkeypatch.setattr(owner._Producer, "_stderr", stderr)
+    result = SearchContentTool(tmp_path).execute(
+        ToolCall(random_id("call"), "search_file_content", {"pattern": "hit"})
+    )
+    assert result.status is ToolResultState.ERROR
+    assert result.business_value.content[0].value["target"]["path"] == "a.txt"
+    assert diagnostic.decode() in result.business_value.content[-1].value
 
 
 def test_literal_basename_batch_preserves_glob_ignore_binary_and_symlink_semantics(
@@ -118,14 +98,16 @@ def test_literal_basename_batch_preserves_glob_ignore_binary_and_symlink_semanti
             SearchContentTool(tmp_path),
             {"pattern": "hit", "file_glob": "a*", "output_mode": mode},
         )
-        key = {"content": "matches", "files_only": "targets", "count": "counts"}[mode]
+
         paths = [
-            record["path"] if mode == "files_only" else record["target"]["path"]
-            for record in page[key]
+            record.value["path"]
+            if mode == "files_only"
+            else record.value["target"]["path"]
+            for record in page
         ]
         assert paths == [literal, "axbYz.txt"]
     page = invoke(SearchContentTool(tmp_path), {"pattern": "hit"})
-    assert {record["target"]["path"] for record in page["matches"]} == {
+    assert {record.value["target"]["path"] for record in page} == {
         literal,
         "axbYz.txt",
     }
@@ -133,31 +115,7 @@ def test_literal_basename_batch_preserves_glob_ignore_binary_and_symlink_semanti
         SearchContentTool(tmp_path),
         {"pattern": "hit", "target": {"kind": "PATH", "path": "binary.txt"}},
     )
-    assert explicit["matches"]  # Preserve explicitly selected rg file semantics.
-
-
-def test_best_effort_diagnostic_is_sticky_without_repeating_the_failed_page(
-    tmp_path, monkeypatch
-):
-    (tmp_path / "a.txt").write_text("hit\n")
-    (tmp_path / "b.txt").write_text("hit\n")
-    original = owner._Producer._stderr
-
-    def diagnostic(self):
-        if "-l" in self.process.args:
-            self.diagnostics.add(b"a local file could not be read\n")
-        original(self)
-
-    monkeypatch.setattr(owner._Producer, "_stderr", diagnostic)
-    tool = SearchContentTool(tmp_path)
-    first = invoke(tool, {"pattern": "hit", "output_mode": "files_only", "limit": 1})
-    assert first["status"] == "partial" and first["targets"][0]["path"] == "a.txt"
-    assert first["next"]["arguments"]["continuation"]["partial"] is True
-    monkeypatch.setattr(owner._Producer, "_stderr", original)
-    second = invoke(tool, first["next"]["arguments"])
-    assert second["status"] == "partial" and second["targets"][0]["path"] == "b.txt"
-    final = invoke(tool, second["next"]["arguments"])
-    assert final["status"] == "partial" and final["next"] is None
+    assert explicit  # Preserve explicitly selected rg file semantics.
 
 
 def test_search_cancel_joins_every_child_and_worker_before_returning(
@@ -190,67 +148,14 @@ def test_search_cancel_joins_every_child_and_worker_before_returning(
         )
         assert started.wait(2)
         cancelled.set()
-        with pytest.raises(InterruptedError, match="cancelled"):
-            future.result(timeout=2)
+        result = future.result(timeout=2)
+        assert result.status is ToolResultState.INTERRUPTED
+        assert "cancelled" in result.business_value.content[-1].value
     assert children and all(child.poll() is not None for child in children)
 
 
-def test_small_call_allowance_does_not_skip_the_first_record(tmp_path):
-    (tmp_path / "one.txt").write_text("hit")
-    call = ToolCall(random_id("call"), "find_files", {"glob": "*.txt"})
-    call = replace(
-        call,
-        page_budget=ToolResultPageBudget(
-            tool_call_id=call.id, accepts_provider_body=lambda body, provenance: False
-        ),
-    )
-    with pytest.raises(ToolResultPageBoundary):
-        FindFilesTool(tmp_path).execute(call)
-
-
-def test_actual_allowance_stops_before_searching_later_parent_batches(
-    tmp_path, monkeypatch
-):
-    for name in ("a", "b", "c", "d"):
-        folder = tmp_path / name
-        folder.mkdir()
-        (folder / "one.txt").write_text("hit")
-    parents = []
-    real = subprocess.Popen
-
-    def popen(command, *args, **kwargs):
-        if "--json" in command:
-            parents.append(kwargs["cwd"].name)
-        return real(command, *args, **kwargs)
-
-    monkeypatch.setattr(owner.subprocess, "Popen", popen)
-    request = ToolCall(
-        random_id("call"), "search_content", {"pattern": "hit", "limit": 50}
-    )
-    quotes = []
-
-    def accepts(body, provenance):
-        value = json.loads(body)
-        quotes.append(value)
-        return len(value["matches"]) <= 1
-
-    budget = ToolResultPageBudget(
-        tool_call_id=request.id, accepts_provider_body=accepts
-    )
-    result = SearchContentTool(tmp_path).execute(replace(request, page_budget=budget))
-    value = json.loads(result.output)
-    assert parents == ["a", "b"]
-    assert [record["target"]["path"] for record in value["matches"]] == ["a/one.txt"]
-    assert value["next"]["arguments"]["continuation"]["path"] == "a/one.txt"
-    assert any(
-        len(quote["matches"]) == 2 and quote["next"] is not None for quote in quotes
-    )
-
-
 @pytest.mark.parametrize("external", [False, True])
-def test_producer_distinguishes_external_kill_from_its_own_page_stop(
-    tmp_path, external
-):
+def test_producer_distinguishes_external_kill_from_its_own_cleanup(tmp_path, external):
     request = ToolCall(random_id("call"), "find_files", {"glob": "*"})
     diagnostics = owner._Diagnostics(False)
     producer = owner._Producer(
@@ -325,10 +230,11 @@ def test_malformed_rg_event_fails_without_leaving_any_producer(
         producers.append(self)
 
     monkeypatch.setattr(owner._Producer, "__init__", initialize)
-    with pytest.raises(ValueError, match="ripgrep"):
-        SearchContentTool(tmp_path).execute(
-            ToolCall(random_id("call"), "search_content", {"pattern": "hit"})
-        )
+    result = SearchContentTool(tmp_path).execute(
+        ToolCall(random_id("call"), "search_file_content", {"pattern": "hit"})
+    )
+    assert result.status is ToolResultState.ERROR
+    assert "ripgrep" in result.business_value.content[-1].value
     assert len(producers) == 3
     assert all(producer.process.poll() is not None for producer in producers)
     assert all(
@@ -351,35 +257,3 @@ def test_decoder_accepts_all_control_events_from_actual_rg(tmp_path):
         "end",
         "summary",
     }
-
-
-def test_path_continuation_checks_revision_and_fragment_delivery(tmp_path):
-    (tmp_path / "one.txt").write_text("x" * 80_000)
-    tool = ReadFileTool(tmp_path)
-    request = ToolCall(
-        random_id("call"),
-        "read_file",
-        {"target": {"kind": "PATH", "path": "one.txt"}},
-        defer_file_observation=True,
-    )
-    first = tool.execute(request)
-    value = json.loads(first.output)
-    assert value["next"]
-    (tmp_path / "one.txt").write_text("changed")
-    first.delivery_succeeded()
-    denied = EditFileTool(tmp_path).execute(
-        ToolCall(
-            random_id("call"),
-            "edit_file",
-            {
-                "target": {"kind": "PATH", "path": "one.txt"},
-                "base_revision": value["content_revision"],
-                "operations": [{"kind": "replace_file", "content": "replacement"}],
-            },
-        )
-    )
-    assert json.loads(denied.output)["error"] == "CONTENT_REVISION_MISMATCH"
-    stale = tool.execute(
-        ToolCall(random_id("call"), "read_file", value["next"]["arguments"])
-    )
-    assert json.loads(stale.output)["error"] == "CONTENT_REVISION_MISMATCH"

@@ -34,6 +34,7 @@ pytestmark = pytest.mark.postgres
 
 class _RecordingSkillCollector(StaticContextSourceCollector):
     def __init__(self):
+        super().__init__()
         self.selections = []
 
     def complete_frozen_sources(self, frozen, **kwargs):

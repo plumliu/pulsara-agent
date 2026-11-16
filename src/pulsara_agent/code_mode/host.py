@@ -3,6 +3,7 @@
 The owner holds no business scheduler or Work/result database. Every guest tool
 submission calls the kernel's shared executor with the admitted exec snapshot.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -11,19 +12,26 @@ from collections import deque
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 import json
+import logging
 import math
 from pathlib import Path
 from typing import Callable, Mapping
 from types import MappingProxyType
 
 from pulsara_agent.identity import random_id, require_id
-from pulsara_agent.ports.tool_execution import thaw_tool_json_object, encode_tool_public_json
-from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 from pulsara_agent.primitives.name_suggestion import suggest_name
 
 from .contracts import (
-    CellParticipationReference, CellState, CodeModeError, CodeModeInvocation, CodeModeInvoke, CodeModeLimits,
-    CodeModeOutputLease, CodeModePrepareBatch, CodeModeToolResult, CodeModeCellSnapshot,
+    CellParticipationReference,
+    CellState,
+    CodeModeError,
+    CodeModeInvocation,
+    CodeModeInvoke,
+    CodeModeLimits,
+    CodeModeOutputLease,
+    CodeModePrepareBatch,
+    CodeModeToolResult,
+    CodeModeCellSnapshot,
 )
 from .targets import cell_target
 
@@ -33,16 +41,25 @@ _SAFE_INTEGER = 9_007_199_254_740_991
 
 def _json(value: object) -> str:
     """Typed JSON bridge, never guess JSON from a TEXT business value."""
+
     def check(item: object) -> None:
         if item is None or type(item) in (str, bool):
             return
         if type(item) is int:
             if abs(item) > _SAFE_INTEGER:
-                raise CodeModeError("unsafe_integer", "Bridge JSON integer exceeds JavaScript's safe range")
+                raise CodeModeError(
+                    "unsafe_integer",
+                    "Bridge JSON integer exceeds JavaScript's safe range",
+                )
             return
         if type(item) is float:
-            if not math.isfinite(item) or (item.is_integer() and abs(item) > _SAFE_INTEGER):
-                raise CodeModeError("unsafe_number", "Bridge requires finite, safely representable JSON numbers")
+            if not math.isfinite(item) or (
+                item.is_integer() and abs(item) > _SAFE_INTEGER
+            ):
+                raise CodeModeError(
+                    "unsafe_number",
+                    "Bridge requires finite, safely representable JSON numbers",
+                )
             return
         if type(item) is list:
             for child in item:
@@ -53,18 +70,25 @@ def _json(value: object) -> str:
                 check(child)
             return
         raise CodeModeError("invalid_json", "Bridge value is not a strict JSON value")
+
     try:
         check(value)
-        encoded = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        encoded = json.dumps(
+            value, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+        )
         try:
             encoded.encode("utf-8")
         except UnicodeEncodeError:
             # JSON escapes preserve ECMAScript lone surrogates without inventing
             # replacement characters or putting invalid UTF-8 into canonical I/O.
-            return json.dumps(value, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
+            return json.dumps(
+                value, ensure_ascii=True, allow_nan=False, separators=(",", ":")
+            )
         return encoded
     except (RecursionError, ValueError) as error:
-        raise CodeModeError("invalid_json", "Bridge value is cyclic or cannot be encoded as JSON") from error
+        raise CodeModeError(
+            "invalid_json", "Bridge value is cyclic or cannot be encoded as JSON"
+        ) from error
 
 
 def _bytes(value: object) -> int:
@@ -102,7 +126,6 @@ class _Cell:
     invoke: CodeModeInvoke
     prepare_batch: CodeModePrepareBatch
     admitted: asyncio.Future[None]
-    on_cell_closed: Callable[[str], None] | None = None
     state: CellState = "queued"
     error: Mapping[str, object] | None = None
     changed: asyncio.Event = field(default_factory=asyncio.Event)
@@ -110,7 +133,9 @@ class _Cell:
     delivery_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     output: deque[_Output] = field(default_factory=deque)
     pending: dict[str, _Pending] = field(default_factory=dict)
-    preparations: dict[str, tuple[list[Mapping[str, object]], Mapping[str, object]]] = field(default_factory=dict)
+    preparations: dict[str, tuple[list[Mapping[str, object]], Mapping[str, object]]] = (
+        field(default_factory=dict)
+    )
     agent_message_cursors: dict[str, int] = field(default_factory=dict)
     cancelled: asyncio.Event = field(default_factory=asyncio.Event)
     terminal_event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -134,8 +159,12 @@ class _Cell:
 
 
 class CodeModeHost:
-    def __init__(self, *, limits: CodeModeLimits | None = None,
-                 node_executable: Path | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        limits: CodeModeLimits | None = None,
+        node_executable: Path | None = None,
+    ) -> None:
         self.limits = limits or CodeModeLimits()
         package = Path(__file__).resolve().parent
         self._script = package / "node/sidecar.mjs"
@@ -150,6 +179,12 @@ class CodeModeHost:
         self._closed = False
         self._sidecar_failure: str | None = None
         self._output_ready: Callable[[], None] | None = None
+        self._output_preparer = None
+        self._output_quoter = None
+
+    def set_output_preparer(self, prepare, *, quote=None) -> None:
+        self._output_preparer = prepare
+        self._output_quoter = quote
 
     def set_output_ready_callback(self, callback: Callable[[], None]) -> None:
         self._output_ready = callback
@@ -172,11 +207,22 @@ class CodeModeHost:
             return
         incoming = dict(error)
         generic_exit = "Code Mode sidecar exited; VM state cannot be resumed"
-        if (cell.error is not None and cell.error.get("message") == generic_exit
-                and incoming.get("name") == "SidecarError" and incoming.get("message") != generic_exit
-                and (cell.diagnostic_output is None or
-                     (any(item is cell.diagnostic_output for item in cell.output)
-                      and (cell.output_lease is None or cell.output[0] is not cell.diagnostic_output)))):
+        if (
+            cell.error is not None
+            and cell.error.get("message") == generic_exit
+            and incoming.get("name") == "SidecarError"
+            and incoming.get("message") != generic_exit
+            and (
+                cell.diagnostic_output is None
+                or (
+                    any(item is cell.diagnostic_output for item in cell.output)
+                    and (
+                        cell.output_lease is None
+                        or cell.output[0] is not cell.diagnostic_output
+                    )
+                )
+            )
+        ):
             incoming["secondary_causes"] = {"SidecarExit": dict(cell.error)}
             cell.error = None
         if cell.error is None:
@@ -193,8 +239,12 @@ class CodeModeHost:
             if causes:
                 combined["secondary_causes"] = causes
             cell.error = combined
-        if (cell.state not in _TERMINAL or cell.explicitly_stopped or self._closed
-                or cell.output_delivery_rejected):
+        if (
+            cell.state not in _TERMINAL
+            or cell.explicitly_stopped
+            or self._closed
+            or cell.output_delivery_rejected
+        ):
             return
         record = {"kind": "error", "error": dict(cell.error)}
         previous = cell.diagnostic_output
@@ -220,14 +270,23 @@ class CodeModeHost:
                 raise CodeModeError("unavailable", self._sidecar_failure)
             if self._process is not None:
                 if self._process.returncode is not None:
-                    raise CodeModeError("unavailable", "Code Mode sidecar has exited; old cells cannot resume")
+                    raise CodeModeError(
+                        "unavailable",
+                        "Code Mode sidecar has exited; old cells cannot resume",
+                    )
                 return
             if not self._node.is_file():
-                raise CodeModeError("runtime_unavailable", "Prepared Code Mode Node runtime is missing; run tools/prepare_code_mode.py before build/install")
+                raise CodeModeError(
+                    "runtime_unavailable",
+                    "Prepared Code Mode Node runtime is missing; run tools/prepare_code_mode.py before build/install",
+                )
             self._configured = asyncio.get_running_loop().create_future()
             self._process = await asyncio.create_subprocess_exec(
-                str(self._node), str(self._script), stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                str(self._node),
+                str(self._script),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
                 limit=self.limits.cell_bytes + self.limits.control_bytes,
             )
             if self._closed:
@@ -237,39 +296,60 @@ class CodeModeHost:
                 if self._process.returncode is None:
                     self._process.terminate()
                 await self._process.wait()
-                raise CodeModeError("unavailable", "Code Mode Host closed during startup")
-            self._reader = asyncio.create_task(self._read_messages(), name="code-mode-sidecar")
-            self._stderr_reader = asyncio.create_task(self._drain_stderr(), name="code-mode-stderr")
+                raise CodeModeError(
+                    "unavailable", "Code Mode Host closed during startup"
+                )
+            self._reader = asyncio.create_task(
+                self._read_messages(), name="code-mode-sidecar"
+            )
+            self._stderr_reader = asyncio.create_task(
+                self._drain_stderr(), name="code-mode-stderr"
+            )
             await self._send({"type": "configure", "limits": asdict(self.limits)})
             await self._configured
 
     async def _send(self, message: Mapping[str, object]) -> None:
         payload = _json(dict(message)).encode("utf-8") + b"\n"
         if len(payload) > self.limits.cell_bytes + self.limits.control_bytes:
-            raise CodeModeError("ipc_boundary", "Code Mode IPC frame exceeds its physical boundary")
+            raise CodeModeError(
+                "ipc_boundary", "Code Mode IPC frame exceeds its physical boundary"
+            )
         async with self._write_lock:
             process = self._process
-            if process is None or process.returncode is not None or process.stdin is None:
+            if (
+                process is None
+                or process.returncode is not None
+                or process.stdin is None
+            ):
                 raise CodeModeError("unavailable", "Code Mode sidecar is unavailable")
             try:
                 process.stdin.write(payload)
                 await process.stdin.drain()
             except (BrokenPipeError, ConnectionResetError) as error:
-                raise CodeModeError("unavailable", "Code Mode sidecar disconnected") from error
+                raise CodeModeError(
+                    "unavailable", "Code Mode sidecar disconnected"
+                ) from error
 
     async def _drain_stderr(self) -> None:
         assert self._process is not None and self._process.stderr is not None
         # Bounded diagnostic tail; guest console only uses the formal output path.
         tail = bytearray()
-        while chunk := await self._process.stderr.read(min(4096, self.limits.control_bytes - self.limits.page_bytes)):
+        while chunk := await self._process.stderr.read(
+            min(4096, self.limits.control_bytes)
+        ):
             tail.extend(chunk)
-            if len(tail) > min(4096, self.limits.control_bytes - self.limits.page_bytes):
-                del tail[:-min(4096, self.limits.control_bytes - self.limits.page_bytes)]
+            if len(tail) > min(4096, self.limits.control_bytes):
+                del tail[: -min(4096, self.limits.control_bytes)]
         if tail:
             diagnostic = tail.decode("utf-8", errors="replace")
             for cell in tuple(self._cells.values()):
-                if cell.state not in _TERMINAL or (cell.error or {}).get("name") == "SidecarError":
-                    self._record_error(cell, {"name": "SidecarError", "message": diagnostic})
+                if (
+                    cell.state not in _TERMINAL
+                    or (cell.error or {}).get("name") == "SidecarError"
+                ):
+                    self._record_error(
+                        cell, {"name": "SidecarError", "message": diagnostic}
+                    )
 
     async def _read_messages(self) -> None:
         assert self._process is not None and self._process.stdout is not None
@@ -288,39 +368,66 @@ class CodeModeHost:
                 if kind == "admitted":
                     cell.admitted.set_result(None)
                 elif kind == "rejected":
-                    cell.admitted.set_exception(CodeModeError(message["code"], message["message"]))
+                    cell.admitted.set_exception(
+                        CodeModeError(message["code"], message["message"])
+                    )
                 elif kind == "running":
                     if cell.state not in _TERMINAL:
                         cell.state = "running"
                 elif kind == "output":
                     if cell.explicitly_stopped:
-                        await self._safe_send({"type": "release", "cell_id": cell.cell_id, "bytes": message["charge"]})
+                        await self._safe_send(
+                            {
+                                "type": "release",
+                                "cell_id": cell.cell_id,
+                                "bytes": message["charge"],
+                            }
+                        )
                     else:
-                        self._append_output(cell, _Output(message["record"], message["charge"]))
+                        self._append_output(
+                            cell, _Output(message["record"], message["charge"])
+                        )
                 elif kind in ("call", "prepare", "name_hint"):
                     self._accept_request(cell, message)
                 elif kind == "retained":
                     self._complete_retention(cell, message)
                 elif kind == "discard_preparation":
-                    cell.preparations.pop(require_id(message["preparation"], "request"), None)
+                    cell.preparations.pop(
+                        require_id(message["preparation"], "request"), None
+                    )
                 elif kind == "delivered":
-                    pending = cell.pending.get(require_id(message["request_id"], "request"))
+                    pending = cell.pending.get(
+                        require_id(message["request_id"], "request")
+                    )
                     if pending is not None:
                         pending.delivered = True
                         pending.charge = 0  # Worker released the original parameters.
-                        if pending.handshake is not None and not pending.handshake.done():
+                        if (
+                            pending.handshake is not None
+                            and not pending.handshake.done()
+                        ):
                             pending.handshake.set_result(None)
                 elif kind == "terminal":
-                    cell.state = ("failed" if cell.output_delivery_rejected and not cell.explicitly_stopped
-                                  else message["state"])
+                    cell.state = (
+                        "failed"
+                        if cell.output_delivery_rejected and not cell.explicitly_stopped
+                        else message["state"]
+                    )
                     self._record_error(cell, message.get("error"))
-                    self._notify_closed(cell)
                     cell.terminal_event.set()
                     cell.cancelled.set()
                     cell.preparations.clear()
                     for pending in cell.pending.values():
-                        if pending.handshake is not None and not pending.handshake.done():
-                            pending.handshake.set_exception(CodeModeError("unavailable", "Cell stopped before Promise delivery"))
+                        if (
+                            pending.handshake is not None
+                            and not pending.handshake.done()
+                        ):
+                            pending.handshake.set_exception(
+                                CodeModeError(
+                                    "unavailable",
+                                    "Cell stopped before Promise delivery",
+                                )
+                            )
                 elif kind == "vm_released":
                     cell.vm_released.set()
                 cell.changed.set()
@@ -335,18 +442,25 @@ class CodeModeHost:
                 except ProcessLookupError:
                     pass
             if self._configured is not None and not self._configured.done():
-                self._configured.set_exception(CodeModeError("runtime_unavailable", failure))
+                self._configured.set_exception(
+                    CodeModeError("runtime_unavailable", failure)
+                )
             for cell in tuple(self._cells.values()):
                 if not cell.admitted.done():
-                    cell.admitted.set_exception(CodeModeError("runtime_unavailable", failure))
+                    cell.admitted.set_exception(
+                        CodeModeError("runtime_unavailable", failure)
+                    )
                 if cell.state not in _TERMINAL:
                     cell.state = "failed"
-                    self._record_error(cell, {"name": "SidecarError", "message": failure})
+                    self._record_error(
+                        cell, {"name": "SidecarError", "message": failure}
+                    )
                 for pending in cell.pending.values():
                     if pending.handshake is not None and not pending.handshake.done():
-                        pending.handshake.set_exception(CodeModeError("unavailable", failure))
+                        pending.handshake.set_exception(
+                            CodeModeError("unavailable", failure)
+                        )
                 cell.vm_released.set()
-                self._notify_closed(cell)
                 cell.terminal_event.set()
                 cell.cancelled.set()
                 for reservation in cell.reservations.values():
@@ -355,55 +469,83 @@ class CodeModeHost:
                 cell.reservations.clear()
                 cell.changed.set()
 
-    def _notify_closed(self, cell: _Cell) -> None:
-        if cell.terminal_event.is_set() or cell.on_cell_closed is None:
-            return
-        try:
-            cell.on_cell_closed(cell.cell_id)
-        except Exception as error:
-            self._record_error(cell, {"name": "CleanupError", "message": str(error)[:512]})
-
-    async def start(self, *, source: str, source_exec_attempt_id: str, turn_id: str,
-                    snapshot: object, tool_catalog: Mapping[str, object], invoke: CodeModeInvoke,
-                    decision_available: bool,
-                    prepare_batch: CodeModePrepareBatch | None = None,
-                    on_cell_closed: Callable[[str], None] | None = None,
-                    page_budget: ToolResultPageBudget | None = None) -> str:
+    async def start(
+        self,
+        *,
+        source: str,
+        source_exec_attempt_id: str,
+        turn_id: str,
+        snapshot: object,
+        tool_catalog: Mapping[str, object],
+        invoke: CodeModeInvoke,
+        decision_available: bool,
+        prepare_batch: CodeModePrepareBatch | None = None,
+    ) -> str:
         if type(decision_available) is not bool:
-            raise CodeModeError("invalid_availability", "Code Mode Decision availability must be a boolean")
+            raise CodeModeError(
+                "invalid_availability",
+                "Code Mode Decision availability must be a boolean",
+            )
         if "decide" not in tool_catalog:
-            raise CodeModeError("invalid_catalog", "Code Mode tool directory must include decide")
-        if type(source) is not str or len(source.encode("utf-8")) > self.limits.value_bytes:
-            raise CodeModeError("source_boundary", "Code Mode source exceeds the single-source UTF-8 boundary")
+            raise CodeModeError(
+                "invalid_catalog", "Code Mode tool directory must include decide"
+            )
+        if type(source) is not str:
+            raise CodeModeError("source_boundary", "Code Mode source must be a string")
         if prepare_batch is None:
-            from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import prepare_batch_refs
+            from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import (
+                prepare_batch_refs,
+            )
+
             prepare_batch = prepare_batch_refs
         # Freeze the complete exact schemas; dispatch still checks live capability facts.
-        catalog_json = json.dumps(dict(tool_catalog), ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        catalog_json = json.dumps(
+            dict(tool_catalog),
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        )
         catalog = json.loads(catalog_json)
         run_agent_fields = None
         if "run_agent" in catalog:
             try:
-                fields = catalog["run_agent"]["parameters"]["properties"]["members"]["items"]["properties"]["parameters"]["properties"]
+                fields = catalog["run_agent"]["parameters"]["properties"]["members"][
+                    "items"
+                ]["properties"]["parameters"]["properties"]
                 if not isinstance(fields, dict) or "instruction" not in fields:
                     raise ValueError("missing assignment fields")
                 run_agent_fields = list(fields)
             except (KeyError, TypeError, ValueError) as error:
-                raise CodeModeError("invalid_catalog", "run_agent requires its canonical member parameter schema") from error
+                raise CodeModeError(
+                    "invalid_catalog",
+                    "run_agent requires its canonical member parameter schema",
+                ) from error
         cell_id = random_id("cell")
-        if page_budget is not None and not page_budget.fits(encode_tool_public_json(
-                {"accepted": True, "target": cell_target(cell_id)}).decode("utf-8")):
-            raise CodeModeError("OUTPUT_PAGE_BOUNDARY", "Cell admission receipt cannot fit the result budget")
         await self._ensure_started()
-        cell = _Cell(cell_id, turn_id, source_exec_attempt_id, snapshot, catalog, invoke,
-                     prepare_batch, asyncio.get_running_loop().create_future(),
-                     on_cell_closed=on_cell_closed)
-        command = {"type": "start", "cell_id": cell_id, "source": source,
-                   "decision_available": decision_available,
-                   "run_agent_fields": run_agent_fields,
-                   "tool_names": list(catalog), "catalog_bytes": len(catalog_json.encode("utf-8")) + 256}
+        cell = _Cell(
+            cell_id,
+            turn_id,
+            source_exec_attempt_id,
+            snapshot,
+            catalog,
+            invoke,
+            prepare_batch,
+            asyncio.get_running_loop().create_future(),
+        )
+        command = {
+            "type": "start",
+            "cell_id": cell_id,
+            "source": source,
+            "decision_available": decision_available,
+            "run_agent_fields": run_agent_fields,
+            "tool_names": list(catalog),
+            "catalog_bytes": len(catalog_json.encode("utf-8")) + 256,
+        }
         if _bytes(command) > self.limits.cell_bytes + self.limits.control_bytes:
-            raise CodeModeError("ipc_boundary", "Code Mode source frame exceeds the current data boundary")
+            raise CodeModeError(
+                "ipc_boundary",
+                "Code Mode source frame exceeds the current data boundary",
+            )
         self._cells[cell_id] = cell
         try:
             await self._send(command)
@@ -420,63 +562,120 @@ class CodeModeHost:
         # No await between the live-cell decision and recording accepted submission.
         # stop() changes state in this same event-loop owner before sending control.
         if cell.cancelled.is_set():
-            asyncio.create_task(self._safe_send({"type": "release", "cell_id": cell.cell_id,
-                                                 "bytes": int(message["charge"])}))
+            asyncio.create_task(
+                self._safe_send(
+                    {
+                        "type": "release",
+                        "cell_id": cell.cell_id,
+                        "bytes": int(message["charge"]),
+                    }
+                )
+            )
             return
         request_id = require_id(message["request_id"], "request")
-        pending = _Pending(request_id,
-                           int(message["sequence"]) if message["type"] == "call" else None,
-                           str(message["tool_name"]) if message["type"] == "call" else None,
-                           int(message["charge"]))
+        pending = _Pending(
+            request_id,
+            int(message["sequence"]) if message["type"] == "call" else None,
+            str(message["tool_name"]) if message["type"] == "call" else None,
+            int(message["charge"]),
+        )
         cell.pending[request_id] = pending
-        pending.task = asyncio.create_task(self._execute_request(cell, pending, message),
-                                           name=f"code-mode:{cell.cell_id}:{request_id}")
+        pending.task = asyncio.create_task(
+            self._execute_request(cell, pending, message),
+            name=f"code-mode:{cell.cell_id}:{request_id}",
+        )
 
-    async def _execute_request(self, cell: _Cell, pending: _Pending,
-                               message: Mapping[str, object]) -> None:
+    async def _execute_request(
+        self, cell: _Cell, pending: _Pending, message: Mapping[str, object]
+    ) -> None:
         result: CodeModeToolResult | None = None
         try:
             arguments = json.loads(str(message["arguments_json"]))
             expected = list if message["type"] == "prepare" else dict
             if type(arguments) is not expected:
-                raise CodeModeError("invalid_arguments", "Preparation requires an array; tool arguments require an object")
+                raise CodeModeError(
+                    "invalid_arguments",
+                    "Preparation requires an array; tool arguments require an object",
+                )
             _json(arguments)
             if cell.cancelled.is_set() or cell.state in _TERMINAL:
-                raise CodeModeError("not_dispatched", "Cell stopped before tool submission")
+                raise CodeModeError(
+                    "not_dispatched", "Cell stopped before tool submission"
+                )
             if message["type"] == "name_hint":
                 # Pure diagnostics over this Cell's own directory: no tool
                 # executor, preparation, Agent identity or canonical write.
-                if (set(arguments) != {"kind", "name"} or type(arguments["name"]) is not str
-                        or arguments["kind"] not in ("tool", "assignment")):
-                    raise CodeModeError("invalid_arguments", "Invalid name hint request")
-                candidates = (cell.tool_catalog if arguments["kind"] == "tool" else
-                    cell.tool_catalog["run_agent"]["parameters"]["properties"]["members"]["items"]["properties"]["parameters"]["properties"])
-                result = CodeModeToolResult(value=suggest_name(arguments["name"], candidates))
+                if (
+                    set(arguments) != {"kind", "name"}
+                    or type(arguments["name"]) is not str
+                    or arguments["kind"] not in ("tool", "assignment")
+                ):
+                    raise CodeModeError(
+                        "invalid_arguments", "Invalid name hint request"
+                    )
+                candidates = (
+                    cell.tool_catalog
+                    if arguments["kind"] == "tool"
+                    else cell.tool_catalog["run_agent"]["parameters"]["properties"][
+                        "members"
+                    ]["items"]["properties"]["parameters"]["properties"]
+                )
+                result = CodeModeToolResult(
+                    value=suggest_name(arguments["name"], candidates)
+                )
             elif message["type"] == "prepare":
                 if "run_agent" not in cell.tool_catalog:
-                    raise CodeModeError("tool_unavailable", "run_agent is not in this cell's frozen catalog")
+                    raise CodeModeError(
+                        "tool_unavailable",
+                        "run_agent is not in this cell's frozen catalog",
+                    )
                 refs = cell.prepare_batch(arguments)
                 # Keep only temporary identities, not an admitted batch or Work state.
                 cell.preparations[pending.request_id] = (arguments, refs)
-                result = CodeModeToolResult(value={"request_id": pending.request_id, "refs": refs})
+                result = CodeModeToolResult(
+                    value={"request_id": pending.request_id, "refs": refs}
+                )
             else:
                 name = pending.tool_name
                 assert name is not None
                 if name not in cell.tool_catalog:
-                    raise CodeModeError("tool_unavailable", "Tool is not in this cell's frozen catalog")
+                    raise CodeModeError(
+                        "tool_unavailable", "Tool is not in this cell's frozen catalog"
+                    )
                 if name == "run_agent":
-                    from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import validate_batch_identities
-                    prepared = cell.preparations.pop(require_id(message.get("preparation"), "request"), None)
+                    from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import (
+                        validate_batch_identities,
+                    )
+
+                    prepared = cell.preparations.pop(
+                        require_id(message.get("preparation"), "request"), None
+                    )
                     if prepared is None:
-                        raise CodeModeError("invalid_batch", "Batch does not own prepared identities")
+                        raise CodeModeError(
+                            "invalid_batch", "Batch does not own prepared identities"
+                        )
                     identities, refs = prepared
                     validate_batch_identities(arguments, refs)
-                    if any(("target" in identity) != ("target" in member["parameters"])
-                           for identity, member in zip(identities, arguments["members"], strict=True)):
-                        raise CodeModeError("invalid_batch", "Batch target changed after identities were prepared")
-                invocation = CodeModeInvocation(cell.cell_id, pending.sequence, name, arguments,
-                                                cell.snapshot, cell.source_exec_attempt_id,
-                                                cell.agent_message_cursors, cell.cancelled)
+                    if any(
+                        ("target" in identity) != ("target" in member["parameters"])
+                        for identity, member in zip(
+                            identities, arguments["members"], strict=True
+                        )
+                    ):
+                        raise CodeModeError(
+                            "invalid_batch",
+                            "Batch target changed after identities were prepared",
+                        )
+                invocation = CodeModeInvocation(
+                    cell.cell_id,
+                    pending.sequence,
+                    name,
+                    arguments,
+                    cell.snapshot,
+                    cell.source_exec_attempt_id,
+                    cell.agent_message_cursors,
+                    cell.cancelled,
+                )
                 result = await cell.invoke(invocation)
             async with cell.delivery_lock:
                 if cell.state not in _TERMINAL:
@@ -487,16 +686,14 @@ class CodeModeHost:
                             if pending.sequence is None:
                                 cell.preparations.pop(pending.request_id, None)
                             # Preserve accepted business effects, reject only the transport.
-                            transport = CodeModeToolResult(state=result.state, error_code=error.code,
-                                error_message=str(error), read=result.read,
-                                result_id=result.result_id, result_entry_id=result.result_entry_id,
-                                output_available=result.output_available,
-                                source_coverage=result.source_coverage,
-                                source_coverage_reason=result.source_coverage_reason,
-                                output_unavailability_reason=result.output_unavailability_reason,
-                                required_facts=result.required_facts,
-                                value={"result_id": result.result_id, "result_entry_id": result.result_entry_id,
-                                       "reason": error.code})
+                            transport = CodeModeToolResult(
+                                state=result.state,
+                                error_code=error.code,
+                                error_message=str(error),
+                                result_id=result.result_id,
+                                result_entry_id=result.result_entry_id,
+                                has_result=False,
+                            )
                             await self._deliver(cell, pending, transport)
                 if not pending.delivered and pending.sequence is not None:
                     await self._late_result(cell, pending, result)
@@ -504,7 +701,12 @@ class CodeModeHost:
             if pending.sequence is None:
                 cell.preparations.pop(pending.request_id, None)
             code = error.code if isinstance(error, CodeModeError) else "bridge_error"
-            failure = CodeModeToolResult(state="FAILED", error_code=code, error_message=str(error))
+            failure = CodeModeToolResult(
+                state="FAILED",
+                error_code=code,
+                error_message=str(error),
+                has_result=False,
+            )
             async with cell.delivery_lock:
                 if cell.state not in _TERMINAL:
                     try:
@@ -515,46 +717,69 @@ class CodeModeHost:
                     await self._late_result(cell, pending, result or failure)
         finally:
             if pending.charge:
-                await self._safe_send({"type": "release", "cell_id": cell.cell_id, "bytes": pending.charge})
+                await self._safe_send(
+                    {
+                        "type": "release",
+                        "cell_id": cell.cell_id,
+                        "bytes": pending.charge,
+                    }
+                )
             cell.pending.pop(pending.request_id, None)
             cell.changed.set()
             await self._collect(cell)
 
-    async def _deliver(self, cell: _Cell, pending: _Pending, result: CodeModeToolResult) -> None:
+    async def _deliver(
+        self, cell: _Cell, pending: _Pending, result: CodeModeToolResult
+    ) -> None:
         if result.error_code is None:
             value = result.value
         else:
-            value = {"code": result.error_code, "message": result.error_message or "Tool failed",
-                     "state": result.state, "result": result.value,
-                     "read": dict(result.read) if result.read else None,
-                     "output_available": result.output_available,
-                     "source_coverage": result.source_coverage,
-                     "source_coverage_reason": result.source_coverage_reason,
-                     "output_unavailability_reason": result.output_unavailability_reason,
-                     "required_facts": thaw_tool_json_object(result.required_facts),
-                     "result_id": result.result_id, "result_entry_id": result.result_entry_id}
+            value = {
+                "code": result.error_code,
+                "message": result.error_message or "Tool failed",
+                **({"result": result.value} if result.has_result else {}),
+            }
         encoded = _json(value)
-        if len(encoded.encode("utf-8")) > self.limits.value_bytes:
-            raise CodeModeError("value_boundary", "Accepted tool result exceeds the bridge value boundary; read its accepted result body")
         pending.handshake = asyncio.get_running_loop().create_future()
-        await self._send({"type": "result", "cell_id": cell.cell_id,
-                          "request_id": pending.request_id, "json": encoded,
-                          "error": result.error_code is not None})
+        await self._send(
+            {
+                "type": "result",
+                "cell_id": cell.cell_id,
+                "request_id": pending.request_id,
+                "json": encoded,
+                "error": result.error_code is not None,
+            }
+        )
         await pending.handshake
         try:
             if result.delivery_succeeded is not None:
                 await result.delivery_succeeded()
         except Exception as error:
-            diagnostic = {"name": "DeliveryOwnerError", "code": "delivery_owner_error",
-                          "message": str(error)[:512], "result_id": result.result_id,
-                          "result_entry_id": result.result_entry_id}
-            await self._safe_send({"type": "fail", "cell_id": cell.cell_id, "error": diagnostic})
+            diagnostic = {
+                "name": "DeliveryOwnerError",
+                "code": "delivery_owner_error",
+                "message": str(error)[:512],
+                "result_id": result.result_id,
+                "result_entry_id": result.result_entry_id,
+            }
+            await self._safe_send(
+                {"type": "fail", "cell_id": cell.cell_id, "error": diagnostic}
+            )
             await cell.terminal_event.wait()
-            raise CodeModeError("delivery_owner_error", "Tool value arrived, but its delivery owner failed") from error
+            raise CodeModeError(
+                "delivery_owner_error",
+                "Tool value arrived, but its delivery owner failed",
+            ) from error
         else:
-            await self._safe_send({"type": "resume", "cell_id": cell.cell_id,
-                                   "request_id": pending.request_id,
-                                   "keep_preparation": pending.request_id in cell.preparations and result.error_code is None})
+            await self._safe_send(
+                {
+                    "type": "resume",
+                    "cell_id": cell.cell_id,
+                    "request_id": pending.request_id,
+                    "keep_preparation": pending.request_id in cell.preparations
+                    and result.error_code is None,
+                }
+            )
 
     @staticmethod
     def _complete_retention(cell: _Cell, message: Mapping[str, object]) -> None:
@@ -566,7 +791,11 @@ class CodeModeHost:
     async def _retain_data(self, cell: _Cell, size: int) -> bool:
         if size <= 0:
             return True
-        if self._process is None or self._process.returncode is not None or self._sidecar_failure is not None:
+        if (
+            self._process is None
+            or self._process.returncode is not None
+            or self._sidecar_failure is not None
+        ):
             return False
         key = random_id("request")
         while key in cell.reservations:
@@ -574,29 +803,37 @@ class CodeModeHost:
         future = asyncio.get_running_loop().create_future()
         cell.reservations[key] = future
         try:
-            await self._send({"type": "retain", "cell_id": cell.cell_id,
-                              "reservation": key, "bytes": size})
+            await self._send(
+                {
+                    "type": "retain",
+                    "cell_id": cell.cell_id,
+                    "reservation": key,
+                    "bytes": size,
+                }
+            )
             return await future
         except (CodeModeError, OSError):
             return False
         finally:
             cell.reservations.pop(key, None)
 
-    async def _late_result(self, cell: _Cell, pending: _Pending, result: CodeModeToolResult) -> None:
+    async def _late_result(
+        self, cell: _Cell, pending: _Pending, result: CodeModeToolResult
+    ) -> None:
         # Explicit cancellation keeps canonical effects readable without
         # scheduling a new model turn for a stopped script.
         if cell.explicitly_stopped or self._closed:
             return
         # Preserve canonical identity and lazily read its accepted projection.
-        retained = replace(result, delivery_succeeded=None, error_message=None)
+        retained = replace(result, delivery_succeeded=None)
         if result.read_undelivered is not None:
             retained = replace(retained, value=None)
-        pointer = {"sequence": pending.sequence, "tool_name": pending.tool_name,
-                   "state": result.state, "result_id": result.result_id,
-                   "result_entry_id": result.result_entry_id,
-                   "read": dict(result.read) if result.read else None,
-                   "output_available": result.output_available, "source_coverage": result.source_coverage,
-                   "required_facts": thaw_tool_json_object(result.required_facts)}
+        pointer = {
+            "sequence": pending.sequence,
+            "tool_name": pending.tool_name,
+            "result_id": result.result_id,
+            "result_entry_id": result.result_entry_id,
+        }
         size = _bytes(pointer) + 256
         if result.read_undelivered is None:
             try:
@@ -608,9 +845,16 @@ class CodeModeHost:
             # Pending-call admission already reserved its small canonical locator.
             # Never retain the raw value when additional data cannot be admitted.
             retained = replace(retained, value=None)
-            self._record_error(cell, {"name": "ResourceError", "code": "data_boundary",
-                          "message": "Accepted late result exceeds the cell data boundary",
-                          "result_id": result.result_id, "result_entry_id": result.result_entry_id})
+            self._record_error(
+                cell,
+                {
+                    "name": "ResourceError",
+                    "code": "data_boundary",
+                    "message": "Accepted late result exceeds the cell data boundary",
+                    "result_id": result.result_id,
+                    "result_entry_id": result.result_entry_id,
+                },
+            )
         else:
             charge = max(charge, size)
         # Stop may have fenced this Cell while retain waited for the sidecar.
@@ -619,8 +863,16 @@ class CodeModeHost:
         if cell.explicitly_stopped or self._closed:
             return
         pending.charge = 0
-        self._append_output(cell, _Output(None, charge=charge, result=retained,
-                                   sequence=pending.sequence, tool_name=pending.tool_name))
+        self._append_output(
+            cell,
+            _Output(
+                None,
+                charge=charge,
+                result=retained,
+                sequence=pending.sequence,
+                tool_name=pending.tool_name,
+            ),
+        )
 
     async def _safe_send(self, message: Mapping[str, object]) -> None:
         try:
@@ -635,16 +887,23 @@ class CodeModeHost:
             raise CodeModeError("invalid_arguments", str(error)) from error
         cell = self._cells.get(cell_id)
         if cell is None:
-            raise CodeModeError("unavailable", "Code Mode cell is unavailable in this Host")
+            raise CodeModeError(
+                "unavailable", "Code Mode cell is unavailable in this Host"
+            )
         return cell
 
     def capture_cell(self, cell_id: str) -> CodeModeCellSnapshot:
         """Capture source provenance and metadata without an output reservation."""
         self._require_query_available()
         cell = self._cell(cell_id)
-        return CodeModeCellSnapshot(cell.cell_id, cell.state, bool(cell.output),
-            cell.pending_calls, MappingProxyType(dict(cell.error)) if cell.error is not None else None,
-            cell.source_exec_attempt_id)
+        return CodeModeCellSnapshot(
+            cell.cell_id,
+            cell.state,
+            bool(cell.output),
+            cell.pending_calls,
+            MappingProxyType(dict(cell.error)) if cell.error is not None else None,
+            cell.source_exec_attempt_id,
+        )
 
     _PARTICIPATION_BITS = {"query": 1, "wait": 2, "message": 4, "stop": 8}
 
@@ -654,7 +913,9 @@ class CodeModeHost:
             cell.participation_incomplete = True
             cell.changed.set()
 
-    def observe_agent_participation(self, cell_id: str, references: tuple[CellParticipationReference, ...]) -> None:
+    def observe_agent_participation(
+        self, cell_id: str, references: tuple[CellParticipationReference, ...]
+    ) -> None:
         """Offer verified identities without waiting for advisory budget admission."""
         cell = self._cells.get(cell_id)
         if cell is None or self._closed or self._sidecar_failure is not None:
@@ -668,7 +929,10 @@ class CodeModeHost:
         for key, bits in incoming.items():
             if key in cell.participants:
                 cell.participants[key] |= bits
-            elif cell.participation_pending is not None and key in cell.participation_pending:
+            elif (
+                cell.participation_pending is not None
+                and key in cell.participation_pending
+            ):
                 cell.participation_pending[key] |= bits
             else:
                 new[key] = bits
@@ -679,15 +943,17 @@ class CodeModeHost:
             cell.participation_incomplete = True
             cell.changed.set()
             return
-        charge = sum(len(_json({"agent_id": agent, "work_id": work,
-                                "kinds": f"{bits:08x}"}).encode("utf-8"))
-                     for (agent, work), bits in new.items())
-        if charge > self.limits.value_bytes:
-            cell.participation_incomplete = True
-            cell.changed.set()
-            return
+        charge = sum(
+            len(
+                _json(
+                    {"agent_id": agent, "work_id": work, "kinds": f"{bits:08x}"}
+                ).encode("utf-8")
+            )
+            for (agent, work), bits in new.items()
+        )
         cell.participation_pending = new
         cell.changed.set()
+
         async def reserve():
             try:
                 accepted = await self._retain_data(cell, charge)
@@ -709,50 +975,98 @@ class CodeModeHost:
                     cell.participation_pending = None
                     cell.participation_task = None
                     cell.changed.set()
-        cell.participation_task = asyncio.create_task(reserve(), name=f"cell-participation:{cell_id}")
 
-    def query_cell_participants(self, cell_id: str, *, cursor: str | None = None,
-                                max_items: int = 50) -> dict[str, object]:
+        cell.participation_task = asyncio.create_task(
+            reserve(), name=f"cell-participation:{cell_id}"
+        )
+
+    def query_cell_participants(
+        self, cell_id: str, *, cursor: str | None = None, max_items: int = 50
+    ) -> dict[str, object]:
         self._require_query_available()
         cell = self._cell(cell_id)
-        if type(max_items) is not int or max_items < 1:
-            raise CodeModeError("invalid_arguments", "max_items must be a positive integer")
+        if max_items is not None and (type(max_items) is not int or max_items < 1):
+            raise CodeModeError(
+                "invalid_arguments", "max_items must be a positive integer"
+            )
         if cursor is not None and not isinstance(cursor, str):
-            raise CodeModeError("invalid_arguments", "participant cursor must be a string")
-        rows = sorted((agent + "|" + (work or ""), agent, work, bits)
-                      for (agent, work), bits in cell.participants.items())
+            raise CodeModeError(
+                "invalid_arguments", "participant cursor must be a string"
+            )
+        rows = sorted(
+            (agent + "|" + (work or ""), agent, work, bits)
+            for (agent, work), bits in cell.participants.items()
+        )
         rows = [row for row in rows if cursor is None or row[0] > cursor]
         selected = rows[:max_items]
-        coverage = "incomplete" if cell.participation_incomplete or cell.participation_pending is not None else "complete"
-        return {"participation_coverage": coverage,
-                "items": [{"agent_id": agent, "work_id": work,
-                           "kinds": [kind for kind, bit in self._PARTICIPATION_BITS.items() if bits & bit]}
-                          for _, agent, work, bits in selected],
-                "next_cursor": selected[-1][0] if len(rows) > len(selected) else None}
+        coverage = (
+            "incomplete"
+            if cell.participation_incomplete or cell.participation_pending is not None
+            else "complete"
+        )
+        return {
+            "participation_coverage": coverage,
+            "items": [
+                {
+                    "agent_id": agent,
+                    "work_id": work,
+                    "kinds": [
+                        kind
+                        for kind, bit in self._PARTICIPATION_BITS.items()
+                        if bits & bit
+                    ],
+                }
+                for _, agent, work, bits in selected
+            ],
+            "next_cursor": selected[-1][0] if len(rows) > len(selected) else None,
+        }
 
     def _require_query_available(self) -> None:
-        if (self._closed or self._sidecar_failure is not None
-                or (self._process is not None and self._process.returncode is not None)):
+        if (
+            self._closed
+            or self._sidecar_failure is not None
+            or (self._process is not None and self._process.returncode is not None)
+        ):
             raise CodeModeError("unavailable", "Code Mode Host is unavailable")
 
-    def list_cell_snapshots(self, *, cursor: str | None = None, max_items: int = 50) -> dict[str, object]:
+    def list_cell_snapshots(
+        self, *, cursor: str | None = None, max_items: int | None = 50
+    ) -> dict[str, object]:
         """Read the current Host inventory without an output reservation."""
         self._require_query_available()
         if cursor is not None:
             try:
                 require_id(cursor, "cell")
             except ValueError as error:
-                raise CodeModeError("invalid_arguments", "cursor must be a canonical Cell ID") from error
-        if type(max_items) is not int or max_items < 1:
-            raise CodeModeError("invalid_arguments", "max_items must be a positive integer")
-        cells = sorted((cell for cell in self._cells.values()
-                        if cursor is None or cell.cell_id > cursor), key=lambda cell: cell.cell_id)
+                raise CodeModeError(
+                    "invalid_arguments", "cursor must be a canonical Cell ID"
+                ) from error
+        if max_items is not None and (type(max_items) is not int or max_items < 1):
+            raise CodeModeError(
+                "invalid_arguments", "max_items must be a positive integer"
+            )
+        cells = sorted(
+            (
+                cell
+                for cell in self._cells.values()
+                if cursor is None or cell.cell_id > cursor
+            ),
+            key=lambda cell: cell.cell_id,
+        )
         selected = cells[:max_items]
-        return {"cells": [{"target": cell_target(cell.cell_id), "state": cell.state,
-                           "has_unread_output": bool(cell.output), "pending_calls": cell.pending_calls}
-                          for cell in selected],
-                "has_more": len(cells) > len(selected),
-                "next_cursor": selected[-1].cell_id if len(cells) > len(selected) else None}
+        return {
+            "cells": [
+                {
+                    "target": cell_target(cell.cell_id),
+                    "state": cell.state,
+                    "has_unread_output": bool(cell.output),
+                    "pending_calls": cell.pending_calls,
+                }
+                for cell in selected
+            ],
+            "has_more": len(cells) > len(selected),
+            "next_cursor": selected[-1].cell_id if len(cells) > len(selected) else None,
+        }
 
     def pending_output_cells(self) -> tuple[str, ...]:
         return tuple(cell.cell_id for cell in self._cells.values() if cell.output)
@@ -767,6 +1081,8 @@ class CodeModeHost:
                 cell.output_borrowing = False
                 if cell.explicitly_stopped and cell.output_lease is None:
                     await self._stop_cell(cell)
+                else:
+                    await self._collect(cell)
 
     async def _lease_output(self, cell_id: str) -> CodeModeOutputLease | None:
         """Borrow only the head record; UNKNOWN keeps this exact object owned."""
@@ -780,21 +1096,59 @@ class CodeModeHost:
         if record is None:
             result = item.result
             assert result is not None
-            body = (await result.read_undelivered() if result.read_undelivered else
-                    {"result": result.value, "read": dict(result.read) if result.read else None,
-                     "output_available": result.output_available,
-                     "source_coverage": result.source_coverage,
-                     "source_coverage_reason": result.source_coverage_reason,
-                     "output_unavailability_reason": result.output_unavailability_reason,
-                     "required_facts": thaw_tool_json_object(result.required_facts),
-                     "result_id": result.result_id, "result_entry_id": result.result_entry_id})
-            record = {"kind": "tool_result", "sequence": item.sequence,
-                      "tool_name": item.tool_name, "state": result.state, **body}
+            body = (
+                await result.read_undelivered()
+                if result.read_undelivered
+                else result.value
+            )
+            record = (
+                {"kind": "tool_result", "tool_name": item.tool_name, "value": body}
+                if result.has_result
+                else {
+                    "kind": "error",
+                    "error": {
+                        "name": "ToolError",
+                        "message": result.error_message or "Tool result unavailable",
+                    },
+                }
+            )
         # Freeze the full typed value rather than aliasing a mutable diagnostic.
         frozen = deepcopy(dict(record))
-        lease = CodeModeOutputLease(cell.cell_id, cell.turn_id, cell.source_exec_attempt_id,
-                                    item.record_sequence, MappingProxyType(frozen), cell.snapshot,
-                                    datetime.now(timezone.utc))
+        lease = CodeModeOutputLease(
+            cell.cell_id,
+            cell.turn_id,
+            cell.source_exec_attempt_id,
+            item.record_sequence,
+            MappingProxyType(frozen),
+            cell.snapshot,
+            datetime.now(timezone.utc),
+        )
+        if self._output_preparer is not None:
+            if self._output_quoter is not None:
+                quoted = await self._output_quoter(lease)
+                additional = max(0, quoted + 256 - item.charge)
+                if additional and not await self._retain_data(cell, additional):
+                    cell.output_lease = lease
+                    error = CodeModeError("data_boundary", "Prepared Cell output exceeds the current data boundary")
+                    logging.getLogger(__name__).warning("Cell output rejected cell=%s record_sequence=%s reason=%s", cell.cell_id, lease.record_sequence, error)
+                    await self.reject_output_delivery(lease, error)
+                    return None
+                item.charge += additional
+            content = await self._output_preparer(lease)
+            lease = replace(lease, record=content.record, content=content)
+            # The same current-data reservation follows the record through image
+            # preparation. Its canonical expanded quote counts each occurrence;
+            # acknowledgement, rejection and Stop release this existing charge.
+            expanded = content.resource_quote.canonical_expanded_bytes + 256
+            additional = max(0, expanded - item.charge)
+            cell.output_lease = lease
+            if additional and not await self._retain_data(cell, additional):
+                error = CodeModeError("data_boundary", "Prepared Cell output exceeds the current data boundary")
+                logging.getLogger(__name__).warning("Cell output rejected cell=%s record_sequence=%s reason=%s", cell.cell_id, lease.record_sequence, error)
+                await self.reject_output_delivery(lease, error)
+                return None
+            item.charge += additional
+            item.value = content.record
         cell.output_lease = lease
         return lease
 
@@ -802,22 +1156,33 @@ class CodeModeHost:
         cell = self._cell(lease.cell_id)
         return not self._closed and not cell.explicitly_stopped
 
-    async def acknowledge_output(self, lease: CodeModeOutputLease, *, accepted: bool = True) -> None:
+    async def acknowledge_output(
+        self, lease: CodeModeOutputLease, *, accepted: bool = True
+    ) -> None:
         cell = self._cell(lease.cell_id)
         if cell.output_lease is not lease:
-            raise CodeModeError("invalid_observation", "Output is not the current admission owner")
+            raise CodeModeError(
+                "invalid_observation", "Output is not the current admission owner"
+            )
         if not accepted and self.output_delivery_allowed(lease):
-            raise CodeModeError("invalid_observation", "A live output must remain pending until accepted")
+            raise CodeModeError(
+                "invalid_observation",
+                "A live output must remain pending until accepted",
+            )
         item = cell.output.popleft()
         assert item.record_sequence == lease.record_sequence
         cell.output_lease = None
         if item.charge:
-            await self._safe_send({"type": "release", "cell_id": cell.cell_id, "bytes": item.charge})
+            await self._safe_send(
+                {"type": "release", "cell_id": cell.cell_id, "bytes": item.charge}
+            )
         await self._collect(cell)
         if cell.output:
             self._wake_output()
 
-    async def reject_output_delivery(self, lease: CodeModeOutputLease, error: CodeModeError) -> dict[str, object]:
+    async def reject_output_delivery(
+        self, lease: CodeModeOutputLease, error: CodeModeError
+    ) -> dict[str, object]:
         """Settle a definitively rejected queue input, never an unknown write.
 
         The caller has proved this candidate was not accepted. Return its actual
@@ -825,7 +1190,9 @@ class CodeModeHost:
         """
         cell = self._cell(lease.cell_id)
         if cell.output_lease is not lease:
-            raise CodeModeError("invalid_observation", "Output is not the current admission owner")
+            raise CodeModeError(
+                "invalid_observation", "Output is not the current admission owner"
+            )
         if not isinstance(error, CodeModeError):
             raise TypeError("Rejected Cell output requires a typed CodeModeError")
         item = cell.output.popleft()
@@ -834,38 +1201,63 @@ class CodeModeHost:
         cell.output_delivery_rejected = True
         cell.cancelled.set()
         cell.state = "failed"
-        self._record_error(cell, {"name": "OutputDeliveryError", "code": error.code, "message": str(error)})
+        self._record_error(
+            cell,
+            {"name": "OutputDeliveryError", "code": error.code, "message": str(error)},
+        )
         if item.charge:
-            await self._safe_send({"type": "release", "cell_id": cell.cell_id, "bytes": item.charge})
-        await self._safe_send({"type": "fail", "cell_id": cell.cell_id, "error": dict(cell.error or {})})
+            await self._safe_send(
+                {"type": "release", "cell_id": cell.cell_id, "bytes": item.charge}
+            )
+        await self._safe_send(
+            {"type": "fail", "cell_id": cell.cell_id, "error": dict(cell.error or {})}
+        )
         cell.changed.set()
-        failure = {"cell_id": cell.cell_id, "source_turn_id": cell.turn_id,
-                   "source_exec_attempt_id": cell.source_exec_attempt_id,
-                   "record_sequence": lease.record_sequence,
-                   "delivery": "rejected", "error": deepcopy(dict(cell.error or {}))}
+        failure = {
+            "cell_id": cell.cell_id,
+            "source_turn_id": cell.turn_id,
+            "source_exec_attempt_id": cell.source_exec_attempt_id,
+            "record_sequence": lease.record_sequence,
+            "delivery": "rejected",
+            "error": deepcopy(dict(cell.error or {})),
+        }
         await self._collect(cell)
         if cell.output:
             self._wake_output()
         return failure
 
-    async def wait_state(self, cell_id: str, yield_time_ms: int = 1_000) -> dict[str, object]:
+    async def wait_state(
+        self, cell_id: str, yield_time_ms: int = 1_000
+    ) -> dict[str, object]:
         if type(yield_time_ms) is not int or not 0 <= yield_time_ms <= 30_000:
-            raise CodeModeError("invalid_arguments", "yield_time_ms must be between 0 and 30000")
+            raise CodeModeError(
+                "invalid_arguments", "yield_time_ms must be between 0 and 30000"
+            )
         cell = self._cell(cell_id)
         if cell.state not in _TERMINAL and yield_time_ms:
             try:
                 await asyncio.wait_for(cell.terminal_event.wait(), yield_time_ms / 1000)
             except TimeoutError:
                 pass
-        value: dict[str, object] = {"target": cell_target(cell.cell_id), "state": cell.state,
-                                    "pending_calls": cell.pending_calls}
+        value: dict[str, object] = {
+            "target": cell_target(cell.cell_id),
+            "state": cell.state,
+            "pending_calls": cell.pending_calls,
+        }
         if cell.error is not None:
-            value["error_code"] = cell.error.get("code", cell.error.get("name", "Error"))
+            value["error"] = dict(cell.error)
         return value
 
     async def _collect(self, cell: _Cell) -> None:
-        if (self._cells.get(cell.cell_id) is cell and cell.state in _TERMINAL and not cell.pending and not cell.output
-                and cell.output_lease is None and not cell.output_borrowing and cell.vm_released.is_set()):
+        if (
+            self._cells.get(cell.cell_id) is cell
+            and cell.state in _TERMINAL
+            and not cell.pending
+            and not cell.output
+            and cell.output_lease is None
+            and not cell.output_borrowing
+            and cell.vm_released.is_set()
+        ):
             if cell.participation_task is not None:
                 cell.participation_task.cancel()
             self._cells.pop(cell.cell_id, None)
@@ -877,8 +1269,14 @@ class CodeModeHost:
         # join, database observation or resource release can suspend Stop.
         cell.explicitly_stopped = True
         cell.cancelled.set()
-        retained = cell.output[0] if cell.output and (cell.output_lease is not None or cell.output_borrowing) else None
-        cell.discarded_output_charge += sum(item.charge for item in cell.output if item is not retained)
+        retained = (
+            cell.output[0]
+            if cell.output and (cell.output_lease is not None or cell.output_borrowing)
+            else None
+        )
+        cell.discarded_output_charge += sum(
+            item.charge for item in cell.output if item is not retained
+        )
         cell.output = deque(() if retained is None else (retained,))
 
     def mark_turn_stopped(self, turn_id: str) -> None:
@@ -890,34 +1288,33 @@ class CodeModeHost:
         for cell in tuple(self._cells.values()):
             self._mark_cell_stopped(cell)
 
-    async def _stop_cell(self, cell: _Cell, *, page_budget: ToolResultPageBudget | None = None) -> dict[str, object]:
-        # Cancellation can race normal completion or failure. Quote every real
-        # terminal receipt before fencing; pending_calls remains UI-only here.
-        states = (cell.state,) if cell.state in _TERMINAL else sorted(_TERMINAL)
-        if page_budget is not None:
-            for state in states:
-                receipt = {"target": cell_target(cell.cell_id), "state": state}
-                if not page_budget.fits(encode_tool_public_json(receipt).decode("utf-8")):
-                    raise CodeModeError("OUTPUT_PAGE_BOUNDARY", "Cell stop receipt cannot fit the result budget")
+    async def _stop_cell(self, cell: _Cell) -> dict[str, object]:
         self._mark_cell_stopped(cell)
         released, cell.discarded_output_charge = cell.discarded_output_charge, 0
         if released:
-            await self._safe_send({"type": "release", "cell_id": cell.cell_id, "bytes": released})
+            await self._safe_send(
+                {"type": "release", "cell_id": cell.cell_id, "bytes": released}
+            )
         if cell.state not in _TERMINAL:
             cell.cancelled.set()
             await self._safe_send({"type": "stop", "cell_id": cell.cell_id})
             await cell.terminal_event.wait()
-        value = {"target": cell_target(cell.cell_id), "state": cell.state,
-                 "pending_calls": cell.pending_calls}
+        value = {
+            "target": cell_target(cell.cell_id),
+            "state": cell.state,
+            "pending_calls": cell.pending_calls,
+        }
+        if cell.error is not None:
+            value['error'] = dict(cell.error)
         await self._collect(cell)
         if cell.output_lease is not None:
             self._wake_output()
         return value
 
-    async def stop(self, cell_id: str, *, page_budget: ToolResultPageBudget | None = None) -> dict[str, object]:
+    async def stop(self, cell_id: str) -> dict[str, object]:
         if self._closed:
             raise CodeModeError("unavailable", "Code Mode Host is closed")
-        return await self._stop_cell(self._cell(cell_id), page_budget=page_budget)
+        return await self._stop_cell(self._cell(cell_id))
 
     async def stop_turn(self, turn_id: str) -> None:
         self.mark_turn_stopped(turn_id)
@@ -928,35 +1325,57 @@ class CodeModeHost:
     def snapshot_cell_index(self) -> tuple[dict[str, object], ...]:
         if self._closed:
             return ()
-        return tuple({"cell_id": cell.cell_id, "state": cell.state,
-                      "has_unread_output": bool(cell.output), "pending_calls": cell.pending_calls}
-                     for cell in self._cells.values())
+        return tuple(
+            {
+                "cell_id": cell.cell_id,
+                "state": cell.state,
+                "has_unread_output": bool(cell.output),
+                "pending_calls": cell.pending_calls,
+            }
+            for cell in self._cells.values()
+        )
 
     def freeze_compaction_handoff(self) -> tuple[dict[str, object], ...]:
         """Observe pending work on the owner loop without consuming or retaining it."""
         self._require_query_available()
         return tuple(
-            {"target": cell_target(cell.cell_id), "state": cell.state,
-             "has_unread_output": bool(cell.output), "pending_calls": cell.pending_calls}
+            {
+                "target": cell_target(cell.cell_id),
+                "state": cell.state,
+                "has_unread_output": bool(cell.output),
+                "pending_calls": cell.pending_calls,
+            }
             for cell in sorted(self._cells.values(), key=lambda item: item.cell_id)
             if (cell.state not in _TERMINAL or cell.output or cell.pending)
         )
 
     def has_live_cells(self) -> bool:
-        return any(cell.state not in _TERMINAL or cell.pending for cell in self._cells.values())
+        return any(
+            cell.state not in _TERMINAL or cell.pending for cell in self._cells.values()
+        )
 
     @property
     def local_children_stopped(self) -> bool:
-        return (self._closed and not self._startup.locked()
-                and (self._process is None or self._process.returncode is not None))
+        return (
+            self._closed
+            and not self._startup.locked()
+            and (self._process is None or self._process.returncode is not None)
+        )
 
     @property
     def physical_close_complete(self) -> bool:
-        return (self.local_children_stopped
-                and all(pending.task is None or pending.task.done()
-                        for cell in self._cells.values() for pending in cell.pending.values())
-                and all(task is None or task.done()
-                        for task in (self._reader, self._stderr_reader)))
+        return (
+            self.local_children_stopped
+            and all(
+                pending.task is None or pending.task.done()
+                for cell in self._cells.values()
+                for pending in cell.pending.values()
+            )
+            and all(
+                task is None or task.done()
+                for task in (self._reader, self._stderr_reader)
+            )
+        )
 
     async def aclose(self) -> None:
         if self._closed:
@@ -968,8 +1387,12 @@ class CodeModeHost:
         if self._process is not None:
             await self._safe_send({"type": "close"})
         # In-flight effects settle in their existing owner; VM termination never drops them.
-        tasks = [pending.task for cell in self._cells.values() for pending in cell.pending.values()
-                 if pending.task is not None]
+        tasks = [
+            pending.task
+            for cell in self._cells.values()
+            for pending in cell.pending.values()
+            if pending.task is not None
+        ]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         if self._process is not None:
@@ -986,4 +1409,8 @@ class CodeModeHost:
             pass
         # An ambiguous queue admission still owns its original record until
         # exact confirmation. Closing never manufactures another delivery.
-        self._cells = {key: cell for key, cell in self._cells.items() if cell.output_lease is not None}
+        self._cells = {
+            key: cell
+            for key, cell in self._cells.items()
+            if cell.output_lease is not None
+        }

@@ -1,205 +1,131 @@
 ---
 name: pulsara-code-mode
-description: Use for ROOT agent assignments, continuations and waits, including a single assignment, and for composing ordinary tools and optional semantic judgments in JavaScript. Execution requires ROOT bypass-permissions mode; native query, message and stop controls remain independently available.
+description: Compose ROOT tool calls, explicit text/image output, reusable Agent work, and optional semantic judgments in independent JavaScript Cells. Requires bypass-permissions.
 ---
 
 # Pulsara Code Mode
 
+Use native `exec_cell({code})`, or `exec_cell({target:{kind:"PATH",path}})` to
+run an independent script. Top-level await and return are available. Each Cell
+has private variables; copy actual Targets from output or query them in a later
+Cell. Node modules, imports, fetch, and timers are unavailable.
+
+**Before writing a business Cell, read the relevant [API pages](references/tool-calling/api/index.md)**
+for its arguments, complete return fields and errors. Select the APIs you need.
+
 ## Compose tools and agent work
 
-ROOT uses Code Mode to create agents, assign or continue work, and wait for their
-messages or results, including a single assignment. Connect ordinary tools and
-agent operations in the same script; a short script can be enough.
+`tools.name(args)` returns the tool's complete saved business value. Its declared
+`content` is an ordered array of `{type,value}` items. A text item's value is a
+string, an image item's value is an IMAGE_REF Target, and an object item's value
+is the declared JSON object. Tool failures throw; `err.result`, when present,
+contains the actual complete business value. A save or delivery failure can throw
+while that value still has `meta.status:"SUCCESS"`; read the error message as
+well as the business outcome. Do not repeat an action to recover its response.
 
-ROOT can also use native `query_agents`, `send_agent_message` and `stop_agent`
-to inspect, supplement or stop work directly while scripts run. These are normal
-control entry points, available independently of Cell capacity and the Code Mode
-runtime. Their `tools.*` counterparts operate on the same Agent and Work targets.
-New assignments and waits use Code Mode; native messages supplement active work.
-The control tools stay listed in every permission mode. Execution requires
-bypass-permissions; other modes return a hint stating that requirement.
+Use `console.log(...)` or a top-level return to disclose selected values to ROOT.
+Actual image items are recognized recursively; bare Targets, paths and strings
+remain text. Use the declared result fields directly:
 
-For ordinary tools offered in both forms, native calls and `tools.name(...)`
-share their arguments and operate on the same files, processes and saved results.
-Use returned Agent/Work targets across scripts and native controls. Query existing
-agents when their findings may help, then reuse their actual AGENT targets with
-`tools.run_agent`. See [agent reuse](references/agent-orchestration/examples.md#4-reuse-an-agent-in-another-cell).
+```js
+const notes = await tools.read_file({target:{kind:"PATH",path:"README.md"}});
+const picture = await tools.view_image({target:{kind:"PATH",path:"chart.png"}});
+console.log({content:[...notes.content, ...picture.content]});
+```
 
 ## Start with one script
 
-Pass JavaScript through `exec_cell`'s `code`, or use `path` for an existing script.
-Top-level `await` is supported. Call available tools as `tools.name(arguments)`;
-the resolved value is the public JSON object or text, without a `.data` wrapper.
-
-For a focused investigation, read project context and assign one agent:
-
-```js
-const readme = await tools.read_file({
-  target: { kind: "PATH", path: "README.md" }, limit: 120
-});
-const investigation = await tools.run_agent([
-  {
-    work_title: "Investigate parser initialization",
-    instruction: `Explain how the project's main entry point initializes.
-Read the relevant source files. This README excerpt is starting context:
-${readme.content}`
-  }
-]);
-console.log({ agents: investigation.agents, works: investigation.works });
-const investigationWait = await tools.wait_agent({
-  agents: [...new Map(investigation.agents.map(target => [target.agent_id, target])).values()],
-  until: "idle"
-});
-if (investigationWait.state !== "settled") console.log({ observation: investigationWait });
-const result = await tools.query_agents({ target: investigation.works[0] });
-console.log(result);
-```
-
-`run_agent` always takes an array, including one assignment. Its result has
-`agents`, `works`, and `details` arrays in the same order as the input. An AGENT
-identifies the reusable conversation; a WORK identifies this assignment.
-`work_title` is an optional display title for the assignment, not an identifier.
-Use `target: investigation.agents[0]` to give the same agent another Work.
-
-The runtime randomly assigns subagent Session names from a pool of 100 historical
-mathematicians, physicists, and computer scientists. These display names can help
-you distinguish agents, but may repeat. Do not supply a name as a tool parameter
-or use it as an identifier; use the actual Target instead.
-
-When several assignments are ready together, put them in one array. Each receives
-its own Work and result position. To give parallel teammates each other's identity
-before they start, use synchronous instruction functions with the preallocated
-`agents` array. `({ agents }) => ...` declares a callback-local parameter; it does
-not create an outer `agents` variable. A plain template string is evaluated before
-`run_agent` starts, so current-batch references belong inside the callback. The
-outer `team` result becomes available only after the dispatch resolves. Callbacks
-receive identities, not reports or promises of future results.
-
-This example copies the latest ROOT turn for the task context;
-include explicit file paths and requirements when that turn is not sufficient:
+`tools.run_agent` accepts an ordered array, including a one-item array. Omit
+`target` to create an Agent; supply an actual AGENT Target to append a Work to an
+existing Agent. `work_title` is optional display text. Identities are Targets,
+not names or titles.
 
 ```js
-const team = await tools.run_agent([
-  {
-    work_title: "Check requirements",
-    context: { mode: "last_n", turns: 1 },
-    instruction: ({ agents }) => `Check the implementation against the requirements.
-Your independent reviewer is ${JSON.stringify(agents[1])}. Share concrete disagreements
-if needed, then finish with your own evidence.`
-  },
-  {
-    work_title: "Check boundary cases",
-    context: { mode: "last_n", turns: 1 },
-    instruction: ({ agents }) => `Independently test boundary cases.
-Your requirements reviewer is ${JSON.stringify(agents[0])}. Share concrete disagreements
-if needed, then finish with your own evidence.`
-  }
+const accepted = await tools.run_agent([
+  {instruction:"Investigate the parser and report evidence.",
+   work_title:"Investigate parser", materials:[{kind:"CONTEXT_MATERIAL",turns:1}]},
+  {instruction:"Review the investigation's reasoning.",
+   depends_on:({works})=>[works[0]]}
 ]);
-console.log({ agents: team.agents, works: team.works });
-const teamWait = await tools.wait_agent({
-  agents: [...new Map(team.agents.map(target => [target.agent_id, target])).values()],
-  until: "idle"
-});
-if (teamWait.state !== "settled") console.log({ observation: teamWait });
-console.log(await Promise.all(team.works.map(target => tools.query_agents({ target }))));
+const works = accepted.content.map(part=>part.value.work);
+console.log(accepted);
+const observed = await tools.wait_agent({works,settle:"all",timeout_seconds:60});
+console.log(observed);
+console.log(await tools.query_agents({target:works[0]}));
 ```
 
-The functions only construct parameters; they must not call tools or start async
-work. To start a review after another assignment succeeds, set
-`depends_on: ({works}) => [works[0]]` on the review assignment. Its prerequisite
-final is supplied directly. Independent discussion and success dependencies serve
-different purposes; do not wait for a reply from work blocked on your completion.
-See [coordination](references/agent-orchestration/coordination.md) for both forms.
+Each result object contains `agent`, `work`, and `work_status`, in assignment
+order. Acceptance does not imply completion. A wait can time out or wake on a
+message; check `meta.wait_reason` and every record before treating work as done.
+Query a retained WORK for its current state and full
+instruction and actual final answer or diagnostic. Reuse its `agent` Target for
+follow-up work. An Agent's existing context remains in order.
 
-`wait_agent` accepts distinct subagent AGENT targets. Use `until: "idle"`
-(the default) for an empty running and queued workload, including assignments
-accepted during the wait. Use `until: "work_end"` for the Work running at the
-first observation; it never follows a successor. Both modes default to
-`settle: "all"` and a 30-second timeout (0–300 seconds). Messages from any listed
-Agent can return early. Check `state` and `observations`, then query retained
-WORK targets for actual results; timeout or a message does not establish completion.
-Deduplicate a dispatch's `agents` array by `agent_id`, preserving complete targets.
-See [coordination](references/agent-orchestration/coordination.md#choose-what-to-wait-for)
-for first/all, queued-only targets and subsequent independent observations.
+`materials` can explicitly select ROOT history with
+`{kind:"CONTEXT_MATERIAL",turns:1|2|3}` or an already ended WORK. Selection works
+for both new and reused Agents and freezes the history at dispatch time. No
+history is copied by default. `depends_on` requires successful completion; a WORK
+also listed in materials is delivered only once as a dependency. The main
+instruction is separate from all history and Work materials. Independent
+teammates can coordinate by messages; dependencies wait for successful results.
+Do not make a Work wait for a reply from one blocked on its own completion.
 
-A Cell has its own JavaScript variables. When another Cell needs a returned target,
-log it with `console.log`, then copy that complete target into the next script or
-query it through `query_agents`. A variable from the previous Cell does not exist
-in a new one. The Agent's conversation and accepted Works remain available.
-For continuation, pass the retained AGENT target to `run_agent`; observe that
-Agent and query the new WORK targets returned by the call. Keep old WORK targets
-for their original results. Titles and query positions do not substitute for identity.
+Instruction and depends_on can be synchronous functions over preallocated
+`{agents,works}` references. They may not call tools or return promises. References
+identify the current batch, not reports that have not happened yet.
 
-`console.log(...)` sends selected values to ROOT. Each call is one independent
-input, including repeated text. Internal tool results stay in the script; Work
-finals are not automatically reported to ROOT. Read and log the result when ROOT
-needs it. Agent messages retain their normal delivery to the active turn.
+`tools.wait_agent({works})` observes exact Works, including queued ones.
+`tools.wait_agent({agents})` observes empty running and queued workloads. Provide
+one branch, not both. Both support `settle:"all"|"first"` and a 0–300 second
+observation timeout. Every SUCCESS returns all requested records in input order.
+Read `meta.wait_reason`: condition_met, timeout, or AGENT-only message_available.
+Messages do not complete a WORK wait and message notification does not consume
+its body. Native query_agents, send_agent_message, and stop_agent remain direct
+ROOT controls, independent of Cell slots. Subagents have native query/message
+and wait_message; they have no Code Mode API.
 
 ## Use semantic judgments in the same script
 
-Use `tools.decide({ condition, inputs })` wherever the script needs a true/false
-judgment about natural-language meaning, before, between or after other tools or
-agent operations. Write one clear yes/no condition and choose the material for
-each independent judgment. An input can combine tool results, attributed dialogue,
-documents or agent reports; include the context that condition needs.
+```js
+const inputs = ["The export failed.", "The file is correct."];
+if (tools.decide.available()) {
+  try {
+    const result = await tools.decide({condition:"Does this report an export failure?",inputs});
+    const decisions = result.content[0].value.decisions;
+    console.log(inputs.filter((_,i)=>decisions[i]));
+  } catch (err) {
+    console.log(err.result !== undefined ? err.result : String(err.message ?? err));
+  }
+} else {
+  console.log({condition:"Does this report an export failure?",inputs});
+}
+```
 
-The only arguments are `condition` and `inputs`. The result is
-`{ decisions: boolean[] }` in input order; one text still uses `inputs: [text]`.
-Use the booleans in expressions, filters, branches or loop conditions, then continue
-with the required tools. Keep source targets and Agent/Work references on the
-original objects. Intermediate results can stay in the script until ROOT needs them.
-
-Every call belongs inside `if (tools.decide.available())`. This local synchronous
-method returns a boolean fixed at Cell startup; it makes no tool or network call.
-When false, output the pending condition, material and relevant Work references
-for ROOT to continue. Reuse work already completed and proceed without asking the
-user to configure Decision as a prerequisite. A new Cell picks up configuration
-changes; an actual call still handles settings changes and service errors normally.
-
-Use JavaScript for exact comparisons, counts, dates and string matching. ROOT can
-judge small amounts of material already in its context directly. Read missing
-context before a semantic judgment; for example, include the preceding proposal
-with “yes, do that.” Process paged sources as the task needs. See the
-[interface](references/tool-calling/patterns.md#semantic-conditions) and
-[worked examples](references/tool-calling/examples.md#4-identify-requirements-in-saved-discussions).
+Read enough material before judging it; a decision cannot supply missing facts.
+Decision configuration is optional: continue from readable evidence when absent.
+available() is local, synchronous, and fixed at Cell startup; it is not a service
+health check. Actual calls use the current saved Decision connection. Empty inputs
+need no configuration. Decisions are booleans in input order; a failure never
+substitutes false or a successful prefix. Use JavaScript for exact comparisons.
 
 ## Follow the running script
 
-- Each `exec_cell` immediately returns accepted with its CELL target. Its variables
-  are private to that script. Output actual targets needed by later scripts.
-- Outputs arrive actively. Do not resubmit a script to retrieve logs. Native
-  `manage_cell` with `action:"wait"` observes terminal state or its observation
-  timeout; output does not finish that wait or appear in it.
-- Native `query_cells` lists retained live cells, or reads a selected CELL's state
-  and frozen source. Reading does not consume output. Historical source remains
-  available through the original exec record after the live Cell retires.
-- ROOT uses `tools.wait_agent({agents: [...], until: "idle"})` for empty queues
-  or `until: "work_end"` for initially running Works. The result describes the
-  observation; read retained WORK finals or diagnostics with `query_agents`. Dependencies/materials
-  pass results directly between Work inputs without ROOT relaying them.
-- `manage_cell` with `action:"stop"` stops further script execution and submissions.
-  Accepted agent work continues; use native `stop_agent` to stop that work too.
+Native query_cells lists currently retained Cells or reads a selected Cell's full
+frozen source. Native manage_cell waits for state or stops further script
+execution and submissions. Neither consumes or replays output. Stopping a Cell
+preserves accepted effects and does not stop its accepted Agent Works. Use
+stop_agent for those Works. Already queued output retains its normal lifecycle;
+explicit stop suppresses later unaccepted output and late-result supplements.
 
-A result's `next` call continues its source. When native output omits part of an
-accepted result, its `read` call reads that frozen body with `read_file` and the
-exact SESSION_ENTRY target. Copy that target into `write_file.source` to create a
-new file containing the whole body. These operations never repeat the original
-action. A complete saved body covers that invocation's returned content, which
-may be only one source page.
-
-The environment provides JavaScript, Promises, `tools`, and `console.log`.
-Access files, processes and remote services through tools; Node modules, `fetch`,
-imports and timers are not available. Code Mode is ROOT-only in bypass-permissions
-mode. Decision is optional and independent of memory reranking; its absence does
-not disable other tools or agent work.
+See [results and failures](references/tool-calling/results-and-errors.md) for
+actual err.result handling, image failures and stopped scripts. Cell output has
+no read_file or export Target; native NEXT belongs to saved tool results.
 
 ## Reference guide
 
-| Need | Reference |
-| --- | --- |
-| JS tools, semantic conditions, sequential/parallel calls, MCP | [Tool patterns](references/tool-calling/patterns.md) |
-| Search/read, follow a process, save output, judge text and continue | [Tool examples](references/tool-calling/examples.md) |
-| Errors, active output, saved bodies, images | [Results and errors](references/tool-calling/results-and-errors.md) |
-| Agent reuse, teammate references, messages, dependencies, waiting and stopping | [Coordination](references/agent-orchestration/coordination.md) |
-| Specialists, teammates, dependencies, existing-agent reuse and native control | [Agent examples](references/agent-orchestration/examples.md) |
-| Investigation, review, revision and implementation with semantic branches | [Workflows](references/agent-orchestration/workflows.md) |
+- [Tool calling patterns](references/tool-calling/patterns.md)
+- [Results, failures and explicit images](references/tool-calling/results-and-errors.md)
+- [Tool examples](references/tool-calling/examples.md)
+- [Agent coordination](references/agent-orchestration/coordination.md)
+- [Agent examples](references/agent-orchestration/examples.md)
+- [Workflows](references/agent-orchestration/workflows.md)

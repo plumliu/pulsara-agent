@@ -1,115 +1,161 @@
-"""Closed query inputs and disposable, bounded model projections.
-
-Native owners retain discovery, source validation and execution authority. This
-module owns only selection shapes and one response page; targets are not permits.
-"""
+"""Closed capability query branches; business scope is independent of paging."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from pathlib import Path
-
+from collections.abc import Mapping
 from jsonschema import Draft202012Validator
 
-from pulsara_agent.identity import ID_PAYLOAD_PATTERN
-from pulsara_agent.primitives.context import canonical_json_bytes
+from pulsara_agent.conversation_kernel.capability_targets import exact_target_path
 
-KINDS = (
-    "SKILL",
-    "HOOK_SOURCE",
-    "MCP_SERVER",
-    "MCP_TOOL",
-    "MCP_RESOURCE",
-    "MCP_RESOURCE_TEMPLATE",
-    "MCP_PROMPT",
-)
-CHILD_KINDS = frozenset(KINDS[3:])
+KINDS = ("SKILL", "HOOK", "MCP", "PLUGIN")
 TEXT = {"type": "string", "minLength": 1}
 SCOPE = {"type": "string", "enum": ["USER", "WORKSPACE"]}
 
 
 def _object(fields, required=None):
-    return {
-        "type": "object",
-        "properties": fields,
-        "required": list(fields) if required is None else required,
-        "additionalProperties": False,
+    return {"type": "object", "properties": fields,
+            "required": list(fields) if required is None else required,
+            "additionalProperties": False}
+
+
+def capability_target_schema(kind):
+    fields = {
+        "PLUGIN": {"plugin_path": TEXT},
+        "SKILL": {"skill_path": TEXT},
+        "HOOK_SOURCE": {"config_path": TEXT},
+        "MCP_CONNECTION": {"config_path": TEXT, "server_id": TEXT},
+        "MCP_TOOL": {"server_id": TEXT, "remote_tool_name": TEXT},
+        "MCP_RESOURCE": {"server_id": TEXT, "uri": TEXT},
+        "MCP_TOOL_REF": {"tool_ref": TEXT},
     }
-
-
-def _target(kind, fields):
-    return _object({"kind": {"const": kind}, **fields})
-
-
-def capability_target_schema(kind, *, source_kind=None):
-    """One closed object identity, shared by query and management contracts."""
-    if kind == "PLUGIN":
-        return _target(kind, {"scope": SCOPE, "plugin_id": TEXT})
-    if kind in {"HOOK_SOURCE", "MCP_CONNECTION"}:
-        if source_kind not in {"LOCAL", "PLUGIN"}:
-            raise ValueError("installation target requires a source kind")
-        fields = {"scope": SCOPE, "source_kind": {"const": source_kind}}
-        if source_kind == "PLUGIN":
-            fields["plugin_id"] = TEXT
-        if kind == "MCP_CONNECTION":
-            fields["server_id"] = TEXT
-        return _target(kind, fields)
-    if kind == "MCP_SERVER":
-        return _target(kind, {"runtime_server_id": {"type": "string", "pattern": f"^mcp-server:{ID_PAYLOAD_PATTERN}$", "maxLength": 37}})
-    if kind == "SKILL":
-        return _target(kind, {"skill_path": TEXT})
-    names = {
-        "MCP_TOOL": "tool_name",
-        "MCP_RESOURCE": "uri",
-        "MCP_RESOURCE_TEMPLATE": "uri_template",
-        "MCP_PROMPT": "name",
-    }
-    return _target(kind, {"server_id": TEXT, names[kind]: TEXT})
-
-
-def target_schema(*, parent=False):
-    shapes = [capability_target_schema("PLUGIN")]
-    for kind in ("MCP_CONNECTION",) if parent else ("HOOK_SOURCE", "MCP_CONNECTION"):
-        shapes.extend(
-            capability_target_schema(kind, source_kind=source)
-            for source in ("LOCAL", "PLUGIN")
-        )
-    shapes.append(capability_target_schema("MCP_SERVER"))
-    if not parent:
-        shapes.extend(
-            capability_target_schema(kind)
-            for kind in (
-                "SKILL",
-                "MCP_TOOL",
-                "MCP_RESOURCE",
-                "MCP_RESOURCE_TEMPLATE",
-                "MCP_PROMPT",
-            )
-        )
-    return {"oneOf": shapes}
-
-
-def _list_input_schema():
-    return _object(
-        {
-            "kind": {"type": "string", "enum": list(KINDS)},
-            "scope": SCOPE,
-            "source_kind": {"type": "string", "enum": ["LOCAL", "PLUGIN", "BUNDLED"]},
-            "parent": target_schema(parent=True),
-            # Existing MCP directory per-page boundary, not a total inventory cap.
-            "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
-            "offset": {"type": "integer", "minimum": 0, "default": 0},
-        },
-        [],
-    )
-
-
-def _inspect_input_schema():
-    return _object({"target": target_schema()})
+    if kind not in fields:
+        raise ValueError("unsupported public capability Target")
+    return _object({"kind": {"const": kind}, **fields[kind]})
 
 
 def query_input_schema():
-    return {"oneOf": [_list_input_schema(), _inspect_input_schema()]}
+    branches = []
+    for kind in KINDS:
+        filters = {"kind": {"const": kind}, "scope": SCOPE}
+        if kind != "PLUGIN":
+            filters["parent"] = capability_target_schema("PLUGIN")
+        if kind == "MCP":
+            filters["query"] = TEXT
+        branches.append(_object(filters, ["kind"]))
+        targets = {"SKILL": ("SKILL",), "HOOK": ("HOOK_SOURCE",),
+                   "PLUGIN": ("PLUGIN",), "MCP": ("MCP_CONNECTION", "MCP_TOOL")}[kind]
+        branches.append(_object({"target": {"oneOf": [capability_target_schema(item) for item in targets]},
+                                 "kind": {"const": kind}}))
+    return {"oneOf": branches}
+
+
+def _content_schema(kind, value):
+    return _object({"type": {"const": kind}, "value": value})
+
+
+def query_output_schema():
+    """The complete query value declared to Cell authors by the SDK guide.
+
+    These are the records produced by the source query owner, including partial
+    observations. This declaration is not an execution acceptance gate.
+    """
+    from pulsara_agent.ports.tool_execution import tool_business_value_schema
+
+    string = {"type": "string"}
+    source = {"oneOf": [
+        _object({"kind": {"const": "LOCAL"}, "scope": SCOPE}),
+        _object({"kind": {"const": "PLUGIN"}, "target": capability_target_schema("PLUGIN")}),
+        _object({"kind": {"const": "BUNDLED"}}),
+    ]}
+    skill = _object({
+        "target": capability_target_schema("SKILL"), "name": string,
+        "description": string, "source": source, "status": string,
+    }, ["target", "source", "status"])
+    hook = _object({
+        "target": capability_target_schema("HOOK_SOURCE"), "status": string,
+        "definitions": {"type": "array", "items": _object({
+            "event": string, "matcher": string, "command": string,
+        })},
+    })
+    count = {"type": ["integer", "null"], "minimum": 0}
+    plugin = _object({
+        "target": capability_target_schema("PLUGIN"), "name": string,
+        "description": string, "status": string,
+        "components": _object({"skills": count, "hooks": count, "mcp_servers": count}),
+    }, ["target", "status", "components"])
+    service = _object({
+        "target": capability_target_schema("MCP_CONNECTION"), "name": string,
+        "status": string, "instructions": string,
+        "resource_count": {"type": "integer", "minimum": 0},
+        "resource_template_count": {"type": "integer", "minimum": 0},
+    }, ["target", "name", "status"])
+    tool_directory = _object({
+        "target": capability_target_schema("MCP_TOOL"), "description": string,
+        "status": string,
+    }, ["target", "status"])
+    common_detail = {
+        "target": capability_target_schema("MCP_TOOL"),
+        "description": {"type": "string", "description": "精确查询为完整说明；关键词查询为首个命中位置附近的连续摘录，未命中说明时省略。"},
+        "input_schema": {"type": "object", "description": "远端完整参数 JSON Schema；按它构造 call_mcp_tool.arguments。"},
+        "output_schema": {"type": "object", "description": "仅在远端实际声明时提供，描述成功 structuredContent，不是整个 Pulsara 返回包。"},
+    }
+    callable_detail = _object({**common_detail, "invocation": _object({
+        "mode": {"const": "META"}, "target": capability_target_schema("MCP_TOOL_REF"),
+    })}, ["target", "input_schema", "invocation"])
+    unavailable_detail = _object({**common_detail, "invocation": _object({
+        "mode": {"const": "UNAVAILABLE"},
+    })}, ["target", "invocation"])
+    component_target = {"oneOf": [capability_target_schema(kind)
+        for kind in ("SKILL", "HOOK_SOURCE", "MCP_CONNECTION")]}
+    return tool_business_value_schema(
+        content_schema={"type": "array", "items": {"oneOf": [
+            _content_schema("text", string),
+            _content_schema("target", component_target),
+            _content_schema("object", {"oneOf": [skill, hook, plugin, service,
+                tool_directory, callable_detail, unavailable_detail]}),
+        ]}},
+        statuses=("SUCCESS", "ERROR", "CANCELLED"),
+    )
+
+
+def _mcp_text_image_parts():
+    return [
+        _content_schema("text", {"type": "string"}),
+        _content_schema("image", _object({"kind": {"const": "IMAGE_REF"}, "image_ref": TEXT})),
+    ]
+
+
+def call_mcp_tool_output_schema():
+    """Formal content is typed; independent remote business JSON stays opaque."""
+    from pulsara_agent.ports.tool_execution import tool_business_value_schema
+
+    return tool_business_value_schema(
+        fields={"structuredContent": {"description": "远端原样返回的任意 JSON 值；缺失与 null 不同。按实际 output_schema 理解成功值，失败值不假定符合成功 schema。"}},
+        content_schema={"type": "array", "items": {"oneOf": _mcp_text_image_parts()}},
+        statuses=("SUCCESS", "ERROR", "CANCELLED"),
+    )
+
+
+def read_mcp_resource_output_schema():
+    """Connection Targets list records; concrete resource Targets read content."""
+    from pulsara_agent.ports.tool_execution import tool_business_value_schema
+
+    string = {"type": "string"}
+    resource = _object({
+        "target": capability_target_schema("MCP_RESOURCE"), "name": string,
+        "description": string, "mime_type": string,
+    }, ["target", "name"])
+    template = _object({
+        "server_id": TEXT, "uri_template": TEXT, "name": string,
+        "description": string, "mime_type": string,
+    }, ["server_id", "uri_template", "name"])
+    return tool_business_value_schema(
+        content_schema={"type": "array", "items": {"oneOf": [
+            *_mcp_text_image_parts(),
+            _content_schema("object", {"oneOf": [resource, template]}),
+        ]}},
+        statuses=("SUCCESS", "ERROR", "CANCELLED"),
+    )
 
 
 class CapabilityQueryError(ValueError):
@@ -120,173 +166,21 @@ class CapabilityQueryError(ValueError):
 
 
 def parse_query(arguments: Mapping[str, object], *, subagent=False):
-    schema = query_input_schema()
-    if not isinstance(arguments, Mapping) or not Draft202012Validator(schema).is_valid(
-        dict(arguments)
-    ):
-        raise CapabilityQueryError(
-            "INVALID_ARGUMENTS",
-            "Use the closed query fields and copy an exact target; PLUGIN is a source, not a list kind.",
-        )
+    if not isinstance(arguments, Mapping) or not Draft202012Validator(query_input_schema()).is_valid(dict(arguments)):
+        raise CapabilityQueryError("INVALID_ARGUMENTS", "填写必需的 kind；精确查询只填 target、kind，列表使用该类别的可选筛选参数。")
     values = dict(arguments)
-    inspect = "target" in values
-    target = values.get("target" if inspect else "parent")
-    if (
-        target
-        and target["kind"] == "SKILL"
-        and not Path(target["skill_path"]).is_absolute()
-    ):
-        raise CapabilityQueryError(
-            "INVALID_ARGUMENTS",
-            "skill_path must be the absolute path of an observed Skill.",
-        )
-    if not inspect and target:
-        kind = values.get("kind")
-        expected = (
-            {"SKILL", "HOOK_SOURCE", "MCP_SERVER"}
-            if target["kind"] == "PLUGIN"
-            else CHILD_KINDS
-        )
-        if kind is not None and kind not in expected:
-            raise CapabilityQueryError(
-                "INVALID_ARGUMENTS", "kind is not a child of this parent."
-            )
-        if target["kind"] == "PLUGIN":
-            if (
-                values.get("source_kind", "PLUGIN") != "PLUGIN"
-                or values.get("scope", target["scope"]) != target["scope"]
-            ):
-                raise CapabilityQueryError(
-                    "INVALID_ARGUMENTS",
-                    "The filters conflict with the exact Plugin parent.",
-                )
-        elif (
-            "scope" in target
-            and values.get("scope", target["scope"]) != target["scope"]
-        ):
-            raise CapabilityQueryError(
-                "INVALID_ARGUMENTS",
-                "scope conflicts with the configured server parent.",
-            )
-        if (
-            target["kind"] == "MCP_CONNECTION"
-            and values.get("source_kind", target["source_kind"])
-            != target["source_kind"]
-        ):
-            raise CapabilityQueryError(
-                "INVALID_ARGUMENTS",
-                "source_kind conflicts with the configured server parent.",
-            )
-    if (
-        not inspect
-        and values.get("source_kind") == "BUNDLED"
-        and values.get("kind") not in {None, "SKILL"}
-    ):
-        raise CapabilityQueryError(
-            "INVALID_ARGUMENTS", "Bundled sources only provide Skills."
-        )
+    if "query" in values and not values["query"].strip():
+        raise CapabilityQueryError("INVALID_ARGUMENTS", "query 必须包含非空关键词。")
+    if subagent and values["kind"] != "MCP":
+        raise CapabilityQueryError("SOURCE_UNAVAILABLE", "子代理仅查询自身范围内的 MCP 服务和工具。")
+    for field in ("target", "parent"):
+        target = values.get(field)
+        if target:
+            for name in ("skill_path", "config_path", "plugin_path"):
+                if name in target:
+                    exact_target_path(target[name], name)
     return values
 
 
-def query_error(code, message):
-    return {"status": code, "message": message}
-
-
-def render_page(
-    rows, arguments, *, fits_result: Callable[[str], bool],
-    diagnostics=(), completeness="COMPLETE",
-):
-    # Sort by existing case-sensitive identity, with no snapshot/cursor registry.
-    def key(row):
-        source = row.get("source") or {}
-        return (
-            row["kind"],
-            source.get("kind", ""),
-            source.get("scope", source.get("target", {}).get("scope", "")),
-            canonical_json_bytes(row["target"]),
-        )
-
-    ordered = sorted(rows, key=key)
-    offset, limit = arguments.get("offset", 0), arguments.get("limit", 50)
-    maximum = min(limit, max(0, len(ordered) - offset))
-    for count in range(maximum, -1, -1):
-        end = offset + count
-        value = {
-            "items": ordered[offset:end],
-            "returned_count": count,
-            "total_count": len(ordered),
-            "next": {
-                "tool": "query_capabilities",
-                "arguments": {**arguments, "offset": end, "limit": limit},
-            } if end < len(ordered) else None,
-            "completeness": completeness,
-            "diagnostics": list(diagnostics),
-        }
-        fits = fits_result(canonical_json_bytes(value).decode("utf-8"))
-        if not fits and count == 1 and "description" in value["items"][0]:
-            # Directory descriptions are expandable metadata. Preserve the
-            # exact identity and provide its complete inspect action instead
-            # of making one long description hide an actionable capability.
-            row = dict(value["items"][0])
-            row.pop("description")
-            row["description_omitted"] = True
-            value["items"] = [row]
-            fits = fits_result(canonical_json_bytes(value).decode("utf-8"))
-        if fits:
-            if count == 0 and offset < len(ordered):
-                raise CapabilityQueryError(
-                    "CAPABILITY_ROW_OVERBOUND",
-                    "One capability row exceeds the existing tool result budget.",
-                )
-            return value
-    raise CapabilityQueryError(
-        "CAPABILITY_RESULT_OVERBOUND",
-        "Query diagnostics exceed the existing tool result budget.",
-    )
-
-
-def minimal_row(kind, name, target, source, status, description=None):
-    row = {
-        "kind": kind,
-        "name": name,
-        "target": target,
-        "source": source,
-        "status": status,
-    }
-    if description:
-        row["description"] = description
-    return row
-
-
-def plugin_target(item):
-    return {
-        "kind": "PLUGIN",
-        "scope": item.identity.scope.value,
-        "plugin_id": item.identity.plugin_id,
-    }
-
-
-def plugin_source(item):
-    return {"kind": "PLUGIN", "target": plugin_target(item)}
-
-
-def public_diagnostics(items):
-    """Explicit projection; native diagnostic DTOs are never serialized wholesale."""
-    result = []
-    for item in items:
-        nested = getattr(item, "diagnostics", None)
-        if nested is not None:
-            result.extend(public_diagnostics(nested))
-            continue
-        code = getattr(item, "code", None)
-        message = getattr(item, "message", None)
-        if code is None or message is None:
-            continue
-        value = {"code": getattr(code, "value", code), "message": message}
-        for name in ("component", "path"):
-            field = getattr(item, name, None)
-            if field is not None:
-                value[name] = str(getattr(field, "value", field))
-        if value not in result:
-            result.append(value)
-    return result
+__all__ = ["KINDS", "CapabilityQueryError", "capability_target_schema", "query_input_schema",
+    "query_output_schema", "call_mcp_tool_output_schema", "read_mcp_resource_output_schema", "parse_query"]

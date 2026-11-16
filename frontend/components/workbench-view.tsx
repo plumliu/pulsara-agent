@@ -5,7 +5,7 @@ import { useDesktopWorkspace } from './desktop-workspace';
 import { workTitle, prepareSessionTarget, type SessionNavigation } from '../lib/agent-cell-api';
 import { ProviderRetryStatus } from './provider-retry-status';
 import { PresentationContext } from './presentation-provider';
-import { parsePresentationResult } from '../lib/presentation-targets';
+import { parsePresentationTargets } from '../lib/presentation-targets';
 import { PresentationResult } from './presentation-result';
 import { desktopHost, writeClipboardText } from '../lib/desktop-host';
 
@@ -110,6 +110,7 @@ import { AnnotationBody, AnnotationReader, ResponseAnnotations } from './respons
 import { PromptComposer } from './prompt-composer';
 import { PromptContentView } from './prompt-content-view';
 import { MediaEvidenceIndex } from './media-evidence-index';
+import { ToolBusinessContent } from './tool-business-content';
 import { WelcomeTypewriter } from './welcome-typewriter';
 import { AnimatedDisclosure } from './animated-disclosure';
 import { AnimatedPromptQueue, queuePreviewCapacity } from './animated-prompt-queue';
@@ -304,20 +305,6 @@ function parseJsonObject(value?: string): JsonObject | undefined {
   }
 }
 
-function terminalOutputText(value: string | undefined, running: boolean): string | undefined {
-  if (running) return value ?? '';
-  if (value === undefined) return undefined;
-  const result = parseJsonObject(value);
-  if (typeof result?.output_preview === 'string') return result.output_preview;
-  if (
-    typeof result?.output === 'string'
-    && (
-      typeof result.terminal_process_action === 'string'
-      || typeof result.exit_code === 'number'
-    )
-  ) return result.output;
-  return value;
-}
 
 function objectField(value: JsonObject | undefined, key: string): JsonObject | undefined {
   const field = value?.[key];
@@ -522,26 +509,22 @@ function TraceCard({
   const purpose = skill ? `使用 ${skill.name} 技能` : builtinSummary?.title ?? trace.title;
   const showPurposeAsTitle = Boolean(builtinSummary) || trace.toolName === 'use_new_mcp_tool';
   const subtitle = mcpDetail?.subtitle ?? builtinSummary?.subtitle ?? trace.subtitle;
-  const parsedResult = trace.resultFacts
-    ? { ...parseJsonObject(trace.resultText), ...trace.resultFacts }
-    : parseJsonObject(trace.resultText);
   const showTargets = useContext(PresentationContext);
   const sourceWorkspace = useDesktopWorkspace();
   const openSource = useInputNavigation(onNotify);
   const cellSource = trace.toolName === 'exec_cell' && trace.attemptId && sourceWorkspace
     ? { kind: 'cell' as const, rootSessionId: sourceWorkspace.sessionId, sourceExecAttemptId: trace.attemptId }
     : undefined;
-  const presentation = trace.toolName === 'open_in_pulsara' && trace.status === 'completed' && trace.outputBody?.sourceCoverage === 'COMPLETE' && trace.outputBody?.omitted === false
-    ? parsePresentationResult(trace.resultText ?? '') : undefined;
-  const terminalOutput = trace.toolName === 'exec_process'
-    ? terminalOutputText(trace.resultText, trace.status === 'running')
-    : undefined;
+  const presentation = trace.toolName === 'open_in_pulsara'
+    ? parsePresentationTargets(trace.resultFacts?.presentation_targets) : undefined;
+  const terminalTool = trace.toolName === 'exec_process' || trace.toolName === 'manage_process';
+  const businessText = trace.businessValue?.content.filter(part=>part.type === 'text').map(part=>part.value).join('');
+  const terminalOutput = terminalTool ? businessText ?? trace.resultText ?? (trace.status === 'running' ? '' : undefined) : undefined;
   const hasTerminalOutput = terminalOutput !== undefined;
   const terminalYieldedToBackground = Boolean(
     trace.toolName === 'exec_process'
     && trace.status === 'completed'
-    && parsedResult?.status === 'running'
-    && parsedResult.yielded_to_background === true,
+    && trace.businessValue?.meta.process_status === 'RUNNING',
   );
   useLayoutEffect(() => {
     if (!expanded || trace.status !== 'running' || !terminalFollowTailRef.current) return;
@@ -553,8 +536,8 @@ function TraceCard({
   const showRawResult = showBuiltinToolResults
     || trace.toolName?.startsWith('mcp__')
     || trace.toolName === 'use_new_mcp_tool';
-  const hasRawResult = showRawResult && Object.prototype.hasOwnProperty.call(trace, 'resultText');
-  const diffText = trace.toolName === 'edit_file' ? stringValue(parsedResult?.diff) : '';
+  const hasRawResult = showRawResult && !trace.businessValue && Object.prototype.hasOwnProperty.call(trace, 'resultText');
+  const diffText = trace.toolName === 'edit_file' && trace.status === 'completed' ? businessText ?? '' : '';
   const canReadOutput = Boolean(
     showRawResult && trace.resultEntryId
     && trace.outputBody?.available,
@@ -564,7 +547,7 @@ function TraceCard({
     && Boolean(trace.resultText || trace.resultContent);
   const expandable = trace.toolName !== 'exec_cell' && (Boolean(trace.programCalls?.length) || Boolean(
     presentation || trace.command || diffText || hasTerminalOutput || hasRawResult
-    || trace.resultContent || mcpDetail || canReadOutput || outputUnavailable || hasMediaEvidence
+    || trace.resultContent || trace.businessValue || mcpDetail || canReadOutput || outputUnavailable || hasMediaEvidence
   ));
   const outputAtEnd = Boolean(outputPage && !outputPage.next);
   const outputIsSinglePage = Boolean(
@@ -641,8 +624,8 @@ function TraceCard({
             skills={skills} mcpToolRefs={mcpToolRefs} outputOwnerKey={outputOwnerKey}
             onReadToolOutput={onReadToolOutput} onReadPromptImage={onReadPromptImage} onNotify={onNotify} />)}
           {presentation && <PresentationResult result={presentation} onOpen={showTargets} />}
-          <MediaEvidenceIndex trace={trace} completeOutput={outputIsSinglePage ? outputPage?.text : undefined} />
-          {trace.resultContent ? (
+          {!trace.businessValue && <MediaEvidenceIndex trace={trace} />}
+          {trace.businessValue && !terminalTool && !diffText ? <ToolBusinessContent value={trace.businessValue} toolName={trace.toolName} onCopy={copyOutput}/> : trace.resultContent ? (
             <section className="tool-result-images" aria-label="工具读取的图片">
               <PromptContentView
                 content={trace.resultContent}
@@ -679,7 +662,9 @@ function TraceCard({
             )}
             {diffText
               ? <>{trace.outputBody?.omitted && <p className="tool-output-page__notice">差异节选</p>}
-                <pre className="tool-result-diff tool-output-scroll" aria-label="文件差异">{diffText}</pre></>
+                <section className="terminal-stream"><header><strong>文件差异</strong>
+                  <button type="button" aria-label="复制文件差异" onClick={()=>copyOutput(diffText)}><Copy size={12}/></button>
+                </header><pre className="tool-result-diff tool-output-scroll" aria-label="文件差异">{diffText}</pre></section></>
               : showRawResult && trace.toolName !== 'exec_process' && trace.resultSummary
                 && <div className="tool-result-summary">{trace.resultSummary}</div>}
             {hasRawResult && (
@@ -962,7 +947,7 @@ const unavailableVisualization = async (): Promise<string> => {
 };
 
 function inputLabel(item: { inputOrigin?: string; scheduledInput?: Message['scheduledInput']; cellOutput?: Message['cellOutput']; sourceKind?: string; sourceSessionId?: string; sourceExecAttemptId?: string }) {
-  if (item.inputOrigin === 'CELL_OUTPUT') return item.cellOutput?.cellId ? `cell日志(${item.cellOutput.cellId})` : 'cell日志';
+  if (item.inputOrigin === 'CELL_OUTPUT') return '脚本输出';
   if (item.inputOrigin === 'SCHEDULED_TASK') return '定时任务';
   if (item.inputOrigin === 'AGENT_MATERIAL') return '任务材料';
   if (item.inputOrigin === 'AGENT_MESSAGE' || item.sourceKind === 'agent') return item.sourceSessionId ? `子代理消息(${item.sourceSessionId})` : '子代理消息';
@@ -1055,7 +1040,7 @@ function UserMessage({
     const title = inputLabel({ ...message, ...message.inputSource });
     const startsTurn = message.userKind !== 'steer'
       && (message.inputOrigin === 'CELL_OUTPUT' || message.inputOrigin === 'SCHEDULED_TASK');
-    return <article className={`user-turn user-steer user-steer--automatic${message.cellOutput?.kind === 'error' ? ' is-error' : ''}`} aria-label={title}>
+    return <article className={`user-turn user-steer user-steer--automatic${message.cellOutput?.kind === 'diagnostic' ? ' is-error' : ''}`} aria-label={title}>
       <header className="user-steer__heading">{startsTurn && copyButton}<strong>{title}</strong>{message.userKind === 'steer' && <CornerDownLeft size={13} aria-hidden="true" />}{!startsTurn && copyButton}</header>
       <SteerMaterialBubble message={message} text={copyText ?? ''} onNotify={onNotify} />
       {deliveryStatus && <span role="status">{deliveryStatus}</span>}
@@ -1353,8 +1338,8 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
   useLayoutEffect(() => {
     if (laidOutExpanded.current === disclosure.expanded) return;
     laidOutExpanded.current = disclosure.expanded;
-    // Capture the first drawer frame; ResizeObserver maintains the reading
-    // anchor as the browser interpolates the drawer height.
+    // Restore the reading anchor when the drawer layout changes;
+    // ResizeObserver also covers content that finishes loading later.
     onProcessLayout?.();
   }, [disclosure.expanded, onProcessLayout]);
   useEffect(() => () => request.current?.abort(), []);
@@ -1777,7 +1762,7 @@ function InteractionCard({
   const interactionId = interaction.id;
   const interactionKind = interaction.kind;
   const [now, setNow] = useState(Date.now);
-  const expiresAtUtc = interaction.kind === 'tool-confirmation' ? interaction.expiresAtUtc : '';
+  const expiresAtUtc = 'expiresAtUtc' in interaction ? interaction.expiresAtUtc : '';
   const decisionInProgress = interaction.kind === 'tool-confirmation' && interaction.decisionInProgress;
   const expired = Boolean(expiresAtUtc) && Date.parse(expiresAtUtc) <= now;
   useEffect(() => {
@@ -1804,7 +1789,7 @@ function InteractionCard({
         prompt,
         options: optionsKey ? optionsKey.split('\u0000') : [],
       }
-      : { id: interactionId, kind: interactionKind, workflowId, workflowRevision };
+      : { id: interactionId, kind: interactionKind, workflowId, workflowRevision, expiresAtUtc };
     void onRead(requested).then(
       (value) => {
         if (current) setContent(value);
@@ -1852,20 +1837,21 @@ function InteractionCard({
           </div>
         </div>
       </>}
+      {(interaction.kind === 'plan-question' || interaction.kind === 'plan-draft') && expiresAtUtc && <p className="interaction-plan-deadline" aria-live="off"><Clock3 size={13} aria-hidden="true" /><span>{expired ? '等待已到期，正在更新状态…' : `等待答复 · 剩余 ${Math.floor(secondsLeft / 60)} 分 ${secondsLeft % 60} 秒`}</span></p>}
       {content?.kind === 'plan-question' && <>
         <p className="interaction-question">{content.question}</p>
         <div className="plan-options">
-          {content.options.map((option, index) => <button key={option.ordinal} className={option.recommended ? 'is-recommended' : undefined} disabled={busy} onClick={() => void resolve({ kind: 'plan-question-option', optionOrdinal: option.ordinal })}>
+          {content.options.map((option, index) => <button key={option.ordinal} className={option.recommended ? 'is-recommended' : undefined} disabled={busy || expired} onClick={() => void resolve({ kind: 'plan-question-option', optionOrdinal: option.ordinal })}>
             <span className="plan-option-number" aria-hidden="true">{index + 1}</span>
             <span className="plan-option-content"><span><strong>{option.label}</strong>{option.recommended && <em>建议</em>}</span>{option.description && <small>{option.description}</small>}</span>
             <ArrowUpRight size={15} aria-hidden="true" />
           </button>)}
         </div>
-        {content.allowFreeText && <div className="interaction-text-answer">
+        <div className="interaction-text-answer">
           <label htmlFor={answerId}>也可以写下你的想法</label>
           <textarea id={answerId} value={freeText} onChange={event => setFreeText(event.target.value)} placeholder="写下你的想法…" disabled={busy} rows={2} />
-          <button className="is-primary" disabled={busy || !freeText.trim()} onClick={() => void resolve({ kind: 'plan-question-text', text: freeText.trim() })}>{busy && <LoaderCircle size={13} />}提交回答<ArrowRight size={14} /></button>
-        </div>}
+          <button className="is-primary" disabled={busy || expired || !freeText.trim()} onClick={() => void resolve({ kind: 'plan-question-text', text: freeText })}>{busy && <LoaderCircle size={13} />}提交回答<ArrowRight size={14} /></button>
+        </div>
       </>}
       {content?.kind === 'plan-draft' && <>
         <div className="plan-draft-body"><MarkdownBody body={content.body} onNotify={onNotify} /></div>
@@ -1874,12 +1860,12 @@ function InteractionCard({
           <textarea id={feedbackId} value={feedback} onChange={event => setFeedback(event.target.value)} placeholder="说说你想调整的地方…" disabled={busy} rows={3} autoFocus />
           <div className="interaction-actions">
             <button disabled={busy} onClick={() => setRevisionOpen(false)}><RotateCcw size={13} />返回方案</button>
-            <button className="is-primary" disabled={busy || !feedback.trim()} onClick={() => void resolve({ kind: 'plan-draft', decision: 'revise', revisionPrompt: { parts: [{ type: 'text', text: feedback }] } })}>{busy && <LoaderCircle size={13} />}提交修改意见<ArrowRight size={14} /></button>
+            <button className="is-primary" disabled={busy || expired || !feedback.trim()} onClick={() => void resolve({ kind: 'plan-draft', decision: 'revise', revisionPrompt: { parts: [{ type: 'text', text: feedback }] } })}>{busy && <LoaderCircle size={13} />}提交修改意见<ArrowRight size={14} /></button>
           </div>
         </div> : <div className="interaction-actions interaction-actions--plan">
-          <button className="interaction-quiet" disabled={busy} onClick={() => void resolve({ kind: 'plan-draft', decision: 'cancel' })}>取消规划</button>
-          <button disabled={busy} onClick={() => setRevisionOpen(true)}><Pencil size={13} />提出修改</button>
-          <button className="is-primary" disabled={busy} onClick={() => void resolve({ kind: 'plan-draft', decision: 'approve' })}>{busy ? <LoaderCircle size={13} /> : <Check size={13} />} 批准并继续</button>
+          <button className="interaction-quiet" disabled={busy || expired} onClick={() => void resolve({ kind: 'plan-draft', decision: 'cancel' })}>取消本次审批</button>
+          <button disabled={busy || expired} onClick={() => setRevisionOpen(true)}><Pencil size={13} />提出修改</button>
+          <button className="is-primary" disabled={busy || expired} onClick={() => void resolve({ kind: 'plan-draft', decision: 'approve' })}>{busy ? <LoaderCircle size={13} /> : <Check size={13} />} 批准并继续</button>
         </div>}
       </>}
     </section>

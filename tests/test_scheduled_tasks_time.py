@@ -28,9 +28,9 @@ def instant(value):
             "2026-10-06T00:00:00Z",
         ),
         (
-            rule("interval", anchor_at_utc="2020-01-01T00:00:00Z", seconds=60),
+            rule("interval", anchor_at_utc="2020-01-01T00:00:00Z", seconds=900),
             "2050-01-01T00:00:00Z",
-            "2050-01-01T00:01:00Z",
+            "2050-01-01T00:15:00Z",
         ),
         (
             rule("daily", start_date="2020-01-01", time="08:00"),
@@ -162,7 +162,7 @@ def test_local_once_rejects_gap_and_selects_first_fold():
         value = await service.local_once(
             run_at_local="2026-11-01T01:30", timezone="America/New_York"
         )
-        assert value["schedule"]["run_at_utc"] == "2026-11-01T05:30:00+00:00"
+        assert value["schedule"] == {"kind":"once","run_at":"2026-11-01T01:30:00"}
 
     asyncio.run(scenario())
 
@@ -175,13 +175,13 @@ def test_local_once_rejects_gap_and_selects_first_fold():
             "2026-11-01T05:00:00Z",
             0,
         ),
-        (rule("once", run_at_utc="2026-11-01T06:30:00Z"), "2026-11-01T05:00:00Z", 1),
+        (rule("once", run_at="2026-11-01T01:30:00"), "2026-11-01T05:00:00Z", 0),
         (
             rule("interval", anchor_at_utc="2026-11-01T05:30:00Z", seconds=3600),
             "2026-11-01T05:30:00Z",
             1,
         ),
-        (rule("once", run_at_utc="2026-11-02T06:30:00Z"), "2026-11-01T05:00:00Z", None),
+        (rule("once", run_at="2026-11-02T01:30:00"), "2026-11-01T05:00:00Z", None),
     ],
 )
 def test_preview_reports_actual_ambiguous_fold(

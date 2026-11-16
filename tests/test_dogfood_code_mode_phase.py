@@ -11,7 +11,7 @@ from pulsara_agent.identity import random_id
 from pulsara_agent.llm.adapters.openai.chat_completions import OpenAIChatCompletionsTransport
 from pulsara_agent.llm.input import PromptContent
 from pulsara_agent.primitives.permission import PermissionMode
-from tests.dogfood.run_content_revision_line_edit_dogfood import (
+from tests.support.dogfood_results import (
     _settle_code_mode_phase,
     _tool_trace,
 )
@@ -126,6 +126,9 @@ def test_phase_waits_for_actual_admission_output_and_root_idle_without_waiting_c
                 assert [(row["tool_name"], row["source_kind"]) for row in trace] == [
                     ("exec_cell", "MODEL_TOOL_CALL"), ("run_agent", "CODE_MODE_CALL"),
                 ]
+                assert trace[0]["result"]["target"]["kind"] == "CELL"
+                assert outputs[0]["cell_id"] == trace[0]["result"]["target"]["cell_id"]
+                assert all(row["result"]["meta"]["status"] == "SUCCESS" for row in trace)
         finally:
             admission_release.set()
             output_release.set()
@@ -265,7 +268,6 @@ def test_subagent_evidence_saves_real_host_frozen_values_and_closed_sessions(
 @pytest.mark.parametrize('mode', [PermissionMode.READ_ONLY, PermissionMode.ASK_PERMISSIONS, PermissionMode.ACCEPT_EDITS])
 def test_non_bypass_host_advertises_controls_and_returns_hint(tmp_path, monkeypatch, stage2_migrated_postgres_database, mode):
     from pulsara_agent.llm.input import MessageRole, text_part_values
-    from pulsara_agent.model_input.lowering import decode_tool_result_observation
 
     async def scenario():
         monkeypatch.setenv('PULSARA_HOME', str(tmp_path / 'home'))
@@ -279,11 +281,11 @@ def test_non_bypass_host_advertises_controls_and_returns_hint(tmp_path, monkeypa
                 events = _tool_call('exec_cell', random_id('call'), {'code': 'throw new Error("must not execute");'})
                 events += _tool_call('query_agents', random_id('call'), {})
             else:
-                results = [decode_tool_result_observation(text_part_values(m.content)[0])
+                results = [text_part_values(m.content)[0]
                     for m in request.compiled_input.messages if m.role is MessageRole.TOOL_RESULT]
                 assert len(results) == 2
-                assert all(r['result_state'] == 'PERMISSION_DENIED' for r in results)
-                assert all('only in bypass-permissions mode' in str(r['body']) for r in results)
+                assert all('status: ERROR' in r for r in results)
+                assert all('only in bypass-permissions mode' in r for r in results)
                 events = _text('Permission hint received')
             for event in events:
                 yield event

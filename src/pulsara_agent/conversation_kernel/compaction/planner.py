@@ -3,7 +3,7 @@
 from __future__ import annotations
 from pulsara_agent.identity import is_valid_id
 
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, replace
 from time import monotonic
 
 from pulsara_agent.conversation_kernel.compaction.contracts import (
@@ -47,7 +47,6 @@ from pulsara_agent.model_input.lowering import (
 )
 from pulsara_agent.llm.request import FrozenProviderWireInputQuote
 from pulsara_agent.model_input.contracts import (
-    ApprovedPlanMaterializationFact,
     CanonicalInputOriginKind,
     CanonicalModelInputIdentity,
     CanonicalModelInputSnapshot,
@@ -59,8 +58,6 @@ from pulsara_agent.model_input.contracts import (
     FrozenModelInputSemanticProjection,
     FrozenToolSpec,
     ModelInputCompileBinding,
-    PlanApprovedMaterializationDisposition,
-    approved_plan_materialization_fingerprint,
     canonical_compile_snapshot_fingerprint,
     canonical_model_input_identity_fingerprint,
     canonical_model_input_snapshot_fingerprint,
@@ -505,11 +502,11 @@ def _render_destination_projection(
                 ) + prompt_provider_parts(entry.content)
             elif entry.role == "user":
                 lowered = lower_canonical_item(entry.source)
-                if lowered.fixed_message is None:
+                if lowered.message is None:
                     raise CompactionPlanningError(
                         "retained request has no fixed provider message"
                     )
-                content = lowered.fixed_message.content
+                content = lowered.message.content
             else:
                 content = entry.content
             append_section(
@@ -709,10 +706,7 @@ def build_synthetic_compaction_dispatch_read(
         **binding_values,
         fact_fingerprint=context_binding_compile_fact_fingerprint(provisional_binding),
     )
-    approved = _synthetic_approved_plan_fact(
-        old_facts.approved_plan_materialization_fact,
-        items=items,
-    )
+    approved = old_facts.approved_plan_materialization_fact
     fact_values = {
         "canonical_input": canonical_input,
         "context_binding_fact": binding,
@@ -721,6 +715,7 @@ def build_synthetic_compaction_dispatch_read(
         "plan_handoff_fact": old_facts.plan_handoff_fact,
         "approved_plan_materialization_fact": approved,
         "previous_turn_outcome_fact": old_facts.previous_turn_outcome_fact,
+        "plan_mode_original_input": old_facts.plan_mode_original_input,
     }
     provisional_facts = FrozenCanonicalCompileSnapshot.__new__(
         FrozenCanonicalCompileSnapshot
@@ -821,6 +816,7 @@ def rebase_compaction_dispatch_read_through_sequence(
             facts.approved_plan_materialization_fact
         ),
         "previous_turn_outcome_fact": facts.previous_turn_outcome_fact,
+        "plan_mode_original_input": facts.plan_mode_original_input,
     }
     provisional_facts = FrozenCanonicalCompileSnapshot.__new__(
         FrozenCanonicalCompileSnapshot
@@ -855,43 +851,6 @@ def rebase_compaction_dispatch_read_through_sequence(
         composite_fingerprint=composite,
     )
 
-
-def _synthetic_approved_plan_fact(
-    fact: ApprovedPlanMaterializationFact | None,
-    *,
-    items: tuple[FrozenProviderInputItem, ...],
-) -> ApprovedPlanMaterializationFact | None:
-    if fact is None:
-        return None
-    pinned = next(
-        (
-            item
-            for item in items
-            if item.source_entry_id == fact.assistant_entry_id
-            and any(call.tool_call_id == fact.tool_call_id for call in item.tool_calls)
-        ),
-        None,
-    )
-    disposition = (
-        PlanApprovedMaterializationDisposition.PIN_EXISTING_CANONICAL_BLOCK
-        if pinned is not None
-        else PlanApprovedMaterializationDisposition.MATERIALIZE_REFERENCED_BLOCK
-    )
-    values = {field.name: getattr(fact, field.name) for field in fields(fact)}
-    values.update(
-        disposition=disposition,
-        pinned_canonical_item_fingerprint=(
-            None if pinned is None else provider_input_item_fingerprint(pinned)
-        ),
-        fact_fingerprint="",
-    )
-    provisional = ApprovedPlanMaterializationFact.__new__(
-        ApprovedPlanMaterializationFact
-    )
-    for name, value in values.items():
-        object.__setattr__(provisional, name, value)
-    values["fact_fingerprint"] = approved_plan_materialization_fingerprint(provisional)
-    return ApprovedPlanMaterializationFact(**values)
 
 
 def freeze_compaction_source_view(

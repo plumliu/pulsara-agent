@@ -15,17 +15,14 @@ from pulsara_agent.retrieval.rerank.factory import build_rerank_provider
 from pulsara_agent.retrieval.rerank.decision_prompt import decision_question
 from pulsara_agent.retrieval.errors import EmbeddingServiceError, RerankServiceError
 from pulsara_agent.conversation_kernel.memory_tools import (
-    MAXIMUM_RERANK_DOCUMENT_BYTES,
-    _prepare_rerank_projection,
+    _rerank_text,
 )
-from pulsara_agent.conversation_kernel.memory.contracts import memory_context_product_label
-from pulsara_agent.memory.scope import CTX_GLOBAL
-from pulsara_agent.primitives.context import canonical_json_bytes
+from pulsara_agent.conversation_kernel.memory.contracts import memory_retrieval_text
 
 VECTOR = [1.0, *([0.0] * 1023)]
 
 
-@pytest.mark.parametrize("purpose", ["recall", "automatic_recall", "related_memory"])
+@pytest.mark.parametrize("purpose", ["recall", "automatic_recall"])
 def test_decision_question_binds_candidate_and_carries_both_criteria(purpose):
     name = "candidate:fixture-identity-73"
     instructions, positive, negative = decision_question(name, purpose)
@@ -35,81 +32,47 @@ def test_decision_question_binds_candidate_and_carries_both_criteria(purpose):
     assert negative in instructions
 
 
-def projection_fact(statement):
-    return SimpleNamespace(
-        fact_kind="FACT", context_id=CTX_GLOBAL,
-        statement=statement, recorded_at="2026-10-10T00:00:00Z",
-    )
 
 
-def test_short_rerank_projection_preserves_exact_document_and_statement():
-    fact = projection_fact('中文正文，包含 "引号"、\\路径和\n换行。')
-    query, documents = _prepare_rerank_projection("测试查询", [fact])
-    assert query == "测试查询"
-    expected = {
-        "kind": fact.fact_kind,
-        "context_product_label": memory_context_product_label(fact.context_id),
-        "statement": fact.statement,
-        "recorded_at": fact.recorded_at,
-    }
-    assert documents == (canonical_json_bytes(expected).decode(),)
 
 
-@pytest.mark.parametrize("statement", [
-    "开始条件" + "汉" * 2690 + "末尾条件",
-    "开始🙂" + "🙂" * 2020 + "结束🙂",
-    "BEGIN" + '"\\\n\t' * 2044 + "END",
-])
-def test_long_rerank_projection_truncates_only_statement_with_valid_json(statement):
-    fact = projection_fact(statement)
-    assert len(statement.encode()) <= 8192
-    _, documents = _prepare_rerank_projection("测试查询", [fact])
-    # The existing 8 KiB document boundary includes escaping and metadata.
-    assert len(documents[0].encode()) <= MAXIMUM_RERANK_DOCUMENT_BYTES
-    document = json.loads(documents[0])
-    assert document == {
-        "kind": fact.fact_kind,
-        "context_product_label": memory_context_product_label(fact.context_id),
-        "recorded_at": fact.recorded_at,
-        "statement": document["statement"],
-        "statement_truncated": True,
-    }
-    head, tail = document["statement"].split("\n...[memory statement truncated]...\n")
-    assert statement.startswith(head) and statement.endswith(tail)
-    assert head and tail
-    assert len(head) + len(tail) < len(statement)
-    assert fact.statement == statement
 
 
 @pytest.mark.parametrize("shape", ["flat_rerank", "nested_rerank", "system_one", "openai_decisions"])
-def test_twenty_truncated_projections_remain_valid_on_each_sdk_wire(monkeypatch, shape):
+def test_twenty_complete_memory_inputs_remain_exact_on_each_sdk_wire(monkeypatch, shape):
     names = tuple(f"fact{i}" for i in range(20))
-    facts = [projection_fact("汉" * 2700) for _ in names]
-    query, documents = _prepare_rerank_projection("测试查询", facts)
-    response = (
-        {"answers": {name: {"type": "noul", "noul": .5} for name in names}}
-        if shape == "system_one" else
-        {"answers": [{"type": "predicate", "name": name, "probability": .5} for name in names]}
-        if shape == "openai_decisions" else
-        {"results": [{"index": i, "relevance_score": .5} for i in range(20)]}
-    )
-    observed = install_transport(monkeypatch, response)
+    facts = [SimpleNamespace(retrieval_text=memory_retrieval_text('标题', '汉' * 8000)) for _ in names]
+    query, documents = '测试查询', tuple(_rerank_text(fact) for fact in facts)
+    def response(request):
+        payload=json.loads(request.content)
+        questions=payload.get("questions")
+        requested=list(questions) if isinstance(questions,dict) else [item["name"] for item in questions] if questions else []
+        return httpx2.Response(200,json=(
+            {"answers":{name:{"type":"noul","noul":.5} for name in requested}} if shape=="system_one" else
+            {"answers":[{"type":"predicate","name":name,"probability":.5} for name in requested]} if shape=="openai_decisions" else
+            {"results":[{"index":i,"relevance_score":.5} for i in range(20)]}))
+    observed=install_transport(monkeypatch,response)
     endpoint = "https://provider.example/decisions" if shape == "openai_decisions" else "https://provider.example/ranking"
     connection = RetrievalConnection(endpoint, "fixture", shape, "none")
     result = asyncio.run(build_rerank_provider(connection).rerank(query, documents, candidate_ids=names))
-    assert len(observed) == 1
     assert [item.index for item in result] == list(range(20))
-    body = json.loads(observed[0].content)
-    if shape == "flat_rerank":
-        wire_documents = body["documents"]
-    elif shape == "nested_rerank":
-        wire_documents = body["input"]["documents"]
-    else:
-        state = body["state"] if shape == "system_one" else json.loads(body["input"])
-        assert [item["candidate_number"] for item in state["candidates"]] == list(names)
-        wire_documents = [item["candidate"] for item in state["candidates"]]
-    assert wire_documents == list(documents)
-    assert all(json.loads(text)["statement_truncated"] for text in wire_documents)
+    wire_documents=[]
+    candidate_names=[]
+    for request in observed:
+        body=json.loads(request.content)
+        if shape=="flat_rerank":
+            wire_documents.extend(body["documents"])
+        elif shape=="nested_rerank":
+            wire_documents.extend(body["input"]["documents"])
+        else:
+            state=body["state"] if shape=="system_one" else json.loads(body["input"])
+            candidate_names.extend(item["candidate_number"] for item in state["candidates"])
+            wire_documents.extend(item["candidate"] for item in state["candidates"])
+    if candidate_names:
+        assert candidate_names==list(names)
+    assert wire_documents==list(documents)
+    assert all(text=='title: 标题\nstatement: '+'汉'*8000 for text in wire_documents)
+
 
 
 def install_transport(monkeypatch, response):
@@ -135,7 +98,7 @@ def install_transport(monkeypatch, response):
 @pytest.mark.parametrize("shape", ["flat_rerank", "nested_rerank"])
 @pytest.mark.parametrize("position", ["results", "data", "output"])
 @pytest.mark.parametrize("authentication", ["bearer_api_key", "none"])
-@pytest.mark.parametrize("purpose", ["recall", "automatic_recall", "related_memory"])
+@pytest.mark.parametrize("purpose", ["recall", "automatic_recall"])
 def test_rerank_requests_have_only_subject_fields(
     monkeypatch, shape, position, authentication, purpose
 ):
@@ -172,7 +135,7 @@ def test_rerank_requests_have_only_subject_fields(
 
 @pytest.mark.parametrize("shape", ["system_one", "openai_decisions"])
 @pytest.mark.parametrize("authentication", ["bearer_api_key", "none"])
-@pytest.mark.parametrize("purpose", ["recall", "automatic_recall", "related_memory"])
+@pytest.mark.parametrize("purpose", ["recall", "automatic_recall"])
 def test_decisions_batch_named_candidates_native_or_public_sdk(
     monkeypatch, shape, authentication, purpose
 ):

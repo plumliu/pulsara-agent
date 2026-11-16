@@ -1,8 +1,8 @@
-# Pulsara todo 工具修订与使用教程草案
+# Pulsara todo 工具合同与使用教程
 
 共用规则见[原生工具修订草案索引](../PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 1、2 章；完整保存、原生 12k 分页及 NEXT 沿[统一交付草案](../PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)。
 
-状态：讨论草案，未实施。todo 只提供原生调用，不提供 JS API。本文件的 TypeScript 只描述参数和业务返回类型，不表示存在脚本入口。本轮只改文档。
+状态：当前生效合同。todo 只提供原生调用，不提供 JS API。本文件的 TypeScript 只描述参数和业务返回类型，不表示存在脚本入口。
 
 ## 1. todo：替换当前进度清单
 

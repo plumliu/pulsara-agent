@@ -883,7 +883,7 @@ def _parse_server_declaration(
     display_name = _string(raw.get("display_name") or server_id, "MCP display name")
     enabled = _boolean(raw.get("enabled", True), "MCP enabled")
     scope_policy = McpScopePolicy(
-        _string(raw.get("scope_policy", "ROOT_ONLY"), "MCP scope policy").upper()
+        _string(raw.get("scope_policy", "ROOT_AND_SUBAGENTS"), "MCP scope policy").upper()
     )
     supports_parallel = _boolean(
         raw.get("supports_parallel_tool_calls", False),

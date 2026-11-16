@@ -173,33 +173,18 @@ def test_external_playlist_io_denied(tmp_path):
             probe_media(source)
 
 
-def test_subtitle_bounded_utf8_fragments_preserve_source_positions(tmp_path):
+def test_subtitle_complete_utf8_keeps_original_cue_boundaries(tmp_path):
     path = tmp_path / "captions.srt"
     original = "你好 world\nAgain"
     path.write_text(
         f"1\n00:00:01,000 --> 00:00:02,000\n{original}\n\n2\n00:00:03,000 --> 00:00:04,000\nRepeat\n"
     )
     with MediaSource.open(path) as source:
-        info = probe_media(source)
-        position, offset, parts = None, 0, []
-        while True:
-            result = read_subtitles(
-                source,
-                info,
-                0,
-                5,
-                after_position=position,
-                text_offset=offset,
-                maximum_text_bytes=7,
-            )
-            assert sum(len(entry.text.encode()) for entry in result.entries) <= 7
-            parts.extend((entry.position, entry.text) for entry in result.entries)
-            if result.next_position is None:
-                break
-            assert (result.next_position, result.next_text_offset) != (position, offset)
-            position, offset = result.next_position, result.next_text_offset
-    assert "".join(text for pos, text in parts if pos == 0) == original
-    assert "".join(text for pos, text in parts if pos == 1) == "Repeat"
+        result = read_subtitles(source, probe_media(source), 0, 5)
+    assert [(entry.start, entry.end, entry.text) for entry in result.entries] == [
+        (1, 2, original),
+        (3, 4, "Repeat"),
+    ]
 
 
 def test_media_source_clone_keeps_descriptor_owned_until_last_close(tmp_path):
@@ -316,7 +301,7 @@ def test_audio_upload_boundary_before_decode(tmp_path):
 
 
 def test_worker_async_start_and_precise_frame_progress(tmp_path):
-    from pulsara_agent.media.frames import FrameBudget, read_video_frames
+    from pulsara_agent.media.frames import prepare_frame_plan
 
     path = tmp_path / "movie.mkv"
     with av.open(str(path), "w") as container:
@@ -341,19 +326,19 @@ def test_worker_async_start_and_precise_frame_progress(tmp_path):
         with MediaSource.open(path) as source:
             info = probe_media(source)
             result = await owner.run(
-                read_video_frames,
+                prepare_frame_plan,
                 source,
                 info,
                 start=0,
                 end=info.duration,
                 mode="overview",
                 crop=None,
-                budget=FrameBudget(1000000, 1280 * 720, 2, 32),
+                analysis_frames=32,
                 on_started=started,
                 on_progress=lambda span: events.append(span),
                 deadline_monotonic=monotonic() + 10,
             )
-            assert events == ["start", result.processed_range]
+            assert events == ["start", tuple(map(float, result.processed_range))]
         await owner.aclose()
 
     asyncio.run(check())

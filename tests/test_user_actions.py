@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-import json
+from pulsara_agent.primitives.context import thaw_json
 from types import SimpleNamespace
 
 from tests.test_pr03_user_controls import _Clock, _command, _host
@@ -54,18 +54,17 @@ def test_user_action_batch_merges_and_take_leaves_later_results():
             admission_deadline_ms=host.control_admission_deadline_ms(),
         )
         await host._user_control_attempts[repeated.command_id].task
-        batch = json.loads(await host.take_user_actions())['actions']
-        assert [x['kind'] for x in batch] == ['workspace_recreated', 'process_control', 'process_control']
-        assert batch[0]['original_files_restored'] is False
-        assert [x['target']['process_id'] for x in batch[1:]] == sorted((first, second))
-        assert next(x for x in batch if x.get('target', {}).get('process_id') == first)['status'] == 'unknown'
-        agent_item = next(x for x in batch if x.get('target', {}).get('process_id') == second)
-        assert agent_item['origin'] == {'kind': 'AGENT', 'agent_id': agent}
-        assert agent_item['disposition'] == 'PHYSICAL_SETTLEMENT_INCOMPLETE'
-        assert 'public_detail' in agent_item
+        batch = await host.take_user_actions()
+        assert len(batch) == 3
+        assert batch[0].target is None and '原文件未恢复' in batch[0].text
+        assert [thaw_json(x.target)['process_id'] for x in batch[1:]] == sorted((first, second))
+        assert all('尚不能确认已停止' in x.text for x in batch[1:])
+        agent_item = next(x for x in batch[1:] if thaw_json(x.target)['process_id'] == second)
+        assert agent in agent_item.text and '进程来自子代理' in agent_item.text
+        assert 'PHYSICAL_SETTLEMENT_INCOMPLETE' in agent_item.text
         assert await host.take_user_actions() is None
         await host.record_workspace_recreated(datetime(2026, 1, 3, tzinfo=timezone.utc))
-        assert json.loads(await host.take_user_actions())['actions'][0]['created_at'].startswith('2026-01-03')
+        assert (await host.take_user_actions())[0].text == batch[0].text
     asyncio.run(run())
 
 
@@ -85,10 +84,10 @@ def test_termination_failure_reports_unknown_and_closed_host_drops_notice():
         attempt = host._user_control_attempts[result.command_id]
         await attempt.task
         assert attempt.outcome.status == 'FAILED'
-        action = json.loads(await host.take_user_actions())['actions'][0]
-        assert action['disposition'] == 'OWNER_UNAVAILABLE'
-        assert action['status'] == 'unknown'
-        assert action['public_detail'] == 'operation unavailable'
+        action = (await host.take_user_actions())[0]
+        assert thaw_json(action.target) == {'kind':'PROCESS', 'process_id':process_id}
+        assert '停止失败' in action.text
+        assert action.text.endswith('详情：operation unavailable')
         await host._execute_terminate_process_attempt(attempt)
         assert host._pending_process_controls
         host._closing = True
@@ -132,14 +131,14 @@ def test_action_dynamic_text_uses_saved_and_process_credential_boundaries():
         assert saved_secret in attempt.outcome.public_message
         body = await host.take_user_actions()
         assert body is not None
-        assert saved_secret not in body and process_secret not in body
-        workspace, process = json.loads(body)['actions']
-        assert workspace['workspace_root'].startswith('/tmp/keep-')
-        assert workspace['workspace_root'].endswith('/workspace')
-        assert process['public_detail'].startswith('failure before ')
-        assert process['public_detail'].endswith('; retry manually')
-        assert process['target']['process_id'] == process_id
-        assert process['disposition'] == 'OWNER_UNAVAILABLE'
+        assert all(saved_secret not in item.text and process_secret not in item.text for item in body)
+        workspace, process = body
+        assert workspace.target is None and '原文件未恢复' in workspace.text
+        assert host.workspace.workspace_root not in workspace.text
+        assert '详情：failure before ' in process.text
+        assert process.text.endswith('; retry manually')
+        assert thaw_json(process.target) == {'kind':'PROCESS', 'process_id':process_id}
+        assert '停止失败' in process.text
     asyncio.run(run())
 
 
@@ -199,7 +198,9 @@ def test_cancelled_projection_leaves_newer_actions_untouched():
         finally:
             release.set()
             assert await asyncio.to_thread(exited.wait, 2)
-        second = json.loads(await host.take_user_actions())['actions']
-        assert second[0]['created_at'].startswith('2026-01-03')
+        assert host._pending_workspace_recreated == datetime(2026, 1, 3, tzinfo=timezone.utc)
+        second = await host.take_user_actions()
+        assert len(second) == 1 and second[0].target is None
+        assert '原文件未恢复' in second[0].text
         assert await host.take_user_actions() is None
     asyncio.run(run())

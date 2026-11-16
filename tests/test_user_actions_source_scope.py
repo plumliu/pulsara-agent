@@ -23,13 +23,13 @@ from pulsara_agent.model_input.contracts import ModelInputScopeKind
 def test_preparation_scope_controls_user_action_take(
     scope, semantic, compaction, prospective, should_take
 ):
-    take = AsyncMock(return_value='{"actions":[]}')
+    take = AsyncMock(return_value=())
     owner = SimpleNamespace(_take_user_actions=take)
     result = asyncio.run(ProviderDispatchCoordinator._take_user_actions_for_preparation(
         owner, scope=scope, semantic_only=semantic,
-        compaction_candidate_family=compaction, noninstallable_preparation=prospective,
+        compaction_candidate_family=compaction, noninstallable_preparation=prospective, eligible_entry=True,
     ))
-    assert result == ('{"actions":[]}' if should_take else None)
+    assert result == (() if should_take else None)
     assert take.await_count == int(should_take)
 
 
@@ -41,7 +41,7 @@ def test_reduced_wire_candidate_preserves_installed_actions_prefix():
         ContextSourceKind, FrozenProviderInputItem, FrozenProviderInputItemKind,
     )
     from tests.support.round3 import new_test_provider_input_continuity_owner
-    from tests.test_round3_structured_model_input_compiler import (
+    from tests.support.model_input import (
         _candidate, _compile_and_install_append, _prepare_append_candidate,
         _prepared_request, _snapshot, _sources, _user,
     )
@@ -53,7 +53,7 @@ def test_reduced_wire_candidate_preserves_installed_actions_prefix():
     _, view = _compile_and_install_append(
         compiler=compiler, owner=owner,
         request=_prepared_request(
-            _snapshot(first), _sources(_candidate(ContextSourceKind.USER_ACTIONS, (old_body,)))
+            _snapshot(first), _sources(_candidate(ContextSourceKind.USER_ACTIONS, old_body))
         ),
     )
     assistant = FrozenProviderInputItem(
@@ -66,7 +66,7 @@ def test_reduced_wire_candidate_preserves_installed_actions_prefix():
     request = replace(
         _prepared_request(
             _snapshot(first, assistant, second),
-            _sources(_candidate(ContextSourceKind.USER_ACTIONS, (new_body,))),
+            _sources(_candidate(ContextSourceKind.USER_ACTIONS, new_body)),
         ),
         context_id="context:6igz6lmmsfk2xstdjjz6lfuzfy", model_call_index=2,
     )

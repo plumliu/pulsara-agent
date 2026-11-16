@@ -1,4 +1,4 @@
-import { Blocks, Bot, Code2, ChevronRight, FileText, Globe, Server, TerminalSquare, TriangleAlert } from 'lucide-react';
+import { Blocks, Bot, Code2, ChevronRight, FileText, Globe, Server, TerminalSquare } from 'lucide-react';
 import { presentationLabel, type PresentationResult as Result, type PresentationTarget } from '../lib/presentation-targets';
 
 export function PresentationResult({ result, onOpen }: { result: Result; onOpen?: (targets: PresentationTarget[]) => void }) {
@@ -12,6 +12,5 @@ export function PresentationResult({ result, onOpen }: { result: Result; onOpen?
         <ChevronRight size={13} aria-hidden="true" />
       </button>;
     })}</div>}
-    {!!result.errors?.length && <ul className="presentation-result__errors">{result.errors.map(error => <li key={error.index}><TriangleAlert size={13} /><span><strong>第 {error.index + 1} 项</strong>{error.message}</span></li>)}</ul>}
   </section>;
 }

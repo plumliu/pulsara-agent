@@ -636,8 +636,7 @@ def _can_retry_compaction_with_smaller_tail(error: BaseException) -> bool:
         ModelInputCompileFailureKind.PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET,
         ModelInputCompileFailureKind.PREFIX_EPOCH_BUDGET_EXHAUSTED,
         ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET,
-        ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_NOT_INLINEABLE,
-        ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET,
+
     }
 
 

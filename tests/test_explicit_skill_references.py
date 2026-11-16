@@ -34,14 +34,12 @@ def test_explicit_user_reference_boundaries(text, expected):
 
 def test_unknown_slash_reference_is_plain_text_not_unavailable_skill_selection():
     injections, diagnostics, unavailable = _active_injections(
-        {}, user_input=("Use /unknown-skill",), active_skill_names=frozenset())
+        {}, user_input=("Use /unknown-skill",))
     assert injections == () and diagnostics == () and unavailable is None
 
 
-def test_explicit_host_selection_still_reports_missing_skill():
-    injections, diagnostics, unavailable = _active_injections(
-        {}, user_input=(), active_skill_names=frozenset({"missing"}))
-    assert not injections and diagnostics and unavailable is not None
+def test_name_and_prefix_text_are_not_slash_selection():
+    assert _explicit_skill_names(("Use alpha and skill:beta",)) == ()
 
 
 def test_annotation_comment_is_active_but_quote_is_not_a_new_skill_request():

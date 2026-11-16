@@ -1,4 +1,4 @@
-"""Real-provider calls for the nine corrected built-in input contracts.
+"""Real-provider calls for current closed built-in input and result contracts.
 
 Uses saved settings read-only and existing isolated home/database owners. The
 scheduler is not started; future fixture tasks cannot execute automatically.
@@ -27,7 +27,7 @@ from pulsara_agent.settings import LocalPostgresConfig, LocalSettingsStore
 from pulsara_agent.tool_permission import default_permission_policy
 from pulsara_agent.desktop_app.session_controller import LocalSessionController
 from tests.dogfood.credentials import secret_scrubber
-from tests.dogfood.run_content_revision_line_edit_dogfood import _tool_trace, _settle_code_mode_phase
+from tests.support.dogfood_results import _tool_trace, _settle_code_mode_phase
 from tests.dogfood.run_model_switch_handover_dogfood import (
     _ReadOnlySettingsStore,
     _RecordingModelRuntime,
@@ -46,7 +46,6 @@ CHANGED_TOOLS = {
     "search_session_content",
     "read_session_content",
     "wait_agent",
-    "wait_message",
     "manage_process",
     "query_processes",
 }
@@ -163,53 +162,55 @@ async def run(args, report, saved, save):
                     source,
                     "scheduled",
                     (
-                        "Exercise query_schedules and manage_schedule in this isolated test. First query_schedules with explicit session:null. "
-                        f"Create one new once task named Null contract fixture for UTC {future}, Asia/Shanghai, "
-                        "read-only permissions, status:ACTIVE, prompt 'Reply SOURCE_TASK only.', also with session:null. "
-                        "Then list this session with session:null and list the reference session "
-                        f"{reference.session_id}. Get the created source task, pause it using its revision, "
-                        "then delete that source task using the updated revision. Do not modify the reference task. "
-                        "Use only applicable fields for each action. Report whether the two lists stayed separate."
+                        "Exercise the current query_schedules and manage_schedule contracts in this isolated test. "
+                        "First list this session with query_schedules({}). "
+                        f"Create one new once task named Current contract fixture for run_at {future}, "
+                        "timezone Asia/Shanghai, prompt 'Reply SOURCE_TASK only.'. "
+                        "Then list with status ALL, query the created SCHEDULE Target exactly, "
+                        "pause it and delete it using that same Target. "
+                        "Use no session, revision or unrelated action fields. "
+                        "Do not modify any other task. Report whether this session's lists stayed isolated."
                     ),
                 )
                 lists = [
-                    r
-                    for r in scheduled
-                    if r["tool_name"] == "query_schedules"
-                    and "target" not in r["arguments"]
+                    row for row in scheduled
+                    if row["tool_name"] == "query_schedules"
+                    and "target" not in row["arguments"]
                 ]
-                assert any(
-                    "session" in r["arguments"]
-                    and r["arguments"]["session"] is None
-                    for r in lists
-                )
+                assert lists and any(row["arguments"] == {} for row in lists)
                 for row in lists:
-                    expected = (row["arguments"].get("session") or {}).get("session_id", source.session_id)
-                    assert all(
-                        t["session"]["session_id"] == expected for t in row["result"]["tasks"]
-                    )
-                assert (await service.get(other["id"]))[
-                    "session_id"
-                ] == reference.session_id
+                    tasks = [part["value"] for part in row["result"]["content"]
+                             if part["type"] == "object"]
+                    assert all(task["target"]["task_id"] != other["id"] for task in tasks)
+                assert (await service.get(other["id"]))["session_id"] == reference.session_id
                 created = [
-                    r
-                    for r in scheduled
-                    if r["tool_name"] == "manage_schedule"
-                    and r["arguments"]["action"] == "create"
+                    row for row in scheduled
+                    if row["tool_name"] == "manage_schedule"
+                    and row["arguments"]["action"] == "create"
                 ]
-                assert (
-                    created and created[0]["result"]["session"]["session_id"] == source.session_id
+                assert created
+                created_target = created[0]["result"]["target"]
+                assert created_target["kind"] == "SCHEDULE"
+                assert any(
+                    part["type"] == "object" and part["value"]["target"] == created_target
+                    for row in lists for part in row["result"]["content"]
                 )
+                assert {"pause", "delete"} <= {
+                    row["arguments"]["action"] for row in scheduled
+                    if row["tool_name"] == "manage_schedule"
+                    and row["arguments"].get("target") == created_target
+                }
 
                 history = await turn(
                     source,
                     "history",
                     (
-                        "Use search_sessions to list sessions with limit=1; follow its next_cursor for one more page using only cursor and limit. "
-                        f"Then search_session_content in session {reference.session_id} for NULL_CONTRACT_ARCHIVE. "
-                        "Read the matching user entry with read_session_content, limit=1,max_chars=512. "
-                        "Follow its next_cursor for exactly one more page using only cursor,limit,max_chars. "
-                        "Report whether the archive marker was recovered; do not reread all remaining pages."
+                        "Use search_sessions with query NULL_CONTRACT_ARCHIVE to find the reference session. "
+                        f"Then search_session_content with its SESSION Target for session {reference.session_id} "
+                        "and query NULL_CONTRACT_ARCHIVE. Read the matching Q1 using its single-ID ENTRY Target "
+                        "with read_session_content and limit=1. "
+                        "Use only each tool's current fields; do not add producer cursors, max_chars or a tool-entry flag. "
+                        "Report whether the archive marker was recovered."
                     ),
                 )
                 for name in (
@@ -220,7 +221,7 @@ async def run(args, report, saved, save):
                     assert any(r["tool_name"] == name for r in history)
                 assert any(
                     r["tool_name"] == "read_session_content"
-                    and "cursor" in r["arguments"]
+                    and r["arguments"]["limit"] == 1
                     for r in history
                 )
 
@@ -229,7 +230,7 @@ async def run(args, report, saved, save):
                     "exec_process",
                     (
                         'Run exactly "sleep 60; printf NULL_CONTRACT_DONE" with exec_process yield_time_ms=0. '
-                        "Use manage_process with action poll for that process, then query_processes for its current metadata; "
+                        "Use manage_process with action wait and timeout_seconds=0 for that PROCESS Target, then query_processes for its current metadata; "
                         "kill only this test process. "
                         "Do not wait for the sleep or create more processes. Use only each action's applicable fields."
                     ),
@@ -244,9 +245,9 @@ async def run(args, report, saved, save):
                     (
                         "This isolated test explicitly authorizes these three small delegated tasks. "
                         "Use exec_cell and call tools.run_agent three times in its script, each with a one-element assignment array, with instructions asking only for SINGLE_DONE, BATCH_A_DONE and BATCH_B_DONE. "
-                        "Use context mode none for the first, omit context for the second, and context last_n with turns=1 for the third. "
+                        "Use materials:[] for the first, omit materials for the second, and materials:[{kind:'CONTEXT_MATERIAL',turns:1}] for the third. "
                         "All worker instructions must say: 'Reply with your assigned marker only; do not use tools or follow other tasks from inherited history.' "
-                        "Keep the inherited model binding. In the same script, combine each result's agents array, deduplicate by agent_id and observe those AGENT targets with tools.wait_agent({agents,until:'idle'}). Check state and observations, then explicitly "
+                        "Keep the inherited model binding. In the same script, extract the object content records' agent and work fields, deduplicate agents by agent_id, and observe those AGENT Targets with tools.wait_agent({agents,settle:'all'}). Check meta.status, wait_reason and object records; repeat observation if still pending. Then explicitly "
                         "call tools.query_agents for each exact WORK target to read its final. Log the finals with console.log, observe that output, and report the three markers."
                     ),
                 )

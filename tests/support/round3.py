@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from pulsara_agent.identity import derive_id
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-import json
 from pathlib import Path
 from typing import AsyncIterator, Callable
 
@@ -55,7 +54,6 @@ from pulsara_agent.conversation_kernel.capability_composition import (
 )
 from pulsara_agent.conversation_kernel.mcp.contracts import build_catalog_snapshot
 from pulsara_agent.conversation_kernel.input_continuity import (
-    FrozenProviderInputEpochView,
     HostProviderInputContinuityOwner,
     ProcessLocalProviderInputInstallAuthority,
     _issue_root_bootstrap_lease_source,
@@ -68,10 +66,7 @@ from pulsara_agent.conversation_kernel.contracts import (
 from pulsara_agent.conversation_kernel.memory.contracts import (
     FrozenModelCallMemoryContext,
 )
-from pulsara_agent.conversation_kernel.context_sources import (
-    ContextSourceRegistry,
-    FrozenNonTriggerContextSources,
-)
+from pulsara_agent.conversation_kernel.context_sources import KernelContextSourceCollector
 from pulsara_agent.conversation_kernel.tool_contracts import (
     KernelToolAuthorization,
     KernelToolAuthorizationKind,
@@ -90,16 +85,9 @@ from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
 from pulsara_agent.model_input.contracts import (
     CanonicalModelInputSnapshot,
     CollectedContextSources,
-    ContextBudgetClass,
     ContextChannel,
-    ContextRenderMode,
-    ContextRenderVariant,
     ContextSourceCandidate,
-    ContextSourceAbsentFact,
-    ContextSourceAbsenceKind,
     ContextSourceKind,
-    ContextSourceLifecycle,
-    ContextTrustClass,
     ContextBindingBaseKind,
     FrozenContextBindingCompileFact,
     FrozenModelToolSurface,
@@ -113,9 +101,6 @@ from pulsara_agent.model_input.contracts import (
 from pulsara_agent.model_input.continuity import FULL_HISTORY_CONTEXT_BASE_IDENTITY
 from pulsara_agent.model_input.continuity import (
     ProcessLocalProviderInputInstallPermit,
-    SourceObservationLifecycle,
-    SourceObservationPresence,
-    encode_runtime_observation,
 )
 from pulsara_agent.primitives.context import context_fingerprint, freeze_json
 from pulsara_agent.llm.adapters.openai.function_tools import (
@@ -463,49 +448,11 @@ class _Cwd:
     value: str = "/test/workspace"
 
 
-class StaticContextSourceCollector:
-    """Required first-party facts with the production contracts."""
-
-    @staticmethod
-    def _value_observation_message(
-        kind: ContextSourceKind,
-        lifecycle: SourceObservationLifecycle,
-        body: str,
-    ):
-        binding = ContextSourceRegistry().binding(kind)
-        return encode_runtime_observation(
-            source_kind=kind,
-            trust_class=binding.trust,
-            lifecycle=lifecycle,
-            presence=SourceObservationPresence.VALUE,
-            body=body,
-        )
-
-    def freeze_post_response_call_source_upper(self):
-        return ()
-
-    def freeze_fresh_entered_plan_source_upper(
-        self,
-        permission_snapshot: FrozenRunPermissionSnapshot,
-    ):
-        del permission_snapshot
-        return (
-            self._value_observation_message(
-                ContextSourceKind.RUN_PERMISSION,
-                SourceObservationLifecycle.TURN,
-                f"permission={PermissionMode.READ_ONLY.value}",
-            ),
-            self._value_observation_message(
-                ContextSourceKind.PLAN_HANDOFF,
-                SourceObservationLifecycle.ONE_SHOT,
-                "plan handoff full",
-            ),
-            self._value_observation_message(
-                ContextSourceKind.PLAN_WORKFLOW,
-                SourceObservationLifecycle.SNAPSHOT,
-                "plan workflow full",
-            ),
-        )
+class StaticContextSourceCollector(KernelContextSourceCollector):
+    """Fixed catalogs with production source collection and eligibility rules."""
+    def __init__(self):
+        super().__init__(workspace_kind="project",workspace_root=Path.cwd(),
+            capability_composer=None,base_system_prompt="ROOT SYSTEM",display_timezone=timezone.utc)
 
     def freeze_skill_capability_source_snapshot(
         self,
@@ -540,10 +487,12 @@ class StaticContextSourceCollector:
             inspection=CompleteEffectiveSkillCatalogInspection(
                 root_policy=root_policy,
                 winners=(),
+            readable_skills=(),
                 candidate_issues=(),
             ),
             owner_authenticity=self,
         )
+
 
     def freeze_skill_capability_projection_input(self, owner):
         return FrozenSkillProjectionInput(
@@ -551,279 +500,15 @@ class StaticContextSourceCollector:
             inspection=owner.inspection,
         )
 
-    def collect(self, **_kwargs: object) -> CollectedContextSources:
-        canonical_facts = _kwargs["canonical_facts"]
-        permission = canonical_facts.run_permission_snapshot  # type: ignore[union-attr]
-        candidates: tuple[ContextSourceCandidate, ...] = (
-            _candidate(
-                kind=ContextSourceKind.BASE_SYSTEM,
-                channel=ContextChannel.SYSTEM,
-                trust=ContextTrustClass.ROOT_INSTRUCTION,
-                budget=ContextBudgetClass.MUST_KEEP,
-                placement=0,
-                degradation=0,
-                variants=((ContextRenderMode.FULL, "ROOT SYSTEM"),),
-            ),
-            _candidate(
-                kind=ContextSourceKind.RUNTIME_ENVIRONMENT,
-                channel=ContextChannel.RUNTIME_OBSERVATION,
-                trust=ContextTrustClass.TRUSTED_RUNTIME_FACT,
-                budget=ContextBudgetClass.MUST_KEEP,
-                placement=10,
-                degradation=10,
-                variants=(
-                    (ContextRenderMode.FULL, "runtime workspace=/test/workspace"),
-                    (ContextRenderMode.COMPACT, "runtime=/test/workspace"),
-                ),
-            ),
-            _candidate(
-                kind=ContextSourceKind.RUN_PERMISSION,
-                channel=ContextChannel.RUNTIME_OBSERVATION,
-                trust=ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
-                budget=ContextBudgetClass.MUST_KEEP,
-                placement=20,
-                degradation=12,
-                variants=(
-                    (
-                        ContextRenderMode.FULL,
-                        f"permission={permission.effective_mode.value}",
-                    ),
-                    (
-                        ContextRenderMode.COMPACT,
-                        f"permission={permission.effective_mode.value}",
-                    ),
-                ),
-            ),
-        )
-        if canonical_facts.plan_handoff_fact is not None:  # type: ignore[union-attr]
-            candidates += (
-                _candidate(
-                    kind=ContextSourceKind.PLAN_HANDOFF,
-                    channel=ContextChannel.RUNTIME_OBSERVATION,
-                    trust=ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
-                    budget=ContextBudgetClass.MUST_KEEP,
-                    placement=30,
-                    degradation=11,
-                    variants=(
-                        (ContextRenderMode.FULL, "plan handoff full"),
-                        (ContextRenderMode.COMPACT, "plan handoff"),
-                    ),
-                ),
-            )
-        if canonical_facts.plan_workflow_fact is not None:  # type: ignore[union-attr]
-            candidates += (
-                _candidate(
-                    kind=ContextSourceKind.PLAN_WORKFLOW,
-                    channel=ContextChannel.RUNTIME_OBSERVATION,
-                    trust=ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
-                    budget=ContextBudgetClass.MUST_KEEP,
-                    placement=40,
-                    degradation=10,
-                    variants=(
-                        (ContextRenderMode.FULL, "plan workflow full"),
-                        (ContextRenderMode.COMPACT, "plan workflow"),
-                    ),
-                ),
-            )
-        previous = canonical_facts.previous_turn_outcome_fact  # type: ignore[union-attr]
-        if previous is not None:
-            body = json.dumps(
-                {
-                    "kind": previous.outcome_kind.value,
-                    "accepted_assistant_entry_count": (
-                        previous.accepted_assistant_entry_count
-                    ),
-                    "definitely_not_dispatched_tool_count": (
-                        previous.definitely_not_dispatched_tool_count
-                    ),
-                    "outcome_unknown_tool_count": (previous.outcome_unknown_tool_count),
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-            candidates += (
-                _candidate(
-                    kind=ContextSourceKind.PREVIOUS_TURN_OUTCOME,
-                    channel=ContextChannel.RUNTIME_OBSERVATION,
-                    trust=ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
-                    budget=ContextBudgetClass.MUST_KEEP,
-                    placement=45,
-                    degradation=10,
-                    variants=(
-                        (ContextRenderMode.FULL, body),
-                        (ContextRenderMode.COMPACT, body),
-                    ),
-                ),
-            )
-        user_actions = _kwargs.get("user_actions")
-        if user_actions is not None:
-            candidates += (_candidate(
-                kind=ContextSourceKind.USER_ACTIONS,
-                channel=ContextChannel.RUNTIME_OBSERVATION,
-                trust=ContextTrustClass.TRUSTED_RUNTIME_FACT,
-                budget=ContextBudgetClass.OPTIONAL,
-                placement=48,
-                degradation=90,
-                variants=((ContextRenderMode.FULL, user_actions),),
-            ),)
-        present = {item.source_kind for item in candidates}
-        absence_kinds = {
-            ContextSourceKind.USER_ACTIONS: ContextSourceAbsenceKind.NOT_APPLICABLE,
-            ContextSourceKind.RUNTIME_CLOCK: ContextSourceAbsenceKind.UNAVAILABLE,
-            ContextSourceKind.PLAN_HANDOFF: ContextSourceAbsenceKind.NOT_APPLICABLE,
-            ContextSourceKind.PLAN_WORKFLOW: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-            ContextSourceKind.SKILL_CATALOG: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-            ContextSourceKind.MCP_CATALOG: ContextSourceAbsenceKind.NOT_APPLICABLE,
-            ContextSourceKind.ACTIVE_SKILL: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-            ContextSourceKind.PREVIOUS_TURN_OUTCOME: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-            ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD: ContextSourceAbsenceKind.NOT_APPLICABLE,
-            ContextSourceKind.MEMORY_RECALL: ContextSourceAbsenceKind.NOT_APPLICABLE,
-            ContextSourceKind.MEMORY_WRITE_HINT: ContextSourceAbsenceKind.NOT_APPLICABLE,
-            ContextSourceKind.COMPACTION_RUNTIME_HANDOFF: ContextSourceAbsenceKind.NOT_APPLICABLE,
-            ContextSourceKind.RETAINED_SKILL_CONTEXT: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-            ContextSourceKind.HOOK_CONTEXT: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-        }
-        absent = tuple(
-            _absent_source(kind, absence)
-            for kind, absence in absence_kinds.items()
-            if kind not in present
-        )
-        collection = context_fingerprint(
-            "collected-context-sources:v1",
-            {
-                "candidates": tuple(
-                    item.source_semantic_fingerprint for item in candidates
-                ),
-                "diagnostics": (),
-                "absent": tuple(
-                    (
-                        item.source_kind.value,
-                        item.lifecycle.value,
-                        item.absence_kind.value,
-                        item.domain_semantic_fingerprint,
-                    )
-                    for item in absent
-                ),
-            },
-        )
-        return CollectedContextSources(candidates, (), collection, absent)
 
-    def freeze_non_trigger_sources(
-        self, **kwargs: object
-    ) -> FrozenNonTriggerContextSources:
-        collection = self.collect(
-            activation_subject=None,
-            activation_text="",
-            **kwargs,
-        )
-        return FrozenNonTriggerContextSources(
-            candidates=collection.candidates,
-            absent_facts=collection.absent_facts,
-            diagnostics=collection.diagnostics,
-            tool_exposure_plan=kwargs["tool_exposure_plan"],  # type: ignore[arg-type]
-            skill_dispatch_view=kwargs["skill_dispatch_view"],  # type: ignore[arg-type]
-            skill_owner_snapshot=kwargs["skill_owner_snapshot"],  # type: ignore[arg-type]
-        )
-
-    def complete_frozen_sources(
-        self,
-        frozen: FrozenNonTriggerContextSources,
-        **_kwargs: object,
-    ) -> CollectedContextSources:
-        absent = frozen.absent_facts
-        if not any(
-            item.source_kind is ContextSourceKind.ACTIVE_SKILL
-            for item in (*frozen.candidates, *absent)
-        ):
-            # Like the production collector, completion owns the activation
-            # head after a continuation reopens it. This static catalog has no
-            # Skill bodies; it still supplies the required typed absence.
-            absent = (*absent, _absent_source(
-                ContextSourceKind.ACTIVE_SKILL,
-                ContextSourceAbsenceKind.NOT_APPLICABLE
-                if _kwargs.get("activation_subject") is None
-                else ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-            ))
-        collection = context_fingerprint(
-            "collected-context-sources:v1",
-            {
-                "candidates": tuple(
-                    item.source_semantic_fingerprint for item in frozen.candidates
-                ),
-                "diagnostics": (),
-                "absent": tuple(
-                    (
-                        item.source_kind.value,
-                        item.lifecycle.value,
-                        item.absence_kind.value,
-                        item.domain_semantic_fingerprint,
-                    )
-                    for item in absent
-                ),
-            },
-        )
-        return CollectedContextSources(
-            frozen.candidates,
-            frozen.diagnostics,
-            collection,
-            absent,
-        )
-
-    def freeze_compaction_active_skill_source(
-        self,
-        predecessor_epoch: FrozenProviderInputEpochView | None,
-    ) -> ContextSourceAbsentFact:
-        """Static fixtures never synthesize inherited active Skill bodies."""
-
-        if predecessor_epoch is not None and any(
-            head.source_kind is ContextSourceKind.ACTIVE_SKILL
-            for head in predecessor_epoch.source_heads
-        ):
-            raise ValueError(
-                "static source collector cannot inherit an installed active Skill"
-            )
-        return _absent_source(
-            ContextSourceKind.ACTIVE_SKILL,
-            ContextSourceAbsenceKind.NOT_APPLICABLE,
-        )
-
-    def freeze_hook_context_source(self, **_kwargs: object):
-        return (
-            _absent_source(
-                ContextSourceKind.HOOK_CONTEXT,
-                ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-            ),
-            None,
-        )
-
-
-def _absent_source(
-    kind: ContextSourceKind,
-    absence: ContextSourceAbsenceKind,
-) -> ContextSourceAbsentFact:
-    binding = ContextSourceRegistry().binding(kind)
-    return ContextSourceAbsentFact(
-        source_kind=kind,
-        lifecycle=binding.lifecycle,
-        absence_kind=absence,
-        trust_class=binding.trust,
-        budget_class=binding.budget,
-        placement_ordinal=binding.placement,
-        degradation_priority=binding.degradation,
-        domain_semantic_fingerprint=context_fingerprint(
-            "pulsara:context-source-absence:v1",
-            {
-                "kind": kind.value,
-                "absence": absence.value,
-                "trust": binding.trust.value,
-                "budget": binding.budget.value,
-                "placement": binding.placement,
-                "degradation": binding.degradation,
-                "lifecycle": binding.lifecycle.value,
-            },
-        ),
-    )
+    def complete_frozen_sources(self,frozen,**kwargs):
+        candidates=frozen.candidates
+        state=frozen.previous_state
+        if frozen.new_context:
+            candidates=(*candidates,ContextSourceCandidate(ContextSourceKind.SKILL_CATALOG,
+                ContextChannel.CONTEXT_MESSAGE,"当前没有可用技能。",1))
+            state=replace(state,skill_catalog=frozen.skill_owner_snapshot,memory=None)
+        return CollectedContextSources(candidates,frozen.diagnostics,frozen.hook_context,state)
 
 
 def static_canonical_compile_facts(
@@ -863,6 +548,7 @@ def static_canonical_compile_facts(
     object.__setattr__(provisional, "plan_handoff_fact", None)
     object.__setattr__(provisional, "approved_plan_materialization_fact", None)
     object.__setattr__(provisional, "previous_turn_outcome_fact", None)
+    object.__setattr__(provisional, "plan_mode_original_input", None)
     object.__setattr__(provisional, "canonical_read_cut_fingerprint", "")
     return FrozenCanonicalCompileSnapshot(
         canonical_input=canonical_input,
@@ -981,8 +667,6 @@ class StructuredToolPort:
         return FrozenMcpCapabilityProjectionInput(
             conversation_scope_kind=owner.conversation_scope_kind,
             source_snapshots=owner.source_snapshots,
-            catalog_semantic_fingerprint=owner.catalog_snapshot.semantic_fingerprint,
-            inspectability_facts=(),
         )
 
     def prepare_planned_tool_surface(
@@ -1214,8 +898,6 @@ class _EmptyTestMcpCapabilityOwner:
         return FrozenMcpCapabilityProjectionInput(
             conversation_scope_kind=owner.conversation_scope_kind,
             source_snapshots=owner.source_snapshots,
-            catalog_semantic_fingerprint=owner.catalog_snapshot.semantic_fingerprint,
-            inspectability_facts=(),
         )
 
 
@@ -1378,6 +1060,7 @@ def prepare_test_direct_tool_surface(
     inspection = CompleteEffectiveSkillCatalogInspection(
         root_policy=root_policy,
         winners=(),
+        readable_skills=(),
         candidate_issues=(),
     )
     skill_owner = issue_skill_catalog_source_snapshot(
@@ -1394,7 +1077,7 @@ def prepare_test_direct_tool_surface(
     native = freeze_openai_native_tool_eligibility(
         conversation_scope_kind=conversation_scope_kind,
         wire_api=wire_api,
-        tool_facts=registry.tool_facts,
+        tool_facts=builtin.source_snapshot.facts,
         retained_direct_inputs=()
         if predecessor is None
         else tuple(
@@ -1468,7 +1151,6 @@ def direct_tool_invocation_context(
             admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
         )
         borrow.execution_binding(tool_name)
-        from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
         result_entry_id = derive_id("entry", "test-fixture", f"result:{attempt_id}")
         return borrow, KernelToolInvocationContext(
             session_id=session_id,
@@ -1485,8 +1167,6 @@ def direct_tool_invocation_context(
             permission_snapshot_fingerprint=permission.snapshot_fingerprint,
             attempt_permission_snapshot_fingerprint=(permission.snapshot_fingerprint),
             surface_borrow=borrow,
-            page_budget=ToolResultPageBudget(tool_call_id=tool_call_id,
-                result_target={"kind": "SESSION_ENTRY", "session_id": session_id, "entry_id": result_entry_id}),
             memory_context=memory_context or _enabled_memory_context(),
         )
     except BaseException:
@@ -1585,69 +1265,6 @@ async def authorize_direct_tool(
 
 def _enabled_memory_context() -> FrozenModelCallMemoryContext:
     return FrozenModelCallMemoryContext()
-
-
-def _candidate(
-    *,
-    kind: ContextSourceKind,
-    channel: ContextChannel,
-    trust: ContextTrustClass,
-    budget: ContextBudgetClass,
-    placement: int,
-    degradation: int,
-    variants: tuple[tuple[ContextRenderMode, str], ...],
-) -> ContextSourceCandidate:
-    lifecycle = {
-        ContextSourceKind.BASE_SYSTEM: ContextSourceLifecycle.EPOCH_ROOT,
-        ContextSourceKind.RUNTIME_ENVIRONMENT: ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
-        ContextSourceKind.RUNTIME_CLOCK: ContextSourceLifecycle.CALL_APPEND,
-        ContextSourceKind.RUN_PERMISSION: ContextSourceLifecycle.TURN_APPEND,
-        ContextSourceKind.PLAN_HANDOFF: ContextSourceLifecycle.ONE_SHOT,
-        ContextSourceKind.USER_ACTIONS: ContextSourceLifecycle.ONE_SHOT,
-        ContextSourceKind.PLAN_WORKFLOW: ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
-        ContextSourceKind.SKILL_CATALOG: ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
-        ContextSourceKind.MCP_CATALOG: ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
-        ContextSourceKind.ACTIVE_SKILL: ContextSourceLifecycle.ACTIVATION_SNAPSHOT,
-        ContextSourceKind.PREVIOUS_TURN_OUTCOME: ContextSourceLifecycle.TURN_APPEND,
-    }[kind]
-    rendered = tuple(
-        ContextRenderVariant(
-            mode,
-            text,
-            len(text.encode("utf-8")),
-            context_fingerprint(
-                "context-render-variant:v1", {"mode": mode.value, "text": text}
-            ),
-        )
-        for mode, text in variants
-    )
-    instance = f"context-source:{kind.value.lower()}"
-    semantic = context_fingerprint(
-        "context-source-candidate:v1",
-        {
-            "source_kind": kind.value,
-            "source_instance_id": instance,
-            "channel": channel.value,
-            "trust": trust.value,
-            "budget": budget.value,
-            "placement": placement,
-            "degradation": degradation,
-            "lifecycle": lifecycle.value,
-            "variants": tuple(item.semantic_fingerprint for item in rendered),
-        },
-    )
-    return ContextSourceCandidate(
-        kind,
-        semantic,
-        channel,
-        trust,
-        budget,
-        placement,
-        degradation,
-        rendered,
-        lifecycle,
-        semantic,
-    )
 
 
 __all__ = [

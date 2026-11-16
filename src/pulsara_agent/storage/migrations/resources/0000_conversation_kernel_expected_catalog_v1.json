@@ -1,5 +1,5 @@
 {
-  "observed_catalog_fingerprint": "sha256:1937b574182323c89e61bb05cf1165d43f6c729bfc8659dd417b4fecc8a11ff8",
+  "observed_catalog_fingerprint": "sha256:40563b4a912904c89bd813db50bd4e8774ca15f5c6a8c7fcd3c561523d51dd05",
   "required_extensions": [
     {
       "extension_name": "vector",
@@ -56,6 +56,7 @@
     "pulsara_v3.enforce_session_root",
     "pulsara_v3.seal_memory_fact",
     "pulsara_v3.enforce_content_part_invariants",
-    "pulsara_v3.enforce_queue_material_metadata"
+    "pulsara_v3.enforce_queue_material_metadata",
+    "pulsara_v3.seal_native_tool_projection"
   ]
 }

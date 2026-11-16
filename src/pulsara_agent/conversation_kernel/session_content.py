@@ -1,57 +1,30 @@
-"""Cold ROOT history queries with advisory process-local search continuation."""
+"""Complete frozen-scope conversation discovery, QA search and message reads."""
 
 from __future__ import annotations
 
-from pulsara_agent.identity import is_valid_id
-
-from pulsara_agent.identity import random_id
-
-import base64
-import json
-from dataclasses import dataclass
 from time import monotonic
 
-from pulsara_agent.conversation_kernel.prompt_storage import (
-    validate_canonical_prompt_owner_metadata,
+from psycopg import IsolationLevel
+from psycopg.rows import dict_row
+
+from pulsara_agent.conversation_kernel.content_parts import ResultPart
+from pulsara_agent.conversation_kernel.history_projection import (
+    canonical_history_message,
 )
-from pulsara_agent.conversation_kernel.session_search import (
-    search_session_page,
+from pulsara_agent.conversation_kernel.history_search import (
+    FrozenHistoryReadScope,
+    search_history,
+    refetch_history,
 )
-from pulsara_agent.conversation_kernel.session_text import (
-    prompt_history_text,
-)
-from pulsara_agent.conversation_kernel.content_parts import read_content_parts
+from pulsara_agent.conversation_kernel.session_search import search_sessions_complete
+from pulsara_agent.identity import require_id
 from pulsara_agent.ports.session_content import (
-    SESSION_QUERY_MAX_ITEMS,
-    SESSION_QUERY_TOOL_NAMES,
-    SESSION_READ_DEFAULT_CHARS,
-    SESSION_READ_MAX_CHARS,
     SessionContentRange,
+    SESSION_QUERY_TOOL_NAMES,
     session_entry_target,
 )
-from pulsara_agent.primitives.tool_result_budget import (
-    ToolResultPageBoundary,
-    ToolResultPageBudget,
-)
-from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader
-
-
-@dataclass(frozen=True, slots=True)
-class _HistoryConsumedPage:
-    # Only consumed canonical IDs, never saved text/results or DB snapshots.
-    # Immutable deltas let retrying an earlier cursor retain its original prefix
-    # without copying the complete seen set into every cursor or page record.
-    query: tuple[str, str, bool, int, str | None]
-    question_ids: tuple[str, ...]
-    previous: _HistoryConsumedPage | None
-
-    def consumed_ids(self) -> set[str]:
-        result = set()
-        page = self
-        while page is not None:
-            result.update(page.question_ids)
-            page = page.previous
-        return result
+from pulsara_agent.ports.tool_execution import ToolBusinessValue
+from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 
 
 class SessionQueryError(ValueError):
@@ -60,149 +33,23 @@ class SessionQueryError(ValueError):
         super().__init__(message)
 
 
-def _encode(value):
-    return base64.urlsafe_b64encode(
-        json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
-    ).decode()
-
-
-def _decode(cursor, operation):
-    try:
-        value = json.loads(base64.b64decode(cursor, altchars=b"-_", validate=True))
-        if not isinstance(value, dict) or value.get("operation") != operation:
-            raise ValueError()
-        return value
-    except (ValueError, TypeError, UnicodeError) as exc:
-        raise SessionQueryError(
-            "CURSOR_INVALID", "Invalid cursor for this operation; restart the query."
-        ) from exc
-
-
-def _integer(value, name, *, minimum=0, maximum=None):
-    if (
-        type(value) is not int
-        or value < minimum
-        or (maximum is not None and value > maximum)
-    ):
-        raise SessionQueryError("INVALID_REQUEST", f"Invalid {name}.")
-    return value
-
-
-def _string(value, name):
-    if name in {"session_id", "entry_id", "page_id"}:
-        if not is_valid_id(
-            value,
-            {
-                "session_id": "session",
-                "entry_id": "entry",
-                "page_id": "page",
-            }[name],
-        ):
-            raise SessionQueryError("INVALID_ID", f"Invalid {name}.")
-    if not isinstance(value, str) or not value:
-        raise SessionQueryError("INVALID_REQUEST", f"Invalid {name}.")
-    return value
-
-
-def _target(arguments, operation, current_session_id):
-    if "target" not in arguments:
-        return current_session_id, None
-    target = arguments["target"]
-    if not isinstance(target, dict):
-        raise SessionQueryError("INVALID_REQUEST", "Invalid session target.")
-    kind = target.get("kind")
-    if kind == "SESSION":
-        if set(target) != {"kind", "session_id"}:
-            raise SessionQueryError("INVALID_REQUEST", "Invalid SESSION target fields.")
-        return _string(target["session_id"], "session_id"), None
-    if kind == "SESSION_ENTRY" and operation == "read_session_content":
-        if not {"kind", "entry_id"} <= set(target) or not set(target) <= {
-            "kind",
-            "session_id",
-            "entry_id",
-        }:
-            raise SessionQueryError(
-                "INVALID_REQUEST", "Invalid SESSION_ENTRY target fields."
-            )
-        return (
-            _string(target.get("session_id", current_session_id), "session_id"),
-            _string(target["entry_id"], "entry_id"),
-        )
-    raise SessionQueryError("INVALID_REQUEST", "Unsupported session target kind.")
-
-
-def _fits(payload, tool_call_id, page_budget=None):
-    budget = page_budget if page_budget is not None else ToolResultPageBudget(tool_call_id=tool_call_id)
-    return budget.fits(
-        json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+def history_message_role(message):
+    if message["role"] == "user":
+        return "user steer" if message["label"] == "用户补充" else "user message"
+    return (
+        "assistant final answer"
+        if message["label"] == "助手回答"
+        else "assistant commentary"
     )
-
-
-def _next_call(operation, cursor, limit, maximum=None):
-    if cursor is None:
-        return None
-    arguments = {"cursor": cursor, "limit": limit}
-    if maximum is not None:
-        arguments["max_chars"] = maximum
-    return {"tool": operation, "arguments": arguments}
-
-
-def _query_page(operation, items, next_call, *, note=None):
-    guidance = {
-        "search_sessions": (
-            "Use item.target with search_session_content to find relevant questions and "
-            "answers, or read_session_content to browse that conversation. Copy a returned "
-            "hit.read to expand a body hit, or next to continue this search."
-        ),
-        "search_session_content": (
-            "Copy a message's read call to expand it with read_session_content. "
-            "Copy next to continue searching this conversation."
-        ),
-        "read_session_content": (
-            "Copy next to continue reading. To locate relevant questions and answers "
-            "instead, use search_session_content with this conversation's SESSION target."
-        ),
-    }[operation]
-    # Include guidance before every page quote, including partial and empty pages.
-    payload = {"items": items, "next": next_call, "guidance": guidance}
-    if note is not None:
-        payload["note"] = note
-    return payload
-
-
-def _entry_read(target, *, include_tools=False):
-    arguments = {"target": target, "limit": 1}
-    if include_tools:
-        arguments["include_tools"] = True
-    return {"tool": "read_session_content", "arguments": arguments}
-
-
-def _resource_error(message=None):
-    return ToolResultPageBoundary(
-        message
-        or "One readable item and its cursor cannot fit the tool result budget.",
-    )
-
-
-_ELIGIBLE = """((e.entry_kind IN ('USER_MESSAGE','USER_STEER')
-    AND e.scheduled_input IS NULL
-    AND e.input_origin IN ('HUMAN_MESSAGE','HUMAN_STEER','AGENT_INSTRUCTION')) OR
-    (e.entry_kind IN ('ASSISTANT_MESSAGE','ASSISTANT_TOOL_REQUEST') AND EXISTS (
-      SELECT 1 FROM pulsara_v3.content_parts p
-      WHERE p.session_id=e.session_id AND p.entry_id=e.id AND p.type='text')))"""
 
 
 class SessionContentQuery:
-    """One cold owner, injected with the caller domain and exact installed range."""
-
-    def __init__(self, repository, *, session_id: str, memory_domain_id: str):
-        self.repository = repository
-        self.session_id = session_id
-        self.memory_domain_id = memory_domain_id
-        self.reader = CanonicalProtocolReader(repository.connection_provider)
-        # Advisory continuation belongs to this loaded session owner. Restart /
-        # owner disposal loses it explicitly; no durable search registry or cap.
-        self._history_consumed_pages: dict[str, _HistoryConsumedPage] = {}
+    def __init__(self, repository, *, session_id, memory_domain_id):
+        self.repository, self.session_id, self.memory_domain_id = (
+            repository,
+            session_id,
+            memory_domain_id,
+        )
 
     def invoke(
         self,
@@ -210,689 +57,201 @@ class SessionContentQuery:
         arguments,
         *,
         current_range: SessionContentRange,
-        tool_call_id: str,
-        page_budget: ToolResultPageBudget,
-        deadline_monotonic: float,
+        deadline_monotonic,
     ):
         if operation not in SESSION_QUERY_TOOL_NAMES:
-            raise SessionQueryError("INVALID_REQUEST", "Unknown session query.")
-        allowed = {"cursor", "limit"}
-        allowed |= (
+            raise SessionQueryError("INVALID_REQUEST", "Unknown history query")
+        allowed = (
             {"query", "lifecycle"}
             if operation == "search_sessions"
-            else {"target", "include_tools", "query"}
+            else {"target", "query"}
             if operation == "search_session_content"
-            else {"target", "include_tools", "direction", "max_chars"}
+            else {"target", "limit"}
         )
-        if not set(arguments) <= allowed:
+        if set(arguments) - allowed:
             raise SessionQueryError(
-                "INVALID_REQUEST", "Unknown session query arguments."
+                "INVALID_REQUEST", "Unknown history query arguments"
             )
-        limit = _integer(
-            arguments.get("limit", 20),
-            "limit",
-            minimum=1,
-            maximum=SESSION_QUERY_MAX_ITEMS,
-        )
-        maximum = _integer(
-            arguments.get("max_chars", SESSION_READ_DEFAULT_CHARS),
-            "max_chars",
-            minimum=1,
-            maximum=SESSION_READ_MAX_CHARS,
-        )
-        cursor = None
-        if "cursor" in arguments:
-            if set(arguments) - {"cursor", "limit", "max_chars"}:
-                raise SessionQueryError(
-                    "CURSOR_CONFLICT",
-                    "Continue with only cursor and optional page budgets.",
-                )
-            cursor = _decode(_string(arguments["cursor"], "cursor"), operation)
-        with self.reader._connection(deadline_monotonic) as connection:
-            # Also reject queries from a deleted or out-of-domain caller.
-            caller = self._authorized(connection, self.session_id)
+        with self.repository.connection_provider.connection(
+            lane=PostgresConnectionLane.MEMORY_QUERY,
+            row_factory=dict_row,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            self._authorized(connection, self.session_id)
             if operation == "search_sessions":
-                payload = self._sessions(
-                    connection,
-                    arguments,
-                    cursor,
-                    current_range,
-                    limit,
-                    tool_call_id,
-                    deadline_monotonic,
-                    page_budget,
-                )
-            elif operation == "search_session_content":
-                payload = self._search_content_bm25(
-                    connection,
-                    arguments,
-                    cursor,
-                    current_range,
-                    limit,
-                    tool_call_id,
-                    deadline_monotonic,
-                    page_budget,
-                )
-            else:
-                payload = self._content(
-                    connection,
-                    operation,
-                    arguments,
-                    cursor,
-                    current_range,
-                    limit,
-                    maximum,
-                    tool_call_id,
-                    deadline_monotonic,
-                    caller["workspace_id"],
-                    page_budget,
-                )
-            if not _fits(payload, tool_call_id, page_budget):
-                raise _resource_error()
-            return payload
-
-    def _authorized(self, connection, target):
-        try:
-            return self.reader.authorized_session(
-                connection, target, self.memory_domain_id
-            )
-        except KeyError as exc:
-            raise SessionQueryError(
-                "SESSION_NOT_ACCESSIBLE",
-                "Session is unavailable or outside the caller's domain.",
-            ) from exc
-
-    def _check_range(self, connection, end, excluded, actual):
-        _integer(end, "cursor range")
-        if excluded is not None:
-            _string(excluded, "entry_id")
-        if end > actual.through_sequence:
-            raise SessionQueryError(
-                "CURSOR_RANGE_CHANGED",
-                "The earlier-content range changed; restart the query.",
-            )
-        if (
-            actual.excluded_entry_id is not None
-            and excluded != actual.excluded_entry_id
-        ):
-            active = connection.execute(
-                "SELECT entry_sequence FROM pulsara_v3.transcript_entries WHERE session_id=%s AND id=%s",
-                (self.session_id, actual.excluded_entry_id),
-            ).fetchone()
-            if active is None or active["entry_sequence"] <= end:
-                raise SessionQueryError(
-                    "CURSOR_RANGE_CHANGED",
-                    "The active request cannot be read; restart the query.",
-                )
-
-    def _sessions(
-        self, connection, arguments, cursor, actual, limit, call_id, deadline, page_budget
-    ):
-        if cursor is None:
-            query = arguments.get("query", "")
-            lifecycle = arguments.get("lifecycle", "ALL")
-            end, excluded, inner = (
-                actual.through_sequence,
-                actual.excluded_entry_id,
-                None,
-            )
-        else:
-            expected = {
-                "operation",
-                "caller_session_id",
-                "query",
-                "lifecycle",
-                "range_end",
-                "excluded",
-                "inner",
-            }
-            if (
-                set(cursor) != expected
-                or cursor["caller_session_id"] != self.session_id
-            ):
-                raise SessionQueryError(
-                    "CURSOR_INVALID",
-                    "Session search cursor does not match this caller.",
-                )
-            query, lifecycle = cursor["query"], cursor["lifecycle"]
-            end, excluded, inner = (
-                cursor["range_end"],
-                cursor["excluded"],
-                cursor["inner"],
-            )
-            _string(inner, "cursor position")
-            self._check_range(connection, end, excluded, actual)
-        if (
-            not isinstance(query, str)
-            or not isinstance(lifecycle, str)
-            or lifecycle not in {"ALL", "OPEN", "ARCHIVED"}
-        ):
-            raise SessionQueryError("INVALID_REQUEST", "Invalid query or lifecycle.")
-
-        def token(inner_cursor):
-            return (
-                None
-                if inner_cursor is None
-                else _encode(
-                    {
-                        "operation": "search_sessions",
-                        "caller_session_id": self.session_id,
-                        "query": query,
-                        "lifecycle": lifecycle,
-                        "range_end": end,
-                        "excluded": excluded,
-                        "inner": inner_cursor,
+                query = arguments.get("query", "")
+                lifecycle = arguments.get("lifecycle", "ALL")
+                if (
+                    not isinstance(query, str)
+                    or not isinstance(lifecycle, str)
+                    or lifecycle
+                    not in {
+                        "ALL",
+                        "OPEN",
+                        "ARCHIVED",
                     }
+                ):
+                    raise SessionQueryError(
+                        "INVALID_REQUEST", "Invalid session query or lifecycle"
+                    )
+                records = search_sessions_complete(
+                    connection,
+                    memory_domain_id=self.memory_domain_id,
+                    query=query,
+                    lifecycle=lifecycle,
+                    current_session_id=self.session_id,
+                    current_range=current_range,
+                    deadline_monotonic=deadline_monotonic,
                 )
+                return self._records(records, "没有找到匹配的会话。")
+            target = arguments.get("target")
+            session, anchor = self._target(
+                connection, target, allow_entry=operation == "read_session_content"
             )
-
-        # The existing live discovery ordering has no global history snapshot.
-        found, after = search_session_page(
-            self.repository,
-            memory_domain_id=self.memory_domain_id,
-            query=query,
-            lifecycle=lifecycle,
-            cursor=inner,
-            limit=limit,
-            deadline_monotonic=deadline,
-            current_session_id=self.session_id,
-            current_range=SessionContentRange(end, excluded),
-            read_connection=connection,
-        )
-        items = []
-        for row in found:
-            item = {
-                "target": {"kind": "SESSION", "session_id": row["id"]},
-                "title": row["title"]
-                or "会话 " + row["id"].removeprefix("session:")[:8],
-                "project": row["workspace_label"] or row["workspace_root"],
-                "updated_at": row["updated_at"].isoformat(),
-            }
-            if "entry_id" in row:
-                hit = {
-                    "target": session_entry_target(row["id"], row["entry_id"]),
-                    **{key: row[key] for key in ("role", "at", "text")},
-                }
-                hit["read"] = _entry_read(hit["target"])
-                if row["partial"]:
-                    hit["partial"] = True
-                if row["scheduled_input"] is not None:
-                    hit["origin"] = "scheduled"
-                item["hit"] = hit
-            # A live keyset cursor after this row permits a smaller response page.
-            row_cursor = _encode(
-                {
-                    "query": query.strip(),
-                    "lifecycle": lifecycle,
-                    "rank": row["rank"],
-                    "at": row["updated_at"].isoformat(),
-                    "id": row["id"],
-                }
+            bound = (
+                current_range.through_sequence
+                if session["id"] == self.session_id
+                else int(session["latest_entry_sequence"])
             )
-            candidate = _query_page("search_sessions", [*items, item], _next_call("search_sessions", token(row_cursor), limit))
-            if not _fits(candidate, call_id, page_budget):
-                if not items:
-                    raise _resource_error()
-                return _query_page("search_sessions", items, _next_call("search_sessions", token(inner), limit))
-            items.append(item)
-            inner = row_cursor
-        payload = _query_page("search_sessions", items, _next_call("search_sessions", token(after), limit))
-        if not _fits(payload, call_id, page_budget):
-            raise _resource_error()
-        return payload
-
-    def _content(
-        self,
-        connection,
-        operation,
-        arguments,
-        cursor,
-        actual,
-        limit,
-        maximum,
-        call_id,
-        deadline,
-        caller_workspace_id,
-        page_budget,
-    ):
-        if cursor is None:
-            target, anchor_id = _target(arguments, operation, self.session_id)
-            tools = arguments.get("include_tools", False)
-            query = arguments.get("query")
-            direction = arguments.get(
-                "direction", "newer" if anchor_id is not None else "older"
+            excluded = (
+                current_range.excluded_entry_id
+                if session["id"] == self.session_id
+                else None
             )
-            excluded = actual.excluded_entry_id if target == self.session_id else None
-        else:
-            expected = {
-                "operation",
-                "session_id",
-                "cut",
-                "event_cut",
-                "range_end",
-                "excluded",
-                "position",
-                "offset",
-                "include_tools",
-                "query",
-                "direction",
-            }
-            if set(cursor) != expected:
+            if operation == "search_session_content":
+                query = arguments.get("query")
+                if not isinstance(query, str) or not query.strip():
+                    raise SessionQueryError(
+                        "INVALID_REQUEST", "query must be nonblank text"
+                    )
+                scope = FrozenHistoryReadScope(
+                    self.session_id, self.memory_domain_id, current_range
+                )
+                rows = search_history(
+                    connection,
+                    scope=scope,
+                    query=query,
+                    limit=None,
+                    target_session_id=session["id"],
+                )
+                records = []
+                for row in rows:
+                    self._deadline(deadline_monotonic)
+                    candidate = refetch_history(connection, row, scope=scope)
+                    if candidate is not None:
+                        text = "\n\n".join(
+                            f"{history_message_role(message)} ({message['at']}):\n{message['text']}"
+                            for message in candidate.messages
+                        )
+                        records.append(
+                            {
+                                "target": session_entry_target(candidate.q1_entry_id),
+                                "text": text,
+                            }
+                        )
+                return self._records(records, "没有找到匹配的对话。")
+            limit = arguments.get("limit")
+            if type(limit) is not int or limit == 0 or (anchor is None and limit > 0):
                 raise SessionQueryError(
-                    "CURSOR_INVALID", "Invalid content cursor fields."
+                    "INVALID_REQUEST",
+                    "limit is required and nonzero; SESSION requires negative limit",
                 )
-            target = _string(cursor["session_id"], "session_id")
-            tools, query, direction, excluded = (
-                cursor["include_tools"],
-                cursor["query"],
-                cursor["direction"],
-                cursor["excluded"],
-            )
-        if (
-            type(tools) is not bool
-            or not isinstance(direction, str)
-            or direction not in {"older", "newer"}
-        ):
-            raise SessionQueryError(
-                "INVALID_REQUEST", "Invalid content filter or direction."
-            )
-        if query is not None:
-            raise SessionQueryError(
-                "CURSOR_INVALID", "Read cursor cannot contain a search query."
-            )
-        session = self._authorized(connection, target)
-        if cursor is None:
-            cut, event_cut = (
-                int(session["latest_entry_sequence"]),
-                int(session["latest_event_sequence"]),
-            )
-            end = (
-                min(cut, actual.through_sequence) if target == self.session_id else cut
-            )
-            offset = 0
-            position = end if direction == "older" else 1
-            if anchor_id is not None:
-                anchor = connection.execute(
-                    """SELECT e.entry_sequence FROM pulsara_v3.transcript_entries e
-                       WHERE e.session_id=%s AND e.id=%s
-                         AND e.entry_sequence<=%s AND e.id IS DISTINCT FROM %s AND """
-                    + _ELIGIBLE,
-                    (
-                        target,
-                        anchor_id,
-                        end,
-                        excluded,
-                    ),
-                ).fetchone()
-                if anchor is None:
+            if anchor is not None:
+                if (
+                    int(anchor["entry_sequence"]) > bound
+                    or anchor["id"] == excluded
+                    or canonical_history_message(connection, anchor) is None
+                ):
                     raise SessionQueryError(
                         "ENTRY_NOT_READABLE",
-                        "Entry does not belong to this session's readable range.",
+                        "The requested entry is not readable in this scope",
                     )
-                position = int(anchor["entry_sequence"])
-        else:
-            cut = _integer(cursor["cut"], "cursor cut")
-            event_cut = _integer(cursor["event_cut"], "cursor event cut")
-            end = _integer(cursor["range_end"], "cursor range", maximum=cut)
-            position = _integer(
-                cursor["position"], "cursor position", minimum=1, maximum=end
-            )
-            offset = _integer(cursor["offset"], "cursor offset")
-            if target == self.session_id:
-                self._check_range(connection, end, excluded, actual)
-            elif excluded is not None:
-                raise SessionQueryError(
-                    "CURSOR_INVALID", "Other sessions have no active request exclusion."
+                start = int(anchor["entry_sequence"])
+            else:
+                start = bound
+            compare, order = (">=", "ASC") if limit > 0 else ("<=", "DESC")
+            records = []
+            with connection.cursor(
+                name="complete_history_read", row_factory=dict_row
+            ) as stream:
+                stream.itersize = 50
+                stream.execute(
+                    f"""SELECT * FROM pulsara_v3.transcript_entries WHERE session_id=%s
+                    AND entry_sequence<=%s AND entry_sequence {compare} %s AND id IS DISTINCT FROM %s
+                    ORDER BY entry_sequence {order}""",
+                    (session["id"], bound, start, excluded),
                 )
-        self.reader.validate_history_cut(connection, session, cut, event_cut)
-        if target == self.session_id and end == 0:
-            return _query_page("read_session_content", [], None, note="没有更早的会话内容。")
-
-        def token(sequence, start):
-            return _encode(
-                {
-                    "operation": operation,
-                    "session_id": target,
-                    "cut": cut,
-                    "event_cut": event_cut,
-                    "range_end": end,
-                    "excluded": excluded,
-                    "position": sequence,
-                    "offset": start,
-                    "include_tools": tools,
-                    "query": query,
-                    "direction": direction,
-                }
-            )
-
-        compare, order = ("<=", "DESC") if direction == "older" else (">=", "ASC")
-        with connection.cursor(name="session_content") as stream:
-            stream.itersize = SESSION_QUERY_MAX_ITEMS
-            stream.execute(
-                """SELECT e.* FROM pulsara_v3.transcript_entries e
-                WHERE e.session_id=%s AND e.entry_sequence<=%s
-                  AND e.id IS DISTINCT FROM %s AND e.entry_sequence """
-                + compare
-                + " %s AND "
-                + _ELIGIBLE
-                + " ORDER BY e.entry_sequence "
-                + order,
-                (target, end, excluded, position),
-            )
-            if cursor is not None and offset:
-                # An offset must name the exact eligible entry, never a later one.
-                probe = connection.execute(
-                    "SELECT id FROM pulsara_v3.transcript_entries WHERE session_id=%s AND entry_sequence=%s",
-                    (target, position),
-                ).fetchone()
-                if probe is None or probe["id"] == excluded:
-                    raise SessionQueryError(
-                        "CURSOR_INVALID", "Text cursor entry is no longer readable."
+                for entry in stream:
+                    self._deadline(deadline_monotonic)
+                    message = canonical_history_message(connection, entry)
+                    if message is None:
+                        continue
+                    records.append(
+                        {
+                            "target": session_entry_target(entry["id"]),
+                            "role": history_message_role(message),
+                            "at": message["at"],
+                            "text": message["text"],
+                        }
                     )
-            return self._read_page(
-                connection,
-                stream,
-                position,
-                offset,
-                event_cut,
-                token,
-                limit,
-                maximum,
-                call_id,
-                deadline,
-                tools,
-                caller_workspace_id,
-                page_budget,
-            )
+                    if len(records) == abs(limit):
+                        break
+            return self._records(records, "该会话当前没有可读的历史消息。")
 
-    def _document(
-        self, connection, entry, event_cut, deadline, include_tools, caller_workspace_id
-    ):
-        if monotonic() >= deadline:
-            raise TimeoutError("session content query deadline exceeded")
-        kind = entry["entry_kind"]
-        role = (
-            "user"
-            if kind in {"USER_MESSAGE", "USER_STEER"}
-            else "tool"
-            if kind == "TOOL_RESULT"
-            else "assistant"
-        )
-        item = {
-            "target": session_entry_target(entry["session_id"], entry["id"]),
-            "role": role,
-            "at": entry["accepted_at"].isoformat(),
-        }
-        if entry["scheduled_input"] is not None:
-            item["origin"] = "scheduled"
-        bounds = ()
-        if role == "assistant":
-            parts = read_content_parts(connection, entry_id=entry["id"], session_id=entry["session_id"])
-            text = "\n".join(part.value for part in parts if part.type == "text")
-            segments = ((0, text),)
-            from pulsara_agent.conversation_kernel.session_text import visualization_history_text
-            for description in visualization_history_text(connection, entry, image_references=True):
-                start = len(text) + (1 if text else 0)
-                text += ("\n" if text else "") + description
-                bounds += ((start, len(text)),)
-        else:
-            decoded = validate_canonical_prompt_owner_metadata(
-                connection, row=entry, transcript_entry_id=entry["id"]
-            )
-            text, segments, bounds = prompt_history_text(decoded.parts, image_references=True)
-        notices = self.reader._notices(
-            connection, entry["session_id"], event_cut, entry
-        )
-        if notices:
-            if len(notices) != 1:
-                raise RuntimeError("saved entry has multiple interruption endings")
-            notice = notices[0]
-            item["interruption"] = {"reason": notice.reason}
-            if notice.public_detail:
-                item["interruption"]["detail"] = notice.public_detail
-        return item, text, segments, bounds
-
-    def _search_content_bm25(
-        self, connection, arguments, cursor, actual, limit, call_id, deadline, page_budget
-    ):
-        from pulsara_agent.conversation_kernel.history_search import (
-            FrozenHistoryReadScope,
-            search_history,
-            refetch_history,
+    @staticmethod
+    def _records(records, empty):
+        return ToolBusinessValue(
+            {},
+            tuple(ResultPart("object", record) for record in records)
+            if records
+            else (ResultPart("text", empty),),
         )
 
-        if cursor is None:
-            query = arguments.get("query")
-            target, _ = _target(arguments, "search_session_content", self.session_id)
-            tools = arguments.get("include_tools", False)
-            end, excluded = actual.through_sequence, actual.excluded_entry_id
-            previous = None
-        else:
-            if set(cursor) != {
-                "operation",
-                "query",
-                "session_id",
-                "include_tools",
-                "range_end",
-                "excluded",
-                "consumed_page",
-            }:
-                raise SessionQueryError(
-                    "CURSOR_INVALID", "Invalid relevance cursor fields."
-                )
-            query, target, tools = (
-                cursor["query"],
-                cursor["session_id"],
-                cursor["include_tools"],
-            )
-            end, excluded = cursor["range_end"], cursor["excluded"]
-            self._check_range(connection, end, excluded, actual)
-            previous = self._history_consumed_pages.get(
-                _string(cursor["consumed_page"], "page_id")
-            )
-            if previous is None:
-                raise SessionQueryError(
-                    "CURSOR_EXPIRED",
-                    "Search continuation is no longer available; restart the query.",
-                )
-        if not isinstance(query, str) or not query.strip() or type(tools) is not bool:
+    def _authorized(self, connection, session_id):
+        row = connection.execute(
+            "SELECT * FROM pulsara_v3.sessions WHERE id=%s AND memory_domain_id=%s",
+            (session_id, self.memory_domain_id),
+        ).fetchone()
+        if row is None:
             raise SessionQueryError(
-                "INVALID_REQUEST",
-                "A content search needs a query and valid content filter.",
+                "SESSION_NOT_ACCESSIBLE",
+                "Session is unavailable or outside this memory domain",
             )
-        target = _string(target, "session_id")
-        self._authorized(connection, target)
-        scope = FrozenHistoryReadScope(
-            self.session_id, self.memory_domain_id, SessionContentRange(end, excluded)
-        )
+        return row
 
-        binding = (query, target, tools, end, excluded)
-        if previous is not None and previous.query != binding:
-            raise SessionQueryError(
-                "CURSOR_INVALID", "Search continuation parameters changed."
-            )
-        seen = set() if previous is None else previous.consumed_ids()
-        consumed = []
-        page_id = random_id("page")
-        while page_id in self._history_consumed_pages:
-            page_id = random_id("page")
-        next_cursor = _encode(
-            {
-                "operation": "search_session_content",
-                "query": query,
-                "session_id": target,
-                "include_tools": tools,
-                "range_end": end,
-                "excluded": excluded,
-                "consumed_page": page_id,
-            }
-        )
-
-        def finish(items, more):
-            payload = _query_page("search_session_content", items, _next_call("search_session_content", next_cursor if more else None, limit))
-            if not _fits(payload, call_id, page_budget):
-                raise _resource_error()
-            if more:
-                self._history_consumed_pages[page_id] = _HistoryConsumedPage(
-                    binding, tuple(consumed), previous
-                )
-            return payload
-
+    def _target(self, connection, target, *, allow_entry):
+        if not isinstance(target, dict):
+            raise SessionQueryError("INVALID_REQUEST", "target is required")
         try:
-            rows = search_history(
-                connection,
-                scope=scope,
-                query=query,
-                limit=limit + 1,
-                target_session_id=target,
-                include_tools=tools,
-                excluded_question_ids=seen,
-            )
-        except Exception as exc:
-            raise SessionQueryError(
-                "SEARCH_UNAVAILABLE", f"pg_search history query unavailable: {exc}"
-            ) from exc
-        items = []
-        for row in rows:
-            if monotonic() >= deadline:
-                raise TimeoutError("session search deadline exceeded")
-            if len(items) == limit:
-                return finish(items, True)
-            candidate = refetch_history(
-                connection, row, scope=scope, include_tools=tools
-            )
-            if candidate is None:
-                consumed.append(row["q1_entry_id"])
-                continue
-            item = {
-                "target": session_entry_target(
-                    candidate.session_id, candidate.q1_entry_id
-                ),
-                "title": candidate.title,
-                "score": candidate.score,
-                "messages": [
-                    {
-                        "target": session_entry_target(
-                            candidate.session_id, m["entry_id"]
-                        ),
-                        "read": _entry_read(
-                            session_entry_target(candidate.session_id, m["entry_id"]),
-                            include_tools=tools,
-                        ),
-                        **{k: m[k] for k in ("role", "label", "at", "text")},
-                        **{k: m[k] for k in (
-                            "result_state", "result_facts", "source_coverage",
-                            "source_coverage_reason", "output_unavailability_reason",
-                        ) if k in m},
-                    }
-                    for m in candidate.messages
-                ],
-            }
-            payload = _query_page("search_session_content", [*items, item], _next_call("search_session_content", next_cursor, limit))
-            if not _fits(payload, call_id, page_budget):
-                if not items:
-                    raise _resource_error()
-                return finish(items, True)
-            items.append(item)
-            consumed.append(row["q1_entry_id"])
-        # Invalid excerpts also consume identities; the bounded admission page
-        # can continue without returning them forever or skipping unseen units.
-        return finish(items, len(rows) == limit + 1)
-
-    def _read_page(
-        self,
-        connection,
-        rows,
-        position,
-        offset,
-        event_cut,
-        token,
-        limit,
-        maximum,
-        call_id,
-        deadline,
-        include_tools,
-        caller_workspace_id,
-        page_budget,
-    ):
-        items = []
-        remaining = maximum
-        iterator = iter(rows)
-        entry = next(iterator, None)
-        if offset and (entry is None or entry["entry_sequence"] != position):
-            raise SessionQueryError(
-                "CURSOR_INVALID", "Text cursor does not identify an eligible entry."
-            )
-        while entry is not None:
-            item, text, _, bounds = self._document(
-                connection,
-                entry,
-                event_cut,
-                deadline,
-                include_tools,
-                caller_workspace_id,
-            )
-            # Generated image descriptions stay atomic for every message role.
-            image_bounds = bounds
-            if any(a < offset < b for a, b in image_bounds):
-                raise SessionQueryError(
-                    "CURSOR_INVALID", "Text cursor splits an image placeholder."
-                )
-            if offset > len(text) or (offset == len(text) and offset):
-                raise SessionQueryError(
-                    "CURSOR_INVALID", "Text cursor is outside this message."
-                )
-            next_entry = next(iterator, None)
-
-            def whole_length(length):
-                end = offset + length
-                for a, b in image_bounds:
-                    if a < end < b:
-                        return a - offset
-                return length
-
-            take = whole_length(min(remaining, len(text) - offset))
-            if not take and offset < len(text):
-                if not items:
-                    raise _resource_error(
-                        "Increase max_chars to fit one complete image placeholder and its result packaging."
+            if set(target) == {"kind", "session_id"} and target["kind"] == "SESSION":
+                return self._authorized(
+                    connection, require_id(target["session_id"], "session")
+                ), None
+            if (
+                allow_entry
+                and set(target) == {"kind", "entry_id"}
+                and target["kind"] == "SESSION_ENTRY"
+            ):
+                entry = connection.execute(
+                    "SELECT e.* FROM pulsara_v3.transcript_entries e JOIN pulsara_v3.sessions s ON s.id=e.session_id WHERE e.id=%s AND s.memory_domain_id=%s",
+                    (require_id(target["entry_id"], "entry"), self.memory_domain_id),
+                ).fetchone()
+                if entry is None:
+                    raise SessionQueryError(
+                        "ENTRY_NOT_READABLE",
+                        "Entry is unavailable or outside this memory domain",
                     )
-                return _query_page("read_session_content", items, _next_call("read_session_content", token(entry["entry_sequence"], offset), limit, maximum))
+                return self._authorized(connection, entry["session_id"]), entry
+        except (TypeError, ValueError) as exc:
+            if isinstance(exc, SessionQueryError):
+                raise
+            raise SessionQueryError(
+                "INVALID_REQUEST", "Invalid history target"
+            ) from exc
+        raise SessionQueryError("INVALID_REQUEST", "Unsupported history target")
 
-            def build(length):
-                value = {**item, "text": text[offset : offset + length]}
-                if offset or length < len(text):
-                    value["partial"] = True
-                after = (
-                    token(entry["entry_sequence"], offset + length)
-                    if offset + length < len(text)
-                    else token(next_entry["entry_sequence"], 0)
-                    if next_entry is not None
-                    else None
-                )
-                return _query_page("read_session_content", [*items, value], _next_call("read_session_content", after, limit, maximum))
-
-            payload = build(take)
-            if not _fits(payload, call_id, page_budget):
-                low, high, winner = 1, take, None
-                while low <= high:
-                    middle = (low + high) // 2
-                    length = whole_length(middle)
-                    candidate = build(length)
-                    if _fits(candidate, call_id, page_budget):
-                        if length:
-                            winner = candidate
-                        low = middle + 1
-                    else:
-                        high = middle - 1
-                if winner is None:
-                    if not items:
-                        raise _resource_error()
-                    return _query_page("read_session_content", items, _next_call("read_session_content", token(entry["entry_sequence"], offset), limit, maximum))
-                return winner
-            items = payload["items"]
-            remaining -= take
-            if offset + take < len(text) or not remaining or len(items) == limit:
-                return payload
-            entry, offset = next_entry, 0
-        return _query_page("read_session_content", items, None)
+    @staticmethod
+    def _deadline(deadline):
+        if monotonic() >= deadline:
+            raise TimeoutError("History query deadline exceeded")

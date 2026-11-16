@@ -12,22 +12,25 @@ from pulsara_agent.identity import derive_id
 
 import asyncio
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from enum import StrEnum
 from hashlib import sha256
+from pathlib import Path
 from typing import Awaitable, Callable, Protocol
 
 from jsonschema import ValidationError, validators
 
 from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
 from pulsara_agent.conversation_kernel.assembler import CompletedToolCallBlock
-from pulsara_agent.conversation_kernel.contracts import WriterLease
+from pulsara_agent.conversation_kernel.contracts import WriterLease, TurnStatus
 from pulsara_agent.conversation_kernel.execution_watchdogs import (
     KernelExecutionDeadlineFactory,
     KernelWatchdogOwner,
 )
-from pulsara_agent.conversation_kernel.io import KernelSessionIO
-from pulsara_agent.llm.input import LLMTextPart
+from pulsara_agent.conversation_kernel.io import (
+    KernelSessionIO,
+    PhysicalToolInvocationDisposition,
+)
 
 from pulsara_agent.conversation_kernel.repository import (
     AcceptedPlanToolBatch,
@@ -49,16 +52,14 @@ from pulsara_agent.conversation_kernel.tool_contracts import (
 from pulsara_agent.conversation_kernel.workspace import SessionWorkspaceResolver
 from pulsara_agent.model_input.contracts import (
     FrozenCanonicalCompileSnapshot,
-    FrozenProviderInputItem,
-    FrozenProviderInputItemKind,
 )
-from pulsara_agent.model_input.lowering import project_tool_result_public_value
 from pulsara_agent.primitives.context import canonical_json_bytes, thaw_json
 from pulsara_agent.primitives.plan_workflow import (
     PlanQuestionContent,
     ExtractedPlanDraft,
+    PLAN_INTERACTION_WAIT_SECONDS,
     parse_plan_exit_arguments,
-    extract_plan_entry_reason,
+    validate_plan_entry_arguments,
     parse_plan_question_arguments,
 )
 from pulsara_agent.ports.tool_execution import thaw_tool_json_object
@@ -94,12 +95,16 @@ class OpenPlanInteraction:
     question: PlanQuestionContent | None
     draft: ExtractedPlanDraft | None
     waiter_generation: int
+    workflow_id: str
+    workflow_revision: int
+    expires_at: datetime
 
 
 class KernelPlanInteractionCoordinator:
     """One dormant-before-write waiter per active Plan workflow."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, timeout_resolver: Callable[[OpenPlanInteraction], Awaitable[AcceptedPlanResolution]] | None = None) -> None:
+        self._timeout_resolver = timeout_resolver
         self._lock = asyncio.Lock()
         self._waiter: PlanInteractionWaiter | None = None
         self._open: OpenPlanInteraction | None = None
@@ -132,6 +137,9 @@ class KernelPlanInteractionCoordinator:
         self, waiter: PlanInteractionWaiter, *,
         question: PlanQuestionContent | None = None,
         draft: ExtractedPlanDraft | None = None,
+        accepted_at: datetime,
+        workflow_id: str,
+        workflow_revision: int,
     ) -> OpenPlanInteraction:
         if (question is None) == (draft is None):
             raise ValueError("Plan interaction requires exactly one typed payload")
@@ -143,6 +151,8 @@ class KernelPlanInteractionCoordinator:
                 question,
                 draft,
                 waiter.waiter_generation,
+                workflow_id, workflow_revision,
+                accepted_at + timedelta(seconds=PLAN_INTERACTION_WAIT_SECONDS),
             )
             # Resolution may commit after OPEN FULL but before the runner
             # promotes its dormant waiter.  Canonical ANSWERED wins; do not
@@ -176,9 +186,26 @@ class KernelPlanInteractionCoordinator:
             return True
 
     async def wait(self, waiter: PlanInteractionWaiter) -> AcceptedPlanResolution:
-        # Deliberately no operation timeout: waiting for a human is not a
-        # physical provider/tool operation deadline.
         try:
+            if not waiter._future.done():
+                async with self._lock:
+                    self._require_waiter(waiter)
+                    opened = self._open
+                if opened is None:
+                    raise RuntimeError("Plan wait has no accepted interaction")
+                remaining = max(0.0, (opened.expires_at - datetime.now(timezone.utc)).total_seconds())
+                try:
+                    return await asyncio.wait_for(asyncio.shield(waiter._future), timeout=remaining)
+                except TimeoutError:
+                    if not waiter._future.done():
+                        if self._timeout_resolver is None:
+                            raise RuntimeError("Plan deadline has no settlement owner")
+                        try:
+                            await self._timeout_resolver(opened)
+                        except ConversationKernelConflict:
+                            # A concurrently accepted answer/decision retains
+                            # its existing Host publication and settlement owner.
+                            pass
             return await asyncio.shield(waiter._future)
         finally:
             async with self._lock:
@@ -450,25 +477,15 @@ class PlanToolBatchCoordinator:
             return
         view = self._hooks.capture_view()
         subject = tool_matcher_subject(settlement.tool_name)
-        item = FrozenProviderInputItem(
-            item_kind=FrozenProviderInputItemKind.TOOL_RESULT,
-            source_entry_id=settlement.result_entry_id,
-            source_entry_sequence=settlement.accepted_entry_sequence,
-            source_turn_id=settlement.turn_id,
-            content=(
-                settlement.canonical_content.parts
-                if settlement.canonical_content is not None
-                else (LLMTextPart(settlement.public_projection.canonical_body),)
-            ),
-            tool_call_id=settlement.tool_call_id,
-            tool_request_entry_id=settlement.assistant_entry_id,
-            tool_result_context=settlement.public_projection.metadata,
-            tool_result_body_text=settlement.public_projection.canonical_body,
-            tool_result_delivery=settlement.public_projection.delivery,
-            tool_call_ordinal=settlement.call_ordinal,
-            tool_call_arguments=settlement.public_arguments,
-        )
-        projected = project_tool_result_public_value(item)
+        from pulsara_agent.conversation_kernel.tool_outputs import PostgresToolOutputReadPort
+        workspace_id = await self._resolved_workspace_id()
+        def read_saved_value(*, deadline_monotonic):
+            from time import monotonic
+            reader = PostgresToolOutputReadPort(self._repository.connection_provider,
+                session_id=self._writer_lease.guard.session_id, workspace_id=workspace_id,
+                operation_timeout_seconds=deadline_monotonic-monotonic())
+            return reader.read_result({"kind":"SESSION_ENTRY", "entry_id":settlement.result_entry_id})
+        saved = await self._io.run(read_saved_value, deadline_monotonic=self._canonical_deadline())
         causal_ref = PostToolRef(
             settlement.turn_id,
             settlement.tool_call_id,
@@ -487,7 +504,7 @@ class PlanToolBatchCoordinator:
             tool_name=subject.canonical_subject,
             tool_use_id=settlement.tool_call_id,
             tool_input=thaw_json(settlement.public_arguments),
-            tool_response=projected.value,
+            tool_response=thaw_tool_json_object(saved.value),
             permission_mode=external_permission_mode(
                 canonical_facts.run_permission_snapshot.effective_mode.value,
                 active_plan_workflow=(
@@ -622,7 +639,7 @@ class PlanToolBatchCoordinator:
         if disposition is PlanToolBatchDisposition.APPLY:
             try:
                 if kind is PlanToolControlKind.ENTER:
-                    extract_plan_entry_reason(
+                    validate_plan_entry_arguments(
                         arguments=selected.arguments,
                     )
                 elif kind is PlanToolControlKind.QUESTION:
@@ -724,6 +741,28 @@ class PlanToolBatchCoordinator:
                     ),
                 )
             )
+        plan_file_path = plan_file_error = None
+        if apply_control and kind is PlanToolControlKind.DRAFT:
+            from pulsara_agent.conversation_kernel.plan_files import publish_plan_markdown
+            plan, summary = parse_plan_exit_arguments(arguments=selected.arguments)
+            assert plan is not None
+            publication = await self._io.run_tool_invocation(
+                publish_plan_markdown, Path(hook_cwd), plan=plan, summary=summary,
+                deadline_monotonic=deadline,
+            )
+            if publication.caller_cancelled:
+                # Stop/close still wins after the physical file operation has
+                # settled. It must not open a new approval interaction.
+                raise asyncio.CancelledError
+            if publication.disposition is PhysicalToolInvocationDisposition.RETURNED_EXACT:
+                plan_file_path, plan_file_error = publication.value
+            elif isinstance(publication.error, Exception):
+                plan_file_error = str(publication.error)
+            else:
+                raise publication.error
+            # Markdown is an optional side effect; its elapsed I/O deadline
+            # cannot prevent the independently required approval admission.
+            deadline = self._canonical_deadline()
         candidate = PreparedPlanToolBatch(
             session_id=self._writer_lease.guard.session_id,
             workspace_id=await self._resolved_workspace_id(),
@@ -748,6 +787,7 @@ class PlanToolBatchCoordinator:
                 and workflow_fact is not None
             ),
             selected_disposition=disposition,
+            plan_file_path=plan_file_path, plan_file_error=plan_file_error,
             resume_permission_mode=(workflow_fact.resume_permission_mode
                 if apply_control and kind is PlanToolControlKind.EXIT and workflow_fact is not None else None),
         )
@@ -788,6 +828,14 @@ class PlanToolBatchCoordinator:
                     )
                     if outcome is None:
                         raise
+            from pulsara_agent.conversation_kernel.tool_outputs import prepare_native_tool_observation, project_native_settlement
+            settlements = []
+            for settlement in outcome.tool_result_settlements:
+                page = await self._io.run(prepare_native_tool_observation, self._repository, self._writer_lease.guard,
+                    workspace_id=candidate.workspace_id, result_entry_id=settlement.result_entry_id,
+                    deadline_monotonic=self._canonical_deadline())
+                settlements.append(project_native_settlement(settlement, page))
+            outcome = replace(outcome, tool_result_settlements=tuple(settlements))
             if waiter is not None:
                 context_allowed = not outcome.origin_turn_completed
                 if pre_context_reservation is not None:
@@ -809,6 +857,8 @@ class PlanToolBatchCoordinator:
                         )
                 await self._plan_interactions.publish_open(
                     waiter, question=outcome.question, draft=outcome.draft,
+                    accepted_at=outcome.interaction_accepted_at,
+                    workflow_id=outcome.workflow_id, workflow_revision=outcome.workflow_revision,
                 )
                 resolution = await self._plan_interactions.wait(waiter)
                 if resolution.tool_result_settlement is None:
@@ -824,11 +874,28 @@ class PlanToolBatchCoordinator:
                     context_allowed=resolution.continuation_turn_id is None,
                 )
                 if kind is PlanToolControlKind.DRAFT:
+                    continuation_turn_id = resolution.continuation_turn_id
+                    continuation_entry_id = resolution.continuation_entry_id
+                    if continuation_turn_id is not None:
+                        status = await self._io.run(
+                            self._repository.read_turn_status,
+                            session_id=candidate.session_id,
+                            turn_id=continuation_turn_id,
+                            deadline_monotonic=self._canonical_deadline(),
+                        )
+                        if status is None:
+                            raise ConversationKernelConflict("accepted Plan successor is absent")
+                        if status is not TurnStatus.RUNNING:
+                            # The Host may have settled an unbindable successor
+                            # before waking this original runner. Its canonical
+                            # resolution remains final; no live handoff exists.
+                            continuation_turn_id = None
+                            continuation_entry_id = None
                     outcome = replace(
                         outcome,
                         selected_result_entry_id=resolution.tool_result_settlement.result_entry_id,
-                        continuation_turn_id=resolution.continuation_turn_id,
-                        continuation_entry_id=resolution.continuation_entry_id,
+                        continuation_turn_id=continuation_turn_id,
+                        continuation_entry_id=continuation_entry_id,
                         origin_turn_completed=resolution.continuation_turn_id is not None,
                         tool_result_settlements=tuple(sorted(
                             (*outcome.tool_result_settlements, resolution.tool_result_settlement),

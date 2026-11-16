@@ -35,13 +35,17 @@ CELL = {"kind": "CELL", "cell_id": random_id("cell")}
         (
             parse_exec_process_input,
             exec_process_input_schema,
-            [{"command": "true"}, {"command": "true", "workdir": None}],
-            [{"command": "true", "target": PROCESS}, {"command": "true", "tty": 1}],
+            [{"command": "true"}, {"command": "true", "workdir": "."}],
+            [
+                {"command": "true", "target": PROCESS},
+                {"command": "true", "tty": 1},
+                {"command": "true", "workdir": None},
+            ],
         ),
         (
             parse_query_processes_input,
             query_processes_input_schema,
-            [{}, {"include_finished": False}, {"target": PROCESS}],
+            [{}, {"target": PROCESS}],
             [
                 {"target": None},
                 {"target": PROCESS, "include_running": True},
@@ -56,10 +60,9 @@ CELL = {"kind": "CELL", "cell_id": random_id("cell")}
             parse_manage_process_input,
             manage_process_input_schema,
             [
-                {"action": "poll", "target": PROCESS, "since_cursor": None},
+                {"action": "wait", "target": PROCESS, "timeout_seconds": 0},
                 {"action": "wait", "target": PROCESS, "timeout_seconds": 1},
                 {"action": "write", "target": PROCESS, "data": ""},
-                {"action": "submit", "target": PROCESS, "data": "line\n"},
                 {"action": "close_stdin", "target": PROCESS},
                 {"action": "kill", "target": PROCESS},
             ],
@@ -88,7 +91,7 @@ def test_terminal_query_canonical_schema_matches_parser(parser, schema, valid, i
 def test_query_process_defaults_apply_only_to_list():
     listing = parse_query_processes_input({})
     assert isinstance(listing, QueryProcessesListInput)
-    assert listing.include_running is True and listing.include_finished is True
+    assert listing.model_dump() == {}
     detail = parse_query_processes_input({"target": PROCESS})
     assert isinstance(detail, QueryProcessInput)
     assert detail.model_dump() == {"target": PROCESS}
@@ -122,6 +125,7 @@ def test_process_detail_reuses_info_snapshot_and_never_polls(live_process, monke
     state.output.append_raw(b"retained log body\n")
     before = state.output.snapshot(maximum_chars=100)
     snapshot = state.output.snapshot
+    read_retained = state.output._read_retained
     calls = []
 
     def capture(**kwargs):
@@ -132,17 +136,21 @@ def test_process_detail_reuses_info_snapshot_and_never_polls(live_process, monke
         pytest.fail("metadata query must not poll or read a process log")
 
     monkeypatch.setattr(state.output, "snapshot", capture)
+    monkeypatch.setattr(state.output, "_read_retained", forbidden)
     monkeypatch.setattr(manager.process_registry, "poll", forbidden)
     monkeypatch.setattr(manager.process_registry, "log", forbidden)
     detail = manager.get_process_info(state.process_id, owner_host_session_id=owner)
-    assert calls == [{"maximum_chars": 1}]
+    assert calls == []
     assert detail.command == "query metadata test"
     assert "output" not in detail.to_payload()
+    monkeypatch.setattr(state.output, "_read_retained", read_retained)
     after = snapshot(maximum_chars=100)
     assert after.text == before.text == "retained log body\n"
     assert after.retained_from_cursor == before.retained_from_cursor
     assert after.output_cursor == before.output_cursor
     with pytest.raises(KeyError):
-        manager.get_process_info(state.process_id, owner_host_session_id=random_id("host"))
+        manager.get_process_info(
+            state.process_id, owner_host_session_id=random_id("host")
+        )
     with pytest.raises(KeyError):
         manager.get_process_info(random_id("process"), owner_host_session_id=owner)

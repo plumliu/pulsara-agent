@@ -633,6 +633,9 @@ class _ToolOperations:
                 tool_call_id=candidate.tool_call_id, turn_id=candidate.turn_id,
                 source=candidate.invocation_source, require_running=False,
             )
+            for image in candidate.pending_images:
+                PostgresCanonicalBlobStore.publish_in_connection(connection, workspace_id=None,
+                    content=image.immutable_bytes, media_type=image.media_type, codec="binary", validated_image=image)
             entry_sequence = self._allocate_entry_sequence(connection, guard.session_id)
             self._insert_entry(
                 connection,
@@ -649,8 +652,8 @@ class _ToolOperations:
             columns = (
                 "result_record_kind,id,session_id,workspace_id,tool_call_entry_id,tool_call_id,"
                 "invocation_id,attempt_id,result_origin_kind,result_entry_id,result_state,"
-                "permission_snapshot_fingerprint,public_fields,result_facts,"
-                "output_unavailability_reason,model_visible_memory_fact_ids,observed_at,"
+                "permission_snapshot_fingerprint,public_fields,result_facts,source_result_entry_id,native_projection,"
+                "output_unavailability_reason,observed_at,"
                 "observation_duration_microseconds,observation_origin_kind,tool_reported_duration_microseconds"
             )
             values = (
@@ -661,8 +664,10 @@ class _ToolOperations:
                 str(turn["permission_snapshot_fingerprint"]),
                 Json(thaw_tool_json_object(candidate.public_fields)),
                 Jsonb(thaw_tool_json_object(candidate.result_facts)),
+                candidate.source_result_entry_id,
+                None if candidate.native_projection is None else Json(thaw_tool_json_object(candidate.native_projection)),
                 None if candidate.output_unavailability_reason is None else candidate.output_unavailability_reason.value,
-                list(candidate.model_visible_memory_fact_ids),candidate.observed_at,
+                candidate.observed_at,
                 candidate.observation_duration_microseconds,candidate.observation_origin_kind.value,
                 candidate.trusted_tool_reported_duration_microseconds,
             )
@@ -751,9 +756,12 @@ class _ToolOperations:
                 or str(result["permission_snapshot_fingerprint"]) != str(turn["permission_snapshot_fingerprint"])
                 or not tool_json_values_equal(result["public_fields"], candidate.public_fields)
                 or not tool_json_values_equal(result["result_facts"], candidate.result_facts)
+                or (candidate.source_result_entry_id is not None and (
+                    result["source_result_entry_id"] != candidate.source_result_entry_id
+                    or (candidate.native_projection is not None
+                        and not tool_json_values_equal(result["native_projection"], candidate.native_projection))))
                 or result["output_unavailability_reason"] != (
                     None if candidate.output_unavailability_reason is None else candidate.output_unavailability_reason.value)
-                or tuple(result["model_visible_memory_fact_ids"]) != candidate.model_visible_memory_fact_ids
                 or result["observed_at"] != candidate.observed_at
                 or result["observation_duration_microseconds"] != candidate.observation_duration_microseconds
                 or str(result["observation_origin_kind"]) != candidate.observation_origin_kind.value
@@ -773,6 +781,60 @@ class _ToolOperations:
                 entry_sequence=int(entry["entry_sequence"]),
                 event_sequence=int(result_event["event_sequence"]),
             )
+
+    def _record_native_projection_in_connection(self, connection, guard, *, result_entry_id,
+            source_result_entry_id, projection):
+        from pulsara_agent.conversation_kernel.native_tool_delivery import validate_native_projection
+        row = connection.execute("SELECT * FROM pulsara_v3.tool_results WHERE session_id=%s AND result_entry_id=%s FOR UPDATE",
+            (guard.session_id, result_entry_id)).fetchone()
+        source = connection.execute("SELECT * FROM pulsara_v3.tool_results WHERE session_id=%s AND result_entry_id=%s",
+            (guard.session_id, source_result_entry_id)).fetchone()
+        if row is None or source is None or row["workspace_id"] != source["workspace_id"]:
+            raise ConversationKernelConflict("native result projection source is unavailable")
+        if source["source_result_entry_id"] not in (None, source_result_entry_id):
+            raise ConversationKernelConflict("a continuation observation cannot become another result source")
+        validate_native_projection(read_accepted_tool_business_value(connection, source), projection)
+        if row["native_projection"] is not None:
+            if (row["source_result_entry_id"] != source_result_entry_id
+                    or not tool_json_values_equal(row["native_projection"], projection)):
+                raise ConversationKernelConflict("native observation was already frozen differently")
+            return
+        if row["source_result_entry_id"] not in (None, source_result_entry_id):
+            raise ConversationKernelConflict("native projection changed its resolved source")
+        connection.execute("""UPDATE pulsara_v3.tool_results
+            SET source_result_entry_id=%s,native_projection=%s
+            WHERE session_id=%s AND result_entry_id=%s""",
+            (source_result_entry_id, Json(dict(projection)), guard.session_id, result_entry_id))
+
+
+    def freeze_native_tool_page_decisions(self, guard: HostWriterGuard, *, decisions,
+            deadline_monotonic: float) -> None:
+        """Accept the admitted ranges, confirming an ambiguous commit exactly."""
+        pages = tuple(item for item in decisions if item.native_projection is not None)
+        if not pages:
+            return
+        try:
+            with self._writer_transaction(guard, deadline_monotonic=deadline_monotonic) as connection:
+                for decision in pages:
+                    self._record_native_projection_in_connection(connection, guard,
+                        result_entry_id=decision.result_entry_id,
+                        source_result_entry_id=decision.source_result_entry_id,
+                        projection=thaw_json(decision.native_projection))
+        except Exception:
+            # This accepts no new business effect. A lost commit acknowledgement
+            # can continue installation only when every exact frozen range is
+            # present; absence or another range preserves the original failure.
+            with self._provider.connection(lane=PostgresConnectionLane.HOST_CONTROL,
+                    row_factory=dict_row, deadline_monotonic=deadline_monotonic,
+                    isolation_level=IsolationLevel.REPEATABLE_READ) as connection:
+                self._require_writer(connection, guard, lock=False)
+                for decision in pages:
+                    row = connection.execute(
+                        "SELECT source_result_entry_id,native_projection FROM pulsara_v3.tool_results WHERE session_id=%s AND result_entry_id=%s",
+                        (guard.session_id, decision.result_entry_id)).fetchone()
+                    if (row is None or row["source_result_entry_id"] != decision.source_result_entry_id
+                            or not tool_json_values_equal(row["native_projection"], thaw_json(decision.native_projection))):
+                        raise
 
     def accept_tool_interaction_decision(
         self,

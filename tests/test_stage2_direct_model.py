@@ -62,6 +62,7 @@ from pulsara_agent.llm.retry import LLMRetryConfig
 from pulsara_agent.llm.normalized_transport import NormalizedProviderTransportExecution
 from pulsara_agent.model_input.compiler import StructuredModelInputCompiler
 from pulsara_agent.model_input.continuity import (
+    InstalledObservationState,
     FULL_HISTORY_CONTEXT_BASE_IDENTITY,
     FrozenProviderInputAppendCompileResult,
     NoNewTriggerAnchor,
@@ -111,7 +112,6 @@ from tests.support.model_config import (
     test_model_runtime,
 )
 from tests.support.round3 import (
-    StaticContextSourceCollector,
     StructuredToolPort,
     new_test_provider_input_continuity_owner,
     prepare_test_direct_tool_surface,
@@ -532,7 +532,9 @@ def _prepared_execution(
         ),
     )
     canonical_facts = static_canonical_compile_facts(snapshot)
-    sources = StaticContextSourceCollector().collect(canonical_facts=canonical_facts)
+    from tests.support.model_input import _sources, _candidate
+    from pulsara_agent.model_input.contracts import ContextSourceKind
+    sources = _sources(_candidate(ContextSourceKind.BASE_SYSTEM,"ROOT SYSTEM"))
     compiled = StructuredModelInputCompiler().compile(
         StructuredModelInputCompileRequest(
             context_id="context:maoywbssk6zspli7b2bnu3pala",
@@ -646,7 +648,7 @@ def _continuity_candidate(request: KernelModelExecutionRequest, owner=None):
         compiled_result=FrozenProviderInputAppendCompileResult(
             compiled_input=request.compiled_input,
             canonical_frontier=frontier,
-            source_heads=(),
+            observation_state=InstalledObservationState(),
             appended_message_count=len(request.compiled_input.messages),
         ),
         wire_input_plan=request.wire_input_plan,

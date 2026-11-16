@@ -1977,12 +1977,16 @@ def test_scheduled_http_filters_active_session_and_returns_activation_conflicts(
                 async with client.get(url, params={"session_id": ""}) as response:
                     assert response.status == 400
                 assert tasks.list.await_count == 1
-                async with client.post(
-                    url,
-                    json={"session_id": 'session:qlp745d22i4ns5hrvdxtssrowu', "values": {}, "status": "ACTIVE"},
-                    headers={"Origin": server.origin},
-                ) as response:
-                    assert response.status == 400
+                for invalid_values in ({}, {**_schedule_values(), "permission_mode": None},
+                    {**_schedule_values(), "expected_revision": 1},
+                    {**_schedule_values(), "schedule": {"kind":"interval", "seconds":60}}):
+                    async with client.post(
+                        url,
+                        json={"session_id": 'session:qlp745d22i4ns5hrvdxtssrowu', "values": invalid_values, "status": "ACTIVE"},
+                        headers={"Origin": server.origin},
+                    ) as response:
+                        assert response.status == 400
+                        assert (await response.json())["error"]["code"] == "INVALID_REQUEST"
                 tasks.create.assert_not_awaited()
                 values = _schedule_values()
                 async with client.post(

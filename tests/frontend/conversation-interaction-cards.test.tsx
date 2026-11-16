@@ -12,7 +12,7 @@ async function open(content: RuntimeInteractionContent, summary?: RuntimeInterac
   adapter.interactionContent = content;
   const kind = content.kind;
   adapter.connectionValue = {...projection('请查看下面的内容。'), hostSessionId: 'host:cards', interaction: summary ?? (kind === 'plan-question' || kind === 'plan-draft'
-    ? {id: 'interaction:card', kind, workflowId: 'workflow:card', workflowRevision: 7}
+    ? {id: 'interaction:card', kind, workflowId: 'workflow:card', workflowRevision: 7, expiresAtUtc: '2099-01-01T00:00:00Z'}
     : {id: 'interaction:card', kind: 'capability-form', prompt: '', options: []})};
   renderWorkbench(<PulsaraApp adapter={adapter} />);
   await screen.findByText('请查看下面的内容。');
@@ -35,7 +35,7 @@ it('saves an inline MCP through the conversation owner once and keeps the Token 
   const [interaction, result] = adapter.lastConnection!.resolveInteraction.mock.calls[0];
   expect(interaction).toEqual(expect.objectContaining({id: 'interaction:card', kind: 'capability-form'}));
   expect(result).toEqual({kind: 'capability', decision: 'SUBMIT', submission: {
-    config: {...config, public_headers: {}, scope_policy: 'ROOT_ONLY', transport: {...config.transport, allow_http_localhost: false, stateless_http_asserted: false}, auth: {type: 'bearer', reference: {source: 'managed', binding: {owner, name: 'bearer'}}}},
+    config: {...config, public_headers: {}, scope_policy: 'ROOT_AND_SUBAGENTS', transport: {...config.transport, allow_http_localhost: false, stateless_http_asserted: false}, auth: {type: 'bearer', reference: {source: 'managed', binding: {owner, name: 'bearer'}}}},
     secret_changes: [{binding: {owner, name: 'bearer'}, value: 'regression-token'}], retain_credentials_confirmed: false,
   }});
   expect(JSON.stringify(result.kind === 'capability' && result.submission?.config)).not.toContain('regression-token');
@@ -45,7 +45,7 @@ it('saves an inline MCP through the conversation owner once and keeps the Token 
 
 it('retains the credential destination consent in an inline update', async () => {
   const prior = {...config, auth: {type: 'bearer', reference: {source: 'managed', binding: {owner, name: 'bearer'}}}};
-  const adapter = await open(capability('UPDATE_LOCAL_MCP', {server_id: 'docs', config: prior}));
+  const adapter = await open(capability('UPDATE_MCP_CONNECTION', {server_id: 'docs', config: prior}));
   const region = within(await screen.findByRole('region', {name: '编辑 文档服务 连接'}));
   fireEvent.change(region.getByLabelText('服务地址'), {target: {value: 'https://new.example/mcp'}});
   const save = region.getByRole('button', {name: '保存并继续'});
@@ -70,7 +70,7 @@ it('saves a real stdio candidate from the inline editor without converting it to
 
 it.each([{visibility:'VISIBLE',value:'package:aaaaaaaaaaaaaaaaaaaaaaaaaa'}, {visibility:'WITHHELD'}])('keeps plugin overrides and private connection inputs with %s identity', async packageId => {
   const pluginOwner = {...owner, kind: 'plugin', plugin_id: 'research'};
-  const adapter = await open(capability('CONFIGURE_PLUGIN_MCP_CONNECTION', {server_id: 'docs', config}, {
+  const adapter = await open(capability('UPDATE_MCP_CONNECTION', {server_id: 'docs', config}, {
     plugin: {name: '资料工具包', enabled: true, package_install_id: packageId},
     connection: {server_id: 'docs', defaults: config, config, overlay: null, credential_owner: pluginOwner,
       connection_inputs: [{name: 'API_KEY', title: '服务密钥', private: true, required: true}]},
@@ -130,7 +130,7 @@ it.each(['expired', 'processing'] as const)('disables both permission choices wh
   expect(adapter.lastConnection!.resolveInteraction).not.toHaveBeenCalled();
 });
 
-const question = {kind: 'plan-question' as const, question: '按什么方式整理？', options: [{ordinal: 5, label: '按主题', description: '方便查找', recommended: true}], allowFreeText: true};
+const question = {kind: 'plan-question' as const, question: '按什么方式整理？', options: [{ordinal: 5, label: '按主题', description: '方便查找', recommended: true}]};
 it.each(['option', 'text'] as const)('answers a plan question using %s without adding a placeholder contract', async method => {
   const adapter = await open(question);
   await screen.findByText(question.question);
@@ -142,7 +142,7 @@ it.each(['option', 'text'] as const)('answers a plan question using %s without a
   if (method === 'option') fireEvent.click(screen.getByRole('button', {name: /按主题/}));
   else {fireEvent.change(input, {target: {value: ' 保留时间顺序 '}});fireEvent.click(screen.getByRole('button', {name: '提交回答'}));}
   await waitFor(() => expect(adapter.lastConnection!.resolveInteraction).toHaveBeenCalledTimes(1));
-  expect(adapter.lastConnection!.resolveInteraction.mock.calls[0][1]).toEqual(method === 'option' ? {kind: 'plan-question-option', optionOrdinal: 5} : {kind: 'plan-question-text', text: '保留时间顺序'});
+  expect(adapter.lastConnection!.resolveInteraction.mock.calls[0][1]).toEqual(method === 'option' ? {kind: 'plan-question-option', optionOrdinal: 5} : {kind: 'plan-question-text', text: ' 保留时间顺序 '});
 });
 
 it.each(['approve', 'revise', 'cancel'] as const)('preserves the Markdown plan and %s decision through the conversation', async decision => {
@@ -158,14 +158,14 @@ it.each(['approve', 'revise', 'cancel'] as const)('preserves the Markdown plan a
     fireEvent.click(screen.getByRole('button', {name: '提出修改'}));
     fireEvent.change(screen.getByPlaceholderText('说说你想调整的地方…'), {target: {value: '保留会议记录原文'}});
   }
-  fireEvent.click(screen.getByRole('button', {name: decision === 'approve' ? '批准并继续' : decision === 'cancel' ? '取消规划' : '提交修改意见'}));
+  fireEvent.click(screen.getByRole('button', {name: decision === 'approve' ? '批准并继续' : decision === 'cancel' ? '取消本次审批' : '提交修改意见'}));
   await waitFor(() => expect(adapter.lastConnection!.resolveInteraction).toHaveBeenCalledTimes(1));
   expect(adapter.lastConnection!.resolveInteraction.mock.calls[0]).toEqual([expect.objectContaining({workflowId: 'workflow:card', workflowRevision: 7}), {kind: 'plan-draft', decision, ...(decision === 'revise' ? {revisionPrompt: {parts: [{type: 'text', text: '保留会议记录原文'}]}} : {})}]);
 });
 
 
 it('restores an inline plugin connection only after reviewing the default and confirming', async () => {
-  const adapter = await open(capability('CONFIGURE_PLUGIN_MCP_CONNECTION', {server_id: 'docs'}, {
+  const adapter = await open(capability('UPDATE_MCP_CONNECTION', {server_id: 'docs'}, {
     plugin: {name: '资料工具包', enabled: true, package_install_id: {visibility: 'VISIBLE', value: 'package:aaaaaaaaaaaaaaaaaaaaaaaaaa'}},
     connection: {server_id: 'docs', defaults: config, config: {...config, transport: {...config.transport, endpoint: 'https://override.example/mcp'}}, overlay: {endpoint: 'https://override.example/mcp'}, credential_owner: {...owner, kind: 'plugin', plugin_id: 'research'}},
   }));

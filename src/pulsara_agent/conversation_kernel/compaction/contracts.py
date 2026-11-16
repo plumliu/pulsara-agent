@@ -639,6 +639,7 @@ class FrozenCompactionCanonicalRead:
     imported_interruptions: tuple[TurnInterruptionNotice, ...] = ()
     executed_history_interruptions: tuple[TurnInterruptionNotice, ...] = ()
     latest_assistant_input_through_sequence: int | None = None
+    successful_file_read_paths: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.source_interruption is not None and (
@@ -735,6 +736,7 @@ def freeze_compaction_canonical_read(
     imported_interruptions: tuple[TurnInterruptionNotice, ...] = (),
     executed_history_interruptions: tuple[TurnInterruptionNotice, ...] = (),
     latest_assistant_input_through_sequence: int | None = None,
+    successful_file_read_paths: tuple[str, ...] = (),
 ) -> FrozenCompactionCanonicalRead:
     return FrozenCompactionCanonicalRead(
         scope=scope,
@@ -746,6 +748,7 @@ def freeze_compaction_canonical_read(
         imported_interruptions=imported_interruptions,
         executed_history_interruptions=executed_history_interruptions,
         latest_assistant_input_through_sequence=latest_assistant_input_through_sequence,
+        successful_file_read_paths=successful_file_read_paths,
     )
 
 
@@ -816,25 +819,13 @@ def provider_input_item_canonical_expanded_bytes(
 
     if item.item_kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT:
         raise ValueError("snapshot C charge belongs to its typed carrier")
-    if (
-        item.item_kind is FrozenProviderInputItemKind.USER
-        and item.input_origin
-        in {
-            CanonicalInputOriginKind.HUMAN_MESSAGE,
-            CanonicalInputOriginKind.HUMAN_STEER,
-            CanonicalInputOriginKind.AGENT_INSTRUCTION,
-            CanonicalInputOriginKind.AGENT_MATERIAL,
-            CanonicalInputOriginKind.AGENT_MESSAGE,
-            CanonicalInputOriginKind.SCHEDULED_TASK,
-        }
-    ) or (
-        item.item_kind
-        in {
-            FrozenProviderInputItemKind.TOOL_RESULT,
-            FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
-        }
-        and any(isinstance(part, LLMImagePart) for part in item.content)
-    ):
+    if item.item_kind in {FrozenProviderInputItemKind.TOOL_RESULT,FrozenProviderInputItemKind.LATE_TOOL_OUTCOME}:
+        return sum(len(part.text.encode("utf-8")) if isinstance(part,LLMTextPart) else len(part.immutable_bytes)
+                   for part in item.content)
+    if item.item_kind is FrozenProviderInputItemKind.TERMINAL_OBSERVATION:
+        from pulsara_agent.ports.terminal_observation import cell_output_canonical_body
+        return cell_output_canonical_body(item.content)[1]
+    if item.item_kind is FrozenProviderInputItemKind.USER:
         content = FrozenPromptContent(item.content)
         return len(canonical_prompt_body_bytes(content)) + sum(
             len(part.immutable_bytes)

@@ -150,7 +150,7 @@ from PIL import Image
 from pulsara_agent.media.source import MediaSource, probe_media
 from pulsara_agent.media.audio import extract_audio
 from pulsara_agent.media.subtitles import read_subtitles
-from pulsara_agent.media.frames import FrameBudget, read_video_frames
+from pulsara_agent.media.frames import FrameBudget, prepare_frame_plan, render_frame_page
 from pulsara_agent.media.worker import MediaWorker
 from importlib.resources import files
 async def check_media():
@@ -183,9 +183,10 @@ async def check_media():
                         container.mux(packet)
             with MediaSource.open(video) as source:
                 info=await owner.run(probe_media,source,deadline_monotonic=monotonic()+30)
-                result=await owner.run(read_video_frames,source,info,start=0,end=info.duration,mode='overview',crop=None,budget=FrameBudget(1000000,1280*720,2,32),deadline_monotonic=monotonic()+30)
-                assert result.images and result.processed_range==(0,info.duration)
-                subtitle=await owner.run(read_subtitles,source,info,0,info.duration,maximum_text_bytes=10000,deadline_monotonic=monotonic()+30)
+                plan=await owner.run(prepare_frame_plan,source,info,start=0,end=info.duration,mode='overview',crop=None,analysis_frames=32,deadline_monotonic=monotonic()+30)
+                result=await owner.run(render_frame_page,source,info,plan,offset=0,count=plan.observation_count,budget=FrameBudget(1000000,1280*720,2,32),deadline_monotonic=monotonic()+30)
+                assert result.images and tuple(map(float,plan.processed_range))==(0,info.duration)
+                subtitle=await owner.run(read_subtitles,source,info,0,info.duration,deadline_monotonic=monotonic()+30)
                 assert subtitle.usable and subtitle.entries[0].text=='Embedded subtitle'
     finally:
         await owner.aclose()
@@ -220,7 +221,7 @@ async def check_vm():
                 assert lease is not None
                 records.append(dict(lease.record))
                 await owner.acknowledge_output(lease)
-        assert records==[{'kind':'return','text':'relocated QuickJS'}]
+        assert records==[{'kind':'return','values':[{'type':'text','value':'relocated QuickJS'}]}]
     finally:
         await owner.aclose()
 asyncio.run(check_vm())

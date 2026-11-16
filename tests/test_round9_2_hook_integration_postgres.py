@@ -34,9 +34,7 @@ from pulsara_agent.llm.input import (
     join_text_content,
 )
 from pulsara_agent.llm.result import TransportUsageReport
-from pulsara_agent.model_input.continuity import decode_runtime_observation
 from pulsara_agent.model_input.contracts import (
-    ContextSourceKind,
     ModelInputScopeKind,
 )
 from pulsara_agent.ports.live_agent_event import (
@@ -327,7 +325,7 @@ class _AgentWorkHookModel(CallbackScriptedKernelModel):
                 items = _delegate(
                     self,
                     "call:round9-2-work",
-                    {"instruction": "Exercise child Work lifecycle Hooks exactly once."},
+                    {"instruction": "Exercise child Work lifecycle Hooks exactly once.", "work_title": "Exercise lifecycle Hooks"},
                 )
             else:
                 items = _text_stream("ROOT_DELEGATION_COMPLETE", "text:root-final")
@@ -452,16 +450,19 @@ def _log_values(path: Path) -> list[dict[str, object]]:
 
 
 def _hook_observations(request: object):
-    compiled = request.compiled_input  # type: ignore[attr-defined]
-    return [
-        decode_runtime_observation(message)
-        for message in compiled.messages
-        if message.role is MessageRole.USER
-        and message.content
-        and "pulsara_runtime_observation" in join_text_content(message.content)
-        and decode_runtime_observation(message).source_kind
-        is ContextSourceKind.HOOK_CONTEXT
-    ]
+    result=[]
+    for message in request.compiled_input.messages:
+        text=join_text_content(message.content)
+        if message.role is MessageRole.USER and text.startswith('{"pulsara_hook_context":'):
+            value=json.loads(text)
+            assert set(value)=={"pulsara_hook_context"}
+            assert all(set(item)=={"event","text"} for item in value["pulsara_hook_context"])
+            result.append(value)
+    return result
+
+
+def _hook_text(value):
+    return "\n".join(item["text"] for item in value["pulsara_hook_context"])
 
 
 def test_round9_2_host_sources_stop_and_prefix_continuity(
@@ -539,13 +540,13 @@ def test_round9_2_host_sources_stop_and_prefix_continuity(
         assert second.messages[: len(first.messages)] == first.messages
         observations = _hook_observations(model.requests[0])
         assert len(observations) == 1
-        assert observations[0].source_kind is ContextSourceKind.HOOK_CONTEXT
-        assert "SESSION_START_CONTEXT:USER" in observations[0].body
-        assert observations[0].body.index("USER_PROMPT_CONTEXT:USER") < (
-            observations[0].body.index("USER_PROMPT_CONTEXT:WORKSPACE")
+        assert {item["event"] for item in observations[0]["pulsara_hook_context"]} == {"SessionStart", "UserPromptSubmit"}
+        assert "SESSION_START_CONTEXT:USER" in _hook_text(observations[0])
+        assert _hook_text(observations[0]).index("USER_PROMPT_CONTEXT:USER") < (
+            _hook_text(observations[0]).index("USER_PROMPT_CONTEXT:WORKSPACE")
         )
         continuation = _hook_observations(model.requests[1])
-        assert any("STOP_CONTINUE_ONCE" in item.body for item in continuation)
+        assert any("STOP_CONTINUE_ONCE" in _hook_text(item) for item in continuation)
         await core.close_session(session.host_session_id)
         await core.shutdown()
 
@@ -631,9 +632,9 @@ def test_round9_2_queued_prompt_context_waits_for_exact_queue_head_full(
             assert monotonic() < deadline
             await asyncio.sleep(0.01)
         assert len(model.requests) == 3
-        first = "\n".join(item.body for item in _hook_observations(model.requests[0]))
-        followup = "\n".join(item.body for item in _hook_observations(model.requests[1]))
-        delivered = "\n".join(item.body for item in _hook_observations(model.requests[2]))
+        first = "\n".join(_hook_text(item) for item in _hook_observations(model.requests[0]))
+        followup = "\n".join(_hook_text(item) for item in _hook_observations(model.requests[1]))
+        delivered = "\n".join(_hook_text(item) for item in _hook_observations(model.requests[2]))
         assert "USER_PROMPT_CONTEXT:USER:active-turn-A" in first
         assert "USER_PROMPT_CONTEXT:USER:queued-turn-B" not in followup
         assert "USER_PROMPT_CONTEXT:USER:queued-turn-B" in delivered
@@ -754,10 +755,10 @@ def test_k2_host_queued_image_hook_is_empty_once_and_conflict_is_exact(
             deadline_monotonic=monotonic() + 5,
         ) as connection:
             refs = connection.execute(
-                """SELECT ref_ordinal, b.body
-                   FROM pulsara_v3.canonical_image_refs r
+                """SELECT ordinal AS ref_ordinal, b.body
+                   FROM pulsara_v3.content_parts r
                    JOIN pulsara_v3.blobs b ON b.id=r.blob_id
-                   WHERE r.session_id=%s AND r.queue_item_id=%s""",
+                   WHERE r.session_id=%s AND r.queue_item_id=%s AND r.type='image' ORDER BY ordinal""",
                 (session.session_id, queued.prompt_delivery.queue_item_id),
             ).fetchall()
         assert [(row["ref_ordinal"], bytes(row["body"])) for row in refs] == [
@@ -875,7 +876,7 @@ def test_round9_2_pre_permission_post_real_command_and_canonical_settlement(
             "attempt_id": None,
         }
         final_observations = _hook_observations(model.requests[-1])
-        assert any("POST_TOOL_CONTEXT:USER" in item.body for item in final_observations)
+        assert any("POST_TOOL_CONTEXT:USER" in _hook_text(item) for item in final_observations)
         await core.close_session(session.host_session_id)
         await core.shutdown()
 
@@ -1117,7 +1118,6 @@ def test_round9_2_plan_immediate_and_delayed_settlements_share_hook_projection(
                 "recommended": False,
             },
         ],
-        "allow_free_text": True,
     }
     first_batch = _tool_stream(
         "write_file",
@@ -1145,7 +1145,6 @@ def test_round9_2_plan_immediate_and_delayed_settlements_share_hook_projection(
         )
         entered = await session.enter_plan(
             command_id='command:jocoa7xxrnrv744feyy7cltls4',
-            entry_reason="exercise delayed Plan settlement",
             resume_permission_mode=PermissionMode.ACCEPT_EDITS,
         )
         assert entered.status == "SUCCEEDED"
@@ -1360,16 +1359,18 @@ def test_round9_2_agent_work_prompt_and_stop_share_real_owner_and_one_shot_conti
                 deadline_monotonic=monotonic() + 5,
             )
             assert frozen_source == (
-                'console.log({delegation:"call:round9-2-work",admitted:await tools.run_agent('
-                '[{"instruction": "Exercise child Work lifecycle Hooks exactly once."}])});'
+                'const r=await tools.run_agent('
+                '[{"instruction": "Exercise child Work lifecycle Hooks exactly once.", '
+                '"work_title": "Exercise lifecycle Hooks"}]); '
+                'console.log({delegation:"call:round9-2-work",admitted:r.content.map(p=>p.value)});'
             )
             first_context = _hook_observations(child_requests[0])
             assert any(
-                "USER_PROMPT_CONTEXT:USER:Exercise child Work lifecycle Hooks exactly once." in item.body for item in first_context
+                "USER_PROMPT_CONTEXT:USER:Exercise child Work lifecycle Hooks exactly once." in _hook_text(item) for item in first_context
             )
             second_context = _hook_observations(child_requests[1])
             assert any(
-                "STOP_CONTINUE_ONCE" in item.body for item in second_context
+                "STOP_CONTINUE_ONCE" in _hook_text(item) for item in second_context
             )
         finally:
             await core.close_session(session.host_session_id)
@@ -1673,17 +1674,10 @@ def test_round9_2_active_compaction_runs_post_then_root_compact_session_start(
             await asyncio.wait_for(model.active_provider_started.wait(), timeout=5)
             active_turn_id = session._active_turn_id  # noqa: SLF001
             assert active_turn_id is not None
-            # Derive the threshold from the active ordinary wire. The real
-            # following tool result crosses it; the three previous requests
-            # did not run with this lower trigger.
-            active_wire = model.requests[-1].wire_input_plan.quote
-            budget = active_wire.effective_input_budget_tokens
-            before_tokens = active_wire.raw_final_wire_estimated_input_tokens
+            # Enable a deterministic trigger only after the active provider
+            # has opened, so its tool-result continuation owns this compaction.
             session._compaction.policy = replace(
-                session._compaction.policy,
-                auto_trigger_ratio=(before_tokens + 128) / budget,
-
-
+                session._compaction.policy, auto_trigger_ratio=0.001,
             )
             model.active_provider_release.set()
             result = await asyncio.wait_for(running, timeout=10)
@@ -1696,7 +1690,7 @@ def test_round9_2_active_compaction_runs_post_then_root_compact_session_start(
             assert model.summary_transport.open_count == 1
             final_observations = _hook_observations(model.requests[-1])
             assert any(
-                "SESSION_START_CONTEXT:USER:compact" in item.body
+                "SESSION_START_CONTEXT:USER:compact" in _hook_text(item)
                 for item in final_observations
             )
         finally:
@@ -1752,7 +1746,7 @@ def test_joint_hook_review_full_production_host_includes_agent_owner(tmp_path, m
         core = KernelHostCore.production(model_runtime=_runtime(stage2_migrated_postgres_database.runtime_dsn))
         session = await core.open_session(HostWorkspaceInput(workspace_kind='project', workspace_root=workspace))
         try:
-            prepared = await session._tools._capability_management.prepare({'action': 'TRUST_HOOK_SOURCE', 'target': {'kind': 'HOOK_SOURCE', 'scope': 'WORKSPACE', 'source_kind': 'LOCAL'}})
+            prepared = await session._tools._capability_management.prepare({'action': 'TRUST_HOOK_SOURCE', 'target': {'kind': 'HOOK_SOURCE', 'config_path': str(workspace / '.pulsara/hooks.json')}})
             hook = thaw_json(prepared.public_prefill)['hook_source']
             assert hook['definitions'][0]['matched_operations'] == ['派发工作']
             assert hook['definitions'][0]['matching_aliases'] == [{'tool_name': 'run_agent', 'aliases': ['Agent']}]

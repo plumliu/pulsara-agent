@@ -332,7 +332,6 @@ function ProjectCapabilityPanel({
       ...(snapshot?.skills.details.length ? ['部分技能目录暂时无法完整读取'] : []),
     ]
     : [
-      ...(snapshot?.mcp.collisions.map((collision) => `${collision.name} 存在同名工具`) ?? []),
       ...servers.filter((server) => server.hasFailure).map((server) => `${server.name}：${mcpFailureReason(server.failureCategory)}`),
     ];
 

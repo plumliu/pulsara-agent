@@ -129,14 +129,14 @@ def queued_input_owner_is_exact(
                 actual.source_exec_attempt_id,
                 actual.record_sequence,
                 actual.storage_kind,
-                actual.storage_text,
+                actual.storage_parts,
             ) == (
                 expected.cell_id,
                 expected.source_turn_id,
                 expected.source_exec_attempt_id,
                 expected.record_sequence,
                 expected.storage_kind,
-                expected.storage_text,
+                expected.storage_parts,
             )
         return actual.body == expected.body
     except (KeyError, TypeError, ValueError, ConversationKernelConflict):
@@ -144,6 +144,65 @@ def queued_input_owner_is_exact(
 
 
 class _PromptOperations:
+    def _cell_output_parts(self, connection, *, record, hydrate):
+        from pulsara_agent.code_mode.output import project_output_record
+        from pulsara_agent.conversation_kernel.prompt_storage import (
+            read_image_reference_in_connection,
+            read_image_reference_metadata_in_connection,
+        )
+        from pulsara_agent.identity import require_id
+        from pulsara_agent.ports.tool_execution import encode_tool_public_json
+
+        kind, candidates = project_output_record(record)
+        parts, images, loaded = [], [], {}
+        for candidate in candidates:
+            if candidate["type"] == "text":
+                parts.append(candidate)
+                continue
+            node = candidate["node"]
+            reference = node.get("value")
+            try:
+                if (set(node) != {"type", "value"}
+                    or not isinstance(reference, dict)
+                    or set(reference) != {"kind", "image_ref"}
+                    or reference["kind"] != "IMAGE_REF"):
+                    raise ValueError("expected an image item with an IMAGE_REF Target")
+                image_ref = require_id(reference["image_ref"], "image")
+                if image_ref not in loaded:
+                    reader = (read_image_reference_in_connection if hydrate
+                              else read_image_reference_metadata_in_connection)
+                    loaded[image_ref] = reader(connection, image_ref=image_ref)
+                image = loaded[image_ref]
+            except Exception as error:
+                parts.append({"type":"text", "value":"[图片 "
+                    + encode_tool_public_json(reference).decode("utf-8")
+                    + " 不可用：" + str(error) + "]"})
+            else:
+                parts.append({"type":"image", "value":reference})
+                images.append(image)
+        return kind, parts, images
+
+    def quote_cell_output_content(self, *, record, deadline_monotonic):
+        from pulsara_agent.llm.input import LLMTextPart
+        from pulsara_agent.ports.terminal_observation import (
+            cell_output_canonical_body, cell_output_provider_text,
+        )
+        with self._provider.connection(lane=PostgresConnectionLane.HOST_CONTROL,
+                row_factory=dict_row, deadline_monotonic=deadline_monotonic) as connection:
+            _kind, parts, images = self._cell_output_parts(connection, record=record, hydrate=False)
+        descriptors = iter(images)
+        provider_parts = tuple(LLMTextPart(cell_output_provider_text(part["value"]))
+            if part["type"] == "text" else next(descriptors) for part in parts)
+        return cell_output_canonical_body(provider_parts)[1]
+
+    def prepare_cell_output_content(self, *, cell_id, source_turn_id,
+            source_exec_attempt_id, record_sequence, record, deadline_monotonic):
+        with self._provider.connection(lane=PostgresConnectionLane.HOST_CONTROL,
+                row_factory=dict_row, deadline_monotonic=deadline_monotonic) as connection:
+            kind, parts, images = self._cell_output_parts(connection, record=record, hydrate=True)
+        return CellOutputContent(cell_id, source_turn_id, source_exec_attempt_id,
+            record_sequence, {"kind":kind,"content":parts}, tuple(images))
+
     def confirm_cell_output_ingress(
         self, *, candidate: PreparedCellOutputIngress, deadline_monotonic
     ):
@@ -1567,6 +1626,9 @@ class _PromptOperations:
                     content=input_entry.body_storage,
                     publish_content=False,
                     input_origin=input_entry.input_origin,
+                    source_cell_id=item["source_cell_id"] if input_entry.input_origin is CanonicalInputOriginKind.CELL_OUTPUT else None,
+                    source_record_sequence=item["source_record_sequence"] if input_entry.input_origin is CanonicalInputOriginKind.CELL_OUTPUT else None,
+                    cell_output_kind=item["cell_output_kind"] if input_entry.input_origin is CanonicalInputOriginKind.CELL_OUTPUT else None,
                     scheduled_input=candidate.scheduled_input
                     if is_instruction
                     else None,
@@ -2433,6 +2495,9 @@ class _PromptOperations:
             content=fact.body_storage,
             publish_content=False,
             input_origin=fact.input_origin,
+            source_cell_id=item["source_cell_id"] if fact.input_origin is CanonicalInputOriginKind.CELL_OUTPUT else None,
+            source_record_sequence=item["source_record_sequence"] if fact.input_origin is CanonicalInputOriginKind.CELL_OUTPUT else None,
+            cell_output_kind=item["cell_output_kind"] if fact.input_origin is CanonicalInputOriginKind.CELL_OUTPUT else None,
             scheduled_input=fact.scheduled_input,
         )
         move_queue_content_parts(

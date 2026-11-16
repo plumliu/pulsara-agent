@@ -5,17 +5,17 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from io import BytesIO
-import json
 import wave
 
 from aiohttp import web
 import pytest
 
 from pulsara_agent.conversation_kernel.host import KernelHostCore
-from pulsara_agent.conversation_kernel.tool_outputs import PostgresToolOutputReadPort
+from pulsara_agent.conversation_kernel.tool_outputs import PostgresToolOutputReadPort, project_tool_result_export
 from pulsara_agent.identity import random_id
 from pulsara_agent.llm.input import PromptContent, text_part_values
 from pulsara_agent.media.asr_config import AsrConnection
+from pulsara_agent.ports.tool_execution import thaw_tool_json_object
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.tool_permission import preset_to_policy
 from pulsara_agent.workspace_identity import HostWorkspaceInput
@@ -148,17 +148,16 @@ def test_pure_audio_host_sdk_overlap_model_change_cleanup_and_exact_history(
                         (session.session_id,),
                     ).fetchone()
                 assert row[1] == "SUCCESS"
-                body = reader.read_body(
-                    {"kind": "SESSION_ENTRY", "entry_id": row[0]}
-                ).content
-                return row[0], body, json.loads(body)
+                value = reader.read_result({"kind": "SESSION_ENTRY", "entry_id": row[0]}).value
+                return row[0], project_tool_result_export(value), thaw_tool_json_object(value)
 
             target = {"kind": "PATH", "path": str(path)}
             first_entry, first_bytes, first = await invoke(
                 "read_transcript", {"target": target, "from": 0, "to": 2}
             )
-            assert first["source"] == "asr" and first["complete"] is True
-            assert first["entries"][0]["text"] == "spoken-model-A"
+            assert first["meta"]["source"] == "asr"
+            assert first["meta"]["status"] == "SUCCESS"
+            assert [part["value"]["text"] for part in first["content"] if part["type"] == "object"] == ["spoken-model-A"]
             assert requests == [("model-A", 2)]
             runtime.settings.value = replace(
                 runtime.settings.read(),
@@ -168,40 +167,35 @@ def test_pure_audio_host_sdk_overlap_model_change_cleanup_and_exact_history(
                 "read_transcript", {"target": target, "from": 1, "to": 3}
             )
             assert requests == [("model-A", 2), ("model-B", 1)]
-            assert [entry["text"] for entry in second["entries"]] == [
+            assert [part["value"]["text"] for part in second["content"] if part["type"] == "object"] == [
                 "spoken-model-A",
                 "spoken-model-B",
             ]
             await invoke("read_transcript", {"target": target, "from": 0, "to": 3})
             assert len(requests) == 2
-            # Cache disposal is independent of already accepted source pages.
+            # Cache disposal is independent of the accepted complete transcript.
             with guarded_postgres_test_connection(database.runtime_dsn) as connection:
                 connection.execute(
                     "UPDATE pulsara_v3.asr_cache SET last_used_at=statement_timestamp()-interval '3 days'"
                 )
             assert (await core.clear_old_asr_cache())["deleted_blocks"] == 2
-            _, _, reread = await invoke(
-                "read_file",
-                {"target": {"kind": "SESSION_ENTRY", "entry_id": first_entry}},
-            )
-            assert reread["content"].encode() == first_bytes
             copied = tmp_path / "saved-first-page.json"
             await invoke(
                 "write_file",
                 {
                     "target": {"kind": "PATH", "path": str(copied)},
-                    "source": {"kind": "SESSION_ENTRY", "entry_id": first_entry},
+                    "tool_result_target": {"kind": "SESSION_ENTRY", "entry_id": first_entry},
                 },
             )
             assert copied.read_bytes() == first_bytes
             assert (
-                reader.read_body(
+                project_tool_result_export(reader.read_result(
                     {"kind": "SESSION_ENTRY", "entry_id": first_entry}
-                ).content
+                ).value)
                 == first_bytes
             )
             assert len(requests) == 2
-            # The normal next model call receives the exact original page.
+            # Subsequent model calls keep the frozen original native observation.
             rendered = "\n".join(
                 text
                 for request in model.requests

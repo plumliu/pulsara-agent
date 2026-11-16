@@ -45,7 +45,9 @@ from pulsara_agent.model_input.lowering import (
 def annotation(quote="中文😀 &amp;", comment="/pulsara-docs 解释一下"):
     return PromptAnnotationPart(
         quote,
-        PromptAnnotationSource('entry:4g4gwnnvee2tosb7zkrcv7tz3e', 0, len(quote.encode("utf-16-le")) // 2),
+        PromptAnnotationSource(
+            "entry:4g4gwnnvee2tosb7zkrcv7tz3e", 0, len(quote.encode("utf-16-le")) // 2
+        ),
         comment,
     )
 
@@ -66,26 +68,31 @@ def test_codec_provider_intent_and_protocol_roundtrip():
     assert parts[-1].text == "原文不变"
     assert a.quote in parts[0].text
     assert all(
-        'entry:4g4gwnnvee2tosb7zkrcv7tz3e' not in part.text and '"source"' not in part.text
+        "entry:4g4gwnnvee2tosb7zkrcv7tz3e" not in part.text
+        and '"source"' not in part.text
         for part in parts
     )
     assert frozen.resource_quote.epoch_logical_bytes == llm_content_logical_bytes(parts)
     item = FrozenProviderInputItem(
         item_kind=FrozenProviderInputItemKind.USER,
-        source_entry_id='entry:a4bjxt45dbisnge25xvuhbvfoq',
+        source_entry_id="entry:a4bjxt45dbisnge25xvuhbvfoq",
         source_entry_sequence=2,
-        source_turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
+        source_turn_id="turn:nzc36cttgo7xxki7bcjc7ops7a",
         input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
         content=content.parts,
     )
-    assert (
-        lower_canonical_item(item).fixed_message.content
-        == parts
-    )
+    assert lower_canonical_item(item).message.content == parts
     with pytest.raises(TypeError):
         LLMMessage(MessageRole.USER, content.parts)
     with pytest.raises(TypeError):
-        replace(item, item_kind=FrozenProviderInputItemKind.TERMINAL_OBSERVATION)
+        from pulsara_agent.identity import random_id
+        from pulsara_agent.ports.terminal_observation import CellOutputSource
+
+        replace(
+            item,
+            item_kind=FrozenProviderInputItemKind.TERMINAL_OBSERVATION,
+            cell_output_source=CellOutputSource(random_id("cell"), 1, "log"),
+        )
 
 
 def test_utf16_and_fork_sources_preserve_model_projection():
@@ -94,9 +101,14 @@ def test_utf16_and_fork_sources_preserve_model_projection():
         with pytest.raises(ValueError):
             utf16_slice("甲😀乙", start, end)
     original = FrozenPromptContent((annotation(),))
-    child = remap_annotation_sources(original, {'entry:4g4gwnnvee2tosb7zkrcv7tz3e': 'entry:fhx2dcgwzqpysr5bxkzd7zvgve'})
-    assert child.parts[0].source.entry_id == 'entry:fhx2dcgwzqpysr5bxkzd7zvgve'
-    grandchild = remap_annotation_sources(child, {'entry:fhx2dcgwzqpysr5bxkzd7zvgve': 'entry:ivrpj3artmlophocuhubae7jri'})
+    child = remap_annotation_sources(
+        original,
+        {"entry:4g4gwnnvee2tosb7zkrcv7tz3e": "entry:fhx2dcgwzqpysr5bxkzd7zvgve"},
+    )
+    assert child.parts[0].source.entry_id == "entry:fhx2dcgwzqpysr5bxkzd7zvgve"
+    grandchild = remap_annotation_sources(
+        child, {"entry:fhx2dcgwzqpysr5bxkzd7zvgve": "entry:ivrpj3artmlophocuhubae7jri"}
+    )
     missing = remap_annotation_sources(grandchild, {})
     assert missing.parts[0].source is None
     assert prompt_provider_parts(original.parts) == prompt_provider_parts(missing.parts)
@@ -110,7 +122,7 @@ def test_utf16_and_fork_sources_preserve_model_projection():
         PromptContent(missing.parts)
 
 
-def test_quote_preserves_canonical_line_endings_without_relaxing_active_input():
+def test_quote_and_active_input_preserve_exact_line_endings():
     quote = "前\r\n后\r尾"
     content = FrozenPromptContent((annotation(quote, None),))
     frozen = freeze_canonical_prompt(content)
@@ -120,10 +132,10 @@ def test_quote_preserves_canonical_line_endings_without_relaxing_active_input():
         == content
     )
     assert "\\r\\n" in prompt_provider_parts(content.parts)[0].text
-    with pytest.raises(ValueError, match="control character"):
-        PromptContent.text(quote)
-    with pytest.raises(ValueError, match="control character"):
-        PromptContent((annotation("quote", quote),))
+    assert PromptContent.text(quote).parts == (LLMTextPart(quote),)
+    active_annotation = annotation("quote", quote)
+    assert PromptContent((active_annotation,)).parts == (active_annotation,)
+    assert prompt_text_projection(PromptContent((active_annotation,))) == quote
 
 
 @pytest.mark.parametrize(
@@ -132,7 +144,7 @@ def test_quote_preserves_canonical_line_endings_without_relaxing_active_input():
 )
 def test_dispatch_anchor_uses_comment_intent_and_excludes_quote(origin):
     from types import SimpleNamespace
-    from tests.test_round3_structured_model_input_compiler import (
+    from tests.support.model_input import (
         _snapshot,
         _append_anchor,
     )
@@ -143,9 +155,9 @@ def test_dispatch_anchor_uses_comment_intent_and_excludes_quote(origin):
 
     item = FrozenProviderInputItem(
         item_kind=FrozenProviderInputItemKind.USER,
-        source_entry_id='entry:a4bjxt45dbisnge25xvuhbvfoq',
+        source_entry_id="entry:a4bjxt45dbisnge25xvuhbvfoq",
         source_entry_sequence=2,
-        source_turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
+        source_turn_id="turn:klmmazz67vfgsfsvg6ceqgdsfu",
         input_origin=origin,
         content=(annotation("/quoted-skill 使用记忆", "/pulsara-docs 不使用记忆"),),
     )
@@ -195,7 +207,7 @@ async def _image_freezer_check():
         deadline_monotonic=monotonic() + 30,
     )
     assert isinstance(mixed.parts[1], LLMImagePart)
-    frozen = freeze_canonical_prompt(mixed, workspace_id="workspace:" + "a" * 26)
+    frozen = freeze_canonical_prompt(mixed)
     assert [(x.ref_ordinal, x.part_index) for x in frozen.image_occurrences] == [(0, 1)]
     assert (
         hydrate_canonical_prompt_body(

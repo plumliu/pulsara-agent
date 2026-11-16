@@ -1,7 +1,5 @@
 """User-owned MCP templates share real SDK connections, never model tool dispatch."""
 
-from pulsara_agent.identity import derive_id as _capability_page_id
-from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 
 import asyncio
 import json
@@ -9,25 +7,14 @@ from types import SimpleNamespace
 
 import pytest
 from mcp import types
-from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog
-from pulsara_agent.capability.source_query import CapabilityQueryError, capability_target_schema, parse_query
-from pulsara_agent.conversation_kernel.capability_query import CapabilitySourceQuery
 from pulsara_agent.conversation_kernel.mcp.supervisor import user_prompt_text
-from pulsara_agent.identity import derive_id
-from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from tests.test_mcp_rpc_errors_and_pagination import _runtime
 
-_CAPABILITY_PAGE_BUDGET = ToolResultPageBudget(_capability_page_id("call", "capability-query-test", __name__))
 
 
 TARGET = {"kind": "MCP_PROMPT", "server_id": "probe", "name": "first"}
 
 
-def test_prompt_metadata_target_is_queryable_and_body_tool_is_removed():
-    assert "get_mcp_prompt" not in {entry.descriptor.name for entry in builtin_tool_catalog()}
-    assert parse_query({"kind": "MCP_PROMPT"}) == {"kind": "MCP_PROMPT"}
-    assert parse_query({"target": TARGET}) == {"target": TARGET}
-    assert capability_target_schema("MCP_PROMPT")["properties"]["kind"]["const"] == "MCP_PROMPT"
 
 
 @pytest.mark.parametrize("messages,state", [
@@ -55,27 +42,6 @@ def test_plain_user_messages_preserve_order_and_whitespace():
 def test_real_sdk_user_listing_read_and_missing_target(tmp_path, scope_policy):
     async def exercise():
         async with _runtime(tmp_path, scope_policy=scope_policy) as (supervisor, runtime):
-            for scope in (ModelInputScopeKind.ROOT, ModelInputScopeKind.SUBAGENT):
-                plan = SimpleNamespace(mcp_catalog_route_projection=SimpleNamespace(routes=()))
-
-                def owner():
-                    return CapabilitySourceQuery(None, runtime=runtime, plan=plan, scope=scope, code_direct_specs=(), fits_result=_CAPABILITY_PAGE_BUDGET.fits)
-
-                page = await owner().execute(parse_query({"kind": "MCP_PROMPT", "limit": 1}))
-                if scope is ModelInputScopeKind.SUBAGENT and scope_policy == "ROOT_ONLY":
-                    assert page["items"] == []
-                    with pytest.raises(CapabilityQueryError) as error:
-                        await owner().execute(parse_query({"target": TARGET}))
-                    assert error.value.code == "CAPABILITY_NOT_FOUND"
-                    continue
-                assert page["items"][0]["target"] == TARGET
-                detail = await owner().execute(parse_query({"target": TARGET}))
-                assert set(detail) == {"target", "source", "server_id", "name", "description", "arguments"}
-                assert "invocation" not in detail and "messages" not in detail
-                server = {"kind": "MCP_SERVER", "runtime_server_id": derive_id("mcp-server", "runtime-target", "probe")}
-                server_detail = await owner().execute(parse_query({"target": server}))
-                assert server_detail["prompt_count"] == 1
-                assert server_detail["prompt_listing"] == {"tool": "query_capabilities", "arguments": {"kind": "MCP_PROMPT", "parent": server}}
             requests = json.loads((tmp_path / "requests.json").read_text())
             assert all(request["method"] != "prompts/get" for request in requests)
             page = supervisor.list_user_prompts(query="fi", limit=1)
@@ -157,7 +123,6 @@ def test_connection_refresh_invalidates_a_preview_in_flight(tmp_path):
 
 
 def test_desktop_prompt_bridge_is_user_owned_and_rechecks_delivery():
-    from types import SimpleNamespace
     from unittest.mock import AsyncMock
     from pulsara_agent.desktop_app.renderer_bridge import RendererBridge
     from pulsara_agent.desktop_app.protocol_client import ProtocolBridgeError

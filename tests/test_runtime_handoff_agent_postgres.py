@@ -20,7 +20,6 @@ from pulsara_agent.primitives.permission import PermissionMode
 from tests.test_agent_collaboration_api import RuntimeOwner
 from tests.test_agent_requests_persistence import deadline, now, request, start
 from tests.test_agent_requests_persistence import source as source
-from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 
 pytestmark = pytest.mark.postgres
 
@@ -112,7 +111,7 @@ def test_subagent_handoff_budget_and_query_recover_same_scoped_inventory(source)
         root_api = CollaborationToolPort(repository=repository, root_session_id=root.guard.session_id,
             session_id=root.guard.session_id, runtime=runtime, admission_facts=None, io=io)
         context = SimpleNamespace(session_id=observer.agent_id, effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
-            page_budget=ToolResultPageBudget(tool_call_id=random_id("call")))
+            )
         try:
             first = await api.freeze_compaction_handoff()
             assert late.agent_id < first[-1]['agent']['agent_id']
@@ -135,19 +134,14 @@ def test_subagent_handoff_budget_and_query_recover_same_scoped_inventory(source)
                     break
                 cursor = page[-1]['agent']['agent_id']
             handoff = builder.finish()
-            assert handoff is not None and 'query_agents' in handoff.full_text
-            assert 'query_cells' not in handoff.full_text
-            displayed = {item['agent']['agent_id'] for item in json.loads(handoff.full_text.split('\n', 1)[0])['agents']}
+            assert handoff is not None and 'query_agents' in handoff.text
+            assert 'query_cells' not in handoff.text
+            displayed = {item['agent']['agent_id'] for item in json.loads(handoff.text.split('\n', 1)[0])['agents']}
             assert displayed < expected_active
             assert not displayed.intersection(item.agent_id for item in unknown)
-            seen, args = set(), {'max_items': 50}
-            while True:
-                result = (await api.invoke(tool_name='query_agents', arguments=args, invocation_context=context)).public_value()
-                assert result['root'] == {'kind': 'AGENT', 'agent_id': 'ROOT'}
-                seen.update(item['agent']['agent_id'] for item in result['agents'])
-                if result['next'] is None:
-                    break
-                args = result['next']['arguments']
+            result=(await api.invoke(tool_name='query_agents',arguments={},invocation_context=context)).public_value()
+            assert result['meta']['status']=='SUCCESS'
+            seen={part['value']['target']['agent_id'] for part in result['content'] if part['type']=='object'}
             assert seen == {observer.agent_id, *(item.agent_id for item in known)}
             assert idle.agent_id in seen
             assert expected_active - displayed <= seen

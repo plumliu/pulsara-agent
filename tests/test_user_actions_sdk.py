@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 import json
-from pathlib import Path
 import shutil
 from threading import Event as ThreadEvent
 from time import monotonic
@@ -15,10 +14,8 @@ import pytest
 from pulsara_agent.conversation_kernel.host import KernelHostCore
 from pulsara_agent.conversation_kernel.execution_watchdogs import KernelWatchdogOwner
 from pulsara_agent.identity import random_id
-from pulsara_agent.llm.input import LLMMessage, PromptContent
+from pulsara_agent.llm.input import PromptContent
 from pulsara_agent.model_input.contracts import ContextSourceKind
-from pulsara_agent.model_input.compiler import StructuredModelInputCompiler
-from pulsara_agent.model_input.continuity import decode_runtime_observation
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.terminal_process import TerminalProcessOrigin, TerminalRequest
 from pulsara_agent.workspace_identity import HostWorkspaceInput
@@ -40,15 +37,15 @@ def _user_actions(request):
     for role, text in _messages(request):
         if role != "user" or not text.startswith('{"pulsara_runtime_observation":'):
             continue
-        observation = decode_runtime_observation(LLMMessage.user(text))
-        if observation.source_kind is ContextSourceKind.USER_ACTIONS:
+        observation=json.loads(text)["pulsara_runtime_observation"]
+        if observation["source"]=="USER_ACTIONS":
             observations.append(observation)
     return observations
 
 
 def _canonical_rows(session):
     entries = _rows(session,
-        "SELECT id,entry_kind,inline_content FROM pulsara_v3.transcript_entries "
+        "SELECT e.id,e.entry_kind,ARRAY(SELECT convert_from(p.inline_value,'UTF8') FROM pulsara_v3.content_parts p WHERE p.entry_id=e.id AND p.type='text' ORDER BY p.ordinal) AS texts FROM pulsara_v3.transcript_entries e "
         "WHERE session_id=%s ORDER BY entry_sequence", (session.session_id,))
     events = _rows(session,
         "SELECT event_id,event_type,payload FROM pulsara_v3.agent_events "
@@ -66,11 +63,9 @@ def _wire_value(request, name):
 
 @pytest.mark.postgres
 @pytest.mark.parametrize("api", APIS)
-@pytest.mark.parametrize(("installed_epoch", "omit_action"), (
-    (False, False), (True, False), (True, True),
-))
+@pytest.mark.parametrize("installed_epoch",(False,True))
 def test_workspace_user_action_is_one_shot_sdk_suffix_without_canonical_write(
-    tmp_path, monkeypatch, isolated_migrated_postgres_database, api, installed_epoch, omit_action,
+    tmp_path, monkeypatch, isolated_migrated_postgres_database, api, installed_epoch,
 ):
     """Cold and installed compilers preserve the same advisory action contract."""
     import pulsara_agent.conversation_kernel.host as kernel_host
@@ -135,46 +130,15 @@ def test_workspace_user_action_is_one_shot_sdk_suffix_without_canonical_write(
                 assert _canonical_rows(session) == before
                 assert len(gate.requests) == request_count
 
-                omitted_batches = []
-                if omit_action:
-                    compiler = session._runner._provider_dispatch._compiler
-                    original_compile = compiler.compile_installed_append
-
-                    def compile_at_aggregate_boundary(request, **kwargs):
-                        actions = [item for item in request.sources.candidates
-                            if item.source_kind is ContextSourceKind.USER_ACTIONS]
-                        if not actions:
-                            return original_compile(request, **kwargs)
-                        # Use the actual frozen production sources to place
-                        # the physical source budget exactly at the business
-                        # baseline. The optional complete batch must be dropped.
-                        baseline_bytes = sum(item.variants[0].utf8_bytes
-                            for item in request.sources.candidates
-                            if item.source_kind is not ContextSourceKind.USER_ACTIONS)
-                        omitted_batches.append(actions[0])
-                        constrained = StructuredModelInputCompiler(limits=replace(
-                            compiler._limits, maximum_aggregate_full_source_bytes=baseline_bytes))
-                        return constrained.compile_installed_append(request, **kwargs)
-
-                    monkeypatch.setattr(compiler, "compile_installed_append", compile_at_aggregate_boundary)
-
                 await normal_turn("Continue with the current request.")
                 action_request = gate.requests[-1]
                 observations = _user_actions(action_request)
-                if omit_action:
-                    assert omitted_batches
-                    assert observations == []
-                else:
-                    assert len(observations) == 1
-                    observation = observations[0]
-                    assert observation.presence.value == "VALUE"
-                    actions = json.loads(observation.body)["actions"]
-                    assert len(actions) == 1
-                    action = actions[0]
-                    assert action["kind"] == "workspace_recreated"
-                    assert Path(action["workspace_root"]) == workspace
-                    assert action["original_files_restored"] is False
-                    assert action["created_at"]
+                assert len(observations)==1
+                actions=observations[0]["body"]
+                assert len(actions)==1
+                assert set(actions[0])=={"text"}
+                assert "空目录" in actions[0]["text"] and "原文件未恢复" in actions[0]["text"]
+                assert str(workspace) not in actions[0]["text"]
 
                 # Calling restore on an existing directory is a no-op and must
                 # neither repeat the action nor append a CLEARED placeholder.
@@ -187,7 +151,7 @@ def test_workspace_user_action_is_one_shot_sdk_suffix_without_canonical_write(
                 entries, events = _canonical_rows(session)
                 assert {row["entry_kind"] for row in entries} == {"USER_MESSAGE", "ASSISTANT_MESSAGE"}
                 assert len(entries) == 2 * len(gate.requests)
-                assert "workspace_recreated" not in b"".join(bytes(row["inline_content"]) for row in entries).decode()
+                assert "原文件未恢复" not in " ".join(text for row in entries for text in row["texts"])
                 assert all("Control" not in row["event_type"] for row in events)
                 assert "workspace_recreated" not in json.dumps([row["payload"] for row in events])
             finally:
@@ -340,14 +304,10 @@ def test_real_process_stop_after_final_notifies_only_next_business_request(
                 assert len(gate.requests) == 3
                 observations = _user_actions(gate.requests[-1])
                 assert len(observations) == 1
-                actions = json.loads(observations[0].body)["actions"]
-                assert len(actions) == 1
-                action = actions[0]
-                assert action["kind"] == "process_control"
-                assert action["target"] == {"kind": "PROCESS", "process_id": process_id}
-                assert action["origin"] == "ROOT"
-                for key in ("disposition", "status", "exit_code", "physical_state", "group_alive"):
-                    assert action[key] == getattr(process, key)
+                actions=observations[0]["body"]
+                assert len(actions)==1
+                assert actions[0]["target"]=={"kind":"PROCESS","process_id":process_id}
+                assert "用户" in actions[0]["text"] and "停止" in actions[0]["text"]
                 assert physical_calls == [process_id]
             finally:
                 release_model.set()

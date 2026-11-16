@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pulsara_agent.conversation_kernel.content_parts import ResultPart, ContentPart
 
 from pulsara_agent.identity import random_id
 
@@ -49,13 +50,10 @@ from pulsara_agent.conversation_kernel.repository import (
     ConversationKernelRepository,
     build_prepared_tool_result_acceptance,
 )
-from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
 from pulsara_agent.conversation_kernel.safe_point import (
     ProviderSafePointCoordinator,
 )
 from pulsara_agent.model_input.contracts import (
-    CanonicalInputOriginKind,
-    FrozenProviderInputItemKind,
     ModelInputScopeKind,
     provider_input_item_text,
 )
@@ -67,10 +65,6 @@ from pulsara_agent.terminal_protocol.canonical_v3 import (
 from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
-from pulsara_agent.primitives.tool_result_projection import (
-    ToolResultDeliveryRequirement,
-    ToolResultFullDeliveryReason,
-)
 from tests.support.postgres import verified_postgres_provider
 from tests.support.model_config import (
     bind_test_session,
@@ -301,8 +295,12 @@ def test_protocol_reader_rebinds_a_large_queue_blob_to_its_exact_consumed_entry(
         queue_item_id=queue_item_id,
         deadline_monotonic=deadline,
     )
-    assert pending["inline_content"] is None
-    assert pending["blob_id"] is not None
+    assert bytes(pending["inline_content"]) == canonical_prompt.body
+    with provider.connection(lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=deadline) as connection:
+        original_part = connection.execute(
+            "SELECT id,blob_id FROM pulsara_v3.content_parts WHERE queue_item_id=%s", (queue_item_id,),
+        ).fetchone()
+    assert original_part[1] is not None
     assert (
         pending["content_digest"]
         == "sha256:" + sha256(canonical_prompt.body).hexdigest()
@@ -335,8 +333,12 @@ def test_protocol_reader_rebinds_a_large_queue_blob_to_its_exact_consumed_entry(
         entry_id=terminal.value.consumed_entry_id,
         deadline_monotonic=deadline,
     )
-    assert entry["inline_content"] is None
-    assert entry["blob_id"] is not None
+    assert bytes(entry["inline_content"]) == canonical_prompt.body
+    with provider.connection(lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=deadline) as connection:
+        moved_part = connection.execute(
+            "SELECT id,blob_id FROM pulsara_v3.content_parts WHERE entry_id=%s", (terminal.value.consumed_entry_id,),
+        ).fetchone()
+    assert moved_part == original_part
     assert (
         entry["content_digest"] == "sha256:" + sha256(canonical_prompt.body).hexdigest()
     )
@@ -364,19 +366,11 @@ def test_provider_reader_fails_closed_on_canonical_blob_and_utf8_integrity() -> 
         CanonicalProviderContinuityFailureKind.BLOB_UNAVAILABLE_OR_CORRUPT
     )
 
-    from hashlib import sha256
 
     invalid_bytes = b"\xf0\x9f"
-    invalid_utf8_row = {
-        "inline_content": invalid_bytes,
-        "blob_id": None,
-        "content_size": len(invalid_bytes),
-        "content_digest": "sha256:" + sha256(invalid_bytes).hexdigest(),
-        "content_codec": "utf-8",
-    }
     with pytest.raises(CanonicalProviderContinuityError) as invalid:
         reader._block_text(
-            invalid_utf8_row,
+            {"part": ContentPart(random_id("block"),0,"data",invalid_bytes,"text/plain","utf-8")},
             deadline_monotonic=monotonic() + 1,
         )
     assert invalid.value.kind is CanonicalProviderContinuityFailureKind.INVALID_UTF8
@@ -410,7 +404,7 @@ def test_reader_uses_exact_scope_and_lowers_late_result_without_replay(
         lease.guard,
         cut=old_cut,
         entry_id=request_entry_id,
-        parent_content=InlineContent.from_bytes(b"tool request"),
+
         blocks=(
             AssistantToolCallBlock(
                 block_id=_id("block"),
@@ -463,7 +457,7 @@ def test_reader_uses_exact_scope_and_lowers_late_result_without_replay(
         lease.guard,
         cut=bridge_cut,
         entry_id=_id("entry"),
-        parent_content=InlineContent.from_bytes(b"bridge answer"),
+
         blocks=(
             AssistantTextBlock(
                 block_id=_id("block"),
@@ -487,12 +481,12 @@ def test_reader_uses_exact_scope_and_lowers_late_result_without_replay(
         tool_call_id=call_id,
         attempt_id=attempt_id,
         result_state="SUCCESS",
-        canonical_preview_content=InlineContent.from_bytes(b"late-success"),
-        output_body=InlineContent.from_bytes(b"late-success"),
-        source_coverage=ToolOutputSourceCoverage.COMPLETE,
-        output_omitted=False,
-        source_coverage_reason=None,
-        output_unavailability_reason=None,
+        public_fields={}, content_parts=(ResultPart("text", b"late-success".decode("utf-8")),),
+
+
+
+
+
         observed_at=occurred_at,
         observation_duration_microseconds=None,
         observation_origin_kind=ToolObservationOrigin.TERMINAL_PROCESS,
@@ -552,7 +546,7 @@ def test_reader_lowers_no_attempt_as_interrupted_before_dispatch(
         lease.guard,
         cut=cut,
         entry_id=_id("entry"),
-        parent_content=InlineContent.from_bytes(b"request"),
+
         blocks=(
             AssistantToolCallBlock(
                 block_id=_id("block"),
@@ -588,7 +582,7 @@ def test_reader_lowers_no_attempt_as_interrupted_before_dispatch(
     assert materialized.late_outcomes == ()
 
 
-def test_reader_preserves_saved_output_page_full_requirement_from_exact_rows(
+def test_reader_prepares_one_complete_result_page_from_exact_rows(
     stage2_migrated_postgres_database,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
@@ -614,7 +608,7 @@ def test_reader_preserves_saved_output_page_full_requirement_from_exact_rows(
         lease.guard,
         cut=cut,
         entry_id=assistant_entry_id,
-        parent_content=InlineContent.from_bytes(b"saved output request"),
+
         blocks=(
             AssistantToolCallBlock(
                 block_id=_id("block"),
@@ -663,14 +657,12 @@ def test_reader_preserves_saved_output_page_full_requirement_from_exact_rows(
         tool_call_id=call_id,
         attempt_id=attempt_id,
         result_state="SUCCESS",
-        canonical_preview_content=InlineContent.from_bytes(
-            b'{"text":"page","next":null}'
-        ),
-        output_body=InlineContent.from_bytes(b'{"text":"page","next":null}'),
-        source_coverage=ToolOutputSourceCoverage.COMPLETE,
-        output_omitted=False,
-        source_coverage_reason=None,
-        output_unavailability_reason=None,
+        public_fields={}, content_parts=(ResultPart("text", b'{"text":"page","next":null}'.decode("utf-8")),),
+
+
+
+
+
         observed_at=observed_at,
         observation_duration_microseconds=1,
         observation_origin_kind=ToolObservationOrigin.BUILTIN,
@@ -696,12 +688,10 @@ def test_reader_preserves_saved_output_page_full_requirement_from_exact_rows(
         for item in snapshot.items
         if item.item_kind is ProviderInputItemKind.TOOL_RESULT
     )
-    assert page.tool_result_delivery.requirement is (
-        ToolResultDeliveryRequirement.FULL_REQUIRED
-    )
-    assert (
-        page.tool_result_delivery.reason is ToolResultFullDeliveryReason.RESULT_PROJECTION
-    )
+    assert page.native_page is not None
+    assert 'page' in page.native_page.canonical_text
+    assert page.native_page.next is None
+
 
 
 
@@ -731,7 +721,7 @@ def test_reader_preserves_assistant_blocks_beyond_old_history_item_limit(
         lease.guard,
         cut=cut,
         entry_id=_id("entry"),
-        parent_content=InlineContent.from_bytes(b"storage manifest"),
+
         blocks=tuple(
             AssistantTextBlock(
                 block_id=_id("block"),
@@ -805,11 +795,7 @@ def test_round3_reader_uses_ordered_semantic_blocks_not_parent_manifest(
         lease.guard,
         cut=cut,
         entry_id=_id("entry"),
-        parent_content=InlineContent.from_bytes(
-            b'{"draft_identity":"MUST_NOT_REACH_PROVIDER","blocks":["'
-            + (b"storage-carrier-only" * 512)
-            + b'"]}'
-        ),
+
         blocks=tuple(blocks),
         occurred_at=datetime.now(timezone.utc),
         actor_id="model:test",
@@ -865,7 +851,7 @@ def test_mid_turn_snapshot_revision_keeps_current_user_as_exact_delta(
         lease.guard,
         cut=first_cut,
         entry_id=_id("entry"),
-        parent_content=InlineContent.from_bytes(b"old answer"),
+
         blocks=(
             AssistantTextBlock(
                 block_id=_id("block"), text=InlineContent.from_bytes(b"old answer")

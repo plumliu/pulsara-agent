@@ -2,6 +2,8 @@
 
 共用规则见[原生工具修订草案索引](../PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 1、2 章。
 
+状态：当前合同已接入生产代码，正在完成 hardcut 跨层验收；正常使用仍按实施计划停用。
+
 ## 1. exec_process：启动命令与首次观察
 
 ### 1.1 用途与范围
@@ -269,7 +271,7 @@ runtime 按内部观察位置取得本次新增输出，完整保存为工具结
 
 ### 1.9 实施核对点
 
-以下是采用已确定合同后的行为验证要求，本轮未实施或运行验证：
+以下为共同验收要求；已执行范围及结果见[实施计划](../PULSARA_HARD_CUT_IMPLEMENTATION_PLAN.zh.md)与对应验证记录：
 
 - 参数仅 command、workdir、yield_time_ms、tty，不接受 max_output_chars；首次等待与命令寿命分开，不引入累计寿命 cap。
 - meta.status 为工具调用状态，process_status／exit_code 为进程事实；RUNNING 使用 null 退出码，EXITED 使用真实退出码。
@@ -664,7 +666,7 @@ JS 失败沿异常通道，通过 err.result 提供实际存在的完整 ManageP
 
 ### 2.9 实施核对点
 
-以下是拟议合同的行为验证要求，除第 2.8 节记录的当前实现小实验外，本轮未实施或运行新合同验证：
+以下为当前合同的行为验证要求；已执行范围及结果见[实施计划](../PULSARA_HARD_CUT_IMPLEMENTATION_PLAN.zh.md)与对应验证记录：
 
 - 公开动作只有 wait、write、close_stdin、kill；wait 的 0–30 秒边界、默认值及立即观察行为明确，删除 poll／submit 及其兼容分支。
 - 参数按动作互斥且 target 在先；删除 since_cursor、max_output_chars，不提供公开位置、替代预览或提交开关。
@@ -963,7 +965,7 @@ try {
 
 ### 3.8 实施核对点
 
-以下是采用本合同后的行为验证要求，本轮未实施或运行验证：
+以下为共同验收要求；已执行范围及结果见[实施计划](../PULSARA_HARD_CUT_IMPLEMENTATION_PLAN.zh.md)与对应验证记录：
 
 - 参数只有可选 target，不接受 null；删除 include_running、include_finished，不新增筛选参数、业务页长或公开游标。
 - 底层 owner 与物理调度共享，模型查询及控制按 session_id 隔离；ROOT 与 subagent session 等价，即使知道其他 session 的 PROCESS Target 也不可访问。列表只返回本 session 保留记录，按启动时间从早到晚排列，回收遵循第 1.8 节。
@@ -982,4 +984,4 @@ try {
 - [Code Mode 当前调用入口](../src/pulsara_agent/conversation_kernel/tool_execution.py)
 - [当前原生工具结果投影](../src/pulsara_agent/primitives/tool_result_projection.py)
 
-这些链接用于核对实施接点，不表示当前代码已经符合本草案。后续 bundled skill 采用教程前，必须与已实施的参数、返回声明和执行值一起更新；不得先让模型按未实施接口调用工具。
+这些链接用于核对当前实现及调试接点。参数、返回声明、执行值和 bundled skill 使用同一当前合同；完整应用的验收与恢复使用条件以实施计划为准。

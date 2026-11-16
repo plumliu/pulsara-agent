@@ -1,7 +1,7 @@
 """Public capability forms share the canonical credential destination rule."""
 
-from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
-from pulsara_agent.identity import random_id as _new_management_call_id
+from tests.support.capability_management_targets import mcp_target
+
 
 import asyncio
 
@@ -86,9 +86,13 @@ def test_public_form_applies_new_secrets_but_requires_confirmation_for_retained_
                     connections=service.mcp,
                 )
                 arguments = {
-                    "action": "CONFIGURE_PLUGIN_MCP_CONNECTION",
-                    "target": {"kind": "MCP_CONNECTION", "scope": "USER", "source_kind": "PLUGIN",
-                               "plugin_id": installed.identity.plugin_id, "server_id": "docs"},
+                    "action": "UPDATE_MCP_CONNECTION",
+                    "target": mcp_target(
+                        service,
+                        "docs",
+                        scope="USER",
+                        plugin=installed.identity.plugin_id,
+                    ),
                 }
                 replacement = {**original, "endpoint": "https://new.example/mcp"}
                 body = {"overlay": replacement}
@@ -102,8 +106,8 @@ def test_public_form_applies_new_secrets_but_requires_confirmation_for_retained_
                 }
                 await service.mcp.create(target, original, old_secrets)
                 arguments = {
-                    "action": "UPDATE_LOCAL_MCP",
-                    "target": {"kind": "MCP_CONNECTION", "scope": "USER", "source_kind": "LOCAL", "server_id": "docs"},
+                    "action": "UPDATE_MCP_CONNECTION",
+                    "target": mcp_target(service, "docs", scope="USER"),
                 }
                 body = {
                     "config": {
@@ -131,7 +135,7 @@ def test_public_form_applies_new_secrets_but_requires_confirmation_for_retained_
                 service.mcp.settings.resolve_mcp_secret(binding) for binding in bindings
             ) == ("old-0", "old-1")
             call.accept(AcceptedCapabilityFormSubmission(values))
-            assert (await call.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call"))))["status"] == "APPLIED"
+            assert (await call.execute()).state == "SUCCESS"
             assert tuple(
                 service.mcp.settings.resolve_mcp_secret(binding) for binding in bindings
             ) == (
@@ -175,8 +179,8 @@ def test_public_form_rejects_foreign_secret_before_destination_review(tmp_path):
                 service,
                 await service.prepare(
                     {
-                        "action": "UPDATE_LOCAL_MCP",
-                        "target": {"kind": "MCP_CONNECTION", "scope": "USER", "source_kind": "LOCAL", "server_id": "docs"},
+                        "action": "UPDATE_MCP_CONNECTION",
+                        "target": mcp_target(service, "docs", scope="USER"),
                     }
                 ),
             )

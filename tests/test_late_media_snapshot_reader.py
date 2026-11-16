@@ -33,11 +33,6 @@ from pulsara_agent.conversation_kernel.compaction.prompt import (
     build_compaction_snapshot_carrier,
     freeze_compaction_summary_output,
 )
-from pulsara_agent.conversation_kernel.prompt_content import (
-    freeze_canonical_prompt,
-    PROMPT_BODY_MEDIA_TYPE,
-    PROMPT_BODY_CODEC,
-)
 from pulsara_agent.conversation_kernel.reader import (
     CanonicalProviderInputReader,
     ProviderInputItemKind,
@@ -49,10 +44,8 @@ from pulsara_agent.conversation_kernel.repository import (
     build_prepared_tool_result_acceptance,
 )
 from pulsara_agent.conversation_kernel.safe_point import ProviderSafePointCoordinator
-from pulsara_agent.llm.input import FrozenPromptContent, LLMTextPart, LLMImagePart
+from pulsara_agent.llm.input import LLMTextPart, LLMImagePart
 from pulsara_agent.model_input.contracts import (
-    CanonicalInputOriginKind,
-    FrozenProviderInputItemKind,
     ModelInputScopeKind,
     ToolAttachmentSource,
     ToolAttachmentSourceMember,
@@ -60,7 +53,14 @@ from pulsara_agent.model_input.contracts import (
 from pulsara_agent.model_input.compiler import _tool_attachment_message
 from pulsara_agent.llm.adapters.openai.chat_completions import chat_semantic_wire_group
 from pulsara_agent.llm.adapters.openai.responses import responses_semantic_wire_group
-from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
+from pulsara_agent.conversation_kernel.content_parts import ResultPart
+from pulsara_agent.conversation_kernel.tool_outputs import (
+    prepare_native_tool_observation,
+)
+from pulsara_agent.conversation_kernel.native_tool_delivery import (
+    render_native_tool_page,
+)
+from tests.test_native_tool_delivery_postgres import freeze_page
 from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 
@@ -157,7 +157,7 @@ def setup(database, *, summarize_request=True, result_before_bridge=False):
     request, call, attempt = _id("entry"), _id("call"), _id("attempt")
     arguments = {
         "target": {"kind": "PATH", "path": "/tmp/late.mp4"},
-        "mode": "motion",
+        "action": "motion",
         "from": 0,
         "to": 1,
     }
@@ -165,7 +165,6 @@ def setup(database, *, summarize_request=True, result_before_bridge=False):
         lease.guard,
         cut=cut,
         entry_id=request,
-        parent_content=InlineContent.from_bytes(b"inspect image"),
         blocks=(
             AssistantToolCallBlock(
                 block_id=_id("block"),
@@ -195,18 +194,9 @@ def setup(database, *, summarize_request=True, result_before_bridge=False):
     )
 
     def accept_result():
-        image = _image(workspace_id=_workspace(repository, lease))
-        body = json.dumps(
-            {
-                "video_frames": True,
-                "frames": [{"n": 1, "image": 1, "t": 0.125}],
-                "next": None,
-            }
-        )
-        prompt = freeze_canonical_prompt(
-            FrozenPromptContent((LLMTextPart(body), image)),
-            workspace_id=_workspace(repository, lease),
-        )
+        image = _image()
+        body = "按真实时间顺序观察。\n"
+        observed = datetime.now(timezone.utc)
         result_entry = _id("entry")
         prepared = build_prepared_tool_result_acceptance(
             guard=lease.guard,
@@ -218,16 +208,16 @@ def setup(database, *, summarize_request=True, result_before_bridge=False):
             tool_call_id=call,
             attempt_id=attempt,
             result_state="SUCCESS",
-            canonical_preview_content=InlineContent.from_bytes(
-                prompt.body, media_type=PROMPT_BODY_MEDIA_TYPE, codec=PROMPT_BODY_CODEC
+            public_fields={"target": {"kind": "PATH", "path": "/tmp/late.mp4"}},
+            content_parts=(
+                ResultPart("text", body),
+                ResultPart("object", {"frames": [{"n": 1, "t": 0.125}]}),
+                ResultPart(
+                    "image", {"kind": "IMAGE_REF", "image_ref": image.image_ref}
+                ),
             ),
-            canonical_prompt=prompt,
-            output_body=None,
-            source_coverage=ToolOutputSourceCoverage.COMPLETE,
-            output_omitted=False,
-            source_coverage_reason=None,
-            output_unavailability_reason=None,
-            observed_at=datetime.now(timezone.utc),
+            pending_images=(image,),
+            observed_at=observed,
             observation_duration_microseconds=1,
             observation_origin_kind=ToolObservationOrigin.BUILTIN,
             trusted_tool_reported_duration_microseconds=None,
@@ -235,6 +225,17 @@ def setup(database, *, summarize_request=True, result_before_bridge=False):
         )
         repository.accept_tool_result(
             lease.guard, candidate=prepared, deadline_monotonic=monotonic() + 30
+        )
+        page = prepare_native_tool_observation(
+            repository,
+            lease.guard,
+            workspace_id=_workspace(repository, lease),
+            result_entry_id=result_entry,
+            deadline_monotonic=monotonic() + 30,
+        )
+        freeze_page(repository, lease.guard, result_entry_id=result_entry, page=page)
+        body = render_native_tool_page(
+            page, observed_at=observed, duration_microseconds=1
         )
         return result_entry, image, body
 
@@ -256,7 +257,6 @@ def setup(database, *, summarize_request=True, result_before_bridge=False):
         lease.guard,
         cut=bridge_cut,
         entry_id=_id("entry"),
-        parent_content=InlineContent.from_bytes(b"bridge answer"),
         blocks=(
             AssistantTextBlock(
                 block_id=_id("block"), text=InlineContent.from_bytes(b"bridge answer")
@@ -335,7 +335,7 @@ def test_normal_reader_retains_late_image_after_request_snapshot(
     assert len(late) == 1, evidence
     assert late[0].source_entry_id == result
     assert late[0].tool_result_body_text == body
-    assert json.loads(late[0].content[0].text)["result"] == body
+    assert late[0].content[0].text == body
     assert [part for part in late[0].content if isinstance(part, LLMImagePart)] == [
         image
     ]
@@ -352,12 +352,9 @@ def test_normal_reader_retains_late_image_after_request_snapshot(
     assert [part for part in carrier.content if isinstance(part, LLMImagePart)] == [
         image
     ]
-    assert any(
-        isinstance(part, LLMTextPart)
-        and '"tool_image_source"' in part.text
-        and "/tmp/late.mp4" in part.text
-        for part in carrier.content
-    )
+    labels = [json.loads(part.text) for part in carrier.content if isinstance(part, LLMTextPart)]
+    assert labels == [{"tool_call_id":late[0].tool_call_id,
+        "image":{"kind":"IMAGE_REF","image_ref":image.image_ref}}]
     for wire in (
         chat_semantic_wire_group(carrier),
         responses_semantic_wire_group(carrier),

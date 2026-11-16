@@ -42,9 +42,6 @@ from pulsara_agent.model_input.continuity import (
     provider_input_logical_bytes,
     provider_input_prefix_fingerprint,
 )
-from pulsara_agent.primitives.tool_result_projection import (
-    provider_neutral_message_logical_bytes,
-)
 
 
 def _validated_image(
@@ -101,11 +98,13 @@ def test_prompt_content_nonempty_and_text_aggregate_rules_preserve_pure_image() 
 def test_prompt_text_keeps_the_existing_control_character_contract() -> None:
     assert MAXIMUM_PROMPT_TEXT_UTF8_BYTES == STAGE2_LIMITS.prompt_hard_bytes
     assert PromptContent((LLMTextPart("line one\n\tline two"),))
-    for forbidden in ("nul\0byte", "carriage\rreturn", "escape\x1bcode"):
+    assert PromptContent((LLMTextPart("carriage\rreturn"),))
+    for forbidden in ("nul\0byte", "escape\x1bcode"):
         with pytest.raises(ValueError, match="forbidden control character"):
             PromptContent((LLMTextPart(forbidden),))
         with pytest.raises(ValueError, match="forbidden control character"):
             CanonicalPromptBody((LLMTextPart(forbidden),))
+    assert CanonicalPromptBody((LLMTextPart("carriage\rreturn"),)).parts[0].text == "carriage\rreturn"
 
 
 def test_frozen_image_shape_and_user_role_are_closed() -> None:
@@ -171,10 +170,12 @@ def test_prefix_identity_and_logical_budget_consume_complete_typed_content() -> 
     )
     content_bytes = llm_content_logical_bytes(message.content)
 
-    assert provider_neutral_message_logical_bytes(message) == content_bytes
-    assert provider_input_logical_bytes(
-        system_prompt="root", tools=(), messages=(message,)
-    ) == len(b"root") + content_bytes
+    assert (
+        provider_input_logical_bytes(
+            system_prompt="root", tools=(), messages=(message,)
+        )
+        == len(b"root") + content_bytes
+    )
     assert provider_input_prefix_fingerprint(
         system_prompt="root", tools=(), messages=(message,)
     ) != provider_input_prefix_fingerprint(
@@ -278,9 +279,23 @@ def test_complete_multipart_limit_uses_exact_body_plus_each_occurrence() -> None
 
 def test_descriptor_quote_rejects_expanded_content_before_hydration() -> None:
     image = _validated_image(b"x")
-    body = json.dumps({"parts": [{"digest": image.content_digest,
-        "image_ref": image.image_ref, "encoded_bytes": 16777216,
-        "height": 1, "media_type": "image/png", "type": "image", "width": 1}]}, sort_keys=True, separators=(",", ":")).encode()
+    body = json.dumps(
+        {
+            "parts": [
+                {
+                    "digest": image.content_digest,
+                    "image_ref": image.image_ref,
+                    "encoded_bytes": 16777216,
+                    "height": 1,
+                    "media_type": "image/png",
+                    "type": "image",
+                    "width": 1,
+                }
+            ]
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
     decoded = decode_canonical_prompt_body(body)
 
     with pytest.raises(ValueError, match="multipart bound"):
@@ -310,9 +325,13 @@ def test_d1_visual_token_formula_is_frozen(
 
 def test_wire_estimator_charges_each_image_occurrence() -> None:
     message = LLMMessage.user_content(FrozenPromptContent((_validated_image(),)))
-    from pulsara_agent.llm.adapters.openai.chat_completions import chat_semantic_wire_group
+    from pulsara_agent.llm.adapters.openai.chat_completions import (
+        chat_semantic_wire_group,
+    )
+
     wire = tuple(chat_semantic_wire_group(message))
     quote = PulsaraHeuristicTokenEstimatorV3().estimate_ordered_wire_json_components(
-        ordered_input_items=wire * 2, ordered_input_sources=(message,) * 2)
+        ordered_input_items=wire * 2, ordered_input_sources=(message,) * 2
+    )
     assert quote.visual_image_tokens == 512
     assert quote.total_input_tokens > 512

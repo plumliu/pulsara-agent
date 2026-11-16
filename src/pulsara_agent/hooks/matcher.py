@@ -100,7 +100,7 @@ def tool_matcher_subject(
         "edit_file": ("apply_patch", "Edit"),
         "write_file": ("apply_patch", "Write"),
         "run_agent": ("Agent",),
-        "search_content": ("Grep",),
+        "search_file_content": ("Grep",),
         "find_files": ("Glob",),
     }
     return FrozenHookMatcherSubject(pulsara_name, aliases.get(pulsara_name, ()))

@@ -19,7 +19,7 @@ from pulsara_agent.conversation_kernel.repository import ConversationKernelConfl
 import codecs
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from hashlib import sha256
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping
@@ -50,6 +50,7 @@ from pulsara_agent.primitives.context import (
 )
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.plan_workflow import (
+    PLAN_INTERACTION_WAIT_SECONDS,
     extract_plan_draft,
     extract_plan_question,
 )
@@ -428,6 +429,9 @@ class CanonicalProtocolReader:
             source_work_id=str(row["source_work_id"] or ""),
             source_turn_id=str(row["source_turn_id"] or ""),
             source_tool_attempt_id=str(row["source_tool_attempt_id"] or ""),
+            source_cell_id=str(row["source_cell_id"] or ""),
+            source_record_sequence=int(row["source_record_sequence"] or 0),
+            cell_output_kind=str(row["cell_output_kind"] or ""),
             consumed_entry_id=str(row["consumed_entry_id"] or ""),
             waiting_on=[str(item["source_work_id"]) for item in row["work_inputs"]
                         if row["status"] == "PENDING" and item["kind"] == "dependency" and not item["ready"]],
@@ -1693,6 +1697,7 @@ class CanonicalProtocolReader:
                       result.output_unavailability_reason,
                       queue.id AS queue_item_id, queue.command_id, queue.delivery_mode, queue.source_session_id, queue.source_work_id,
                       queue.source_turn_id, queue.source_tool_attempt_id, queue.work_title,
+                      queue.source_cell_id, queue.source_record_sequence, queue.cell_output_kind,
                       CASE e.entry_owner_kind
                         WHEN 'EXECUTED_TURN' THEN t.status IN ('COMPLETED', 'INTERRUPTED') AND t.final_entry_id=e.id
                         WHEN 'IMPORTED_HISTORY' THEN g.status IN ('COMPLETED', 'INTERRUPTED') AND g.final_entry_id=e.id
@@ -1717,7 +1722,7 @@ class CanonicalProtocolReader:
                LEFT JOIN pulsara_v3.tool_invocations invocation
                  ON invocation.session_id=result.session_id AND invocation.id=result.invocation_id
                LEFT JOIN LATERAL (
-                 SELECT id, command_id, delivery_mode, source_session_id, source_work_id, source_turn_id, source_tool_attempt_id, work_title FROM pulsara_v3.prompt_queue_items
+                 SELECT id, command_id, delivery_mode, source_session_id, source_work_id, source_turn_id, source_tool_attempt_id, work_title, source_cell_id, source_record_sequence, cell_output_kind FROM pulsara_v3.prompt_queue_items
                  WHERE e.entry_owner_kind='EXECUTED_TURN' AND e.entry_kind IN ('USER_MESSAGE', 'USER_STEER', 'TERMINAL_OBSERVATION')
                    AND session_id=e.session_id AND consumed_entry_id=e.id LIMIT 1
                ) queue ON true
@@ -1848,7 +1853,7 @@ class CanonicalProtocolReader:
             if related is None:
                 source = connection.execute(
                     """
-                    SELECT id, command_id, delivery_mode, source_session_id, source_work_id, source_turn_id, source_tool_attempt_id, work_title
+                    SELECT id, command_id, delivery_mode, source_session_id, source_work_id, source_turn_id, source_tool_attempt_id, work_title, source_cell_id, source_record_sequence, cell_output_kind
                     FROM pulsara_v3.prompt_queue_items
                     WHERE session_id = %s AND consumed_entry_id = %s
                     """,
@@ -1863,9 +1868,18 @@ class CanonicalProtocolReader:
                     source_work_id=str(source["source_work_id"] or ""),
                     source_turn_id=str(source["source_turn_id"] or ""),
                     source_tool_attempt_id=str(source["source_tool_attempt_id"] or ""),
+                    source_cell_id=str(source["source_cell_id"] or ""),
+                    source_record_sequence=int(source["source_record_sequence"] or 0),
+                    cell_output_kind=str(source["cell_output_kind"] or ""),
                 ))
                 if row["input_origin"] == "AGENT_INSTRUCTION" and source["work_title"] is not None:
                     result.input_source.work_title = source["work_title"]
+        if row["entry_kind"] == "TERMINAL_OBSERVATION":
+            # Imported Cell entries retain provenance without inventing a live
+            # queue, source turn or executable attempt in the child session.
+            result.input_source.source_cell_id = str(row["source_cell_id"])
+            result.input_source.source_record_sequence = int(row["source_record_sequence"])
+            result.input_source.cell_output_kind = str(row["cell_output_kind"])
         if combined_assistant:
             reasoning = self._project_reasoning_blocks(stored_row, replay)
         elif root_assistant and related is not None and not related["has_replay"]:
@@ -2151,6 +2165,7 @@ class CanonicalProtocolReader:
                 kind=str(open_plan["kind"]),
                 status=str(open_plan["status"]),
                 interaction_ordinal=int(open_plan["interaction_ordinal"]),
+                expires_at_utc=_utc(open_plan["accepted_at"] + timedelta(seconds=PLAN_INTERACTION_WAIT_SECONDS)),
             )
             if str(open_plan["kind"]) == "QUESTION":
                 question = extract_plan_question(
@@ -2159,7 +2174,6 @@ class CanonicalProtocolReader:
                 )
                 target.typed_content_fingerprint = question.typed_content_fingerprint
                 target.option_count = len(question.options)
-                target.allow_free_text = question.allow_free_text
             else:
                 draft = extract_plan_draft(
                     interaction_id=str(open_plan["id"]),
@@ -2414,7 +2428,8 @@ def _owner_display_content(connection, row, *, queue=False):
     elif row["entry_kind"] in {"ASSISTANT_MESSAGE", "ASSISTANT_TOOL_REQUEST"}:
         return _display_content(b"")
     elif row["entry_kind"] == "TOOL_RESULT":
-        from pulsara_agent.conversation_kernel.tool_outputs import read_accepted_tool_business_value, project_tool_result_export
+        from pulsara_agent.conversation_kernel.tool_outputs import read_accepted_tool_business_value
+        from pulsara_agent.ports.tool_execution import encode_tool_public_json
         result = connection.execute(
             "SELECT * FROM pulsara_v3.tool_results WHERE session_id=%s AND result_entry_id=%s",
             (row["session_id"], row["id"]),
@@ -2423,17 +2438,26 @@ def _owner_display_content(connection, row, *, queue=False):
             raise ValueError("canonical tool result is missing its relational row")
         if result["output_unavailability_reason"] is not None:
             return _display_content(("Tool result content could not be accepted: " + result["output_unavailability_reason"]).encode("utf-8"))
-        return _display_content(project_tool_result_export(read_accepted_tool_business_value(connection, result)))
+        return _display_content(encode_tool_public_json(read_accepted_tool_business_value(connection, result)),
+                                media_type="application/vnd.pulsara.tool-result+json")
     parts = read_content_parts(connection, session_id=str(row["session_id"]), **owner, **limits)
     if (queue and row["input_origin"] == "CELL_OUTPUT") or (
         not queue and row["entry_kind"] == "TERMINAL_OBSERVATION"
     ):
         from pulsara_agent.conversation_kernel.prompt_content import PROMPT_BODY_MEDIA_TYPE
-        if any(part.type != "text" for part in parts):
-            raise ValueError("Cell display content requires text")
-        # JSON transports the original JavaScript code units, including lone
-        # surrogates. This is an ephemeral wire projection, never saved body.
-        body = {"parts": [{"type": "text", "text": part.value} for part in parts]}
+        body_parts = []
+        for part in parts:
+            if part.type == 'text':
+                body_parts.append({'type':'text','text':part.value})
+            elif part.type == 'image':
+                image = connection.execute('SELECT logical_digest,logical_size,media_type,width,height FROM pulsara_v3.blobs WHERE id=%s',
+                                           (part.value['image_ref'],)).fetchone()
+                body_parts.append({'type':'image','image_ref':part.value['image_ref'], 'digest':image['logical_digest'],
+                    'encoded_bytes':int(image['logical_size']), 'media_type':image['media_type'],
+                    'width':int(image['width']), 'height':int(image['height'])})
+            else:
+                raise ValueError('Cell output requires ordered text/image content')
+        body = {'parts':body_parts}
         return _display_content(
             json.dumps(body, ensure_ascii=True, separators=(",", ":")).encode("utf-8"),
             media_type=PROMPT_BODY_MEDIA_TYPE,

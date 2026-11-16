@@ -62,105 +62,104 @@ class _HostCoreManagementOperations:
         )
 
     @_core_database_operation
-    async def memory_management_detail(
-        self,
-        *,
-        memory_domain_id,
-        selection,
-        fact_id,
-        limit=40,
-        cursor=None,
-    ):
+    async def memory_management_detail(self, *, memory_domain_id, selection, fact_id):
         repository = await self._ensure_resources()
         return await asyncio.to_thread(
             repository.memory_management_detail,
             memory_domain_id=memory_domain_id,
             selection=selection,
             fact_id=fact_id,
-            limit=limit,
-            cursor=cursor,
             deadline_monotonic=self._canonical_deadline(),
         )
 
-    @_core_database_operation
-    async def memory_deletion_preview(
-        self, *, memory_domain_id, selection, fact_id, additional=()
-    ):
-        repository = await self._ensure_resources()
-        return await asyncio.to_thread(
-            repository.memory_deletion_preview,
-            memory_domain_id=memory_domain_id,
-            selection=selection,
-            fact_id=fact_id,
-            additional=additional,
-            deadline_monotonic=self._canonical_deadline(),
-        )
-
-    @_core_database_operation
-    async def memory_management_edit_statement(
-        self, *, memory_domain_id, selection, fact_id, statement, expected_updated_at
-    ):
-        repository = await self._ensure_resources()
-        # A disconnected HTTP client must not detach an in-flight DB commit.
+    async def _memory_management_write(self, operation, **kwargs):
         task = asyncio.create_task(
             asyncio.to_thread(
-                repository.memory_management_edit_statement,
-                memory_domain_id=memory_domain_id,
-                selection=selection,
-                fact_id=fact_id,
-                statement=statement,
-                expected_updated_at=expected_updated_at,
-                deadline_monotonic=self._canonical_deadline(),
+                operation, deadline_monotonic=self._canonical_deadline(), **kwargs
             )
         )
-        cancelled = None
+        cancellation = None
         while not task.done():
             try:
                 await asyncio.shield(task)
             except asyncio.CancelledError as exc:
-                cancelled = exc
+                cancellation = cancellation or exc
         result = task.result()
-        if result["changed"]:
-            async with self._lock:
-                for session in self._sessions.values():
-                    if session._memory_domain_id == memory_domain_id:
-                        session._memory_embedding_maintainer.offer_wake()
-        if cancelled is not None:
-            raise cancelled
+        await self.wake_memory_embeddings()
+        if cancellation is not None:
+            raise cancellation
         return result
+
+    @_core_database_operation
+    async def memory_management_create(
+        self, *, memory_domain_id, selection, kind, title, statement=""
+    ):
+        repository = await self._ensure_resources()
+        record = await self._memory_management_write(
+            repository.create_memory,
+            memory_domain_id=memory_domain_id,
+            context_id="ctx:global"
+            if selection.view == "global"
+            else selection.workspace_id,
+            kind=kind,
+            title=title,
+            statement=statement,
+        )
+        return record.value()
+
+    @_core_database_operation
+    async def memory_management_edit(
+        self,
+        *,
+        memory_domain_id,
+        selection,
+        fact_id,
+        expected_updated_at,
+        statement=None,
+        destination=None,
+    ):
+        repository = await self._ensure_resources()
+        kwargs = {}
+        if statement is not None:
+            kwargs["statement"] = statement
+        if destination is not None:
+            kwargs["context_id"] = (
+                "ctx:global"
+                if destination.view == "global"
+                else destination.workspace_id
+            )
+        result = await self._memory_management_write(
+            repository.update_memory,
+            memory_domain_id=memory_domain_id,
+            fact_id=fact_id,
+            expected_updated_at=expected_updated_at,
+            expected_context_id="ctx:global"
+            if selection.view == "global"
+            else selection.workspace_id,
+            **kwargs,
+        )
+        return {"record": result.record.value(), "changed": result.changed}
+
+    @_core_database_operation
+    async def memory_management_delete(
+        self, *, memory_domain_id, selection, fact_id, expected_updated_at
+    ):
+        repository = await self._ensure_resources()
+        await self._memory_management_write(
+            repository.delete_memory,
+            memory_domain_id=memory_domain_id,
+            fact_id=fact_id,
+            expected_updated_at=expected_updated_at,
+            expected_context_id="ctx:global"
+            if selection.view == "global"
+            else selection.workspace_id,
+        )
+        return {}
 
     async def wake_memory_embeddings(self):
         async with self._lock:
             for session in self._sessions.values():
                 session._memory_embedding_maintainer.offer_wake()
-
-    @_core_database_operation
-    async def execute_memory_deletion(
-        self, *, memory_domain_id, selection, fact_id, additional, expected_records
-    ):
-        repository = await self._ensure_resources()
-        # Join physical execution before the HTTP owner may close its confirmation file.
-        task = asyncio.create_task(
-            asyncio.to_thread(
-                repository.execute_memory_deletion,
-                memory_domain_id=memory_domain_id,
-                selection=selection,
-                fact_id=fact_id,
-                additional=additional,
-                expected_records=expected_records,
-                deadline_monotonic=self._canonical_deadline(),
-            )
-        )
-        cancelled = None
-        while not task.done():
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError as exc:
-                cancelled = exc
-        result = task.result()
-        if cancelled is not None:
-            raise cancelled
-        return result
 
     async def mark_capability_change(self, workspace_root: Path | None = None) -> int:
         canonical_root = (

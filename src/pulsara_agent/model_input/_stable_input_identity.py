@@ -150,10 +150,8 @@ def compiled_input_identity(
                     d.source_kind.value,
                     d.source_instance_fingerprint,
                     d.channel.value,
-                    None if d.selected_mode is None else d.selected_mode.value,
                     d.included,
                     cost,
-                    d.reason_code,
                 )
                 for d, cost in zip(source_decisions, source_codes, strict=True)
             ),
@@ -161,14 +159,10 @@ def compiled_input_identity(
                 (
                     d.source_entry_fingerprint,
                     d.current_turn,
-                    d.first_legal_mode.value,
-                    d.selected_mode.value,
-                    d.delivery_requirement.value,
-                    None
-                    if d.full_delivery_reason is None
-                    else d.full_delivery_reason.value,
                     cost,
-                    d.reason_code,
+                    d.result_entry_id,
+                    d.source_result_entry_id,
+                    d.native_projection,
                 )
                 for d, cost in zip(tool_result_decisions, tool_codes, strict=True)
             ),

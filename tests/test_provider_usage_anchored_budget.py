@@ -136,7 +136,8 @@ def test_three_calls_with_middle_missing_keep_entire_assistant_suffix(api):
 
 def test_anchor_rejects_context_projection_and_prefix_drift():
     port = _port()
-    request, _ = _prepared_execution(port)
+    from tests.support.model_input import _user
+    request, _ = _prepared_execution(port, canonical_items=(_user("installed prefix"),))
     try:
         anchor = _anchor(request)
         kwargs = dict(connection_id=anchor.connection_id, target=anchor.target,
@@ -226,9 +227,9 @@ def test_cancellation_during_observation_preserves_original_execution_outcome(fi
 
 @pytest.mark.parametrize('api', ['openai_chat_completions', 'openai_responses'])
 def test_anchored_dispatch_keeps_full_sources_when_raw_quote_overestimates(api):
-    from tests.test_catalog_final_wire_resources import _prepare_case, _skill_source, _measure, _mode
-    from pulsara_agent.model_input.contracts import ContextRenderMode, ContextSourceKind
-    # V3 folds ASCII at four bytes/token. Keep the raw quote above the
+    from tests.test_catalog_final_wire_resources import _prepare_case, _skill_source, _measure
+    from pulsara_agent.model_input.contracts import ContextSourceKind
+    # ASCII estimation uses four bytes/token. Keep the raw quote above the
     # budget while the same measured prefix plus suffix remains admissible.
     coordinator, candidate, view, _ = _prepare_case(api, _skill_source(), budget=150_000, user_text='u'*400_000)
     plan = view.wire_input_plan
@@ -242,15 +243,22 @@ def test_anchored_dispatch_keeps_full_sources_when_raw_quote_overestimates(api):
     assert decision.wire_input_plan is not None
     assert decision.quote.raw_final_wire_estimated_input_tokens > decision.quote.effective_input_budget_tokens
     assert decision.quote.budget_input_tokens < decision.quote.effective_input_budget_tokens
-    assert _mode(decision.candidate, ContextSourceKind.SKILL_CATALOG) is ContextRenderMode.FULL
+    selected = [part for part in decision.candidate.semantic_input.source_decisions
+        if part.source_kind is ContextSourceKind.SKILL_CATALOG_CHANGES]
+    assert len(selected) == 1 and selected[0].included
+    assert decision.candidate.sources == candidate.sources
     assert decision.candidate is candidate
     assert decision.quote.anchor_reported_input_tokens == 5
 
 
-def test_one_dispatch_floor_selection_uses_one_anchor_snapshot():
-    from tests.test_catalog_final_wire_resources import _prepare_case, _skill_source, _measure, _mode
-    from pulsara_agent.model_input.contracts import ContextRenderMode, ContextSourceKind
-    coordinator, candidate, view, _ = _prepare_case('openai_chat_completions', _skill_source(), budget=150_000)
+def test_one_dispatch_optional_selection_uses_one_anchor_snapshot():
+    from tests.test_catalog_final_wire_resources import _prepare_case, _skill_source, _measure
+    from pulsara_agent.model_input.contracts import ContextSourceKind
+    from tests.support.model_input import _candidate
+    from pulsara_agent.model_input.contracts import ContextBudgetClass
+    action = _candidate(ContextSourceKind.USER_ACTIONS, "a"*500_000, budget=ContextBudgetClass.OPTIONAL)
+    coordinator, candidate, view, _ = _prepare_case('openai_chat_completions', _skill_source(1),
+        budget=150_000, extra_sources=(action,))
     plan = view.wire_input_plan
     call = candidate.call
     anchor = ProviderInputUsageAnchor(call.resolved_model_call_id, view.epoch_nonce, view.epoch_revision,
@@ -273,7 +281,9 @@ def test_one_dispatch_floor_selection_uses_one_anchor_snapshot():
     decision = _measure(coordinator, candidate)
     assert decision.wire_input_plan is not None
     assert observed == [149_000, 149_000]
-    assert _mode(decision.candidate, ContextSourceKind.SKILL_CATALOG) is ContextRenderMode.UNAVAILABLE_MINIMAL
+    selected = {part.source_kind: part.included for part in decision.candidate.semantic_input.source_decisions}
+    assert selected[ContextSourceKind.SKILL_CATALOG_CHANGES]
+    assert not selected[ContextSourceKind.USER_ACTIONS]
     assert owner.current_usage_anchor(view.scope).reported_input_tokens == 5
 
 
@@ -360,99 +370,54 @@ def test_chat_later_alias_carrier_updates_the_same_normalized_parent_field():
         request.surface_borrow.close()
 
 
-def test_cold_successor_may_omit_optional_source_despite_old_epoch_head():
-    from tests.test_catalog_final_wire_resources import _prepare_case, _measure
-    from tests.test_round3_structured_model_input_compiler import _candidate
-    from pulsara_agent.conversation_kernel.cold_epoch import CanonicalColdContinuationSeed
-    from pulsara_agent.model_input.contracts import ContextSourceKind
-    kind = ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD
-    source = _candidate(kind, ('p' * 100_000,))
-    coordinator, candidate, view, _ = _prepare_case('openai_chat_completions', source,
-        initial_catalog=_candidate(kind, ('old preference',)), budget=50_000, user_text='u' * 140_000)
-    assert any(head.source_kind is kind for head in view.source_heads)
-    _, template, _, _ = _prepare_case('openai_chat_completions', source, cold=True, budget=100_000)
-    append = coordinator._compiler.compile_new_epoch(candidate.compile_request, planning=candidate.planning)
-    # Authority-free measurement of the already frozen successor basis. Actual
-    # adoption and installation are covered separately by the real Host fixture.
-    cold = replace(template.cold_semantic, compile_request=candidate.compile_request,
-        seed=CanonicalColdContinuationSeed(candidate.canonical_read), planning=candidate.planning,
-        compiled_result=append, prepared_call=candidate.prepared_call)
-    candidate = replace(candidate, semantic_input=append.compiled_input, append_result=append, cold_semantic=cold)
-    decision = _measure(coordinator, candidate)
-    assert decision.wire_input_plan is not None
-    assert decision.quote.budget_source == 'heuristic'
-    preference = next(item for item in decision.candidate.semantic_input.source_decisions if item.source_kind is kind)
-    assert not preference.included
-    assert decision.quote.budget_input_tokens <= decision.quote.effective_input_budget_tokens
+
+
+
+
 
 
 @pytest.mark.parametrize("api", ["openai_chat_completions", "openai_responses"])
-def test_wire_memory_fallback_preserves_installed_state_and_steer_headroom(api):
-    import asyncio
-    from time import monotonic
-    from tests.test_catalog_final_wire_resources import _prepare_case
-    from pulsara_agent.conversation_kernel.context_sources import build_memory_context_source, replace_memory_context_sources
-    from pulsara_agent.conversation_kernel.memory.dispatch import MemoryDispatchSupport
-    from pulsara_agent.model_input.contracts import ContextSourceKind, ContextSourceAbsenceKind
-    from pulsara_agent.model_input.continuity import SourceObservationPresence
-    kind = ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD
-    old = build_memory_context_source(kind=kind, texts=('old preference',))
-    updated = build_memory_context_source(kind=kind, texts=('new preference ' * 500,))
-    coordinator, candidate, view, _ = _prepare_case(api, updated,
-        initial_catalog=old, budget=100_000)
-    support = MemoryDispatchSupport(compiler=coordinator._compiler, io_owner=coordinator._io,
-        memory_projection=None, input_reader=coordinator._input_reader, deadline_factory=None)
-    coordinator._memory_support = support
-    # Price the real UNAVAILABLE carrier; choose a fixture boundary at which the
-    # admitted human suffix and reserved carrier fit, but optional VALUE does not.
-    fallback_sources = replace_memory_context_sources(candidate.sources, (
-        build_memory_context_source(kind=kind, texts=None, absence_kind=ContextSourceAbsenceKind.UNAVAILABLE),))
-    fallback_request = replace(candidate.compile_request, sources=fallback_sources)
-    fallback_append = coordinator._compiler.compile_installed_append(fallback_request, planning=candidate.planning)
-    fallback_candidate = replace(candidate, sources=fallback_sources, compile_request=fallback_request,
-        append_result=fallback_append, semantic_input=fallback_append.compiled_input)
-    measured = asyncio.run(coordinator._freeze_candidate_wire_measurement(fallback_candidate, deadline=monotonic()+30))
-    delta = measured.quote.raw_final_wire_estimated_input_tokens - view.wire_input_plan.quote.raw_final_wire_estimated_input_tokens
-    measured.discard_materialization_to_quote()
-    reservation = support.planning_preference_refresh_reservation(
-        planning=candidate.planning, desired=updated, prepared_call=candidate.prepared_call, new_epoch=False)
-    assert reservation is not None
-    headroom = reservation.invalidation_input_token_ceiling
+def test_reported_anchor_does_not_replace_mandatory_memory_when_wire_cannot_fit(api):
+    from tests.test_catalog_final_wire_resources import _prepare_case, _measure
+    from tests.support.model_input import _candidate
+    from pulsara_agent.model_input.contracts import ContextSourceKind
+    source = _candidate(ContextSourceKind.MEMORY_RECALL, "complete new preference "*20_000)
+    initial = _candidate(ContextSourceKind.MEMORY_RECALL, "old preference")
+    coordinator, candidate, view, _ = _prepare_case(api, source, initial_catalog=initial, budget=100_000)
     plan, call = view.wire_input_plan, candidate.call
     anchor = ProviderInputUsageAnchor(call.resolved_model_call_id, view.epoch_nonce, view.epoch_revision,
         call.binding.connection_id.value, call.target.fact, plan.route_wire_profile_fingerprint,
-        'alias', 100_000-delta, plan.quote.raw_final_wire_estimated_input_tokens, plan.materialization)
+        'alias', 99_990, plan.quote.raw_final_wire_estimated_input_tokens, plan.materialization)
     coordinator._continuity.observe_usage_anchor(view.scope, epoch_nonce=view.epoch_nonce,
         epoch_revision=view.epoch_revision, reported_model_id='alias', anchor=anchor)
-    decision = asyncio.run(coordinator.measure_prepared_wire_candidate(candidate,
-        deadline=monotonic()+30, invalidation_reservations=(reservation,)))
-    assert decision.wire_input_plan is not None  # steer remains admissible
-    from pulsara_agent.conversation_kernel.provider_dispatch import _remaining_invalidation_input_tokens
-    assert _remaining_invalidation_input_tokens(decision.candidate, (reservation,)) == 0
-    assert headroom > 0
-    assert decision.quote.budget_input_tokens == 100_000
+    decision = _measure(coordinator, candidate)
+    assert decision.wire_input_plan is None
     assert decision.quote.anchor_model_call_id == anchor.model_call_id
-    absent = next(item for item in decision.candidate.sources.absent_facts if item.source_kind is kind)
-    assert absent.absence_kind is ContextSourceAbsenceKind.UNAVAILABLE
-    replacement = next(item for item in decision.candidate.append_result.source_heads if item.source_kind is kind)
-    assert replacement.presence is SourceObservationPresence.UNAVAILABLE
-    assert decision.candidate.compile_request.sources == decision.candidate.sources
+    assert decision.quote.budget_input_tokens > decision.quote.effective_input_budget_tokens
+    assert decision.candidate is candidate
+    assert decision.candidate.sources == candidate.sources
     assert decision.candidate.semantic_input.messages[:len(view.messages)] == view.messages
+    memory = next(item for item in decision.candidate.semantic_input.source_decisions
+        if item.source_kind is ContextSourceKind.MEMORY_RECALL)
+    assert memory.included
 
 
-def test_reserved_headroom_exhaustion_keeps_wire_admission_union_valid():
-    import asyncio
-    from time import monotonic
-    from tests.test_catalog_final_wire_resources import _prepare_case, _skill_source
-    coordinator, candidate, _, _ = _prepare_case('openai_chat_completions', _skill_source(1), budget=100_000)
-    from types import SimpleNamespace
-    from pulsara_agent.model_input.contracts import ContextSourceKind
-    reservation = SimpleNamespace(source_kind=ContextSourceKind.MEMORY_RECALL,
-        invalidation_input_token_ceiling=100_000)
-    decision = asyncio.run(coordinator.measure_prepared_wire_candidate(candidate,
-        deadline=monotonic()+30, invalidation_reservations=(reservation,)))
-    # Wire input itself fits. The steer owner rejects its unsatisfied reservation
-    # from this same quote, rather than an inconsistent None-plan union.
+def test_cold_successor_uses_heuristic_and_may_omit_optional_action():
+    from tests.test_catalog_final_wire_resources import _prepare_case, _measure
+    from tests.support.model_input import _candidate
+    from pulsara_agent.model_input.contracts import ContextSourceKind, ContextBudgetClass
+    optional = _candidate(ContextSourceKind.USER_ACTIONS, "a"*500_000,
+        budget=ContextBudgetClass.OPTIONAL)
+    coordinator, candidate, _, _ = _prepare_case('openai_chat_completions', optional,
+        cold=True, budget=100_000, user_text='u'*140_000)
+    # A cold successor must not reuse the former epoch's input calibration.
+    # Its actual immutable provider materialization supplies the new quote.
+    coordinator._continuity.current_usage_anchor = lambda _: object()
+    decision = _measure(coordinator, candidate)
     assert decision.wire_input_plan is not None
-    assert decision.quote.budget_input_tokens <= 100_000
-    assert decision.quote.budget_input_tokens + 100_000 > 100_000
+    assert decision.quote.budget_source == 'heuristic'
+    assert decision.quote.anchor_model_call_id is None
+    action = next(item for item in decision.candidate.semantic_input.source_decisions
+        if item.source_kind is ContextSourceKind.USER_ACTIONS)
+    assert not action.included
+    assert decision.quote.budget_input_tokens <= decision.quote.effective_input_budget_tokens

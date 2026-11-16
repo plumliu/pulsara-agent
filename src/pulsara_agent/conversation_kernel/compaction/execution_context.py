@@ -19,10 +19,7 @@ from pulsara_agent.conversation_kernel.provider_dispatch import (
     PreparedCompactionSourceDispatch,
 )
 from pulsara_agent.model_input.contracts import (
-    ContextSourceAbsentFact,
-    ContextSourceAbsenceKind,
     ContextSourceCandidate,
-    ContextSourceKind,
 )
 from pulsara_agent.hooks.contracts import (
     GateDecision,
@@ -137,7 +134,7 @@ class CompactionContextOperations:
         scope: CompactionScope,
         deadline: float,
     ) -> tuple[
-        ContextSourceCandidate | ContextSourceAbsentFact,
+        ContextSourceCandidate | None,
         FrozenCompactionRuntimeHandoff | None,
     ]:
         remaining = deadline - monotonic()
@@ -151,16 +148,5 @@ class CompactionContextOperations:
             ),
             timeout=remaining,
         )
-        if handoff is None:
-            source = build_compaction_context_source(
-                kind=ContextSourceKind.COMPACTION_RUNTIME_HANDOFF,
-                texts=None,
-                absence_kind=ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-            )
-        else:
-            source = build_compaction_context_source(
-                kind=ContextSourceKind.COMPACTION_RUNTIME_HANDOFF,
-                texts=(handoff.full_text, handoff.compact_text),
-                domain_identity=handoff.source_fingerprint,
-            )
+        source = build_compaction_context_source(text=None if handoff is None else handoff.text)
         return source, handoff

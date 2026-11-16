@@ -15,7 +15,6 @@ from pulsara_agent.conversation_kernel.steer import (
 from pulsara_agent.llm.input import FrozenPromptContent
 from pulsara_agent.model_input.contracts import CanonicalInputOriginKind
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
-from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 from pulsara_agent.scheduling.contracts import (
     ScheduledAdmission,
     ScheduledTriggerSource,
@@ -52,6 +51,22 @@ def scheduled_owner(database):
     return repo, lease, cut
 
 
+def _input_values(values):
+    """Use the public time spelling when copying an actual saved row into an edit."""
+    if values is None:
+        return None
+    value=dict(values)
+    schedule=value.get("schedule")
+    if schedule is not None:
+        from pulsara_agent.scheduling.contracts import public_schedule_rule
+        value["schedule"]=public_schedule_rule(schedule,value.get("timezone","Asia/Shanghai"))
+    return value
+
+
+def _input_replacement(replacement):
+    return {**replacement,"values":_input_values(replacement["values"])} if replacement["kind"]=="create" else replacement
+
+
 def task(owner, kind="interval"):
     repo, lease, cut = owner
     schedule = {"kind": kind}
@@ -62,20 +77,20 @@ def task(owner, kind="interval"):
             .isoformat()
         )
     else:
-        schedule.update(anchor_at_utc="2020-01-01T00:00:00+00:00", seconds=60)
+        schedule.update(anchor_at_utc="2020-01-01T00:00:00+00:00", seconds=900)
     return repo.create_scheduled_task(
 
         status="ACTIVE",
         session_id=lease.guard.session_id,
         memory_domain_id="u_local",
         guard=lease.guard,
-        values=dict(
+        values=_input_values(dict(
             name="report",
             prompt="original task",
             schedule=schedule,
             timezone="Asia/Shanghai",
             permission_mode=DEFAULT_PERMISSION_MODE.value,
-        ),
+        )),
         model_resolution_snapshot=cut,
         deadline_monotonic=monotonic() + 30,
     )
@@ -89,7 +104,7 @@ def test_create_paused_alongside_active_does_not_change_existing_plan(owner, sta
     row = repo.create_scheduled_task(
 
         session_id=active["session_id"], memory_domain_id="u_local", guard=lease.guard,
-        values={k: active[k] for k in ("name", "prompt", "schedule", "timezone", "permission_mode")},
+        values=_input_values({k: active[k] for k in ("name", "prompt", "schedule", "timezone", "permission_mode")}),
         model_resolution_snapshot=cut, deadline_monotonic=monotonic() + 30,
         **status_fields,
     )
@@ -210,96 +225,49 @@ def mutate(owner, t, action, values=None):
         guard=lease.guard,
         expected_revision=t["revision"],
         action=action,
-        values=values,
+        values=_input_values(values),
         deadline_monotonic=monotonic() + 30,
     )
 
 
-def test_tool_null_scope_preserves_filtered_pages_and_service_all_sessions(
-    owner, monkeypatch
-):
+def test_native_scope_stays_current_session_while_user_pages_list_all_sessions(owner,monkeypatch):
     import asyncio
     from dataclasses import replace
     from types import SimpleNamespace
-
     from pulsara_agent.conversation_kernel._repository import scheduling
     from pulsara_agent.scheduling.service import ScheduledTaskService
-
-    # Small page fixture exercises the existing keyset boundary without adding
-    # a product inventory/lifetime limit or creating 129 unrelated task rows.
-    monkeypatch.setattr(
-        scheduling,
-        "STAGE2_LIMITS",
-        replace(scheduling.STAGE2_LIMITS, history_page_default_entries=1),
-    )
-    repo, lease, cut = owner
-    current = [mutate(owner, task(owner), "pause") for _ in range(3)]
-    active = task(owner)
-    other_lease = repo.acquire_host_writer(
-        intent="NEW",
-        session_id=_name("session"),
-        workspace_id=_name("workspace"),
-        writer_owner_id=_name("host"),
-        lease_seconds=120,
-        deadline_monotonic=monotonic() + 30,
-    )
-    _, binding, _ = _two_connection_resolution_cut()
-    repo.update_session_model_call_binding(
-        other_lease.guard, binding=binding, deadline_monotonic=monotonic() + 30
-    )
-    other = task((repo, other_lease, cut))
-
+    monkeypatch.setattr(scheduling,"STAGE2_LIMITS",replace(scheduling.STAGE2_LIMITS,history_page_default_entries=1))
+    repo,lease,cut=owner
+    current=[mutate(owner,task(owner),"pause") for _ in range(3)]
+    active=task(owner)
+    other_lease=repo.acquire_host_writer(intent="NEW",session_id=_name("session"),workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),lease_seconds=120,deadline_monotonic=monotonic()+30)
+    _,binding,_=_two_connection_resolution_cut()
+    repo.update_session_model_call_binding(other_lease.guard,binding=binding,deadline_monotonic=monotonic()+30)
+    other=task((repo,other_lease,cut))
     async def run():
-        service = ScheduledTaskService(SimpleNamespace())
-
-        async def read_repository(method, **kwargs):
-            return getattr(repo, method)(
-                memory_domain_id="u_local",
-                deadline_monotonic=monotonic() + 30,
-                **kwargs,
-            )
-
-        service._read = read_repository
-        arguments = {"session": None, "status": "PAUSED"}
-        ids = []
+        service=ScheduledTaskService(SimpleNamespace())
+        async def read_repository(method,**kwargs):
+            return getattr(repo,method)(memory_domain_id="u_local",deadline_monotonic=monotonic()+30,**kwargs)
+        service._read=read_repository
+        observed=await service.invoke_query({"status":"PAUSED"},default_session_id=lease.guard.session_id,
+            permission_mode=DEFAULT_PERMISSION_MODE)
+        records=[part.value for part in observed.value.content if part.type=="object"]
+        assert [record["target"]["task_id"] for record in records]==sorted(row["id"] for row in current)
+        assert all(record["prompt"]=="original task" for record in records)
+        assert observed.result_facts=={"schedule_revisions":{row["id"]:row["revision"] for row in current}}
+        with pytest.raises(ScheduledTaskError):
+            await service.invoke_query({"target":{"kind":"SCHEDULE","task_id":other["id"]}},
+                default_session_id=lease.guard.session_id,permission_mode=DEFAULT_PERMISSION_MODE)
+        all_ids=[]
+        cursor=None
         while True:
-            page = await service.invoke_query(
-                arguments,
-                default_session_id=lease.guard.session_id,
-                permission_mode=DEFAULT_PERMISSION_MODE,
-                page_budget=ToolResultPageBudget(tool_call_id="schedule-page"),
-            )
-            page = page.value
-            ids.extend(row["target"]["task_id"] for row in page["tasks"])
-            assert all(
-                row["session"]["session_id"] == lease.guard.session_id for row in page["tasks"]
-            )
-            if page["next"] is None:
-                break
-            arguments = page["next"]["arguments"]
-        assert ids == sorted(row["id"] for row in current)
-        assert active["id"] not in ids and other["id"] not in ids
-        selected = await service.invoke_query(
-            {"session": {"kind": "SESSION", "session_id": other_lease.guard.session_id}},
-            default_session_id=lease.guard.session_id,
-            permission_mode=DEFAULT_PERMISSION_MODE,
-            page_budget=ToolResultPageBudget(tool_call_id="schedule-other-page"),
-        )
-        assert [row["target"]["task_id"] for row in selected.value["tasks"]] == [other["id"]]
-        all_ids = []
-        cursor = None
-        while True:
-            page = await service.list(cursor=cursor)
+            page=await service.list(cursor=cursor)
             all_ids.extend(row["id"] for row in page["tasks"])
-            cursor = page["next_cursor"]
+            cursor=page["next_cursor"]
             if cursor is None:
                 break
-        assert set(all_ids) >= {
-            *(row["id"] for row in current),
-            active["id"],
-            other["id"],
-        }
-
+        assert set(all_ids)>={*(row["id"] for row in current),active["id"],other["id"]}
     asyncio.run(run())
 
 
@@ -646,7 +614,7 @@ def test_large_task_pages_obey_existing_wire_budget_without_total_task_cap(owner
             session_id=template["session_id"],
             memory_domain_id="u_local",
             guard=lease.guard,
-            values=values,
+            values=_input_values(values),
             model_resolution_snapshot=cut,
             deadline_monotonic=monotonic() + 30,
         )
@@ -735,7 +703,7 @@ def test_concurrent_cold_management_admits_only_one_active_plan(owner, operation
                 return repo.create_scheduled_task(
 
                     status="ACTIVE",
-                    values=values,
+                    values=_input_values(values),
                     model_resolution_snapshot=cut,
                     **kwargs,
                 )["status"]
@@ -786,7 +754,7 @@ def switch(owner, source, target, **kwargs):
         memory_domain_id="u_local",
         guard=lease.guard,
         expected_revision=source["revision"],
-        replacement=target,
+        replacement=_input_replacement(target),
 
         model_resolution_snapshot=cut,
         deadline_monotonic=monotonic() + 30,
@@ -1040,7 +1008,7 @@ def test_concurrent_manual_submissions_get_independent_fifo_inputs(owner):
 def test_runtime_delay_preserves_each_timer_occurrence_and_atomic_progress(owner, monkeypatch):
     repo, lease, _ = owner
     t = task(owner)
-    first_due = datetime.now(timezone.utc).replace(second=0, microsecond=0) - timedelta(minutes=3)
+    first_due = t["next_run_at"] - timedelta(seconds=4*900)
     with repo._writer_transaction(lease.guard, deadline_monotonic=monotonic() + 30) as connection:
         connection.execute("UPDATE pulsara_v3.scheduled_tasks SET next_run_at=%s WHERE id=%s", (first_due, t["id"]))
     current = read(owner, t["id"])
@@ -1049,7 +1017,7 @@ def test_runtime_delay_preserves_each_timer_occurrence_and_atomic_progress(owner
         candidate, _accepted = enqueue(owner, admission(current))
         expected.append((candidate.queue_item_id, current["next_run_at"]))
         advanced = read(owner, t["id"])
-        assert advanced["next_run_at"] == current["next_run_at"] + timedelta(seconds=60)
+        assert advanced["next_run_at"] == current["next_run_at"] + timedelta(seconds=900)
         current = advanced
     assert len({queue_id for queue_id, _due in expected}) == 3
     original = repo._settle_scheduled_acceptance_in_connection

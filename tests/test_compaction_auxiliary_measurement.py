@@ -26,7 +26,7 @@ from pulsara_agent.model_input.continuity import NoNewTriggerAnchor
 from tests.support.images import bound_test_image
 from tests.support.model_config import test_model_runtime as model_runtime_fixture
 from tests.test_catalog_final_wire_resources import _prepare_case
-from tests.test_round3_structured_model_input_compiler import _append_frontier, _candidate
+from tests.support.model_input import _append_frontier, _candidate
 from tests.test_stage2_direct_model import _continuity_candidate, _prepared_execution
 
 
@@ -86,7 +86,7 @@ def test_auxiliary_image_meter_does_not_authorize_unsupported_model_execution(ap
 
 @pytest.mark.parametrize("api", _APIS)
 def test_independent_auxiliary_source_preserves_same_wire_usage_anchor(api):
-    catalog = _candidate(ContextSourceKind.SKILL_CATALOG, ("Current skill catalog", ""))
+    catalog = _candidate(ContextSourceKind.SKILL_CATALOG, "Current skill catalog")
     dispatch, candidate, installed, _ = _prepare_case(
         api, catalog, initial_catalog=catalog, budget=100_000,
     )

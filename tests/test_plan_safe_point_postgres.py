@@ -36,7 +36,7 @@ def _prepared(database):
     workspace = repository.read_session_workspace_id(lease.guard, deadline_monotonic=monotonic()+30)
     turn, _ = _start_root(repository, lease)
     prepared = _commit_plan_batch(repository, lease, workspace_id=workspace, turn_id=turn,
-        selected_tool_name='enter_plan', selected_arguments={'reason': 'plan'},
+        selected_tool_name='enter_plan', selected_arguments={},
         workflow_id=_id('plan'), expected_workflow_revision=None, sibling_before=True)
     return repository, lease, workspace, turn, prepared.candidate
 

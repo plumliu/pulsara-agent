@@ -12,6 +12,7 @@ from pulsara_agent.conversation_kernel.tool_policy import (
 from pulsara_agent.conversation_kernel.repository import ConversationKernelRepository
 from tests.support.postgres import verified_postgres_provider
 from tests.test_tool_output_filesystem import BodyPort
+from pulsara_agent.conversation_kernel.tool_outputs import project_tool_result_export
 
 
 @pytest.mark.parametrize("child", [False, True])
@@ -38,7 +39,7 @@ def test_source_write_cancel_after_publication_keeps_exact_single_outcome(
 
     monkeypatch.setattr(owner, "_atomic_create_bytes", create)
 
-    source = BodyPort(session_id="session:yovkoffbw6sro643t4zfhazd24")
+    source = BodyPort()
 
     async def run():
         port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
@@ -56,7 +57,7 @@ def test_source_write_cancel_after_publication_keeps_exact_single_outcome(
                 tool_name="write_file",
                 arguments={
                     "target": {"kind": "PATH", "path": "output.txt"},
-                    "source": source.target,
+                    "tool_result_target": source.target,
                 },
                 tool_call_id="call:export",
                 attempt_id="attempt:u3xrx7rpcwqzvgtl24sz2q7u7y",
@@ -75,10 +76,9 @@ def test_source_write_cancel_after_publication_keeps_exact_single_outcome(
             result = await operation
             assert result.state == "SUCCESS"
             assert result.caller_cancelled_while_running
-            assert result.page_complete
-            assert json.loads(result.content)["status"] == "ok"
+            assert result.content.public_fields["meta"]["bytes_written"] == len(project_tool_result_export(source.view.value))
             assert writes == [tmp_path / "output.txt"]
-            assert (tmp_path / "output.txt").read_bytes() == b"retained text"
+            assert (tmp_path / "output.txt").read_bytes() == project_tool_result_export(source.view.value)
         finally:
             release.set()
             await port.aclose()
@@ -92,7 +92,7 @@ def test_source_write_available_to_root_and_child_with_same_scoped_owner(tmp_pat
     from pulsara_agent.model_input.contracts import ModelInputScopeKind
     from tests.support.round3 import prepare_test_direct_tool_surface
 
-    source = BodyPort(session_id="session:yovkoffbw6sro643t4zfhazd24")
+    source = BodyPort()
 
     async def run():
         port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
@@ -146,7 +146,7 @@ def test_source_write_runtime_dispatch_delivery_and_prefix_continuity(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id, _, lease = _lease(repository)
-    source = BodyPort(b"exact source", session_id=session_id)
+    source = BodyPort("exact source")
     model = ScriptedKernelModel(
         [
             _tool_stream(
@@ -155,7 +155,7 @@ def test_source_write_runtime_dispatch_delivery_and_prefix_continuity(
                 arguments=json.dumps(
                     {
                         "target": {"kind": "PATH", "path": "result.txt"},
-                        "source": source.target,
+                        "tool_result_target": source.target,
                     }
                 ),
             ),
@@ -201,19 +201,19 @@ def test_source_write_runtime_dispatch_delivery_and_prefix_continuity(
             await port.aclose()
 
     asyncio.run(run())
-    assert (tmp_path / "result.txt").read_bytes() == b"exact source"
+    assert (tmp_path / "result.txt").read_bytes() == project_tool_result_export(source.view.value)
     bodies = [
-        json.loads(part.text)["pulsara_tool_result"]
+        part.text
         for message in model.requests[-1].compiled_input.messages
         if message.role is MessageRole.TOOL_RESULT
         for part in message.content
         if isinstance(part, LLMTextPart)
     ]
-    exported = json.loads(bodies[0]["body"])
-    assert exported["target"] == {"kind": "PATH", "path": "result.txt"}
-    assert exported["source_coverage"] == "COMPLETE"
-    assert "model_visible_memory_ids" not in bodies[0]
-    assert "exact source" in bodies[1]["body"]
+    assert len(bodies) == 2
+    assert 'result.txt' in bodies[0]
+    assert f'"bytes_written": {len(project_tool_result_export(source.view.value))}' in bodies[0]
+    assert 'exact source' in bodies[1]
+    assert source.reads == 1
     for before, after in zip(model.requests, model.requests[1:]):
         assert after.compiled_input.tools == before.compiled_input.tools
         assert after.compiled_input.system_prompt == before.compiled_input.system_prompt

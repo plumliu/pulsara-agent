@@ -80,7 +80,7 @@ function schedule() {
       }
     });
     worker.on('error', error => terminal(cell, 'failed', {name: error.name,
-      message: String(error.message).slice(0, Math.min(4096, limits.control_bytes - limits.page_bytes) - 512)}));
+      message: String(error.message).slice(0, Math.min(4096, limits.control_bytes) - 512)}));
     worker.on('exit', code => {
       active--; cell.worker = null;
       for (const timer of cell.timers) clearTimeout(timer);

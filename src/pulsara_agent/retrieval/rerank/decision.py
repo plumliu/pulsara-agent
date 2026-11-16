@@ -35,9 +35,6 @@ class DecisionRerankProvider:
         documents = tuple(documents)
         if not documents:
             return []
-        # This is memory's existing shortlist boundary, not a Decision-call cap.
-        if len(documents) > 20:
-            raise RerankServiceError("rerank candidate count exceeds 20")
         names = (
             tuple(candidate_ids)
             if candidate_ids is not None

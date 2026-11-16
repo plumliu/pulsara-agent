@@ -86,9 +86,16 @@ class _MemoryOperations(_MemoryManagementOperations):
                   AND f.context_id=ANY(%s::text[])
                 FOR UPDATE
                 """,
-                (read_binding.memory_domain_id, fact_id, list(read_binding.readable_context_ids)),
+                (
+                    read_binding.memory_domain_id,
+                    fact_id,
+                    list(read_binding.readable_context_ids),
+                ),
             ).fetchone()
-            if source is None or _embedding_input_digest(source["body"]) != fact_semantic_digest:
+            if (
+                source is None
+                or _embedding_input_digest(source["body"]) != fact_semantic_digest
+            ):
                 return False
             # The source row stays locked through this write. A late vector
             # cannot overwrite a changed input, resurrect a deleted memory, or
@@ -104,7 +111,74 @@ class _MemoryOperations(_MemoryManagementOperations):
                     embedding_contract_id=EXCLUDED.embedding_contract_id,
                     embedding=EXCLUDED.embedding, embedded_at=EXCLUDED.embedded_at
                 """,
-                (read_binding.memory_domain_id, fact_id, fact_semantic_digest,
-                 embedding_contract.contract_id, literal, embedded_at),
+                (
+                    read_binding.memory_domain_id,
+                    fact_id,
+                    fact_semantic_digest,
+                    embedding_contract.contract_id,
+                    literal,
+                    embedded_at,
+                ),
             )
             return True
+
+    def read_memory_result_timestamps(
+        self, *, session_id, fact_ids, deadline_monotonic
+    ):
+        """Find concurrency bases in complete accepted results of this session.
+
+        The server cursor streams the existing history; its batches do not cap
+        the number of results or acquire any durable read/qualification state.
+        """
+        from pulsara_agent.conversation_kernel.memory.contracts import memory_timestamp
+        from pulsara_agent.conversation_kernel.content_parts import read_content_parts
+
+        wanted = set(fact_ids)
+        found = {}
+        if not wanted:
+            return found
+
+        def accept(value):
+            if not isinstance(value, dict) and not hasattr(value, "get"):
+                return
+            target = value.get("target")
+            if (
+                not hasattr(target, "get")
+                or target.get("kind") != "MEMORY"
+                or target.get("memory_id") not in wanted
+            ):
+                return
+            stamp = value.get("updated_at")
+            if stamp is None:
+                meta = value.get("meta")
+                stamp = meta.get("updated_at") if hasattr(meta, "get") else None
+            if stamp is not None:
+                instant = memory_timestamp(stamp)
+                identity = target["memory_id"]
+                if identity not in found or found[identity] < instant:
+                    found[identity] = instant
+
+        with self._provider.connection(
+            lane=PostgresConnectionLane.MEMORY_QUERY,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as c:
+            with c.cursor(name="memory_saved_results") as cursor:
+                cursor.execute(
+                    """SELECT r.public_fields,r.result_entry_id FROM pulsara_v3.tool_results r
+                    JOIN pulsara_v3.content_parts call ON call.session_id=r.session_id
+                      AND call.entry_id=r.tool_call_entry_id AND call.tool_call_id=r.tool_call_id
+                    WHERE r.session_id=%s AND r.result_record_kind='EXECUTED'
+                      AND r.output_unavailability_reason IS NULL
+                      AND call.type='tool_call' AND call.tool_name IN ('remember','query_memory','manage_memory')
+                    ORDER BY r.observed_at,r.id""",
+                    (session_id,),
+                )
+                for row in cursor:
+                    accept(row["public_fields"])
+                    for part in read_content_parts(
+                        c, session_id=session_id, entry_id=row["result_entry_id"]
+                    ):
+                        if part.type == "object":
+                            accept(part.value)
+        return found

@@ -71,7 +71,7 @@ from pulsara_agent.model_input.contracts import (
     provider_input_item_fingerprint,
     FrozenProviderInputItemKind,
 )
-from pulsara_agent.model_input.continuity import decode_runtime_observation
+from pulsara_agent.model_input.contracts import ContextChannel
 from pulsara_agent.model_input.provider_replay import (
     FrozenCanonicalProviderDispatchRead,
 )
@@ -217,9 +217,10 @@ def _summary_source_messages(
             message = source.messages[index]
             if source.message_placements[index].origin_entry_id is not None:
                 continue
-            try:
-                decode_runtime_observation(message)
-            except ValueError:
+            if source.message_placements[index].origin_item_fingerprint not in {
+                decision.source_instance_fingerprint for decision in source.source_decisions
+                if decision.channel is ContextChannel.RUNTIME_OBSERVATION and decision.included
+            }:
                 continue
             observations.append((message, source.message_placements[index]))
         observation_indices = {

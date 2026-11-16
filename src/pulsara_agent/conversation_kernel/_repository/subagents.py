@@ -1005,7 +1005,7 @@ class _SubagentOperations:
         active_only=False,
         deadline_monotonic,
     ):
-        if limit < 1:
+        if limit is not None and limit < 1:
             raise ValueError("page limit must be positive")
         with self._provider.connection(
             lane=PostgresConnectionLane.INSPECTOR,
@@ -1075,7 +1075,7 @@ class _SubagentOperations:
         limit=20,
         deadline_monotonic,
     ):
-        if limit < 1:
+        if limit is not None and limit < 1:
             raise ValueError("page limit must be positive")
         with self._provider.connection(
             lane=PostgresConnectionLane.INSPECTOR,
@@ -1145,6 +1145,26 @@ class _SubagentOperations:
                 _RUNTIME_SELECT + " WHERE s.id=%s", (session_id,)
             ).fetchone()
             return None if row is None else dict(row)
+
+    def read_work_wait_states(self, *, root_session_id, work_ids, deadline_monotonic):
+        with self._provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            rows = connection.execute(
+                _WORK_SELECT
+                + " AND q.id=ANY(%s::text[]) ORDER BY array_position(%s::text[], q.id)",
+                (root_session_id, list(work_ids), list(work_ids)),
+            ).fetchall()
+            return tuple(
+                dict(
+                    agent_id=str(row["session_id"]),
+                    work_id=str(row["id"]),
+                    status=request_execution_from_row(row).status.value,
+                )
+                for row in rows
+            )
 
     def read_agent_wait_states(
         self,
@@ -1330,7 +1350,6 @@ class _SubagentOperations:
         occurred_at,
         actor_id,
         deadline_monotonic,
-        result_check=None,
     ):
         input_origin = "AGENT_MESSAGE"
         with self._writer_transaction(
@@ -1380,8 +1399,6 @@ class _SubagentOperations:
                 (guard.session_id, target_turn_id),
             ).fetchone()
             work_id = None if work is None else work["id"]
-            if result_check is not None:
-                result_check(work_id)
             pairs = {
                 (guard.session_id, candidate)
                 for candidate in _session_ids_in_text(text)

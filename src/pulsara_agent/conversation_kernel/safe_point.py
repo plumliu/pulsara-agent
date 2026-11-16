@@ -523,6 +523,7 @@ class ProviderSafePointCoordinator:
         *,
         candidate: "PreparedProviderInputAppendCandidate",
         execution: object,
+        before_install: Callable[[], None] | None = None,
     ) -> "ProcessLocalProviderInputInstallPermit":
         with self._lock:
             self._require_basis_current(basis)
@@ -532,7 +533,9 @@ class ProviderSafePointCoordinator:
                 raise RuntimeError("model operation already started")
             basis.handle._model_active = True
             try:
-                permit = continuity.install(candidate=candidate, execution=execution)
+                permit = continuity.install(
+                    candidate=candidate, execution=execution, before_install=before_install
+                )
                 basis._mark_installed(self)
                 return permit
             except BaseException:

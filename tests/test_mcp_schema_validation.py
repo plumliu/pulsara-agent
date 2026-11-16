@@ -227,12 +227,13 @@ def test_document_local_refs_reach_public_authorization(tmp_path):
                 effective_mode=fixture.PermissionMode.READ_ONLY,
                 admission_source=fixture.RunPermissionAdmissionSource.USER_SUBMISSION,
             )
+            meta = await fixture._meta_arguments(port, borrow, "mcp__fixture__schema_probe", {})
             for value, expected in (
                 (42, fixture.KernelToolAuthorizationKind.INVALID_ARGUMENTS),
                 ("hello", fixture.KernelToolAuthorizationKind.ALLOW),
             ):
                 authorization = await port.authorize(
-                    tool_name="mcp__fixture__schema_probe", arguments={"text": value},
+                    tool_name="call_mcp_tool", arguments={**meta, "arguments": {"text": value}},
                     tool_call_id=f"call:local:{value}",
                     turn_id="turn:fugd2z4wkqsu77svw4oie5ktvy",
                     assistant_entry_id="entry:5qidalqvkujk5ykzzzfpwie2qy",
@@ -312,7 +313,7 @@ def test_real_sdk_distinguishes_explicit_null_from_unset(
             )
             permit.mark_attempt_accepted()
             result = await executor.invoke(permit, {})
-            body = json.loads(result.content)
+            body = json.loads(result.content) if result.kind == "TOOL" else result.content.decode("utf-8")
             success = output_schema is None or (
                 protocol == "2026-07-28"
                 and "structuredContent" in response
@@ -324,8 +325,8 @@ def test_real_sdk_distinguishes_explicit_null_from_unset(
                 if "structuredContent" in body:
                     assert body["structuredContent"] is None
             else:
-                assert body["error"] == "MCP_OUTPUT_SCHEMA_MISMATCH"
-                assert "remote_outcome" not in body
+                assert "MCP_OUTPUT_SCHEMA_MISMATCH" in body
+                assert "未自动重做" in body
             assert executor.lease._slot.dispatch_fence_state.value == "OPEN"
             assert len(json.loads(calls.read_text())) == 1
         finally:
@@ -380,14 +381,15 @@ def test_recursive_evaluation_stays_local_in_public_prepare_and_authorize(tmp_pa
                 effective_mode=fixture.PermissionMode.READ_ONLY,
                 admission_source=fixture.RunPermissionAdmissionSource.USER_SUBMISSION,
             )
+            meta = await fixture._meta_arguments(port, borrow, "mcp__fixture__schema_probe", {})
             for recurse in (True, False):
-                arguments = {"recurse": recurse}
+                arguments = {**meta, "arguments": {"recurse": recurse}}
                 prepared = port.prepare_resolved_invocation(
-                    tool_name="mcp__fixture__schema_probe", arguments=arguments,
+                    tool_name="call_mcp_tool", arguments=arguments,
                     surface_borrow=borrow,
                 )
                 authorization = await port.authorize(
-                    tool_name="mcp__fixture__schema_probe", arguments=arguments,
+                    tool_name="call_mcp_tool", arguments=arguments,
                     tool_call_id=f"call:recursive:{recurse}",
                     turn_id="turn:fugd2z4wkqsu77svw4oie5ktvy",
                     assistant_entry_id="entry:5qidalqvkujk5ykzzzfpwie2qy",
@@ -444,14 +446,13 @@ def test_real_sdk_output_boundary_preserves_response_and_connection(tmp_path, re
                 permit.mark_attempt_accepted()
                 result = await executor.invoke(permit, {})
                 assert result.state == (state if index == 0 else "SUCCESS")
-                body = json.loads(result.content)
+                body = json.loads(result.content) if result.kind == "TOOL" else result.content.decode("utf-8")
                 if index == 0 and state == "APPLICATION_ERROR":
                     assert body["isError"] is True
                     assert body["content"][0]["text"] == "application denied"
                 elif index == 0 and state == "SYSTEM_ERROR":
-                    assert body["error"] == "MCP_OUTPUT_SCHEMA_MISMATCH"
-                    assert "remote_outcome" not in body
-                    assert body["retry_performed"] is False
+                    assert "MCP_OUTPUT_SCHEMA_MISMATCH" in body
+                    assert "未自动重做" in body
                 assert executor.lease._slot.dispatch_fence_state.value == "OPEN"
                 assert "fixture" not in supervisor._retry_tasks
             assert len(json.loads(calls.read_text())) == 2

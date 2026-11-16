@@ -14,7 +14,10 @@ import inspect
 from time import monotonic
 from typing import Callable, Mapping
 
-from pulsara_agent.code_mode.contracts import CellParticipationObserver, CellParticipationReference
+from pulsara_agent.code_mode.contracts import (
+    CellParticipationObserver,
+    CellParticipationReference,
+)
 from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import (
     AGENT_TOOLS,
     agent_target,
@@ -24,48 +27,34 @@ from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import 
     validate_collaboration_parameters,
 )
 from pulsara_agent.conversation_kernel.tool_contracts import KernelToolResult
-from pulsara_agent.ports.tool_execution import ToolOutputSourceFormatHint
-from pulsara_agent.primitives.context import canonical_json_bytes
+from pulsara_agent.ports.tool_execution import ToolBusinessValue
+from pulsara_agent.conversation_kernel.content_parts import ResultPart
 from pulsara_agent.primitives.permission import PermissionMode
-from pulsara_agent.primitives.tool_result_budget import ToolResultPageBoundary
 
 TERMINAL = frozenset({"completed", "stopped"})
 
 
-def _query_call(target):
-    return {"tool": "query_agents", "arguments": {"target": target}}
+def _business(parts=(), *, meta=None, state="SUCCESS", outcome=None, delivered=None):
+    return KernelToolResult(
+        state=state,
+        content=ToolBusinessValue(
+            public_fields={"meta": dict(meta or {})}, content=tuple(parts)
+        ),
+        delivery_succeeded=delivered,
+        physical_timing="ON_TIME" if outcome is None else outcome.timing.value,
+        caller_cancelled_while_running=False
+        if outcome is None
+        else outcome.caller_cancelled,
+        physical_observation=None if outcome is None else outcome.observation,
+    )
 
 
-def _require_fits(context, value, *, include_read=False):
-    if not context.page_budget.fits(canonical_json_bytes(value).decode("utf-8"), include_read=include_read):
-        raise ToolResultPageBoundary("The minimum agent result does not fit this call's result allowance")
-
-
-def _dispatch_receipt(rows):
+def _run_record(row):
     return {
-        "agents": [agent_target(row["agent_id"]) for row in rows],
-        "works": [work_target(row["work_id"]) for row in rows],
-        "details": [{"work_title": row["work_title"], "status": row["status"],
-                     "inspect": _query_call(work_target(row["work_id"]))} for row in rows],
+        "agent": agent_target(row["agent_id"]),
+        "work": work_target(row["work_id"]),
+        "work_status": row["status"],
     }
-
-
-def _admission_receipt(requests):
-    # The longest existing status spelling reserves the whole accepted receipt,
-    # including a request that settles before the admission acknowledgement.
-    return _dispatch_receipt([dict(agent_id=r.agent_id, work_id=r.work_id,
-        work_title=r.work_title, status="completed") for r in requests])
-
-
-def _fit_page(rows, *, limit, build, budget):
-    """Keep whole source records; the cursor advances only past delivered rows."""
-    for count in range(min(len(rows), limit), -1, -1):
-        if rows and count == 0:
-            break
-        value = build(rows[:count], len(rows) > count)
-        if budget.fits(canonical_json_bytes(value).decode("utf-8")):
-            return value
-    raise ToolResultPageBoundary("The minimum agent page does not fit this call's result allowance")
 
 
 class CollaborationToolPort:
@@ -90,7 +79,9 @@ class CollaborationToolPort:
     def bind_cell_observer(self, observer: CellParticipationObserver) -> None:
         self._cell_observer = observer
 
-    def _observe_cell(self, context, references: tuple[CellParticipationReference, ...]) -> None:
+    def _observe_cell(
+        self, context, references: tuple[CellParticipationReference, ...]
+    ) -> None:
         cell_id = getattr(context, "code_cell_id", None)
         observer = self._cell_observer
         if cell_id is None or observer is None:
@@ -133,7 +124,8 @@ class CollaborationToolPort:
             {
                 "agent": agent_target(row["agent_id"]),
                 "current_work": (
-                    None if row["current_work_id"] is None
+                    None
+                    if row["current_work_id"] is None
                     else work_target(row["current_work_id"])
                 ),
                 "queued_count": row["queued_count"],
@@ -142,10 +134,15 @@ class CollaborationToolPort:
         )
 
     async def resolve_visible_agent(self, agent_id: str):
-        from pulsara_agent.conversation_kernel.presentation_targets import resolve_visible_agent
+        from pulsara_agent.conversation_kernel.presentation_targets import (
+            resolve_visible_agent,
+        )
+
         return await self._read(
-            resolve_visible_agent, repository=self.repository,
-            root_session_id=self.root_session_id, agent_session_id=agent_id,
+            resolve_visible_agent,
+            repository=self.repository,
+            root_session_id=self.root_session_id,
+            agent_session_id=agent_id,
             deadline_monotonic=self.runtime.read_deadline(),
         )
 
@@ -161,53 +158,63 @@ class CollaborationToolPort:
         return await self.io.run(method, **kwargs)
 
     async def _work_status(self, work_id: str) -> dict:
-        row = await self._read(self.repository.read_agent_work_graph_facts,
-            root_session_id=self.root_session_id, work_id=work_id,
-            deadline_monotonic=self.runtime.read_deadline())
+        row = await self._read(
+            self.repository.read_agent_work_graph_facts,
+            root_session_id=self.root_session_id,
+            work_id=work_id,
+            deadline_monotonic=self.runtime.read_deadline(),
+        )
         if row is None:
             raise ValueError("WORK does not exist in this collaboration")
-        value = self._public_work(row)
-        value["inspect"] = _query_call(value["target"])
-        return value
+        return row
 
     async def read_cell_work_page(self, *, source_exec_attempt_id, cursor, limit):
-        return await self._read(self.repository.list_cell_agent_works,
-            root_session_id=self.root_session_id, source_exec_attempt_id=source_exec_attempt_id,
-            cursor=cursor, limit=limit, deadline_monotonic=self.runtime.read_deadline())
+        return await self._read(
+            self.repository.list_cell_agent_works,
+            root_session_id=self.root_session_id,
+            source_exec_attempt_id=source_exec_attempt_id,
+            cursor=cursor,
+            limit=limit,
+            deadline_monotonic=self.runtime.read_deadline(),
+        )
 
     async def visible_cell_participants(self, participants):
         visible = []
         for item in participants:
             if item["work_id"] is None:
-                state = await self._read(self.repository.read_agent_runtime_state,
-                    session_id=item["agent_id"], deadline_monotonic=self.runtime.read_deadline())
-                present = state is not None and state["root_session_id"] == self.root_session_id
+                state = await self._read(
+                    self.repository.read_agent_runtime_state,
+                    session_id=item["agent_id"],
+                    deadline_monotonic=self.runtime.read_deadline(),
+                )
+                present = (
+                    state is not None
+                    and state["root_session_id"] == self.root_session_id
+                )
             else:
-                fact = await self._read(self.repository.read_agent_work_graph_facts,
-                    root_session_id=self.root_session_id, work_id=item["work_id"],
-                    deadline_monotonic=self.runtime.read_deadline())
+                fact = await self._read(
+                    self.repository.read_agent_work_graph_facts,
+                    root_session_id=self.root_session_id,
+                    work_id=item["work_id"],
+                    deadline_monotonic=self.runtime.read_deadline(),
+                )
                 present = fact is not None and fact["agent_id"] == item["agent_id"]
             if present:
                 visible.append(item)
         return visible
 
     @staticmethod
-    def _public_work(row: Mapping) -> dict:
+    def _public_work(row: Mapping, *, detail=True) -> dict:
         result = {
             "target": work_target(row["work_id"]),
             "agent": agent_target(row["agent_id"]),
-            "status": row["status"],
-            "terminal_reason": row.get("terminal_reason"),
-            "work_title": row["work_title"],
+            "work_status": row["status"],
+            "work_title": row.get("work_title"),
         }
-        for field in (
-            "instruction",
-            "final",
-            "diagnostic",
-            "failed_dependency",
-        ):
-            if row.get(field) is not None:
-                result[field] = row[field]
+        if detail:
+            for field in ("instruction", "final", "diagnostic"):
+                if field in row and row[field] is not None:
+                    result[field] = row[field]
         reason = row.get("terminal_reason")
         if isinstance(reason, str) and reason.startswith("DEPENDENCY_NOT_SUCCESSFUL:"):
             result["failed_dependency"] = work_target(
@@ -216,17 +223,15 @@ class CollaborationToolPort:
         return result
 
     @staticmethod
-    def _work_summary(row: Mapping) -> dict:
-        value = CollaborationToolPort._public_work({
-            key: row[key] for key in ("work_id", "agent_id", "status", "terminal_reason", "failed_dependency", "work_title")
-            if key in row
-        })
-        value["inspect"] = _query_call(value["target"])
-        return value
+    def _work_summary(row):
+        return CollaborationToolPort._public_work(row, detail=False)
 
     async def _require_agent(self, agent_id: str):
-        row = await self._read(self.repository.read_agent_runtime_state,
-            session_id=agent_id, deadline_monotonic=self.runtime.read_deadline())
+        row = await self._read(
+            self.repository.read_agent_runtime_state,
+            session_id=agent_id,
+            deadline_monotonic=self.runtime.read_deadline(),
+        )
         if row is None or row["root_session_id"] != self.root_session_id:
             raise ValueError("AGENT does not exist in this collaboration")
 
@@ -243,11 +248,11 @@ class CollaborationToolPort:
             replace(
                 r,
                 initial_context=tuple(
-                    snapshot.initial_context_units[-r.context_turns :]
+                    unit
+                    for turns in r.context_turns
+                    for unit in snapshot.initial_context_units[-turns:]
                 ),
             )
-            if r.create_agent and r.context_mode == "last_n"
-            else r
             for r in requests
         )
         root_guard = facts.pop("root_guard")
@@ -276,7 +281,7 @@ class CollaborationToolPort:
                 if rows is None:
                     raise outcome.error
         await self.runtime.wake_agent_requests(self.root_session_id)
-        return _dispatch_receipt(rows), outcome
+        return rows, outcome
 
     async def invoke(self, *, tool_name, arguments, invocation_context):
         error = self.validate_arguments(tool_name=tool_name, arguments=arguments)
@@ -286,50 +291,38 @@ class CollaborationToolPort:
         is_root = context.session_id == self.root_session_id
         if context.effective_permission_mode != PermissionMode.BYPASS_PERMISSIONS:
             raise ValueError("collaboration operations require bypass permissions")
-        if tool_name not in {"query_agents", "send_agent_message", "wait_message"} and not is_root:
+        if (
+            tool_name not in {"query_agents", "send_agent_message", "wait_message"}
+            and not is_root
+        ):
             raise ValueError("operation is available only to ROOT")
         source_kind = getattr(getattr(context, "invocation_source", None), "kind", None)
         if tool_name in {"run_agent", "wait_agent"} and source_kind != "CODE_MODE_CALL":
             raise ValueError("operation requires a live Code Mode invocation")
-        if tool_name == "wait_message" and (is_root or source_kind != "MODEL_TOOL_CALL"):
-            raise ValueError("message waiting is available only to native subagent calls")
-        outcome = None
-        page_complete = False
-        required_facts = {}
-        if tool_name == "run_agent":
-            requests = parse_batch_members(arguments)
-            try:
-                _require_fits(context, _admission_receipt(requests))
-            except ToolResultPageBoundary as error:
-                # This is a known pre-admission rejection: no member has been
-                # submitted, so it must settle as an ordinary tool failure.
-                facts = {"error": "RESULT_BUDGET_EXCEEDED", "message": str(error)}
-                return KernelToolResult(
-                    state="APPLICATION_ERROR", content=canonical_json_bytes(facts),
-                    public_format=ToolOutputSourceFormatHint.JSON,
-                    page_complete=True, required_facts=facts, effect_class="read_only",
-                )
-            result, outcome = await self._run(requests, context)
-        elif tool_name == "query_agents" and "target" not in arguments:
-            limit = arguments.get("max_items", 50)
-            rows = await self._read(
-                self.repository.list_query_agent_sessions,
-                root_session_id=self.root_session_id,
-                observer_session_id=context.session_id,
-                cursor=arguments.get("cursor"),
-                limit=limit + 1,
-                deadline_monotonic=self.runtime.read_deadline(),
+        if tool_name == "wait_message" and (
+            is_root or source_kind != "MODEL_TOOL_CALL"
+        ):
+            raise ValueError(
+                "message waiting is available only to native subagent calls"
             )
-            def build(selected, more):
-                return {"root": agent_target("ROOT"),
-                    "agents": [self._public_agent(row) for row in selected],
-                    "next": {"tool": "query_agents", "arguments": {
-                        "cursor": self._agent_cursor(selected[-1]), "max_items": limit}}
-                    if more else None}
-            result = _fit_page(rows, limit=limit, build=build, budget=context.page_budget)
-            page_complete = True
-        elif tool_name == "query_agents":
-            target = arguments["target"]
+        if tool_name == "run_agent":
+            rows, outcome = await self._run(parse_batch_members(arguments), context)
+            return _business(
+                (ResultPart("object", _run_record(row)) for row in rows),
+                outcome=outcome,
+            )
+        if tool_name == "query_agents":
+            target = arguments.get("target")
+            if target is None:
+                rows = await self._read(
+                    self.repository.list_query_agent_sessions,
+                    root_session_id=self.root_session_id,
+                    observer_session_id=context.session_id,
+                    limit=None,
+                    deadline_monotonic=self.runtime.read_deadline(),
+                )
+                parts = [ResultPart("object", self._public_agent(row)) for row in rows]
+                return _business(parts or [ResultPart("text", "没有可查询的 Agent。")])
             if target["kind"] == "WORK":
                 row = await self._read(
                     self.repository.query_visible_agent_work,
@@ -340,123 +333,123 @@ class CollaborationToolPort:
                 )
                 if row is None:
                     raise ValueError("WORK does not exist in this collaboration")
-                result = self._public_work(row)
-                self._observe_cell(context, ((result["agent"]["agent_id"], result["target"]["work_id"], "query"),))
-            else:
-                identity = target_id(target, "AGENT")
-                limit = arguments.get("max_items", 50)
-                rows = await self._read(
-                    self.repository.list_query_agent_works,
-                    root_session_id=self.root_session_id,
-                    observer_session_id=context.session_id,
-                    agent_id=identity,
-                    cursor=arguments.get("cursor"),
-                    limit=limit + 1,
-                    deadline_monotonic=self.runtime.read_deadline(),
+                self._observe_cell(
+                    context, ((row["agent_id"], row["work_id"], "query"),)
                 )
-                self._observe_cell(context, ((identity, None, "query"),))
-                def build(selected, more):
-                    return {"agent": agent_target(identity),
-                        "works": [self._work_summary(row) for row in selected],
-                        "next": {"tool": "query_agents", "arguments": {
-                            "target": target, "cursor": self._work_cursor(selected[-1]), "max_items": limit}}
-                        if more else None}
-                result = _fit_page(rows, limit=limit, build=build, budget=context.page_budget)
-                page_complete = True
-        elif tool_name == "send_agent_message":
+                return _business([ResultPart("object", self._public_work(row))])
+            identity = target_id(target, "AGENT")
+            rows = await self._read(
+                self.repository.list_query_agent_works,
+                root_session_id=self.root_session_id,
+                observer_session_id=context.session_id,
+                agent_id=identity,
+                limit=None,
+                deadline_monotonic=self.runtime.read_deadline(),
+            )
+            self._observe_cell(context, ((identity, None, "query"),))
+            parts = []
+            for row in rows:
+                parts.append(ResultPart("object", self._work_summary(row)))
+                if row["status"] == "stopped" and row.get("terminal_reason"):
+                    parts.append(
+                        ResultPart(
+                            "text",
+                            "工作已停止：" + row["terminal_reason"].split(":", 1)[0],
+                        )
+                    )
+            return _business(
+                parts or [ResultPart("text", "该 Agent 没有可查询的 Work。")]
+            )
+        if tool_name == "send_agent_message":
             identity = target_id(arguments["target"], "AGENT", allow_root=True)
             identity = self.root_session_id if identity == "ROOT" else identity
             if identity != self.root_session_id:
                 await self._require_agent(identity)
                 self._observe_cell(context, ((identity, None, "message"),))
-            _require_fits(context, {"recipient": agent_target(identity), "delivery": "not_started"})
             result = await self.runtime.send_agent_steer(
                 agent_id=identity, message=arguments["message"], source_context=context
             )
-        elif tool_name == "stop_agent":
-            result, outcome = await self._stop(arguments["target"], context)
-        elif tool_name == "wait_agent":
-            result = await self._wait_agents(arguments, context)
-            page_complete = True
-        elif tool_name == "wait_message":
-            result = await self._wait_message(arguments, context)
-        if tool_name == "run_agent":
-            required_facts = result
-            page_complete = True
-        elif tool_name == "send_agent_message":
-            required_facts = {key: result[key] for key in ("recipient", "work", "delivery")}
-            page_complete = True
-        elif tool_name == "query_agents" and arguments.get("target", {}).get("kind") == "WORK":
-            required_facts = {key: result[key] for key in ("target", "agent", "status", "terminal_reason", "work_title")}
-        elif tool_name == "stop_agent":
-            required_facts = {key: result[key] for key in ("target", "stop_requested", "stopped", "affected_count", "status_counts")}
-        elif tool_name in {"wait_agent", "wait_message"}:
-            required_facts = {"state": result["state"],
-                **{key + "_count": len(result[key]) for key in
-                   ("observations", "pending_targets", "message_sources", "unavailable_targets") if key in result}}
-        if page_complete and tool_name == "query_agents" and not context.page_budget.fits(canonical_json_bytes(result).decode("utf-8")):
-            raise ToolResultPageBoundary("The complete agent result does not fit this call's result allowance")
-        return KernelToolResult(
-            state="SUCCESS",
-            content=canonical_json_bytes(result),
-            public_format=ToolOutputSourceFormatHint.JSON,
-            page_complete=page_complete,
-            required_facts=required_facts,
-            physical_timing="ON_TIME" if outcome is None else outcome.timing.value,
-            caller_cancelled_while_running=False
-            if outcome is None
-            else outcome.caller_cancelled,
-            physical_observation=None if outcome is None else outcome.observation,
+            success = result["delivery"] == "queued"
+            return _business(
+                [
+                    ResultPart(
+                        "text",
+                        "消息已加入接收方当前轮次的输入队列。"
+                        if success
+                        else result["message"],
+                    )
+                ],
+                state="SUCCESS" if success else "APPLICATION_ERROR",
+            )
+        if tool_name == "stop_agent":
+            rows, outcome, message = await self._stop(arguments["target"], context)
+            meta = {
+                state + "_work_count": sum(row["status"] == state for row in rows)
+                for state in ("queued", "running", "completed", "stopped")
+            }
+            return _business(
+                [
+                    ResultPart("text", message),
+                    *[
+                        ResultPart(
+                            "object",
+                            {
+                                "target": work_target(row["work_id"]),
+                                "work_status": row["status"],
+                            },
+                        )
+                        for row in rows
+                    ],
+                ],
+                meta=meta,
+                outcome=outcome,
+            )
+        if tool_name == "wait_agent":
+            return await self._wait_agents(arguments, context)
+        state = await self._wait_message(arguments, context)
+        return _business(
+            [
+                ResultPart(
+                    "text",
+                    "有新消息待处理，正文将通过正常输入路径交付。"
+                    if state["state"] == "message_available"
+                    else "本次等待已取消。"
+                    if state["state"] == "interrupted"
+                    else "本次等待超时，尚未发现新消息。",
+                )
+            ],
+            state="CANCELLED" if state["state"] == "interrupted" else "SUCCESS",
         )
-
-    @staticmethod
-    def _agent_cursor(row):
-        return row.get("cursor", row["agent_id"])
-
-    @staticmethod
-    def _work_cursor(row):
-        return row.get("cursor", row["work_id"])
 
     @staticmethod
     def _public_agent(row):
         result = {
-            "agent": agent_target(row["agent_id"]),
-            "name": row.get("title"),
-            "current_work": (None if row["ui_current_work_id"] is None
-                             else work_target(row["ui_current_work_id"])),
+            "target": agent_target(row["agent_id"]),
+            "current_work": None
+            if row["ui_current_work_id"] is None
+            else work_target(row["ui_current_work_id"]),
             "current_work_title": row["ui_current_work_title"],
-            "current_work_status": row["ui_current_work_status"],
             "queued_work_count": row["ui_queued_work_count"],
         }
-        result["inspect"] = _query_call(result["agent"])
+        if row.get("title") is not None:
+            result["name"] = row["title"]
         return result
 
     async def _stop(self, target, context):
         if target["kind"] == "WORK":
             work = await self._work_status(target_id(target, "WORK"))
-            identity, work_id = work["agent"]["agent_id"], work["target"]["work_id"]
+            identity, work_id = work["agent_id"], work["work_id"]
             self._observe_cell(context, ((identity, work_id, "stop"),))
             if work["status"] in TERMINAL:
-                return {
-                    "target": target,
-                    "stopped": False,
-                    "stop_requested": False,
-                    "affected_count": 0,
-                    "status_counts": {work["status"]: 1},
-                    "works": [self._work_summary({"work_id": work["target"]["work_id"],
-                        "agent_id": identity, **work})],
-                    "message": "Work already ended; no stop was performed.",
-                }, None
+                return [work], None, "工作已结束，本次未执行停止。"
         else:
             identity, work_id = target_id(target, "AGENT"), None
             await self._require_agent(identity)
             self._observe_cell(context, ((identity, None, "stop"),))
-        _require_fits(context, {"target": target, "stop_requested": True, "stopped": False}, include_read=True)
         facts = await self._facts(context)
-        guard = facts["root_guard"]
         outcome = await self.io.run_tool_invocation(
             self.repository.cancel_agent_requests,
-            guard,
+            facts["root_guard"],
             agent_id=identity,
             work_id=work_id,
             reason="USER_CANCELLED",
@@ -466,27 +459,19 @@ class CollaborationToolPort:
         )
         if outcome.error is not None:
             raise outcome.error
-        rows = outcome.value
-        for row in rows:
+        for row in outcome.value:
             if row["status"] == "running":
                 await self.runtime.stop_active_work(
                     agent_id=identity, work_id=row["work_id"]
                 )
-        actual = [await self._work_status(row["work_id"]) for row in rows]
-        counts = {state: sum(work["status"] == state for work in actual)
-                  for state in {work["status"] for work in actual}}
-        return {
-            "target": target,
-            "stop_requested": bool(actual),
-            "stopped": bool(actual)
-            and all(work["status"] == "stopped" for work in actual),
-            "works": actual,
-            "affected_count": len(actual),
-            "status_counts": counts,
-            "message": "Stop requested; outcomes reflect actual settlement."
+        actual = [await self._work_status(row["work_id"]) for row in outcome.value]
+        return (
+            actual,
+            outcome,
+            "已请求停止工作，结果反映实际结算。"
             if actual
-            else "Agent has no unfinished work.",
-        }, outcome
+            else "Agent 没有未结束工作。",
+        )
 
     @asynccontextmanager
     async def _suspend(self, context):
@@ -495,7 +480,9 @@ class CollaborationToolPort:
 
     @staticmethod
     def _interrupted(context) -> bool:
-        return context.cell_cancel_event is not None and context.cell_cancel_event.is_set()
+        return (
+            context.cell_cancel_event is not None and context.cell_cancel_event.is_set()
+        )
 
     async def _wait_change(self, revision, context, *, timeout=None):
         """Race observations with caller control, without cancelling target work."""
@@ -540,7 +527,9 @@ class CollaborationToolPort:
                 if change in {"timeout", "interrupted"}:
                     return {"state": change}
                 revision = self.runtime.agent_change_revision()
-                if await self.runtime.has_pending_agent_message(invocation_context=context):
+                if await self.runtime.has_pending_agent_message(
+                    invocation_context=context
+                ):
                     return {"state": "message_available"}
 
     async def _agent_wait_snapshot(self, identities, bound_work_ids):
@@ -559,82 +548,154 @@ class CollaborationToolPort:
         return rows
 
     async def _wait_agents(self, arguments, context):
-        identities = tuple(target_id(t, "AGENT") for t in arguments["agents"])
-        if self.root_session_id in identities:
-            raise ValueError("cannot observe ROOT through wait_agent")
-        until = arguments.get("until", "idle")
-        settle = arguments.get("settle", "all")
-        deadline = monotonic() + arguments.get("timeout_seconds", 30)
+        works_branch = "works" in arguments
+        key, kind = ("works", "WORK") if works_branch else ("agents", "AGENT")
+        identities = tuple(target_id(t, kind) for t in arguments[key])
+        settle, deadline = (
+            arguments.get("settle", "all"),
+            monotonic() + arguments.get("timeout_seconds", 30),
+        )
         owner_cursors = getattr(context, "agent_message_cursors", None)
         after = dict(owner_cursors or {})
+        rows = ()
         revision = self.runtime.agent_change_revision()
-        rows = await self._agent_wait_snapshot(identities, (None,) * len(identities))
-        bindings = tuple(row["current_work_id"] if until == "work_end" else None for row in rows)
-        initial = tuple(
-            "pending" if work_id is not None else
-            "not_started" if row["has_pending_work"] else "idle"
-            for row, work_id in zip(rows, bindings, strict=True)
+        self._observe_cell(
+            context,
+            tuple((i, None, "wait") for i in identities) if not works_branch else (),
         )
-        if until == "work_end" and any(
-            row["has_running_turn"] and work_id is None
-            for row, work_id in zip(rows, bindings, strict=True)
-        ):
-            raise ValueError("Agent active turn does not identify its current Work")
-        self._observe_cell(context, tuple(
-            (identity, work_id, "wait") for identity, work_id in zip(identities, bindings, strict=True)
-        ))
 
-        def observations(current, *, first=False):
-            result = []
-            for row, work_id, condition in zip(current, bindings, initial, strict=True):
-                if until == "idle":
-                    condition = "pending" if row["has_running_turn"] or row["has_pending_work"] else "idle"
-                elif work_id is not None:
-                    condition = ("work_ended" if not first and row["bound_work_status"] in TERMINAL else "pending")
-                result.append({"target": agent_target(row["agent_id"]), "condition": condition,
-                               **({"work": work_target(work_id)} if work_id is not None else {})})
-            return result
+        def records():
+            if works_branch:
+                return [ResultPart("object", _run_record(row)) for row in rows]
+            return [
+                ResultPart(
+                    "object",
+                    {
+                        "agent": agent_target(row["agent_id"]),
+                        "is_idle": not row["has_running_turn"]
+                        and not row["has_pending_work"],
+                    },
+                )
+                for row in rows
+            ]
 
-        async def evaluate(current):
-            sources = await self.runtime.pending_message_sources(
-                recipient_session_id=context.session_id, source_agent_ids=identities,
-                after_by_sender=after, invocation_context=context,
-            )
-            pending = [item["target"] for item in current if item["condition"] not in {"idle", "work_ended"}]
-            unavailable = [{"target": item["target"], "reason": "not_started"}
-                           for item in current if item["condition"] == "not_started"]
-            result = {"until": until, "observations": current, "pending_targets": pending}
+        async def evaluate():
+            nonlocal rows, revision
             if self._interrupted(context):
-                state = "interrupted"
-            elif sources:
-                state = "message_available"
-                result["message_sources"] = [agent_target(identity) for identity in sources]
-            elif not pending or (settle == "first" and len(pending) < len(current)):
-                state = "settled"
-            elif unavailable and (settle == "all" or len(unavailable) == len(current)):
-                state = "unavailable"
-                result["unavailable_targets"] = unavailable
-            elif monotonic() >= deadline:
-                state = "timeout"
+                return _business(
+                    [
+                        *records(),
+                        ResultPart(
+                            "text", "本次等待已取消，目标工作继续沿原生命周期结算。"
+                        ),
+                    ],
+                    state="CANCELLED",
+                )
+            if works_branch:
+                rows = await self._read(
+                    self.repository.read_work_wait_states,
+                    root_session_id=self.root_session_id,
+                    work_ids=identities,
+                    deadline_monotonic=self.runtime.read_deadline(),
+                )
+                if tuple(row["work_id"] for row in rows) != identities:
+                    raise ValueError("WORK does not exist in this collaboration")
+                self._observe_cell(
+                    context,
+                    tuple((row["agent_id"], row["work_id"], "wait") for row in rows),
+                )
+                satisfied = [row["status"] in TERMINAL for row in rows]
             else:
+                rows = await self._agent_wait_snapshot(
+                    identities, (None,) * len(identities)
+                )
+                satisfied = [
+                    not row["has_running_turn"] and not row["has_pending_work"]
+                    for row in rows
+                ]
+            if self._interrupted(context):
+                return _business(
+                    [
+                        *records(),
+                        ResultPart("text", "本次等待已取消，目标工作未被停止。"),
+                    ],
+                    state="CANCELLED",
+                )
+            sources = (
+                {}
+                if works_branch
+                else await self.runtime.pending_message_sources(
+                    recipient_session_id=context.session_id,
+                    source_agent_ids=identities,
+                    after_by_sender=after,
+                    invocation_context=context,
+                )
+            )
+            if self._interrupted(context):
+                return _business(
+                    [
+                        *records(),
+                        ResultPart("text", "本次等待已取消，目标工作未被停止。"),
+                    ],
+                    state="CANCELLED",
+                )
+            reason = (
+                "message_available"
+                if sources
+                else "condition_met"
+                if (all(satisfied) if settle == "all" else any(satisfied))
+                else "timeout"
+                if monotonic() >= deadline
+                else None
+            )
+            if reason is None:
                 return None
-            result = {"state": state, **result}
-            _require_fits(context, result)
-            if state == "message_available" and owner_cursors is not None:
-                for sender, sequence in sources.items():
-                    owner_cursors[sender] = max(owner_cursors.get(sender, 0), sequence)
-            return result
+            meta = {"wait_reason": reason}
+            callback = None
+            if sources:
+                meta["message_sources"] = [
+                    agent_target(identity)
+                    for identity in identities
+                    if identity in sources
+                ]
+                captured = dict(sources)
 
-        current = observations(rows, first=True)
-        if result := await evaluate(current):
+                async def delivered():
+                    if owner_cursors is not None:
+                        for sender, sequence in captured.items():
+                            owner_cursors[sender] = max(
+                                owner_cursors.get(sender, 0), sequence
+                            )
+
+                callback = delivered
+            return _business(records(), meta=meta, delivered=callback)
+
+        async def observe():
+            try:
+                return await evaluate()
+            except Exception as error:
+                return _business(
+                    [*records(), ResultPart("text", str(error))],
+                    state="APPLICATION_ERROR",
+                )
+
+        result = await observe()
+        if result is not None:
             return result
         async with self._suspend(context):
             while True:
-                await self._wait_change(revision, context, timeout=max(0, deadline - monotonic()))
+                change = await self._wait_change(
+                    revision, context, timeout=max(0, deadline - monotonic())
+                )
                 revision = self.runtime.agent_change_revision()
-                # A fresh statement is also needed on timeout/control so the
-                # result reports one current snapshot rather than stale busy state.
-                rows = await self._agent_wait_snapshot(identities, bindings)
-                current = observations(rows)
-                if result := await evaluate(current):
+                if change == "interrupted":
+                    return _business(
+                        [
+                            *records(),
+                            ResultPart("text", "本次等待已取消，目标工作未被停止。"),
+                        ],
+                        state="CANCELLED",
+                    )
+                result = await observe()
+                if result is not None:
                     return result

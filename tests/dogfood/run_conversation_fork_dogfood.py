@@ -29,7 +29,7 @@ from pulsara_agent.primitives.context import thaw_json
 from pulsara_agent.settings import LocalSettingsStore, LocalPostgresConfig
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from pulsara_agent.workspace_identity import HostWorkspaceInput
-from tests.dogfood.run_content_revision_line_edit_dogfood import _scrub
+from tests.support.dogfood_results import _scrub
 from tests.dogfood.run_model_switch_handover_dogfood import (
     _ReadOnlySettingsStore,
     _binding,

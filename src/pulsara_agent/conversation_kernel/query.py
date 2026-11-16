@@ -365,21 +365,8 @@ class CanonicalConversationQuery:
             ).fetchone()
             if fact is None:
                 raise KeyError(memory_id)
-            relations = connection.execute(
-                """
-                SELECT * FROM pulsara_v3.memory_relations
-                WHERE memory_domain_id = %s
-                  AND (source_fact_id = %s OR target_fact_id = %s)
-                ORDER BY accepted_at, id LIMIT 256
-                """,
-                (fact["memory_domain_id"], memory_id, memory_id),
-            ).fetchall()
-        return {
-            "inspect_kind": "canonical_memory",
-            "fact": _public_row(fact),
-            "relations": [_public_row(item) for item in relations],
-            "index_freshness": [],
-        }
+        from pulsara_agent.conversation_kernel.memory.contracts import MemoryRecord
+        return {"inspect_kind":"canonical_memory","memory":MemoryRecord.from_row(fact).value()}
 
     def inspect_health(self, *, deadline_monotonic: float) -> Mapping[str, object]:
         with self._provider.connection(
@@ -401,7 +388,7 @@ class CanonicalConversationQuery:
 
             sessions = grouped("sessions", "lifecycle")
             queue = grouped("prompt_queue_items", "status")
-            memory_facts = grouped("memory_facts", "lifecycle")
+            memory_facts = grouped("memory_facts", "fact_kind")
         return {
             "inspect_kind": "canonical_kernel_health",
             "conversation_authority": "pulsara_v3",

@@ -7,12 +7,26 @@ import pytest
 
 from pulsara_agent.conversation_kernel.decision_tools import (
     KernelDecisionToolPort,
+    decision_output_schema,
     validate_decision_arguments,
 )
 from pulsara_agent.conversation_kernel.execution_watchdogs import KernelWatchdogOwner
-from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 from pulsara_agent.retrieval.config import RetrievalConnection
 from pulsara_agent.settings import LocalSettingsUnavailable
+
+
+@pytest.fixture(autouse=True)
+def validate_complete_decision_values(monkeypatch):
+    from jsonschema import Draft202012Validator
+    original = KernelDecisionToolPort.invoke
+    validator = Draft202012Validator(decision_output_schema())
+
+    async def invoke(owner, **kwargs):
+        result = await original(owner, **kwargs)
+        validator.validate(result.public_value())
+        return result
+
+    monkeypatch.setattr(KernelDecisionToolPort, "invoke", invoke)
 
 
 class Settings:
@@ -23,7 +37,11 @@ class Settings:
         self.reads += 1
         if self.error is not None:
             raise self.error
-        return SimpleNamespace(memory_retrieval=SimpleNamespace(decision=self.connection, ranking_mode=self.mode))
+        return SimpleNamespace(
+            memory_retrieval=SimpleNamespace(
+                decision=self.connection, ranking_mode=self.mode
+            )
+        )
 
 
 class Service:
@@ -52,25 +70,49 @@ class Deadlines:
 
 
 def connection(*, key="saved-key"):
-    return RetrievalConnection("https://example.invalid/decisions", "decision-model", "openai_decisions", api_key=key)
+    return RetrievalConnection(
+        "https://example.invalid/decisions",
+        "decision-model",
+        "openai_decisions",
+        api_key=key,
+    )
 
 
-def context(budget=None):
-    return SimpleNamespace(tool_call_id="test-call", page_budget=budget, cell_cancel_event=asyncio.Event())
+def context():
+    return SimpleNamespace(
+        tool_call_id="test-call", cell_cancel_event=asyncio.Event()
+    )
 
 
-def port(settings, service=None, *, maximum=4096):
+def port(settings, service=None):
     deadlines = Deadlines()
     service = service or Service()
-    return KernelDecisionToolPort(settings=settings, decision_service=service, deadline_factory=deadlines,
-                                  max_value_bytes=maximum), service, deadlines
+    return (
+        KernelDecisionToolPort(
+            settings=settings, decision_service=service, deadline_factory=deadlines
+        ),
+        service,
+        deadlines,
+    )
 
 
-@pytest.mark.parametrize("arguments", [None, [], {}, {"condition": "x"}, {"inputs": []},
-    {"condition": " \n", "inputs": []}, {"condition": 1, "inputs": []},
-    {"condition": "x", "inputs": None}, {"condition": "x", "inputs": ("x",)},
-    {"condition": "x", "inputs": [None]}, {"condition": "x", "inputs": [False]},
-    {"condition": "x", "inputs": [], "threshold": .5}])
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        None,
+        [],
+        {},
+        {"condition": "x"},
+        {"inputs": []},
+        {"condition": " \n", "inputs": []},
+        {"condition": 1, "inputs": []},
+        {"condition": "x", "inputs": None},
+        {"condition": "x", "inputs": ("x",)},
+        {"condition": "x", "inputs": [None]},
+        {"condition": "x", "inputs": [False]},
+        {"condition": "x", "inputs": [], "threshold": 0.5},
+    ],
+)
 def test_decide_rejects_invalid_arguments_before_settings_or_network(arguments):
     settings = Settings(error=AssertionError("settings must not be read"))
     owner, service, _ = port(settings)
@@ -82,9 +124,17 @@ def test_decide_rejects_invalid_arguments_before_settings_or_network(arguments):
 def test_decide_empty_inputs_do_not_read_settings_or_acquire_a_deadline():
     settings = Settings(error=AssertionError("empty call read settings"))
     owner, service, deadlines = port(settings)
-    result = asyncio.run(owner.invoke(arguments={"condition": " valid condition ", "inputs": []}, invocation_context=context()))
-    assert result.public_value() == {"decisions": []}
-    assert result.state == "SUCCESS" and result.page_complete
+    result = asyncio.run(
+        owner.invoke(
+            arguments={"condition": " valid condition ", "inputs": []},
+            invocation_context=context(),
+        )
+    )
+    assert result.public_value() == {
+        "meta": {"status": "SUCCESS"},
+        "content": [{"type": "object", "value": {"decisions": []}}],
+    }
+    assert result.state == "SUCCESS"
     assert settings.reads == 0 and deadlines.owners == []
     assert service.prepared == service.evaluated == []
 
@@ -92,19 +142,37 @@ def test_decide_empty_inputs_do_not_read_settings_or_acquire_a_deadline():
 @pytest.mark.parametrize("mode", ["off", "rerank", "decision"])
 def test_decide_preserves_order_text_and_threshold_independent_of_memory_mode(mode):
     settings = Settings(connection(), mode)
-    owner, service, deadlines = port(settings, Service((0, .499999, .5, 1)))
+    owner, service, deadlines = port(settings, Service((0, 0.499999, 0.5, 1)))
     invocation = context()
-    result = asyncio.run(owner.invoke(
-        arguments={"condition": "  Is this relevant?  ", "inputs": ["", "duplicate", "duplicate", "字"]},
-        invocation_context=invocation,
-    ))
-    assert result.public_value() == {"decisions": [False, False, True, True]}
+    result = asyncio.run(
+        owner.invoke(
+            arguments={
+                "condition": "  Is this relevant?  ",
+                "inputs": ["", "duplicate", "duplicate", "字"],
+            },
+            invocation_context=invocation,
+        )
+    )
+    assert result.public_value()["content"][0]["value"]["decisions"] == [
+        False,
+        False,
+        True,
+        True,
+    ]
     assert settings.reads == 1
     assert deadlines.owners == [KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION]
     selected, request = service.prepared[0]
     assert selected is settings.connection
-    assert [item["text"] for item in request.state["inputs"]] == ["", "duplicate", "duplicate", "字"]
-    assert all("  Is this relevant?  " in question.instructions for question in request.questions)
+    assert [item["text"] for item in request.state["inputs"]] == [
+        "",
+        "duplicate",
+        "duplicate",
+        "字",
+    ]
+    assert all(
+        "  Is this relevant?  " in question.instructions
+        for question in request.questions
+    )
     assert service.evaluated[0][1:] == (1234.0, invocation.cell_cancel_event)
 
 
@@ -112,44 +180,70 @@ def test_decide_preserves_order_text_and_threshold_independent_of_memory_mode(mo
 def test_decide_available_checks_only_current_configuration(configured):
     owner, service, _ = port(Settings(configured))
     value = owner.available()
-    assert type(value) is bool and value is (configured is not None and configured.complete)
+    assert type(value) is bool and value is (
+        configured is not None and configured.complete
+    )
     assert service.prepared == service.evaluated == []
 
 
 def test_decide_settings_error_is_distinct_from_missing_configuration(caplog):
-    owner, service, _ = port(Settings(error=LocalSettingsUnavailable("settings directory is unreadable")))
+    owner, service, _ = port(
+        Settings(error=LocalSettingsUnavailable("settings directory is unreadable"))
+    )
     assert owner.available() is False
     assert "settings directory is unreadable" in caplog.text
-    result = asyncio.run(owner.invoke(arguments={"condition": "x", "inputs": ["text"]}, invocation_context=context()))
+    result = asyncio.run(
+        owner.invoke(
+            arguments={"condition": "x", "inputs": ["text"]},
+            invocation_context=context(),
+        )
+    )
     assert result.state == "APPLICATION_ERROR"
-    assert result.public_value()["error"] == "DECISION_UNAVAILABLE"
-    assert "settings directory is unreadable" in result.public_value()["message"]
+    assert result.public_value()["meta"]["status"] == "ERROR"
+    assert (
+        "settings directory is unreadable"
+        in result.public_value()["content"][0]["value"]
+    )
     assert "decisions" not in result.public_value()
     assert service.prepared == service.evaluated == []
 
 
-@pytest.mark.parametrize("bridge_boundary", [False, True])
-def test_decide_quotes_longest_complete_result_before_network(bridge_boundary):
+def test_decide_accepts_complete_twenty_thousand_item_result():
     settings = Settings(connection())
-    owner, service, _ = port(settings, maximum=1 if bridge_boundary else 4096)
-    quote = ToolResultPageBudget("test-call", accepts_provider_body=lambda body, _ids: False)
-    result = asyncio.run(owner.invoke(arguments={"condition": "x", "inputs": ["text"]},
-                                     invocation_context=context(None if bridge_boundary else quote)))
-    assert result.state == "APPLICATION_ERROR"
-    assert result.public_value()["error"] == "DECISION_RESOURCE_BOUNDARY"
-    assert "decisions" not in result.public_value()
-    assert service.prepared == service.evaluated == []
+    probabilities = (0.1,) * 20_000
+    owner, service, _ = port(settings, Service(probabilities))
+    result = asyncio.run(
+        owner.invoke(
+            arguments={"condition": "x", "inputs": ["text"] * len(probabilities)},
+            invocation_context=context(),
+        )
+    )
+    assert result.state == "SUCCESS"
+    assert result.public_value()["content"][0]["value"]["decisions"] == [False] * len(
+        probabilities
+    )
+    assert len(service.prepared) == len(service.evaluated) == 1
 
 
 def test_decide_validation_retains_original_text():
-    assert validate_decision_arguments({"condition": " x ", "inputs": ["", " a "]}) == (" x ", ("", " a "))
+    assert validate_decision_arguments({"condition": " x ", "inputs": ["", " a "]}) == (
+        " x ",
+        ("", " a "),
+    )
 
 
 @pytest.mark.parametrize("phase", ["prepare", "evaluate"])
-def test_decide_preserves_service_failure_code_and_resource_details_without_partial_result(phase):
+def test_decide_preserves_service_failure_code_and_resource_details_without_partial_result(
+    phase,
+):
     from pulsara_agent.retrieval.decision import DecisionError
 
-    error = DecisionError("DECISION_RESOURCE_BOUNDARY", "input exceeds request budget", input_index=1, limit=192 * 1024)
+    error = DecisionError(
+        "DECISION_RESOURCE_BOUNDARY",
+        "input exceeds request budget",
+        input_index=1,
+        limit=192 * 1024,
+    )
 
     class FailingService(Service):
         def prepare_batches(self, *args, **kwargs):
@@ -161,13 +255,29 @@ def test_decide_preserves_service_failure_code_and_resource_details_without_part
             raise error
 
     owner, _, _ = port(Settings(connection()), FailingService())
-    result = asyncio.run(owner.invoke(arguments={"condition": "x", "inputs": ["one", "two"]}, invocation_context=context()))
+    result = asyncio.run(
+        owner.invoke(
+            arguments={"condition": "x", "inputs": ["one", "two"]},
+            invocation_context=context(),
+        )
+    )
     assert result.state == "APPLICATION_ERROR"
-    assert result.public_value() == {"error": error.code, "message": str(error), "input_index": 1, "limit": 192 * 1024}
+    assert result.public_value()["meta"]["status"] == "ERROR"
+    message = result.public_value()["content"][0]["value"]
+    assert (
+        str(error) in message
+        and "input_index: 1" in message
+        and str(192 * 1024) in message
+    )
 
 
-@pytest.mark.parametrize("failure", [asyncio.CancelledError("cell stopped"), TimeoutError("whole call expired")])
-def test_decide_propagates_cancellation_and_deadline_to_existing_tool_settlement(failure):
+@pytest.mark.parametrize(
+    "failure",
+    [asyncio.CancelledError("cell stopped"), TimeoutError("whole call expired")],
+)
+def test_decide_propagates_cancellation_and_deadline_to_existing_tool_settlement(
+    failure,
+):
     class InterruptedService(Service):
         async def evaluate(self, *args, **kwargs):
             raise failure
@@ -176,7 +286,10 @@ def test_decide_propagates_cancellation_and_deadline_to_existing_tool_settlement
 
     async def run():
         with pytest.raises(type(failure)) as observed:
-            await owner.invoke(arguments={"condition": "x", "inputs": ["one"]}, invocation_context=context())
+            await owner.invoke(
+                arguments={"condition": "x", "inputs": ["one"]},
+                invocation_context=context(),
+            )
         assert observed.value is failure
 
     asyncio.run(run())
@@ -193,11 +306,17 @@ def test_decide_each_call_reads_new_configuration_but_does_not_reselect_in_fligh
     owner, service, _ = port(settings, UpdatingService((1,)))
 
     async def run():
-        result = await owner.invoke(arguments={"condition": "x", "inputs": ["text"]}, invocation_context=context())
-        assert result.public_value() == {"decisions": [True]}
+        result = await owner.invoke(
+            arguments={"condition": "x", "inputs": ["text"]},
+            invocation_context=context(),
+        )
+        assert result.public_value()["content"][0]["value"]["decisions"] == [True]
         assert settings.reads == 1
-        second = await owner.invoke(arguments={"condition": "x", "inputs": ["text"]}, invocation_context=context())
-        assert second.public_value()["error"] == "DECISION_UNAVAILABLE"
+        second = await owner.invoke(
+            arguments={"condition": "x", "inputs": ["text"]},
+            invocation_context=context(),
+        )
+        assert second.public_value()["meta"]["status"] == "ERROR"
         assert settings.reads == 2
         assert len(service.prepared) == len(service.evaluated) == 1
 
@@ -208,32 +327,61 @@ def test_decide_each_call_reads_new_configuration_but_does_not_reselect_in_fligh
 def test_decide_real_service_batches_and_restores_order(monkeypatch, shape):
     import json
     import httpx2
-    from pulsara_agent.conversation_kernel.execution_watchdogs import KernelExecutionDeadlineFactory
+    from pulsara_agent.conversation_kernel.execution_watchdogs import (
+        KernelExecutionDeadlineFactory,
+    )
     from pulsara_agent.retrieval.decision import DecisionService
-    from tests.test_memory_retrieval_adapters import install_transport
+    from tests.support.sdk_transport import install_transport
 
     def respond(request):
         payload = json.loads(request.content)
-        names = list(payload["questions"]) if shape == "system_one" else [q["name"] for q in payload["questions"]]
-        values = {name: (0, .5, 1)[int(name.removeprefix("input_")) % 3] for name in names}
-        answers = ({name: {"type": "noul", "noul": values[name]} for name in reversed(names)}
-                   if shape == "system_one" else
-                   [{"name": name, "type": "predicate", "probability": values[name]} for name in reversed(names)])
+        names = (
+            list(payload["questions"])
+            if shape == "system_one"
+            else [q["name"] for q in payload["questions"]]
+        )
+        values = {
+            name: (0, 0.5, 1)[int(name.removeprefix("input_")) % 3] for name in names
+        }
+        answers = (
+            {name: {"type": "noul", "noul": values[name]} for name in reversed(names)}
+            if shape == "system_one"
+            else [
+                {"name": name, "type": "predicate", "probability": values[name]}
+                for name in reversed(names)
+            ]
+        )
         return httpx2.Response(200, json={"answers": answers})
 
     observed = install_transport(monkeypatch, respond)
-    settings = Settings(RetrievalConnection("https://provider.example/decisions", "configured", shape, "none"))
+    settings = Settings(
+        RetrievalConnection(
+            "https://provider.example/decisions", "configured", shape, "none"
+        )
+    )
 
     async def run():
         service = DecisionService()
-        owner = KernelDecisionToolPort(settings=settings, decision_service=service,
-            deadline_factory=KernelExecutionDeadlineFactory(), max_value_bytes=4096)
+        owner = KernelDecisionToolPort(
+            settings=settings,
+            decision_service=service,
+            deadline_factory=KernelExecutionDeadlineFactory(),
+        )
         try:
-            result = await owner.invoke(arguments={"condition": "Does the material satisfy the requirement?",
-                "inputs": ["duplicate"] * 23}, invocation_context=context())
-            assert result.public_value() == {"decisions": [index % 3 != 0 for index in range(23)]}
+            result = await owner.invoke(
+                arguments={
+                    "condition": "Does the material satisfy the requirement?",
+                    "inputs": ["duplicate"] * 23,
+                },
+                invocation_context=context(),
+            )
+            assert result.public_value()["content"][0]["value"]["decisions"] == [
+                index % 3 != 0 for index in range(23)
+            ]
             assert settings.reads == 1
-            assert [len(json.loads(request.content)["questions"]) for request in observed] == [20, 3]
+            assert [
+                len(json.loads(request.content)["questions"]) for request in observed
+            ] == [20, 3]
         finally:
             await service.aclose()
         assert service.physical_close_complete
@@ -242,7 +390,9 @@ def test_decide_real_service_batches_and_restores_order(monkeypatch, shape):
 
 
 @pytest.mark.parametrize("closing", [False, True])
-def test_memory_retains_own_request_until_sdk_cleanup_without_closing_shared_service(closing):
+def test_memory_retains_own_request_until_sdk_cleanup_without_closing_shared_service(
+    closing,
+):
     from pulsara_agent.conversation_kernel.memory_tools import KernelMemoryToolPort
     from unittest.mock import AsyncMock
 
@@ -260,7 +410,11 @@ def test_memory_retains_own_request_until_sdk_cleanup_without_closing_shared_ser
                 cleaning.set()
                 await release.wait()
 
-        task = asyncio.create_task(memory._run_remote_exact(physical(), timeout_seconds=10, name="test-memory-decision"))
+        task = asyncio.create_task(
+            memory._run_remote_exact(
+                physical(), timeout_seconds=10, name="test-memory-decision"
+            )
+        )
         await entered.wait()
         close = asyncio.create_task(memory.aclose()) if closing else None
         if not closing:

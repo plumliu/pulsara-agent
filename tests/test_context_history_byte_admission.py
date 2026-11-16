@@ -17,10 +17,6 @@ from pulsara_agent.conversation_kernel.prompt_content import (
     MAXIMUM_PROMPT_MULTIPART_BYTES,
     freeze_canonical_prompt,
 )
-from pulsara_agent.conversation_kernel.runner import (
-    ConversationKernelRunner,
-    FrozenPostResponseResourceQuote,
-)
 from pulsara_agent.identity import derive_id
 from pulsara_agent.llm.input import FrozenPromptContent, LLMTextPart
 from pulsara_agent.model_input.compiler import StructuredModelInputCompiler
@@ -30,7 +26,7 @@ from pulsara_agent.model_input.contracts import (
     FrozenProviderInputItemKind,
 )
 from tests.support.images import bound_test_image
-from tests.test_round3_structured_model_input_compiler import (
+from tests.support.model_input import (
     _prepared_request,
     _snapshot,
     _sources,
@@ -163,23 +159,6 @@ def test_history_bytes_do_not_trigger_compaction_but_token_threshold_does():
     assert should_trigger_compaction(source_view=source, policy=policy, force=True)
 
 
-def test_large_history_does_not_reduce_post_response_admission():
-    quote = FrozenPostResponseResourceQuote(
-        current_canonical_expanded_bytes=128 << 20,
-        actual_assistant_canonical_bytes=1,
-        bounded_followup_canonical_bytes=100,
-        canonical_upper_after=(128 << 20) + 101,
-        current_epoch_logical_bytes=256 << 20,
-        actual_assistant_logical_bytes=1,
-        bounded_followup_logical_bytes=100,
-        logical_upper_after=(256 << 20) + 101,
-        current_canonical_items=10_000,
-        bounded_followup_items=1,
-        item_upper_after=10_002,
-    )
-    ConversationKernelRunner._require_post_response_resources(
-        quote, effective_input_budget_tokens=100_000
-    )
 
 
 def test_individual_prompt_message_allocation_is_unchanged():
@@ -205,8 +184,6 @@ def test_steer_into_large_history_keeps_its_new_message_allocation():
         effective_target_budget=1_000_000,
         estimator_fingerprint="sha256:" + "a" * 64,
         predecessor_prefix_fingerprint=None,
-        memory_recall_reservation=None,
-        memory_response_preference_reservation=None,
     )
     assert quote.selected_canonical_expanded_bytes == 256
     assert quote.prospective_snapshot_hydrated_bytes == 128 << 20
@@ -214,7 +191,7 @@ def test_steer_into_large_history_keeps_its_new_message_allocation():
 
 
 def test_history_items_beyond_old_limit_append_without_rewriting_installed_prefix():
-    from tests.test_round3_structured_model_input_compiler import _user
+    from tests.support.model_input import _user
 
     items = tuple(_user(f"fact-{index}", sequence=index + 1) for index in range(5_000))
     compiler = StructuredModelInputCompiler()

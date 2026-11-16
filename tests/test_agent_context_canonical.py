@@ -1,6 +1,5 @@
 """Both Agent kinds read the same session-owned canonical history."""
 
-from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 
 import pytest
 
@@ -18,7 +17,7 @@ from tests.test_agent_requests_persistence import (
     deadline,
     now,
 )
-from tests.test_round3_structured_model_input_compiler import (
+from tests.support.model_input import (
     _prepared_request,
     _sources,
 )
@@ -106,17 +105,16 @@ def test_reused_agent_reads_ordinary_history_and_exact_group_cut(source):
     from pulsara_agent.conversation_kernel.session_content import SessionContentQuery
     from pulsara_agent.ports.session_content import SessionContentRange
     from tests.support.history_projection import maintain_history
-    from pulsara_agent.identity import random_id
 
     root_query = SessionContentQuery(
         repository, session_id=root.guard.session_id, memory_domain_id="u_local"
     )
     received = root_query.invoke(
         "read_session_content",
-        {"target": {"kind": "SESSION", "session_id": first.agent_id}},
+        {"target":{"kind":"SESSION","session_id":first.agent_id},"limit":-2},
         current_range=SessionContentRange(0),
-        tool_call_id=random_id("call"),
-        page_budget=ToolResultPageBudget(tool_call_id=random_id("call")),
+
+
         deadline_monotonic=deadline(),
     )
     assert "First final stays in this Agent history." in str(received)
@@ -129,11 +127,15 @@ def test_reused_agent_reads_ordinary_history_and_exact_group_cut(source):
             "query": "investigation",
         },
         current_range=SessionContentRange(0),
-        tool_call_id=random_id("call"),
-        page_budget=ToolResultPageBudget(tool_call_id=random_id("call")),
+
+
         deadline_monotonic=deadline(),
     )
-    assert first.agent_id in str(found)
+    from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
+    from psycopg.rows import dict_row
+    found_target=next(part.value["target"] for part in found.content if part.type=="object")
+    with repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,row_factory=dict_row,deadline_monotonic=deadline()) as connection:
+        assert connection.execute("SELECT session_id FROM pulsara_v3.transcript_entries WHERE id=%s",(found_target["entry_id"],)).fetchone()["session_id"]==first.agent_id
     assert "First investigation." in str(found)
 
 
@@ -145,7 +147,6 @@ def test_code_results_are_visible_to_ui_but_filtered_before_provider_budget_sear
     from pulsara_agent.conversation_kernel.session_content import SessionContentQuery
     from pulsara_agent.ports.session_content import SessionContentRange
     from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader
-    from pulsara_agent.identity import random_id
 
     marker = "privateuniquecodebody"
     repository, lease, _, _, _, code_entries = _canonical_code_calls(
@@ -178,19 +179,14 @@ def test_code_results_are_visible_to_ui_but_filtered_before_provider_budget_sear
         cut, deadline_monotonic=deadline()
     )
     assert preflight.selected_item_count >= len(canonical.items)
-    from tests.test_round3_structured_model_input_compiler import _candidate
     from pulsara_agent.model_input.contracts import ContextSourceKind
     from pulsara_agent.conversation_kernel.context_sources import (
-        _render_previous_turn_outcome,
+        _previous_turn_body, observation_source,
     )
 
     sources = _sources(
-        _candidate(
-            ContextSourceKind.PREVIOUS_TURN_OUTCOME,
-            _render_previous_turn_outcome(
-                dispatch.compile_snapshot.previous_turn_outcome_fact
-            ),
-        )
+        observation_source(ContextSourceKind.PREVIOUS_TURN_OUTCOME,
+            _previous_turn_body(dispatch.compile_snapshot.previous_turn_outcome_fact),32)
     )
     compiled = StructuredModelInputCompiler().compile(
         _prepared_request(canonical, sources, canonical_facts=dispatch.compile_snapshot)
@@ -210,10 +206,10 @@ def test_code_results_are_visible_to_ui_but_filtered_before_provider_budget_sear
     )
     result = query.invoke(
         "read_session_content",
-        {"include_tools": True},
+        {"target":{"kind":"SESSION","session_id":lease.guard.session_id},"limit":-100},
         current_range=SessionContentRange(cut.provider_input_through_sequence),
-        tool_call_id=random_id("call"),
-        page_budget=ToolResultPageBudget(tool_call_id=random_id("call")),
+
+
         deadline_monotonic=deadline(),
     )
     assert marker not in str(result)
@@ -222,13 +218,13 @@ def test_code_results_are_visible_to_ui_but_filtered_before_provider_budget_sear
     maintain_history(repository)
     searched = query.invoke(
         "search_session_content",
-        {"query": marker, "include_tools": True},
+        {"target":{"kind":"SESSION","session_id":lease.guard.session_id},"query":marker},
         current_range=SessionContentRange(cut.provider_input_through_sequence),
-        tool_call_id=random_id("call"),
-        page_budget=ToolResultPageBudget(tool_call_id=random_id("call")),
+
+
         deadline_monotonic=deadline(),
     )
-    assert searched["items"] == []
+    assert not [part for part in searched.content if part.type=="object"]
     snapshot = CanonicalProtocolReader(repository.connection_provider).snapshot(
         session_id=lease.guard.session_id,
         maximum_entries=20,
@@ -239,12 +235,14 @@ def test_code_results_are_visible_to_ui_but_filtered_before_provider_budget_sear
     child = fork(repository, lease.guard.session_id, final_id)
     fork_rows = rows(
         repository,
-        "SELECT id,inline_content FROM pulsara_v3.transcript_entries WHERE session_id=%s",
+        "SELECT id FROM pulsara_v3.transcript_entries WHERE session_id=%s",
         (child.child_session_id,),
     )
-    assert all(
-        marker.encode() not in bytes(row["inline_content"] or b"") for row in fork_rows
-    )
+    from pulsara_agent.conversation_kernel.content_parts import read_content_parts
+    from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
+    from psycopg.rows import dict_row
+    with repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,row_factory=dict_row,deadline_monotonic=deadline()) as connection:
+        assert all(marker not in str(part.value) for row in fork_rows for part in read_content_parts(connection,entry_id=row["id"]))
     assert (
         len(fork_rows) == 4
     )  # Source user/exec, successor user/final, no CODE result rows.
@@ -299,7 +297,7 @@ def test_real_host_cold_permission_selection_and_retained_epoch_prefix(
     import asyncio
     from pulsara_agent.conversation_kernel.host import KernelHostCore
     from pulsara_agent.llm.input import PromptContent, text_part_values
-    from pulsara_agent.model_input.lowering import decode_tool_result_observation
+    from tests.test_agent_code_mode_execution import _native_fields
     from pulsara_agent.primitives.permission import PermissionMode
     from pulsara_agent.workspace_identity import HostWorkspaceInput
     from pulsara_agent.identity import random_id
@@ -370,10 +368,10 @@ def test_real_host_cold_permission_selection_and_retained_epoch_prefix(
                     m for m in last.messages if m.role is MessageRole.TOOL_RESULT
                 ]
                 assert len(tool_messages) == 1
-                observation = decode_tool_result_observation(
+                observation = _native_fields(
                     text_part_values(tool_messages[0].content)[0]
                 )
-                assert observation["result_state"] == "PERMISSION_DENIED"
+                assert observation["meta"]["status"] == "ERROR"
                 assert session._code_mode.snapshot_cell_index() == ()
         finally:
             await core.shutdown()

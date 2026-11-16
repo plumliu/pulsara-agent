@@ -1,7 +1,7 @@
 from __future__ import annotations
 from tests.support.model_config import scheduled_task_service
 
-from pulsara_agent.identity import random_id
+from pulsara_agent.identity import random_id, derive_id
 
 from tests.support.model_config import frozen_test_prompt
 import asyncio
@@ -76,7 +76,6 @@ from pulsara_agent.model_input.contracts import (
 from pulsara_agent.primitives.context import FrozenJsonObjectFact, freeze_json
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.plan_workflow import (
-    PlanApprovedMaterializationDisposition,
     PlanDraftDecision,
     PlanHandoffKind,
     PlanQuestionAnswerKind,
@@ -243,7 +242,7 @@ def _commit_plan_batch(
     for block in blocks:
         is_selected_question = (
             block.tool_call_id == selected_call_id
-            and control_kind is PlanToolControlKind.QUESTION
+            and control_kind in {PlanToolControlKind.QUESTION, PlanToolControlKind.DRAFT}
         )
         calls.append(
             PreparedPlanBatchCall(
@@ -305,7 +304,7 @@ def _open_user_plan(repository, lease, *, resume=PermissionMode.ACCEPT_EDITS):
         lease.guard,
         command_id=_id("command"),
         workflow_id=workflow_id,
-        entry_reason="plan before implementation",
+
         resume_permission_mode=resume,
         occurred_at=_now(),
         actor_id="user:test",
@@ -316,7 +315,7 @@ def _open_user_plan(repository, lease, *, resume=PermissionMode.ACCEPT_EDITS):
 
 def _runner_plan_batch_stream() -> list[object]:
     plan_arguments = json.dumps(
-        {"reason": "inspect before changing files"},
+        {},
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -603,7 +602,7 @@ def test_round4_agent_enter_batch_cancels_every_sibling_before_dispatch(
         workspace_id=workspace_id,
         turn_id=origin_turn_id,
         selected_tool_name="enter_plan",
-        selected_arguments={"reason": "need a plan"},
+        selected_arguments={},
         workflow_id=workflow_id,
         expected_workflow_revision=None,
         sibling_before=sibling_before,
@@ -659,7 +658,7 @@ def test_k3_fresh_plan_result_and_started_continuation_commit_atomically(
         workspace_id=workspace_id,
         turn_id=origin_turn_id,
         selected_tool_name="enter_plan",
-        selected_arguments={"reason": "quote result and continuation together"},
+        selected_arguments={},
         workflow_id=_id("plan"),
         expected_workflow_revision=None,
         sibling_before=True,
@@ -731,7 +730,7 @@ def test_round4_plan_batch_confirmation_rejects_every_exact_identity_drift(
         workspace_id=workspace_id,
         turn_id=origin_turn_id,
         selected_tool_name="enter_plan",
-        selected_arguments={"reason": "exact ACK confirmation"},
+        selected_arguments={},
         workflow_id=_id("plan"),
         expected_workflow_revision=None,
     )
@@ -747,7 +746,7 @@ def test_round4_plan_batch_confirmation_rejects_every_exact_identity_drift(
     if corruption_surface == "assistant_arguments":
         _admin_corrupt(
             stage2_migrated_postgres_database,
-            "UPDATE pulsara_v3.assistant_message_blocks "
+            "UPDATE pulsara_v3.content_parts "
             "SET tool_arguments = %s::jsonb "
             "WHERE session_id = %s AND id = %s",
             (
@@ -757,20 +756,9 @@ def test_round4_plan_batch_confirmation_rejects_every_exact_identity_drift(
             ),
         )
     elif corruption_surface == "result_content":
-        corrupted = InlineContent.from_bytes(b'{"status":"corrupt"}')
-        _admin_corrupt(
-            stage2_migrated_postgres_database,
-            "UPDATE pulsara_v3.transcript_entries "
-            "SET inline_content = %s, content_digest = %s, content_size = %s "
-            "WHERE session_id = %s AND id = %s",
-            (
-                corrupted.canonical_bytes,
-                corrupted.digest,
-                corrupted.size,
-                candidate.session_id,
-                selected.result_entry_id,
-            ),
-        )
+        _admin_corrupt(stage2_migrated_postgres_database,
+            "UPDATE pulsara_v3.content_parts SET inline_value=%s WHERE session_id=%s AND entry_id=%s AND type='text'",
+            (b"corrupted result", candidate.session_id, selected.result_entry_id))
     elif corruption_surface == "result_event":
         _admin_corrupt(
             stage2_migrated_postgres_database,
@@ -786,9 +774,9 @@ def test_round4_plan_batch_confirmation_rejects_every_exact_identity_drift(
     elif corruption_surface == "workflow_identity":
         _admin_corrupt(
             stage2_migrated_postgres_database,
-            "UPDATE pulsara_v3.plan_workflows SET entry_reason = %s "
+            "UPDATE pulsara_v3.plan_workflows SET resume_permission_mode = %s "
             "WHERE session_id = %s AND id = %s",
-            ("different reason", candidate.session_id, candidate.workflow_id),
+            ("read-only", candidate.session_id, candidate.workflow_id),
         )
     else:
         assert candidate.continuation_context_binding_revision_id is not None
@@ -829,7 +817,7 @@ def test_round4_plan_question_confirmation_rejects_binding_drift(
         selected_arguments={
             "question": "Which exact path?",
             "options": [],
-            "allow_free_text": True,
+
         },
         workflow_id=workflow_id,
         expected_workflow_revision=1,
@@ -940,7 +928,7 @@ def test_round4_runner_plan_barrier_prevents_earlier_sibling_dispatch(
                     {"label": "same", "description": "first"},
                     {"label": "same", "description": "second"},
                 ],
-                "allow_free_text": True,
+
             },
             "INVALID_ARGUMENTS",
         ),
@@ -948,7 +936,7 @@ def test_round4_runner_plan_barrier_prevents_earlier_sibling_dispatch(
             {
                 "question": "Choose a path",
                 "options": [],
-                "allow_free_text": True,
+
             },
             "TOOL_UNAVAILABLE",
         ),
@@ -1077,7 +1065,7 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
                 {"label": "A", "description": "safe", "recommended": True},
                 {"label": "B", "description": "fast", "recommended": False},
             ],
-            "allow_free_text": True,
+
         },
         workflow_id=workflow_id,
         expected_workflow_revision=1,
@@ -1182,17 +1170,13 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
     )
     assert answered.workflow_revision == 3
     from pulsara_agent.conversation_kernel.tool_outputs import PostgresToolOutputReadPort
-    answer_body = PostgresToolOutputReadPort(
+    answer_value = PostgresToolOutputReadPort(
         repository.connection_provider, session_id=lease.guard.session_id,
         workspace_id=workspace_id,
-    ).read_body({"kind": "SESSION_ENTRY", "entry_id": answer_entry_id})
-    expected_answer = {
-        "status": "success", "plan_control": "QUESTION_ANSWERED",
-        "answer": {"kind": "OPTION", "ordinal": 0, "label": "A"},
-    }
-    assert json.loads(answer_body.content) == expected_answer
-    assert dict(answer_body.required_facts) == expected_answer
-    assert b"interaction_id" not in answer_body.content
+    ).read_result({"kind":"SESSION_ENTRY","entry_id":answer_entry_id}).value
+    assert dict(answer_value["meta"]) == {"status":"SUCCESS"}
+    assert answer_value["content"][0]["type"] == "text"
+    assert answer_value["content"][0]["value"] == "用户选择：A"
 
     first_plan = "1. inspect\n2. implement 🙂\n3. verify"
     draft_batch = _commit_plan_batch(
@@ -1218,7 +1202,7 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
         == opened_draft
     )
     assert opened_draft.draft is not None
-    assert opened_draft.origin_turn_completed
+    assert not opened_draft.origin_turn_completed
     chunk = repository.read_plan_draft_text_chunk(
         session_id=lease.guard.session_id,
         interaction_id=str(opened_draft.interaction_id),
@@ -1231,9 +1215,7 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
     assert chunk.next_offset_utf8_bytes > 0
 
     revise_command = _id("command")
-    revise_turn = _id("turn")
-    revise_entry = _id("entry")
-    revise_revision = _id("binding")
+    revise_turn = turn_id
     revised = repository.resolve_plan_draft_review(
         lease.guard,
         command_id=revise_command,
@@ -1242,9 +1224,9 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
         interaction_id=str(opened_draft.interaction_id),
         decision=PlanDraftDecision.REVISE,
         canonical_prompt=frozen_test_prompt("please add rollback"),
-        continuation_turn_id=revise_turn,
-        continuation_entry_id=revise_entry,
-        continuation_context_binding_revision_id=revise_revision,
+        continuation_turn_id=None,
+        continuation_entry_id=None,
+        continuation_context_binding_revision_id=None,
         occurred_at=_now(),
         actor_id="user:test",
         deadline_monotonic=monotonic() + 30,
@@ -1254,25 +1236,13 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
         RunPermissionOverlay.PLAN_READ_ONLY
     )
 
-    revision_cut = repository.prepare_provider_input_cut(
-        lease.guard, turn_id=revise_turn, deadline_monotonic=monotonic() + 30,
-    )
-    revision_facts = CanonicalProviderInputReader(
-        repository.connection_provider
-    ).read_frozen_compile_snapshot(revision_cut, deadline_monotonic=monotonic() + 30)
-    revision_item = next(item for item in revision_facts.canonical_input.items
-                         if item.source_entry_id == revise_entry)
-    assert revision_item.item_kind is FrozenProviderInputItemKind.USER
-    assert revision_item.input_origin.value == "HUMAN_MESSAGE"
-    assert tuple(part.text for part in revision_item.content) == ("please add rollback",)
-    snapshot = CanonicalProtocolReader(repository.connection_provider).snapshot(
-        session_id=lease.guard.session_id, maximum_entries=64,
-        maximum_control_items=64, deadline_monotonic=monotonic() + 30,
-    )
-    projected_revision = next(entry for entry in snapshot.entries if entry.entry_id == revise_entry)
-    assert projected_revision.input_source.command_id == revise_command
-    assert projected_revision.input_source.queue_item_id == ""
-    assert projected_revision.input_source.delivery_mode == "NEW_TURN"
+    assert revised.continuation_turn_id is None
+    feedback_id = derive_id("queue", "plan-review-feedback", opened_draft.interaction_id, revise_command)
+    from pulsara_agent.conversation_kernel.content_parts import read_content_parts
+    with repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row, deadline_monotonic=monotonic()+30) as connection:
+        feedback = read_content_parts(connection, queue_item_id=feedback_id)
+        assert [(part.type,part.value) for part in feedback] == [("text","please add rollback")]
 
     second_plan = first_plan + "\n4. rollback"
     second_draft_batch = _commit_plan_batch(
@@ -1368,9 +1338,6 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
     assert (
         facts.approved_plan_materialization_fact.exact_plan_utf8 == second_plan.encode()
     )
-    assert facts.approved_plan_materialization_fact.disposition is (
-        PlanApprovedMaterializationDisposition.PIN_EXISTING_CANONICAL_BLOCK
-    )
     continuation_items = tuple(
         item
         for item in facts.canonical_input.items
@@ -1381,9 +1348,8 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
     )
     assert len(continuation_items) == 1
 
-    # A legal adopted snapshot may cover the original exit_plan block.  The
-    # same RR reader must then select the other closed disposition and carry
-    # the exact body for one compiler-owned materialization.
+    # Approved plan text remains complete when an adopted snapshot covers
+    # the original exit_plan tool call.
     with repository.connection_provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
         row_factory=dict_row,
@@ -1495,9 +1461,6 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
         materialized_cut, deadline_monotonic=monotonic() + 30
     )
     assert materialized_facts.approved_plan_materialization_fact is not None
-    assert materialized_facts.approved_plan_materialization_fact.disposition is (
-        PlanApprovedMaterializationDisposition.MATERIALIZE_REFERENCED_BLOCK
-    )
     assert (
         materialized_facts.approved_plan_materialization_fact.exact_plan_utf8
         == second_plan.encode()
@@ -1565,163 +1528,55 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
 
 
 @pytest.mark.parametrize("first_disposition", ["CONSUMED", "CANCELLED"])
-def test_round4_draft_cancel_handoff_is_delivery_owned_exactly_once(
-    stage2_migrated_postgres_database,
-    first_disposition: str,
-) -> None:
+def test_cancelled_review_keeps_queued_inputs_independent_without_a_handoff(
+    stage2_migrated_postgres_database, first_disposition,
+):
     repository = _repository(stage2_migrated_postgres_database)
     lease = _lease(repository)
-    workspace_id = repository.read_session_workspace_id(
-        lease.guard, deadline_monotonic=monotonic() + 30
-    )
+    workspace_id = repository.read_session_workspace_id(lease.guard, deadline_monotonic=monotonic()+30)
     workflow_id, _ = _open_user_plan(repository, lease)
     origin_turn_id, _ = _start_root(repository, lease)
-    draft_batch = _commit_plan_batch(
-        repository,
-        lease,
-        workspace_id=workspace_id,
-        turn_id=origin_turn_id,
-        selected_tool_name="exit_plan",
-        selected_arguments={"plan": "one immutable plan"},
-        workflow_id=workflow_id,
-        expected_workflow_revision=1,
-    )
-    opened = repository.accept_plan_tool_batch(
-        lease.guard,
-        candidate=draft_batch.candidate,
-        deadline_monotonic=monotonic() + 30,
-    )
-    interaction_id = str(opened.interaction_id)
-    cancelled = repository.resolve_plan_draft_review(
-        lease.guard,
-        command_id=_id("command"),
-        workflow_id=workflow_id,
-        expected_workflow_revision=2,
-        interaction_id=interaction_id,
-        decision=PlanDraftDecision.CANCEL,
-        canonical_prompt=None,
-        continuation_turn_id=None,
-        continuation_entry_id=None,
-        continuation_context_binding_revision_id=None,
-        occurred_at=_now(),
-        actor_id="user:test",
-        deadline_monotonic=monotonic() + 30,
-    )
-    assert cancelled.handoff_created_at_commit
-    first_queue_id = _id("queue")
-    enqueue_test_prompt(
-        repository,
-        lease.guard,
-        command_id=_id("command"),
-        queue_item_id=first_queue_id,
-        client_submission_id=random_id("command"),
-        delivery_mode=PromptDeliveryMode.NEW_TURN,
-        target_turn_id=None,
-        permission_snapshot_id=_id("permission"),
-        requested_permission_mode=PermissionMode.READ_ONLY,
-        model_call_binding=test_model_binding(test_model_runtime()),
-        content=FrozenPromptContent.text('first real prompt'),
-        occurred_at=_now(),
-        actor_id="user:test",
-        deadline_monotonic=monotonic() + 30,
-    )
-    with repository.connection_provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        row_factory=dict_row,
-        deadline_monotonic=monotonic() + 30,
-    ) as connection:
-        queued = connection.execute(
-            "SELECT * FROM pulsara_v3.prompt_queue_items WHERE id = %s",
-            (first_queue_id,),
-        ).fetchone()
-    assert queued["pending_plan_handoff_workflow_id"] is None
-    assert queued["permission_snapshot_id"] is None
-    assert queued["requested_permission_mode"] == PermissionMode.READ_ONLY.value
-
-    if first_disposition == "CONSUMED":
-        candidate = repository.prepare_prompt_head_consumption(
-            session_id=lease.guard.session_id,
-            occurred_at=_now(),
-            actor_id="runtime:test",
-            deadline_monotonic=monotonic() + 30,
-        )
-        assert candidate is not None
-        confirmation = repository.consume_prepared_prompt_head(
-            lease.guard,
-            candidate=candidate,
-            deadline_monotonic=monotonic() + 30,
-        )
-        assert confirmation is not None
-        assert confirmation.kind is QueuedRootTurnAdmissionConfirmationKind.FULL
-        accepted = confirmation.accepted
-        assert accepted is not None
-        with repository.connection_provider.connection(
-            lane=PostgresConnectionLane.INSPECTOR,
-            row_factory=dict_row,
-            deadline_monotonic=monotonic() + 30,
-        ) as connection:
-            entry = connection.execute(
-                "SELECT * FROM pulsara_v3.transcript_entries WHERE id = %s",
-                (accepted.entry_id,),
-            ).fetchone()
-        assert entry["source_plan_workflow_id"] == workflow_id
-        assert entry["source_plan_interaction_id"] == interaction_id
-        assert entry["source_plan_handoff_kind"] == "CANCELLED_PLAN"
-        repository.interrupt_turn(
-            lease.guard,
-            turn_id=accepted.turn_id,
-            reason="TEST_BOUNDARY",
-            actor_id="test",
-            occurred_at=_now(),
-            deadline_monotonic=monotonic() + 30,
-        )
-    else:
-        assert (
-            repository.cancel_prompt(
-                lease.guard,
-                queue_item_id=first_queue_id,
-                occurred_at=_now(),
-                actor_id="user:test",
-                deadline_monotonic=monotonic() + 30,
-            )
-            == "CANCELLED"
-        )
-
-    second_queue_id = _id("queue")
-    enqueue_test_prompt(
-        repository,
-        lease.guard,
-        command_id=_id("command"),
-        queue_item_id=second_queue_id,
-        client_submission_id=random_id("command"),
-        delivery_mode=PromptDeliveryMode.NEW_TURN,
-        target_turn_id=None,
-        permission_snapshot_id=_id("permission"),
-        requested_permission_mode=PermissionMode.ACCEPT_EDITS,
-        model_call_binding=test_model_binding(test_model_runtime()),
-        content=FrozenPromptContent.text('second real prompt'),
-        occurred_at=_now(),
-        actor_id="user:test",
-        deadline_monotonic=monotonic() + 30,
-    )
-    with repository.connection_provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        row_factory=dict_row,
-        deadline_monotonic=monotonic() + 30,
-    ) as connection:
-        second = connection.execute(
-            "SELECT * FROM pulsara_v3.prompt_queue_items WHERE id = %s",
-            (second_queue_id,),
-        ).fetchone()
-    assert second["pending_plan_handoff_workflow_id"] is None
-    next_candidate = repository.prepare_prompt_head_consumption(
-        session_id=lease.guard.session_id, occurred_at=_now(), actor_id="runtime:test",
-        deadline_monotonic=monotonic()+30,
-    )
-    assert next_candidate is not None
-    assert next_candidate.pending_plan_handoff_workflow_id == (
-        workflow_id if first_disposition == "CANCELLED" else None
-    )
+    batch = _commit_plan_batch(repository, lease, workspace_id=workspace_id, turn_id=origin_turn_id,
+        selected_tool_name="exit_plan", selected_arguments={"plan":"one immutable plan"},
+        workflow_id=workflow_id, expected_workflow_revision=1)
+    opened = repository.accept_plan_tool_batch(lease.guard, candidate=batch.candidate, deadline_monotonic=monotonic()+30)
+    cancelled = repository.resolve_plan_draft_review(lease.guard, command_id=_id("command"), workflow_id=workflow_id,
+        expected_workflow_revision=2, interaction_id=opened.interaction_id, decision=PlanDraftDecision.CANCEL,
+        canonical_prompt=None, continuation_turn_id=None, continuation_entry_id=None,
+        continuation_context_binding_revision_id=None, occurred_at=_now(),actor_id="user:test", deadline_monotonic=monotonic()+30)
+    assert not cancelled.handoff_created_at_commit and cancelled.continuation_turn_id is None
+    queue_id = _id("queue")
+    def enqueue(queue_id):
+        enqueue_test_prompt(repository, lease.guard, command_id=_id("command"), queue_item_id=queue_id,
+            client_submission_id=random_id("command"), delivery_mode=PromptDeliveryMode.NEW_TURN,
+            target_turn_id=None, permission_snapshot_id=_id("permission"), requested_permission_mode=PermissionMode.READ_ONLY,
+            model_call_binding=test_model_binding(test_model_runtime()), content=FrozenPromptContent.text("ordinary next input"),
+            occurred_at=_now(),actor_id="user:test",deadline_monotonic=monotonic()+30)
+    enqueue(queue_id)
+    with repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,row_factory=dict_row,
+            deadline_monotonic=monotonic()+30) as connection:
+        row=connection.execute("SELECT * FROM pulsara_v3.prompt_queue_items WHERE id=%s",(queue_id,)).fetchone()
+        assert row["pending_plan_handoff_workflow_id"] is None
+        assert connection.execute("SELECT status FROM pulsara_v3.turns WHERE id=%s",(origin_turn_id,)).fetchone()["status"] == "RUNNING"
+    if first_disposition == "CANCELLED":
+        repository.cancel_prompt(lease.guard, queue_item_id=queue_id,
+            occurred_at=_now(),actor_id="user:test",deadline_monotonic=monotonic()+30)
+        queue_id = _id("queue")
+        enqueue(queue_id)
+    from pulsara_agent.conversation_kernel.repository import AssistantTextBlock
+    repository.commit_assistant_message(lease.guard,
+        cut=repository.prepare_provider_input_cut(lease.guard,turn_id=origin_turn_id,deadline_monotonic=monotonic()+30),
+        entry_id=_id("entry"),blocks=(AssistantTextBlock(_id("block"),InlineContent.from_bytes(b"planning paused")),),
+        complete_turn=True,occurred_at=_now(),actor_id="model:test",deadline_monotonic=monotonic()+30)
+    prepared=repository.prepare_prompt_head_consumption(session_id=lease.guard.session_id,
+        occurred_at=_now(),actor_id="runtime:test",deadline_monotonic=monotonic()+30)
+    assert prepared is not None and prepared.queue_item_id == queue_id
+    consumed=repository.consume_prepared_prompt_head(lease.guard,candidate=prepared,deadline_monotonic=monotonic()+30)
+    assert consumed.kind is QueuedRootTurnAdmissionConfirmationKind.FULL
+    with repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,row_factory=dict_row,
+            deadline_monotonic=monotonic()+30) as connection:
+        entry=connection.execute("SELECT * FROM pulsara_v3.transcript_entries WHERE id=%s",(consumed.accepted.entry_id,)).fetchone()
+        assert entry["source_plan_interaction_id"] is None and entry["source_plan_handoff_kind"] is None
 
 
 def test_round4_aborted_plan_question_lowers_without_effect_unknown(
@@ -1743,7 +1598,7 @@ def test_round4_aborted_plan_question_lowers_without_effect_unknown(
         selected_arguments={
             "question": "Continue?",
             "options": [],
-            "allow_free_text": True,
+
         },
         workflow_id=workflow_id,
         expected_workflow_revision=1,

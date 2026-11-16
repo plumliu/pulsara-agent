@@ -1,9 +1,9 @@
 """Observable management contracts for the GUI/Host capability boundary."""
 
-from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
-from pulsara_agent.identity import random_id as _new_management_call_id
-
-from pulsara_agent.identity import derive_id as _capability_page_id
+from tests.support.capability_management_targets import (
+    plugin_target,
+    hook_target,
+)
 
 
 import asyncio
@@ -24,9 +24,6 @@ from pulsara_agent.conversation_kernel.capability_management_execution import (
 from pulsara_agent.primitives.context import thaw_json
 
 
-_CAPABILITY_PAGE_BUDGET = ToolResultPageBudget(_capability_page_id("call", "capability-query-test", __name__))
-
-
 def skill_source(tmp_path, name="boundary-example"):
     source = tmp_path / "download" / name
     source.mkdir(parents=True)
@@ -40,22 +37,27 @@ def skill_source(tmp_path, name="boundary-example"):
 async def invoke(service, **arguments):
     return await CapabilityManagementCall(
         service, await service.prepare(arguments)
-    ).execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
+    ).execute()
 
 
 async def query_sources(service, **arguments):
     from pulsara_agent.conversation_kernel.capability_query import CapabilitySourceQuery
-    from pulsara_agent.capability.source_query import parse_query
     from pulsara_agent.model_input.contracts import ModelInputScopeKind
-    return await CapabilitySourceQuery(service, runtime=None, plan=None, scope=ModelInputScopeKind.ROOT, fits_result=_CAPABILITY_PAGE_BUDGET.fits).execute(
-        parse_query(arguments))
+
+    return await CapabilitySourceQuery(
+        service, runtime=None, scope=ModelInputScopeKind.ROOT, inspect_tool=None
+    ).execute(arguments)
+
+
+def records(value):
+    return [part["value"] for part in value["content"] if part["type"] == "object"]
 
 
 async def inspect_hook(service, *, scope, source_kind, plugin_id=None):
-    target = {"kind": "HOOK_SOURCE", "scope": scope, "source_kind": source_kind}
-    if plugin_id is not None:
-        target["plugin_id"] = plugin_id
-    return await query_sources(service, target=target)
+    value = await query_sources(
+        service, kind="HOOK", target=hook_target(service, scope=scope, plugin=plugin_id)
+    )
+    return records(value)[0]
 
 
 @pytest.mark.parametrize("scope", ["USER", "WORKSPACE"])
@@ -68,63 +70,71 @@ def test_skill_lifecycle_keeps_source_and_uses_frozen_target(
         original = (source / "SKILL.md").read_bytes()
         monkeypatch.chdir(source)
         monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "foreign-home"))
-        args = dict(action="INSTALL_LOOSE_SKILL", scope=scope, source_path=str(source))
+        args = dict(
+            action="INSTALL_LOOSE_SKILL",
+            scope=scope,
+            target={"kind": "PATH", "path": str(source)},
+        )
         prepared = await service.prepare(args)
         assert not (service.workspace_root / ".pulsara").exists()
-        result = await CapabilityManagementCall(service, prepared).execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
-        assert result["status"] == "APPLIED"
+        result = await CapabilityManagementCall(service, prepared).execute()
+        assert result.state == "SUCCESS"
         target_root = (
             tmp_path / "private"
             if scope == "USER"
             else service.workspace_root / ".pulsara"
         )
         skill = target_root / "skills" / "boundary-example" / "SKILL.md"
-        assert Path(result["current"]["skill_root"]) == skill.parent
+        assert (
+            Path(result.business_value.public_fields["target"]["skill_path"]) == skill
+        )
         assert (skill.parent / "reference.txt").read_text() == "preserved resource"
         assert (source / "SKILL.md").read_bytes() == original
         assert not (tmp_path / "foreign-home").exists()
-        assert (await invoke(service, **args))["status"] == "CONFLICT"
-        inspected = await query_sources(service, kind="SKILL", scope=scope, source_kind="LOCAL")
-        assert inspected["completeness"] == "COMPLETE"
-        assert inspected["items"][0]["target"]["skill_path"] == str(skill)
-        assert result["target"]["skill_path"] == str(skill)
+        assert (await invoke(service, **args)).state == "APPLICATION_ERROR"
+        inspected = await query_sources(service, kind="SKILL", scope=scope)
+        assert inspected["meta"]["status"] == "SUCCESS"
+        assert records(inspected)[0]["target"]["skill_path"] == str(skill)
+        assert result.business_value.public_fields["target"]["skill_path"] == str(skill)
         enabled = await invoke(
             service,
-            action="SET_LOOSE_SKILL_ENABLED", enabled=False, target={"kind":'SKILL', 'skill_path':str(skill)},
+            action="SET_LOOSE_SKILL_ENABLED",
+            enabled=False,
+            target={"kind": "SKILL", "skill_path": str(skill)},
         )
-        assert enabled["status"] == "APPLIED"
-        inspected = await query_sources(service, target={"kind":"SKILL", "skill_path":str(skill)})
-        assert inspected["enabled"] is False and inspected["selected"] is False
+        assert enabled.state == "SUCCESS"
+        inspected = await query_sources(
+            service, kind="SKILL", target={"kind": "SKILL", "skill_path": str(skill)}
+        )
+        assert "已禁用" in records(inspected)[0]["status"]
         removed = await invoke(
-            service, action="REMOVE_LOOSE_SKILL", target={"kind":'SKILL', 'skill_path':str(skill)}
+            service,
+            action="REMOVE_LOOSE_SKILL",
+            target={"kind": "SKILL", "skill_path": str(skill)},
         )
-        assert removed["status"] == "APPLIED" and not skill.exists()
+        assert removed.state == "SUCCESS" and not skill.exists()
         await service.mcp.aclose()
 
     asyncio.run(run())
 
 
-def test_install_metadata_override_uses_native_candidate_and_preserves_source(tmp_path):
+def test_skill_install_uses_source_metadata_and_does_not_fill_missing_fields(tmp_path):
     async def run():
         service = preparation(tmp_path)
         source = skill_source(tmp_path)
         (source / "SKILL.md").write_text(
-            "---\nname: boundary-example\n---\n# Imported Skill\n\nInstructions.\n"
+            "---\nname: boundary-example\n---\nInstructions.\n"
         )
-        result = await invoke(
-            service,
-            action="INSTALL_LOOSE_SKILL",
-            scope="WORKSPACE",
-            source_path=str(source),
-            name="imported",
-            description="Native normalization.",
-        )
-        assert result["status"] == "APPLIED"
-        assert "description:" not in (source / "SKILL.md").read_text()
-        assert (
-            "name: imported"
-            in (Path(result["current"]["skill_root"]) / "SKILL.md").read_text()
-        )
+        original = (source / "SKILL.md").read_bytes()
+        with pytest.raises(ValueError, match="description"):
+            await invoke(
+                service,
+                action="INSTALL_LOOSE_SKILL",
+                scope="WORKSPACE",
+                target={"kind": "PATH", "path": str(source)},
+            )
+        assert (source / "SKILL.md").read_bytes() == original
+        assert not (service.workspace_root / ".pulsara/skills").exists()
         await service.mcp.aclose()
 
     asyncio.run(run())
@@ -136,43 +146,47 @@ def test_inventory_preserves_shadowed_invalid_and_distinct_removal_eligibility(
     async def run():
         service = preparation(tmp_path)
         for parent in (
-            service.workspace_root / ".pulsara" / "skills",
-            service.workspace_root / ".agents" / "skills",
+            service.workspace_root / ".pulsara/skills",
+            service.workspace_root / ".agents/skills",
         ):
             source = parent / "same-name"
             source.mkdir(parents=True)
             (source / "SKILL.md").write_text(
                 "---\nname: same-name\ndescription: Example.\n---\nBody\n"
             )
-        invalid = service.workspace_root / ".pulsara" / "skills" / "invalid"
+        invalid = service.workspace_root / ".pulsara/skills/invalid"
         invalid.mkdir()
         (invalid / "SKILL.md").write_text("invalid")
-        observed = await query_sources(service, kind="SKILL", scope="WORKSPACE", source_kind="LOCAL")
-        items = [await query_sources(service, target=row["target"]) for row in observed["items"] if row["name"] == "same-name"]
-        assert len(items) == 2 and {item["selected"] for item in items} == {False, True}
-        agent = next(item for item in items if ".agents" in item["skill_path"])
-        assert agent["enable_eligible"] and not agent["remove_eligible"]
-        invalid_item = next(row for row in observed["items"] if row["name"] == "invalid")
-        assert invalid_item["target"]["skill_path"] == str(invalid / "SKILL.md")
-        assert observed["completeness"] == "PARTIAL"
+        observed = await query_sources(service, kind="SKILL", scope="WORKSPACE")
+        items = [row for row in records(observed) if row.get("name") == "same-name"]
+        assert len(items) == 2 and {"当前已选择。", "当前未选择。"} <= {
+            row["status"] for row in items
+        }
+        agent = next(row for row in items if ".agents" in row["target"]["skill_path"])
+        assert any(
+            row["target"]["skill_path"] == str(invalid / "SKILL.md")
+            and row["status"] == "定义无效。"
+            for row in records(observed)
+        )
         assert (
             await invoke(
                 service,
-                action="SET_LOOSE_SKILL_ENABLED", enabled=False, target={"kind":'SKILL', 'skill_path':agent["skill_path"]},
+                action="SET_LOOSE_SKILL_ENABLED",
+                enabled=False,
+                target=agent["target"],
             )
-        )["status"] == "APPLIED"
+        ).state == "SUCCESS"
         with pytest.raises(ValueError):
             await service.prepare(
-                dict(
-                    action="REMOVE_LOOSE_SKILL", target={"kind":'SKILL', 'skill_path':agent["skill_path"]},
-                )
+                {"action": "REMOVE_LOOSE_SKILL", "target": agent["target"]}
             )
         assert (
             await invoke(
                 service,
-                action="REMOVE_LOOSE_SKILL", target={"kind":'SKILL', 'skill_path':str(invalid / "SKILL.md")},
+                action="REMOVE_LOOSE_SKILL",
+                target={"kind": "SKILL", "skill_path": str(invalid / "SKILL.md")},
             )
-        )["status"] == "APPLIED"
+        ).state == "SUCCESS"
         await service.mcp.aclose()
 
     asyncio.run(run())
@@ -212,7 +226,9 @@ def test_hook_trust_requires_full_review_then_future_source_adopts_trust(tmp_pat
     async def run():
         service = preparation(tmp_path)
         write_hook(service)
-        args = dict(action="TRUST_HOOK_SOURCE", target={"kind":'HOOK_SOURCE', 'scope':"WORKSPACE", 'source_kind':"LOCAL"})
+        args = dict(
+            action="TRUST_HOOK_SOURCE", target=hook_target(service, scope="WORKSPACE")
+        )
         prepared = await service.prepare(args)
         assert prepared.user_inputs == ("hook_source_review",)
         assert (
@@ -232,19 +248,25 @@ def test_hook_trust_requires_full_review_then_future_source_adopts_trust(tmp_pat
         values = await form.prepare_submission({"hook_review_accepted": True})
         assert not service.hooks.discover().source_snapshots[-1].runnable
         call.accept(AcceptedCapabilityFormSubmission(values))
-        assert (await call.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call"))))["status"] == "APPLIED"
+        assert (await call.execute()).state == "SUCCESS"
         assert service.hooks.discover().source_snapshots[-1].runnable
         await invoke(
             service,
-            action="SET_HOOK_SOURCE_ENABLED", enabled=False, target={"kind":'HOOK_SOURCE', 'scope':"WORKSPACE", 'source_kind':"LOCAL"},
+            action="SET_HOOK_SOURCE_ENABLED",
+            enabled=False,
+            target=hook_target(service, scope="WORKSPACE"),
         )
         assert not service.hooks.discover().source_snapshots[-1].runnable
         await invoke(
-            service, action="REVOKE_HOOK_TRUST", target={"kind":'HOOK_SOURCE', 'scope':"WORKSPACE", 'source_kind':"LOCAL"}
+            service,
+            action="REVOKE_HOOK_TRUST",
+            target=hook_target(service, scope="WORKSPACE"),
         )
         await invoke(
             service,
-            action="SET_HOOK_SOURCE_ENABLED", enabled=True, target={"kind":'HOOK_SOURCE', 'scope':"WORKSPACE", 'source_kind':"LOCAL"},
+            action="SET_HOOK_SOURCE_ENABLED",
+            enabled=True,
+            target=hook_target(service, scope="WORKSPACE"),
         )
         assert not service.hooks.discover().source_snapshots[-1].runnable
         await service.mcp.aclose()
@@ -260,7 +282,10 @@ def test_hook_review_never_retargets_changed_definitions(tmp_path, after_submiss
         call = CapabilityManagementCall(
             service,
             await service.prepare(
-                dict(action="TRUST_HOOK_SOURCE", target={"kind":'HOOK_SOURCE', 'scope':"WORKSPACE", 'source_kind':"LOCAL"})
+                dict(
+                    action="TRUST_HOOK_SOURCE",
+                    target=hook_target(service, scope="WORKSPACE"),
+                )
             ),
         )
         form = call.form("review")
@@ -273,7 +298,7 @@ def test_hook_review_never_retargets_changed_definitions(tmp_path, after_submiss
         path.write_text(json.dumps(hook_document("printf changed")))
         with pytest.raises(McpManagementConflict):
             if after_submission:
-                await call.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
+                await call.execute()
             else:
                 await form.prepare_submission({"hook_review_accepted": True})
         assert not service.hooks.discover().source_snapshots[-1].runnable
@@ -288,6 +313,8 @@ def test_user_hook_inspection_does_not_read_project_and_never_enables_plugin(
     async def run():
         service = preparation(tmp_path)
         write_hook(service, {"invalid": "project config"})
+        service.hooks.user_config_path.parent.mkdir(exist_ok=True, parents=True)
+        service.hooks.user_config_path.write_text(json.dumps(hook_document()))
         await install_plugin(service, tmp_path)
         original = service.hooks._read_source
 
@@ -296,10 +323,9 @@ def test_user_hook_inspection_does_not_read_project_and_never_enables_plugin(
             return original(**kwargs)
 
         monkeypatch.setattr(service.hooks, "_read_source", user_only)
-        result = await query_sources(service, kind="HOOK_SOURCE", scope="USER", source_kind="LOCAL")
-        assert result["completeness"] == "COMPLETE" and len(result["items"]) == 1
-        plugin = await service._plugin(None, "example")
-        assert not plugin.enabled
+        result = await query_sources(service, kind="HOOK", scope="USER")
+        assert result["meta"]["status"] == "SUCCESS" and len(records(result)) == 1
+        assert not (await service._plugin(None, "example")).enabled
         await service.mcp.aclose()
 
     asyncio.run(run())
@@ -317,9 +343,12 @@ def test_transient_workspace_rejects_project_capability_scope(tmp_path, action):
         service = preparation(tmp_path)
         service.workspace_kind = "transient"
         fields = (
-            {"scope": "WORKSPACE", "source_path": str(skill_source(tmp_path))}
+            {
+                "scope": "WORKSPACE",
+                "target": {"kind": "PATH", "path": str(skill_source(tmp_path))},
+            }
             if action == "INSTALL_LOOSE_SKILL"
-            else {"target": {"kind": "HOOK_SOURCE", "scope": "WORKSPACE", "source_kind": "LOCAL"}}
+            else {"target": hook_target(service, scope="WORKSPACE")}
             if action == "TRUST_HOOK_SOURCE"
             else {}
         )
@@ -347,11 +376,13 @@ def test_transient_workspace_rejects_project_capability_scope(tmp_path, action):
 )
 def test_hook_model_intent_is_closed_and_cannot_supply_review_authority(fields):
     with pytest.raises(ValueError):
-        parse_capability_management_intent({
-            "action": "TRUST_HOOK_SOURCE",
-            "target": {"kind": "HOOK_SOURCE", "scope": "USER", **{key: value for key, value in fields.items() if key in {"source_kind", "plugin_id"}}},
-            **{key: value for key, value in fields.items() if key not in {"source_kind", "plugin_id"}},
-        })
+        parse_capability_management_intent(
+            {
+                "action": "TRUST_HOOK_SOURCE",
+                "target": {"kind": "HOOK_SOURCE", "config_path": "/exact/hooks.json"},
+                **fields,
+            }
+        )
 
 
 def test_disabled_plugin_hook_full_inspection_trust_and_enable_are_separate(tmp_path):
@@ -365,17 +396,19 @@ def test_disabled_plugin_hook_full_inspection_trust_and_enable_are_separate(tmp_
             plugin_id="example",
         )
         source = observed
-        assert (
-            source["authorization"] == "UNTRUSTED" and source["selected"] is False
-        )
+        assert "尚未信任" in source["status"]
         assert source["definitions"][0]["event"] == "PreToolUse"
         assert source["definitions"][0]["command"]
-        assert "declaration_environment" not in source and "definition_digest" not in source
+        assert (
+            "declaration_environment" not in source
+            and "definition_digest" not in source
+        )
         call = CapabilityManagementCall(
             service,
             await service.prepare(
                 dict(
-                    action="TRUST_HOOK_SOURCE", target={"kind":'HOOK_SOURCE', 'scope':"USER", 'source_kind':"PLUGIN", 'plugin_id':"example"},
+                    action="TRUST_HOOK_SOURCE",
+                    target=hook_target(service, scope="USER", plugin="example"),
                 )
             ),
         )
@@ -385,7 +418,7 @@ def test_disabled_plugin_hook_full_inspection_trust_and_enable_are_separate(tmp_
                 await form.prepare_submission({"hook_review_accepted": True})
             )
         )
-        assert (await call.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call"))))["status"] == "APPLIED"
+        assert (await call.execute()).state == "SUCCESS"
         plugin = await service._plugin(None, "example")
         assert not plugin.enabled
         observed = await inspect_hook(
@@ -395,12 +428,14 @@ def test_disabled_plugin_hook_full_inspection_trust_and_enable_are_separate(tmp_
             plugin_id="example",
         )
         source = observed
-        assert source["authorization"] == "TRUSTED" and source["selected"] is False
+        assert "已信任" in source["status"]
         enable = CapabilityManagementCall(
             service,
             await service.prepare(
                 dict(
-                    action="SET_PLUGIN_ENABLED", enabled=True, target={"kind":'PLUGIN', 'scope':"USER", 'plugin_id':"example"},
+                    action="SET_PLUGIN_ENABLED",
+                    enabled=True,
+                    target=plugin_target(service, "example", scope="USER"),
                 )
             ),
         )
@@ -410,14 +445,14 @@ def test_disabled_plugin_hook_full_inspection_trust_and_enable_are_separate(tmp_
                 await form.prepare_submission({"enable_review_accepted": True})
             )
         )
-        assert (await enable.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call"))))["status"] == "APPLIED"
+        assert (await enable.execute()).state == "SUCCESS"
         observed = await inspect_hook(
             service,
             scope="USER",
             source_kind="PLUGIN",
             plugin_id="example",
         )
-        assert observed["authorization"] == "TRUSTED" and observed["selected"] is None
+        assert "已信任" in observed["status"]
         assert (await service._plugin(None, "example")).enabled
         await service.mcp.aclose()
 
@@ -434,7 +469,7 @@ def test_source_change_during_skill_confirmation_is_a_conflict(tmp_path):
                 dict(
                     action="INSTALL_LOOSE_SKILL",
                     scope="WORKSPACE",
-                    source_path=str(source),
+                    target={"kind": "PATH", "path": str(source)},
                 )
             ),
         )
@@ -456,7 +491,9 @@ def test_capability_refresh_has_one_argumentless_model_entry():
     from pulsara_agent.ports.tool_execution import thaw_tool_json_object
 
     entry = builtin_tool_catalog_entry("reload_capabilities")
-    validator = Draft202012Validator(thaw_tool_json_object(entry.descriptor.input_schema))
+    validator = Draft202012Validator(
+        thaw_tool_json_object(entry.descriptor.input_schema)
+    )
     assert validator.is_valid({})
     assert not validator.is_valid({"target": "hooks"})
     with pytest.raises(KeyError):
@@ -540,11 +577,13 @@ def test_skill_install_cancellation_signals_native_publisher_and_joins_exact_out
             monkeypatch.setattr(publisher, "_copy_source_to_stage", paused)
         prepared = await service.prepare(
             dict(
-                action="INSTALL_LOOSE_SKILL", scope="WORKSPACE", source_path=str(source)
+                action="INSTALL_LOOSE_SKILL",
+                scope="WORKSPACE",
+                target={"kind": "PATH", "path": str(source)},
             )
         )
         task = asyncio.create_task(
-            CapabilityManagementCall(service, prepared).execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
+            CapabilityManagementCall(service, prepared).execute()
         )
         try:
             assert await asyncio.to_thread(started.wait, 5)
@@ -557,7 +596,7 @@ def test_skill_install_cancellation_signals_native_publisher_and_joins_exact_out
         finally:
             release.set()
         target = service.workspace_root / ".pulsara" / "skills" / "boundary-example"
-        assert result["status"] == ("APPLIED" if published else "CANCELLED")
+        assert result.state == ("SUCCESS" if published else "CANCELLED")
         assert target.exists() is published
         assert not list(target.parent.glob(".pulsara-skill-install-*"))
         await service.mcp.aclose()
@@ -643,7 +682,7 @@ def test_refresh_abort_before_any_publication_preserves_predecessor():
     asyncio.run(run())
 
 
-def test_unavailable_native_hook_composition_remains_unknown_in_query(
+def test_hook_definition_query_is_independent_of_runtime_composition(
     tmp_path, monkeypatch
 ):
     import pulsara_agent.plugins.inspection as inspection
@@ -655,7 +694,9 @@ def test_unavailable_native_hook_composition_remains_unknown_in_query(
             service,
             await service.prepare(
                 dict(
-                    action="SET_PLUGIN_ENABLED", enabled=True, target={"kind":'PLUGIN', 'scope':"USER", 'plugin_id':"example"},
+                    action="SET_PLUGIN_ENABLED",
+                    enabled=True,
+                    target=plugin_target(service, "example", scope="USER"),
                 )
             ),
         )
@@ -665,18 +706,19 @@ def test_unavailable_native_hook_composition_remains_unknown_in_query(
                 await form.prepare_submission({"enable_review_accepted": True})
             )
         )
-        await enable.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
+        await enable.execute()
 
         def unavailable(**kwargs):
             raise OSError("composition unavailable fixture")
 
         monkeypatch.setattr(inspection, "compose_hook_definition_view", unavailable)
-        result = await query_sources(service, kind="HOOK_SOURCE", source_kind="PLUGIN")
-        assert result["completeness"] == "PARTIAL"
-        assert result["items"] and "来源已禁用" not in result["items"][0]["status"]
-        source = await inspect_hook(service, scope="USER", source_kind="PLUGIN", plugin_id="example")
-        assert source["definitions"] and source["selected"] is None
-        assert result["diagnostics"]
+        result = await query_sources(service, kind="HOOK")
+        assert result["meta"]["status"] == "SUCCESS"
+        assert records(result) and "来源已禁用" not in records(result)[0]["status"]
+        source = await inspect_hook(
+            service, scope="USER", source_kind="PLUGIN", plugin_id="example"
+        )
+        assert source["definitions"] and "已停用" not in source["status"]
         await service.mcp.aclose()
 
     asyncio.run(run())

@@ -2,7 +2,7 @@
 
 共用规则见[原生工具修订草案索引](../PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 1、2 章；完整保存、原生 12k／NEXT 及导出沿[统一交付草案](../PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)，结果存储沿[数据库 hardcut 草案](../PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md)。能力查询、最小能力 Target 和刷新入口见[能力查询与刷新草案](capabilities.md)。
 
-状态：讨论草案，未实施。逐项记录 manage_capability 的修订，当前包含三个独立 Skill action、三个 Hook action、MCP 共用 config、独立连接新增／删除及独立／Plugin 连接统一修改、独立／Plugin MCP 的两个 OAuth action，以及 INSTALL_PLUGIN、SET_PLUGIN_ENABLED、REMOVE_PLUGIN 的参数、返回值、原生示例及错误语义。安装默认值、启停、信任及审阅流程保持现有产品语义；独立及 Plugin MCP 连接的默认使用范围按第 7 章调整。仅 ROOT 原生调用，不提供 JS API；TypeScript 只描述合同，不表示存在脚本入口。本轮只改文档。
+状态：当前合同已接入生产代码，正在完成 hardcut 跨层验收；正常使用仍按实施计划停用。逐项记录 manage_capability 的修订，当前包含三个独立 Skill action、三个 Hook action、MCP 共用 config、独立连接新增／删除及独立／Plugin 连接统一修改、独立／Plugin MCP 的两个 OAuth action，以及 INSTALL_PLUGIN、SET_PLUGIN_ENABLED、REMOVE_PLUGIN 的参数、返回值、原生示例及错误语义。安装默认值、启停、信任及审阅流程保持现有产品语义；独立及 Plugin MCP 连接的默认使用范围按第 7 章调整。仅 ROOT 原生调用，不提供 JS API；TypeScript 只描述合同，不表示存在脚本入口。
 
 本文件所有 action 的模型可见 content 都直接说明对象、实际结果及必要失败原因。成功使用“已安装／已更新／已删除”等简短说明；部分失败先说已经完成的操作，再说失败步骤、路径和原因；无法确认时直接说“无法确认……是否已完成”。不向模型解释“采用、结算、状态切点”等内部术语，不重复内部枚举、处理阶段或无助于下一步操作的实现细节。下文实施说明仍可使用内部术语，但不把它们照搬进 content。
 

@@ -367,7 +367,7 @@ def test_round9_2_closed_vocabulary_inputs_outcomes_causal_arms_and_oracle() -> 
     )
     assert len(SUBJECT_SLOTS) == 8
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 31
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
     assert not hasattr(STAGE2_LIMITS, "model_calls_per_turn_hard")
 
 
@@ -1248,7 +1248,7 @@ print('visible stderr ' + secret, file=sys.stderr)
             scope_kind="ROOT", session_id="session:cbauiajfisf4gvpdotrq4qgxhq", estimator=_Estimator()
         )
         assert prepared is not None
-        assert secret not in prepared.full_text
+        assert secret not in prepared.text
         prepared.reservation.retire()
         assert (
             owner.freeze_for_target(
@@ -1391,8 +1391,8 @@ def test_round9_2_context_scope_threshold_occurrence_and_terminal_drop(
         scope_kind="ROOT", session_id="session:cbauiajfisf4gvpdotrq4qgxhq", estimator=_Estimator()
     )
     assert prepared is not None
-    assert prepared.full_text.count("identical") == 2
-    assert len(set(prepared.domain_identity)) == 2
+    assert prepared.text.count("identical") == 2
+    assert len(json.loads(prepared.text)["pulsara_hook_context"]) == 2
     assert (
         owner.freeze_for_target(
             scope_kind="SUBAGENT", session_id='session:itnsbirlmxzeu74pn7keq6zuzi', estimator=_Estimator()
@@ -1549,8 +1549,8 @@ def test_round9_2_queued_prompt_context_stays_candidate_bound_until_full(
         scope_kind="ROOT", session_id="session:cbauiajfisf4gvpdotrq4qgxhq", estimator=_Estimator()
     )
     assert selected_for_a is not None
-    assert "context-for-active-turn-A" in selected_for_a.full_text
-    assert "context-for-queued-turn-B" not in selected_for_a.full_text
+    assert "context-for-active-turn-A" in selected_for_a.text
+    assert "context-for-queued-turn-B" not in selected_for_a.text
     selected_for_a.reservation.retire()
 
     owner.activate_prompt_candidate(scope=scope, prompt_candidate_id='queue:dvzibiul2jmfaj5m6reewz35fe')
@@ -1558,8 +1558,8 @@ def test_round9_2_queued_prompt_context_stays_candidate_bound_until_full(
         scope_kind="ROOT", session_id="session:cbauiajfisf4gvpdotrq4qgxhq", estimator=_Estimator()
     )
     assert selected_for_b is not None
-    assert "context-for-active-turn-A" not in selected_for_b.full_text
-    assert "context-for-queued-turn-B" in selected_for_b.full_text
+    assert "context-for-active-turn-A" not in selected_for_b.text
+    assert "context-for-queued-turn-B" in selected_for_b.text
     selected_for_b.reservation.retire()
 
 
@@ -1606,15 +1606,15 @@ def test_prompt_attempt_retirement_is_exact_and_rejects_late_retry_output(
         scope_kind="ROOT", session_id=scope.session_id, estimator=_Estimator(),
     )
     assert selected is not None
-    assert "accepted-retry" in selected.full_text
-    assert "rejected" not in selected.full_text
+    assert "accepted-retry" in selected.text
+    assert "rejected" not in selected.text
     selected.reservation.retire()
 
     adopted.accept_prompt_entries(entry("accepted-late-output"))
     selected = owner.freeze_for_target(
         scope_kind="ROOT", session_id=scope.session_id, estimator=_Estimator(),
     )
-    assert selected is not None and "accepted-late-output" in selected.full_text
+    assert selected is not None and "accepted-late-output" in selected.text
     selected.reservation.retire()
 
 
@@ -1644,7 +1644,7 @@ def test_active_prompt_retirement_preserves_other_output_and_scope_close_drops_l
         scope_kind="ROOT", session_id=scope.session_id, estimator=_Estimator(),
     )
     assert selected is not None
-    assert "surviving" in selected.full_text and "failed" not in selected.full_text
+    assert "surviving" in selected.text and "failed" not in selected.text
     selected.reservation.retire()
     owner.close()
     surviving.accept_prompt_entries((HookContextEntry(definition, 0, 3, "after-close", scrub),))
@@ -2129,7 +2129,7 @@ def test_hook_review_uses_production_matcher_native_remote_and_is_advisory(tmp_p
     definition = _definition(tmp_path, HookEventType.POST_TOOL_USE_EVENT, 'full command', matcher='^(Read|Grep|Glob|mcp__real__lookup)$')
     snapshot = _view(tmp_path, (definition,)).source_snapshots[0]
     value = hook_snapshot_public(snapshot, inspect=True)
-    subjects = tuple(tool_matcher_subject(name) for name in ['read_file', 'search_content', 'find_files', 'exec_process']) + (tool_matcher_subject('use_new_mcp_tool', resolved_remote_identity='mcp__real__lookup'),)
+    subjects = tuple(tool_matcher_subject(name) for name in ['read_file', 'search_file_content', 'find_files', 'exec_process']) + (tool_matcher_subject('use_new_mcp_tool', resolved_remote_identity='mcp__real__lookup'),)
     before = normalized_definition_digest(snapshot.provenance, snapshot.definitions)
     add_matching_tool_review(value, snapshot, subjects=subjects, complete=False, workspace_root=tmp_path)
     assert value['definitions'][0]['matched_operations'] == ['读取文件', '搜索内容', '查找文件', 'mcp__real__lookup']

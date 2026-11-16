@@ -620,7 +620,7 @@ class PreparedProviderDispatch:
                         abandon(error or RuntimeError("adopted continuation abandoned"))
 
     def close_for_canonical_replan(self) -> None:
-        # HOOK_CONTEXT is one-shot advisory input.  Once a planning cut
+        # Hook text is one-shot advisory input. Once a planning cut
         # freezes it, every abandon/conflict/replan retires that exact
         # reservation; it is never put back or replayed into another cut.
         self.close()

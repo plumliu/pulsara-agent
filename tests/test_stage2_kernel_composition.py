@@ -7,7 +7,7 @@ import pytest
 
 from pulsara_agent.capability.builtin_catalog import builtin_tool_descriptors
 from pulsara_agent.capability.contracts import (
-    capability_identity_digest,
+    skill_capability_fact_fingerprint,
     CapabilitySourceKind,
     CapabilitySourceRefreshMode,
     CapabilitySourceSnapshotDisposition,
@@ -44,7 +44,13 @@ from pulsara_agent.conversation_kernel.host import (
     KernelHostCore,
     KernelHostCoreClosing,
 )
-from pulsara_agent.capability.types import BundledSkillOrigin
+from pulsara_agent.capability.types import (
+    BundledSkillOrigin,
+    ActiveSkillSelection,
+    LooseSkillOrigin,
+    ResolvedSkillCatalogEntry,
+)
+from pulsara_agent.capability.contracts import LocalSkillRootKind
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.hooks.contracts import FrozenHookDefinitionView
 from pulsara_agent.primitives.context import context_fingerprint
@@ -62,21 +68,23 @@ class _SkillProjectionProvider:
         assert inspection.disposition.value == "COMPLETE"
         return SkillProjectionOutput(
             catalog_entries=(
-                SimpleNamespace(
-                    name="review", description="Review changes", location="test"
-                ),
-            ),
-            active_injections=(
-                SimpleNamespace(
+                ResolvedSkillCatalogEntry(
                     name="review",
-                    location="test",
-                    body="Review body",
-                    reason="configured",
+                    description="Review changes",
+                    skill_path="/test/skills/review/SKILL.md",
+                    origin=LooseSkillOrigin(LocalSkillRootKind.WORKSPACE_AGENTS),
                 ),
             ),
+            active_skills=(
+                ActiveSkillSelection(
+                    "review",
+                    "/test/skills/review/SKILL.md",
+                    LooseSkillOrigin(LocalSkillRootKind.WORKSPACE_AGENTS),
+                ),
+            )
+            if any("/review" in text for text in context.user_input)
+            else (),
             diagnostics=(SimpleNamespace(code="skill_ready"),),
-            catalog_prompt="<skills>review</skills>",
-            active_skill_prompt="<active-skill>review body</active-skill>",
         )
 
 
@@ -158,8 +166,6 @@ def _skill_view(composer: KernelSkillProjectionComposer):
     mcp = FrozenMcpCapabilityProjectionInput(
         conversation_scope_kind=ModelInputScopeKind.ROOT,
         source_snapshots=(),
-        catalog_semantic_fingerprint=context_fingerprint("test:mcp-catalog:v1", ()),
-        inspectability_facts=(),
     )
     tools = freeze_tool_planning_input(
         predecessor=EmptyCapabilityEpochPredecessor(0),
@@ -179,8 +185,11 @@ def _skill_view(composer: KernelSkillProjectionComposer):
 def test_every_model_callable_builtin_has_provider_object_schema(wire_api: str) -> None:
     from jsonschema import Draft202012Validator
     from pulsara_agent.capability.contracts import (
-        CapabilityKind, FrozenNativeToolWireEligibilityQuote, ToolCapabilityOrigin,
-        capability_identity, freeze_tool_capability_fact,
+        CapabilityKind,
+        FrozenNativeToolWireEligibilityQuote,
+        ToolCapabilityOrigin,
+        capability_identity,
+        freeze_tool_capability_fact,
     )
     from pulsara_agent.llm.adapters.openai.function_tools import (
         freeze_openai_native_tool_eligibility,
@@ -190,32 +199,47 @@ def test_every_model_callable_builtin_has_provider_object_schema(wire_api: str) 
     from pulsara_agent.primitives.context import freeze_json, thaw_json
 
     # Descriptors may use a root union; the provider schema is the lowered value.
-    source = capability_source_ref(CapabilitySourceKind.BUILTIN_REGISTRY, "test-builtin")
+    source = capability_source_ref(
+        CapabilitySourceKind.BUILTIN_REGISTRY, "test-builtin"
+    )
     descriptors = tuple(d for d in builtin_tool_descriptors() if d.is_model_callable)
     facts = tuple(
         freeze_tool_capability_fact(
-            identity=capability_identity(kind=CapabilityKind.TOOL, source=source, stable_name=d.name),
+            identity=capability_identity(
+                kind=CapabilityKind.TOOL, source=source, stable_name=d.name
+            ),
             origin=ToolCapabilityOrigin.BUILTIN,
             canonical_tool_spec=FrozenToolSpec(
-                name=d.name, description=d.description,
-                parameters=freeze_json(d.input_schema), descriptor_fingerprint="test-descriptor",
+                name=d.name,
+                description=d.description,
+                parameters=freeze_json(d.input_schema),
+                descriptor_fingerprint="test-descriptor",
             ),
         )
         for d in descriptors
     )
     eligibility = freeze_openai_native_tool_eligibility(
-        conversation_scope_kind=ModelInputScopeKind.ROOT, wire_api=wire_api, tool_facts=facts,
+        conversation_scope_kind=ModelInputScopeKind.ROOT,
+        wire_api=wire_api,
+        tool_facts=facts,
     )
     assert len(eligibility.entries) == len(descriptors)
-    assert all(isinstance(entry, FrozenNativeToolWireEligibilityQuote) for entry in eligibility.entries)
+    assert all(
+        isinstance(entry, FrozenNativeToolWireEligibilityQuote)
+        for entry in eligibility.entries
+    )
     versions = tuple(entry.version for entry in eligibility.entries)
     specs = {fact.canonical_tool_spec.name: fact.canonical_tool_spec for fact in facts}
     projection = materialize_openai_native_tool_projection_set(
-        conversation_scope_kind=ModelInputScopeKind.ROOT, wire_api=wire_api,
-        tool_versions=versions, tool_specs=tuple(specs[version.provider_name] for version in versions),
+        conversation_scope_kind=ModelInputScopeKind.ROOT,
+        wire_api=wire_api,
+        tool_versions=versions,
+        tool_specs=tuple(specs[version.provider_name] for version in versions),
         eligibility=eligibility,
     )
-    assert {version.provider_name for version in versions} == {descriptor.name for descriptor in descriptors}
+    assert {version.provider_name for version in versions} == {
+        descriptor.name for descriptor in descriptors
+    }
     for item in projection.projections:
         wire = thaw_json(item.wire_tool)
         function = wire["function"] if wire_api == "openai_chat_completions" else wire
@@ -254,40 +278,32 @@ def test_kernel_composition_preserves_root_catalog_and_active_skill_prompt(
             for item in view.registry_skill_facts
             if isinstance(item.origin, BundledSkillOrigin)
         )
-        origin_digest = context_fingerprint(
-            "bundled-skill-origin:v1-agent-skills",
-            {
-                "package": "pulsara_agent",
-                "relative_skill_directory": (
-                    bundled_fact.origin.package_relative_skill_directory
-                ),
-            },
+        assert (
+            bundled_fact.fact_semantic_fingerprint
+            == skill_capability_fact_fingerprint(
+                identity=bundled_fact.identity,
+                description=bundled_fact.description,
+                skill_path=bundled_fact.skill_path,
+                activation_semantic_fingerprint=bundled_fact.activation_semantic_fingerprint,
+                origin=bundled_fact.origin,
+            )
         )
-        assert bundled_fact.fact_semantic_fingerprint == context_fingerprint(
-            "skill-capability-fact:v1",
-            {
-                "identity_fingerprint": capability_identity_digest(bundled_fact.identity),
-                "catalog_semantic_fingerprint": (
-                    bundled_fact.catalog_semantic_fingerprint
-                ),
-                "activation_semantic_fingerprint": (
-                    bundled_fact.activation_semantic_fingerprint
-                ),
-                "winning_root_provenance_fingerprint": origin_digest,
-            },
-        )
-        assert not hasattr(bundled_fact, "winning_root_provenance_fingerprint")
         projection = composer.compose(
             view=view,
             owner=owner,
-            activation_subject=composer.activation_context(user_input="please review"),
+            activation_subject=composer.activation_context(user_input=("/review",)),
         )
-        assert projection.catalog_prompt == "<skills>review</skills>"
-        assert projection.active_skill_prompt == (
-            "<active-skill>review body</active-skill>"
+        assert projection.catalog_entries[0].description == "Review changes"
+        ordinary = composer.compose(
+            view=view,
+            owner=owner,
+            activation_subject=composer.activation_context(
+                user_input=("please review",)
+            ),
         )
+        assert ordinary.active_skills == ()
         assert tuple(item.name for item in projection.catalog_entries) == ("review",)
-        assert tuple(item.name for item in projection.active_injections) == ("review",)
+        assert tuple(item.name for item in projection.active_skills) == ("review",)
         assert tuple(item.code for item in projection.diagnostics) == ("skill_ready",)
     finally:
         binding.close()
@@ -303,18 +319,17 @@ def test_round3_1_capability_input_is_sampled_once_for_multiple_prefix_trials(
         first = composer.compose(
             view=frozen_view,
             owner=owner,
-            activation_subject=composer.activation_context(user_input="first"),
+            activation_subject=composer.activation_context(user_input=("first",)),
         )
         second = composer.compose(
             view=frozen_view,
             owner=owner,
-            activation_subject=composer.activation_context(user_input="second"),
+            activation_subject=composer.activation_context(user_input=("second",)),
         )
 
         assert loose.observe_calls == 1
-        assert first.catalog_prompt == second.catalog_prompt == (
-            "<skills>review</skills>"
-        )
+        assert first.catalog_entries == second.catalog_entries
+        assert first.active_skills == second.active_skills == ()
     finally:
         binding.close()
 
@@ -334,7 +349,9 @@ def test_enabled_mcp_enters_kernel_resource_activation(
     monkeypatch.setattr(
         kernel_host.LocalMcpManagementService,
         "load_configs",
-        lambda *_args, **_kwargs: (SimpleNamespace(server_id="mcp:test", enabled=True),),
+        lambda *_args, **_kwargs: (
+            SimpleNamespace(server_id="mcp:test", enabled=True),
+        ),
     )
     monkeypatch.setattr(KernelHostCore, "_ensure_resources", observed_activation)
     core = KernelHostCore(model_runtime=test_model_runtime())
@@ -390,17 +407,33 @@ def test_shutdown_fences_and_joins_unregistered_session_open(
         @staticmethod
         def acquire_host_writer(**kwargs: object):
             from datetime import datetime, timedelta, timezone
-            from pulsara_agent.conversation_kernel.contracts import HostWriterGuard, WriterLease, HostWriterAcquisitionKind
-            return WriterLease(guard=HostWriterGuard(str(kwargs["session_id"]), 1, str(kwargs["writer_owner_id"])),
-                               expires_at=datetime.now(timezone.utc)+timedelta(seconds=60),
-                               acquisition_kind=HostWriterAcquisitionKind.NEW_SESSION)
+            from pulsara_agent.conversation_kernel.contracts import (
+                HostWriterGuard,
+                WriterLease,
+                HostWriterAcquisitionKind,
+            )
+
+            return WriterLease(
+                guard=HostWriterGuard(
+                    str(kwargs["session_id"]), 1, str(kwargs["writer_owner_id"])
+                ),
+                expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+                acquisition_kind=HostWriterAcquisitionKind.NEW_SESSION,
+            )
 
         @staticmethod
         def renew_host_writer(guard, **kwargs):
             from datetime import datetime, timedelta, timezone
-            from pulsara_agent.conversation_kernel.contracts import WriterLease, HostWriterAcquisitionKind
-            return WriterLease(guard=guard, expires_at=datetime.now(timezone.utc)+timedelta(seconds=60),
-                               acquisition_kind=HostWriterAcquisitionKind.SAME_OWNER_RENEWAL)
+            from pulsara_agent.conversation_kernel.contracts import (
+                WriterLease,
+                HostWriterAcquisitionKind,
+            )
+
+            return WriterLease(
+                guard=guard,
+                expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+                acquisition_kind=HostWriterAcquisitionKind.SAME_OWNER_RENEWAL,
+            )
 
         @staticmethod
         def release_host_writer(guard, **kwargs):
@@ -447,7 +480,11 @@ def test_shutdown_fences_and_joins_unregistered_session_open(
         return _self._repository
 
     monkeypatch.setattr(kernel_host, "LocalHookSourceProvider", FakeHookSourceProvider)
-    monkeypatch.setattr(kernel_host.LocalMcpManagementService, "load_configs", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(
+        kernel_host.LocalMcpManagementService,
+        "load_configs",
+        lambda *_args, **_kwargs: (),
+    )
     monkeypatch.setattr(kernel_host, "KernelHostSession", BlockingSession)
     monkeypatch.setattr(kernel_host, "resolve_user_home", observed_user_home)
     monkeypatch.setattr(KernelHostCore, "_ensure_resources", fake_resources)

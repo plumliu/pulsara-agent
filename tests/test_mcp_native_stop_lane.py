@@ -1,6 +1,7 @@
 """Native turn Stop must cancel lane waits without dispatching effects."""
 import asyncio
 import json
+import re
 import sys
 from time import monotonic
 
@@ -8,13 +9,18 @@ import pytest
 from psycopg.rows import dict_row
 
 from pulsara_agent.identity import random_id
-from pulsara_agent.llm.input import PromptContent
+from pulsara_agent.llm.input import PromptContent, text_part_values
 from pulsara_agent.mcp_config import load_mcp_server_configs
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.test_round4_plan_host import _DetachedDraftModel, _open_test_session, _tool_call
 
 pytestmark = pytest.mark.postgres
+
+
+@pytest.fixture(autouse=True)
+def private_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "home"))
 
 
 @pytest.mark.parametrize("blocked_lane", ["server", "host"])
@@ -40,7 +46,27 @@ if __name__ == "__main__":
 
     class Model(_DetachedDraftModel):
         async def stream(self, request):
-            for event in _tool_call("mcp__fixture__write_mark", "call:effect", {"value": "dispatched"}):
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                assert "mcp__fixture__write_mark" not in {
+                    spec.name for spec in request.compiled_input.tools
+                }
+                events = _tool_call("query_capabilities", "call:inspect", {
+                    "kind": "MCP",
+                    "target": {"kind": "MCP_TOOL", "server_id": "fixture", "remote_tool_name": "write_mark"},
+                })
+            else:
+                assert len(self.requests) == 2
+                bodies = [text for message in request.compiled_input.messages
+                    for text in text_part_values(message.content)]
+                token = next((match.group() for body in reversed(bodies)
+                    if (match := re.search(r"mcpref:[a-z2-7]{26}", body)) is not None), None)
+                assert token is not None
+                events = _tool_call("call_mcp_tool", "call:effect", {
+                    "target": {"kind": "MCP_TOOL_REF", "tool_ref": token},
+                    "arguments": {"value": "dispatched"},
+                })
+            for event in events:
                 yield event
 
     async def exercise():
@@ -96,10 +122,14 @@ if __name__ == "__main__":
                 deadline_monotonic=monotonic() + 10,
             ) as connection:
                 rows = connection.execute(
-                    "SELECT result_state, result_origin_kind FROM pulsara_v3.tool_results WHERE session_id=%s",
+                    "SELECT tool_call_id, result_state, result_origin_kind "
+                    "FROM pulsara_v3.tool_results WHERE session_id=%s ORDER BY tool_call_id",
                     (session.session_id,),
                 ).fetchall()
-            assert rows == [{"result_state": "CANCELLED_BEFORE_DISPATCH", "result_origin_kind": "PHYSICAL_ATTEMPT"}]
+            assert rows == [
+                {"tool_call_id": "call:effect", "result_state": "CANCELLED_BEFORE_DISPATCH", "result_origin_kind": "PHYSICAL_ATTEMPT"},
+                {"tool_call_id": "call:inspect", "result_state": "SUCCESS", "result_origin_kind": "PHYSICAL_ATTEMPT"},
+            ]
         finally:
             if lane is not None:
                 for _ in range(held):

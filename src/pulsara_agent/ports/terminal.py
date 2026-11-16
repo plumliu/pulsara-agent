@@ -6,64 +6,32 @@ from copy import deepcopy
 from functools import lru_cache
 from typing import Annotated, Any, Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
+from pulsara_agent.identity import ID_PAYLOAD_PATTERN
 
 
-
-DEFAULT_MAX_OUTPUT_CHARS = 32_000
-MIN_TERMINAL_OUTPUT_CHARS = 512
 DEFAULT_WAIT_TIMEOUT_SECONDS = 30
+EXEC_PROCESS_TOOL_DESCRIPTION = "Start a shell command and observe its complete available public output. A PROCESS Target supports later metadata queries and wait/write/control. Initial wait does not limit process lifetime. Native NEXT reads a frozen result; JS returns the full observation."
+QUERY_PROCESSES_TOOL_DESCRIPTION = "Query this session's retained process metadata without reading or consuming logs. Omit target to list all current records, or provide one PROCESS Target."
+MANAGE_PROCESS_TOOL_DESCRIPTION = "Observe or control a process in this session. wait: target, optional timeout_seconds (0–30; default 30); write: target,data,optional yield_time_ms (0–30000; default 1000); close_stdin/kill: target only. wait/write return all pending public output and frozen process facts. Nonzero process exit is a successful observation. No action is rerun by NEXT."
 
-EXEC_PROCESS_TOOL_DESCRIPTION = (
-    "Run one local shell command. Each call starts a new shell, so its directory and "
-    "environment changes stay within that call. A running command returns a PROCESS "
-    "target for query_processes metadata or manage_process output and interaction. "
-    "Response "
-    "size and initial wait settings do not limit the command's lifetime. Native "
-    "output shows the latest text within max_output_chars and the response budget. "
-    "Follow read to recover this observation's omitted saved text with read_file, "
-    "or use write_file with its result source to save the complete observation. "
-    "Follow observe to wait for new output from the same running command."
-)
-
-QUERY_PROCESSES_TOOL_DESCRIPTION = (
-    "Query managed process metadata without returning logs or consuming output. To "
-    "list processes, omit target; optional fields: include_running, include_finished. "
-    "To inspect one process's command and current metadata, pass only its PROCESS "
-    "target, without list filters. For output, use manage_process with poll or wait. "
-    "Omit unused fields; target does not accept null."
-)
-
-MANAGE_PROCESS_TOOL_DESCRIPTION = (
-    "Control commands started by exec_process. Copy a PROCESS target from process "
-    "results; reuse it across actions. Fields listed for an action are required "
-    "unless marked optional; use only that action's fields.\n"
-    "poll: target (PROCESS); optional since_cursor, max_output_chars.\n"
-    "wait: target (PROCESS); optional since_cursor, timeout_seconds, max_output_chars.\n"
-    "write: target (PROCESS), data; optional yield_time_ms.\n"
-    "submit: target (PROCESS), data; optional yield_time_ms.\n"
-    "close_stdin: target (PROCESS).\n"
-    "kill: target (PROCESS).\n"
-    "poll reads now; wait waits up to timeout_seconds. write sends data unchanged; "
-    "submit unconditionally adds one LF to data. close_stdin closes input; kill stops "
-    "the command and its children and waits for exit. Omitted optional fields use "
-    "their defaults; only since_cursor accepts null. status and exit_code describe "
-    "process completion; output or echo alone does not establish completion. Use "
-    "observe for later updates and read for this observation's omitted saved logs. "
-    "write and submit return output since just before input was written. "
-    "close_stdin and kill return control state without logs; poll or wait reads logs. "
-    "read_file reads saved output; write_file with its result source saves the "
-    "complete observation without rerunning the command."
-)
 
 class _StrictInput(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_null_fields(cls, value):
+        if isinstance(value, dict) and any(item is None for item in value.values()):
+            raise ValueError("Unused fields must be omitted, not null")
+        return value
 
 
 class TerminalInput(_StrictInput):
     command: str = Field(
         min_length=1,
         max_length=1_048_576,
+        pattern=r"\S",
     )
     workdir: str | None = Field(
         default=None,
@@ -86,33 +54,19 @@ class TerminalInput(_StrictInput):
             "Enable terminal interaction for programs needing line editing or a full-screen interface."
         ),
     )
-    max_output_chars: int = Field(
-        default=DEFAULT_MAX_OUTPUT_CHARS,
-        ge=MIN_TERMINAL_OUTPUT_CHARS,
-        le=DEFAULT_MAX_OUTPUT_CHARS,
-        description=(
-            "Maximum native tail preview characters, further limited by the response "
-            "budget; does not limit saved output, the JS value, or command lifetime."
-        ),
-    )
 
 
 _TERMINAL_ADAPTER = TypeAdapter(TerminalInput)
 
 
 class QueryProcessesListInput(_StrictInput):
-    include_running: bool = Field(
-        default=True,
-    )
-    include_finished: bool = Field(
-        default=True,
-    )
+    pass
 
 
 class TerminalProcessTarget(_StrictInput):
     kind: Literal["PROCESS"]
     process_id: str = Field(
-        min_length=1,
+        pattern=rf"^process:{ID_PAYLOAD_PATTERN}$",
         description="Exact process_id from this terminal environment.",
     )
 
@@ -129,60 +83,17 @@ QueryProcessesInput: TypeAlias = QueryProcessesListInput | QueryProcessInput
 _QUERY_PROCESSES_ADAPTER = TypeAdapter(QueryProcessesInput)
 
 
-class TerminalProcessPollInput(_ProcessInput):
-    action: Literal["poll"]
-    since_cursor: str | None = Field(
-        default=None,
-        description=(
-            "Exact output_cursor from this process, or omit for retained output. It "
-            "advances past observed text, including omitted output."
-        ),
-    )
-    max_output_chars: int = Field(
-        default=DEFAULT_MAX_OUTPUT_CHARS,
-        ge=MIN_TERMINAL_OUTPUT_CHARS,
-        le=DEFAULT_MAX_OUTPUT_CHARS,
-        description="Maximum native tail preview characters; saved output and JS retain the selected range.",
-    )
-
-
 class TerminalProcessWaitInput(_ProcessInput):
     action: Literal["wait"]
-    since_cursor: str | None = Field(
-        default=None,
-        description=(
-            "Exact output_cursor from this process, or omit for retained output. It "
-            "advances past observed text, including omitted output."
-        ),
-    )
     timeout_seconds: int = Field(
         default=DEFAULT_WAIT_TIMEOUT_SECONDS,
-        ge=1,
+        ge=0,
         le=30,
-    )
-    max_output_chars: int = Field(
-        default=DEFAULT_MAX_OUTPUT_CHARS,
-        ge=MIN_TERMINAL_OUTPUT_CHARS,
-        le=DEFAULT_MAX_OUTPUT_CHARS,
-        description="Maximum native tail preview characters; saved output and JS retain the selected range.",
     )
 
 
 class TerminalProcessWriteInput(_ProcessInput):
     action: Literal["write"]
-    data: str = Field(description="Exact UTF-8 text; an empty string is allowed.")
-    yield_time_ms: int = Field(
-        default=1000,
-        ge=0,
-        le=30_000,
-        description=(
-            "Wait for process exit after input is flushed; 0 returns immediately."
-        ),
-    )
-
-
-class TerminalProcessSubmitInput(_ProcessInput):
-    action: Literal["submit"]
     data: str = Field(description="Exact UTF-8 text; an empty string is allowed.")
     yield_time_ms: int = Field(
         default=1000,
@@ -203,10 +114,8 @@ class TerminalProcessKillInput(_ProcessInput):
 
 
 ManageProcessInput: TypeAlias = Annotated[
-    TerminalProcessPollInput
-    | TerminalProcessWaitInput
+    TerminalProcessWaitInput
     | TerminalProcessWriteInput
-    | TerminalProcessSubmitInput
     | TerminalProcessCloseStdinInput
     | TerminalProcessKillInput,
     Field(discriminator="action"),
@@ -241,6 +150,45 @@ def manage_process_input_schema() -> dict[str, Any]:
     return _inline_schema_references(_MANAGE_PROCESS_ADAPTER.json_schema())
 
 
+def terminal_result_schema(name: str) -> dict[str, Any]:
+    """Complete terminal business snapshots; process state is not call status."""
+    from pulsara_agent.ports.tool_execution import tool_business_value_schema
+
+    target = _inline_schema_references(TypeAdapter(TerminalProcessTarget).json_schema())
+    if name in {"exec_process", "manage_process"}:
+        success = [tool_business_value_schema(
+            fields={"target": target}, required_fields=("target",),
+            meta={"process_status": {"const": state}, "exit_code": code,
+                  "cwd": {"type": "string"}},
+            required_meta=("process_status", "exit_code", "cwd"),
+        ) for state, code in (
+            ("RUNNING", {"type": "null"}), ("EXITED", {"type": "integer"}),
+        )]
+        return {"oneOf": [*success, tool_business_value_schema(
+            fields={"target": target},
+            required_fields=("target",) if name == "manage_process" else (),
+            statuses=("ERROR", "CANCELLED"),
+        )]}
+    if name != "query_processes":
+        raise ValueError("Unknown terminal tool")
+    common = {
+        "target": target, "command": {"type": "string"}, "cwd": {"type": "string"},
+        "stdin_closed": {"type": "boolean"}, "duration_seconds": {"type": "number", "minimum": 0},
+    }
+    records = [{"type": "object", "properties": {
+        **common, "process_status": {"const": state}, "exit_code": code,
+    }, "required": [*common, "process_status", "exit_code"], "additionalProperties": False}
+        for state, code in (("RUNNING", {"type": "null"}), ("EXITED", {"type": "integer"}))]
+    content = {"type": "array", "items": {"oneOf": [
+        {"type": "object", "properties": {"type": {"const": "text"}, "value": {"type": "string"}},
+            "required": ["type", "value"], "additionalProperties": False},
+        {"type": "object", "properties": {"type": {"const": "object"}, "value": {"oneOf": records}},
+            "required": ["type", "value"], "additionalProperties": False},
+    ]}}
+    return {"oneOf": [tool_business_value_schema(content_schema=content),
+        tool_business_value_schema(statuses=("ERROR", "CANCELLED"))]}
+
+
 def _inline_schema_references(schema: dict[str, Any]) -> dict[str, Any]:
     root = deepcopy(schema)
     definitions = root.pop("$defs", {})
@@ -270,7 +218,15 @@ def _inline_schema_references(schema: dict[str, Any]) -> dict[str, Any]:
             }:
                 resolved[key] = {name: resolve(child) for name, child in item.items()}
             elif key in {"oneOf", "anyOf", "allOf", "prefixItems"}:
-                resolved[key] = [resolve(child) for child in item]
+                resolved[key] = [
+                    resolve(child)
+                    for child in item
+                    if not (
+                        key == "anyOf"
+                        and isinstance(child, dict)
+                        and child.get("type") == "null"
+                    )
+                ]
             elif key in {
                 "items",
                 "additionalProperties",
@@ -286,6 +242,8 @@ def _inline_schema_references(schema: dict[str, Any]) -> dict[str, Any]:
             }:
                 resolved[key] = resolve(item)
             else:
+                if key == "default" and item is None:
+                    continue
                 resolved[key] = item
         return resolved
 
@@ -306,7 +264,6 @@ def _inline_schema_references(schema: dict[str, Any]) -> dict[str, Any]:
 
 
 __all__ = [
-    "DEFAULT_MAX_OUTPUT_CHARS",
     "EXEC_PROCESS_TOOL_DESCRIPTION",
     "QUERY_PROCESSES_TOOL_DESCRIPTION",
     "MANAGE_PROCESS_TOOL_DESCRIPTION",
@@ -320,5 +277,6 @@ __all__ = [
     "parse_manage_process_input",
     "exec_process_input_schema",
     "query_processes_input_schema",
+    "terminal_result_schema",
     "manage_process_input_schema",
 ]

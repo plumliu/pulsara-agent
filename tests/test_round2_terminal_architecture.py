@@ -38,8 +38,8 @@ from pulsara_agent.ports.terminal_observation import (
 )
 from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
 from pulsara_agent.terminal_process.output import (
-    TERMINAL_HOST_RETAINED_HARD_BYTES,
-    TERMINAL_RETAINED_OUTPUT_HARD_BYTES,
+    TERMINAL_HOST_OUTPUT_MEMORY_BYTES,
+    TERMINAL_OUTPUT_MEMORY_BYTES,
 )
 
 
@@ -112,7 +112,7 @@ def test_round2_closed_oracles_and_no_durable_terminal_authority(
     assert len(LIVE_EVENT_TYPES) == 20
     assert len(SUBJECT_SLOTS) == 8
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 31
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
     terminal_names = {
         "exec_process",
         "manage_process",
@@ -224,6 +224,6 @@ def test_round2_strict_three_tool_input_contracts_fail_closed() -> None:
         )
 
 
-def test_round2_named_memory_and_process_bounds_are_exact() -> None:
-    assert TERMINAL_RETAINED_OUTPUT_HARD_BYTES == 16 * 1024 * 1024
-    assert TERMINAL_HOST_RETAINED_HARD_BYTES == 128 * 1024 * 1024
+def test_terminal_spool_memory_thresholds_are_explicit() -> None:
+    assert TERMINAL_OUTPUT_MEMORY_BYTES == 16 * 1024 * 1024
+    assert TERMINAL_HOST_OUTPUT_MEMORY_BYTES == 128 * 1024 * 1024

@@ -225,6 +225,9 @@ class _ForkOperations:
                         entry_kind=entry["entry_kind"],
                         input_origin=entry['input_origin'],
                         scheduled_input=None if entry["scheduled_input"] is None else Jsonb(entry["scheduled_input"]),
+                        source_cell_id=entry["source_cell_id"],
+                        source_record_sequence=entry["source_record_sequence"],
+                        cell_output_kind=entry["cell_output_kind"],
                         accepted_at=entry["accepted_at"],
                     )
                     source_prefix = (
@@ -308,6 +311,16 @@ class _ForkOperations:
                     values.pop("entry_sequence")
                     values["result_facts"] = Jsonb(values["result_facts"])
                     values["public_fields"] = Json(values["public_fields"])
+                    source_result_entry_id = result["source_result_entry_id"]
+                    if source_result_entry_id is not None:
+                        if str(source_result_entry_id) not in entry_map:
+                            raise ConversationKernelConflict(
+                                "Fork native observation source is outside the copied history"
+                            )
+                        values["source_result_entry_id"] = entry_map[str(source_result_entry_id)]
+                    values["native_projection"] = (
+                        None if result["native_projection"] is None else Json(result["native_projection"])
+                    )
                     values.update(
                         id=derive_id("result", "fork", child_session_id, str(result["id"])),
                         session_id=child_session_id,

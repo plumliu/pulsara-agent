@@ -14,7 +14,7 @@ from pulsara_agent.media.frames import (
     FRAME_ANALYSIS_FRAMES,
     FrameBudget,
     prepare_frame_plan,
-    read_video_frames,
+    render_frame_page,
 )
 from pulsara_agent.media.frames_detail_render import render_detail_images
 from pulsara_agent.media import frames_detail_render
@@ -28,7 +28,11 @@ def video(path: Path, states, *, size=(320, 180)):
         stream.pix_fmt = "bgr0"
         stream.time_base = Fraction(1, 2)
         for ordinal, state in enumerate(states):
-            image = state if isinstance(state, Image.Image) else Image.new("RGB", size, state)
+            image = (
+                state
+                if isinstance(state, Image.Image)
+                else Image.new("RGB", size, state)
+            )
             frame = av.VideoFrame.from_image(image)
             frame.pts, frame.time_base = ordinal, Fraction(1, 2)
             for packet in stream.encode(frame):
@@ -38,16 +42,30 @@ def video(path: Path, states, *, size=(320, 180)):
     return path
 
 
-def render(path, *, crop=None, images=8, pixels=8 * 1280 * 720, encoded_bytes=8_000_000,
-           requested_range=None):
+def render(
+    path,
+    *,
+    crop=None,
+    images=8,
+    pixels=8 * 1280 * 720,
+    encoded_bytes=8_000_000,
+    requested_range=None,
+):
     with MediaSource.open(path) as source:
         info = probe_media(source)
         # Motion supplies all source observations, independently of detail's
         # target-selection policy. Only the shared renderer is under test.
-        plan = prepare_frame_plan(source, info, start=0, end=info.duration, mode="motion", crop=crop)
-        plan = replace(plan, mode="detail", requested_range=requested_range or plan.requested_range)
+        plan = prepare_frame_plan(
+            source, info, start=0, end=info.duration, mode="motion", crop=crop
+        )
+        plan = replace(
+            plan, mode="detail", requested_range=requested_range or plan.requested_range
+        )
         return render_detail_images(
-            source, info, plan, plan.priority,
+            source,
+            info,
+            plan,
+            plan.priority,
             budget=FrameBudget(encoded_bytes, pixels, images, FRAME_ANALYSIS_FRAMES),
         )
 
@@ -60,7 +78,12 @@ def test_identical_pixels_share_one_picture_without_dropping_distinct_times(tmp_
     assert [item["image"] for item in index] == [1, 1, 2, 1]
     assert [item["t"] for item in index] == [0, 0.5, 1, 1.5]
     assert [item["dt"] for item in index[1:]] == [0.5] * 3
-    assert [item["visible_range"] for item in index] == [[0, 0.5], [0.5, 1], [1, 1.5], [1.5, 2]]
+    assert [item["visible_range"] for item in index] == [
+        [0, 0.5],
+        [0.5, 1],
+        [1, 1.5],
+        [1.5, 2],
+    ]
     assert all(item["cell_rect"] == [0, 0, 1, 1] for item in index)
     decoded = [Image.open(io.BytesIO(image.data)).convert("RGB") for image in images]
     assert all(image.size == (1280, 720) for image in decoded)
@@ -68,28 +91,24 @@ def test_identical_pixels_share_one_picture_without_dropping_distinct_times(tmp_
     assert decoded[1].getpixel((640, 360))[2] > 240
 
 
-def test_exact_comparison_is_before_observation_number_labels(tmp_path):
+def test_exact_sharing_keeps_unlabelled_source_pixels(tmp_path):
     path = video(tmp_path / "numbering.mkv", ["red", "red", "blue", "blue"])
     images, index = render(path)
     assert [item["image"] for item in index] == [1, 1, 2, 2]
-    # The second unique picture is labelled 2, even though its first source
-    # observation is n=3. Compare its visible glyph to an independent label.
+    # Detail images carry source pixels without observation-number overlays.
     expected = Image.new("RGB", (1280, 720), "blue")
-    draw = ImageDraw.Draw(expected)
-    draw.rectangle((0, 0, 19, 17), fill="black")
-    draw.text((4, 3), "2", fill="white")
     buffer = io.BytesIO()
     expected.save(buffer, format="JPEG", quality=90)
-    expected_patch = Image.open(io.BytesIO(buffer.getvalue())).crop((4, 5, 10, 12))
-    actual_patch = Image.open(io.BytesIO(images[1].data)).crop((4, 5, 10, 12))
-    assert actual_patch.tobytes() == expected_patch.tobytes()
+    assert images[1].data == buffer.getvalue()
 
 
 def test_one_rgb_pixel_difference_is_not_approximately_shared(tmp_path):
     first = Image.new("RGB", (1280, 720), (100, 100, 100))
     second = first.copy()
     second.putpixel((640, 360), (100, 101, 100))
-    images, index = render(video(tmp_path / "one-pixel.mkv", [first, second], size=first.size))
+    images, index = render(
+        video(tmp_path / "one-pixel.mkv", [first, second], size=first.size)
+    )
     assert len(images) == 2
     assert [item["image"] for item in index] == [1, 2]
 
@@ -101,7 +120,9 @@ def test_exact_sharing_compares_the_final_crop_not_uncropped_source(tmp_path):
         ImageDraw.Draw(image).rectangle((320, 180, 959, 539), fill="red")
     images, index = render(
         video(tmp_path / "crop.mkv", [first, second], size=first.size),
-        crop=(0.25, 0.25, 0.75, 0.75), images=1, pixels=1280 * 720,
+        crop=(0.25, 0.25, 0.75, 0.75),
+        images=1,
+        pixels=1280 * 720,
     )
     assert len(images) == 1
     assert [item["image"] for item in index] == [1, 1]
@@ -137,7 +158,9 @@ def test_many_observations_fit_one_unique_picture_budget(tmp_path):
     assert [item["image"] for item in index] == [1] * 25
 
 
-def test_source_rgb_rasters_are_released_before_the_next_observation(tmp_path, monkeypatch):
+def test_source_rgb_rasters_are_released_before_the_next_observation(
+    tmp_path, monkeypatch
+):
     decoder_owner = frames_detail_render.VideoDecoder
     observed = []
 
@@ -165,7 +188,9 @@ def test_source_rgb_rasters_are_released_before_the_next_observation(tmp_path, m
     assert all(reference() is None for reference in observed)
 
 
-def test_256_distinct_observations_convert_only_the_unique_capacity_plus_one(tmp_path, monkeypatch):
+def test_256_distinct_observations_convert_only_the_unique_capacity_plus_one(
+    tmp_path, monkeypatch
+):
     decoder_owner = frames_detail_render.VideoDecoder
     observed = []
 
@@ -185,7 +210,9 @@ def test_256_distinct_observations_convert_only_the_unique_capacity_plus_one(tmp
                 observed.append(visible.t)
                 yield visible
 
-    path = video(tmp_path / "physical-prefix.mkv", [(i, i // 2, 255 - i) for i in range(256)])
+    path = video(
+        tmp_path / "physical-prefix.mkv", [(i, i // 2, 255 - i) for i in range(256)]
+    )
     monkeypatch.setattr(frames_detail_render, "VideoDecoder", CountingDecoder)
     images, index = render(path, images=18, pixels=18 * 1280 * 720)
     assert len(images) == len(index) == 18
@@ -200,7 +227,10 @@ def test_encoded_byte_limit_keeps_the_source_and_unique_image_prefix(tmp_path):
     images, index = render(path, encoded_bytes=allowance)
     assert len(images) == 1
     assert images[0].data == full_images[0].data
-    assert [(item["n"], item["image"], item["t"]) for item in index] == [(1, 1, 0), (2, 1, 0.5)]
+    assert [(item["n"], item["image"], item["t"]) for item in index] == [
+        (1, 1, 0),
+        (2, 1, 0.5),
+    ]
 
 
 def test_detail_visible_intervals_are_always_actual_request_intersections(tmp_path):
@@ -212,44 +242,44 @@ def test_detail_visible_intervals_are_always_actual_request_intersections(tmp_pa
 
 
 def test_detail_geometry_admits_many_observations_that_share_one_image(tmp_path):
-    import json
-
     path = video(tmp_path / "shared-admission.mkv", ["red"] * 25)
     with MediaSource.open(path) as source:
         info = probe_media(source)
-        result = read_video_frames(
-            source, info, start=0, end=2, mode="detail",
+        plan = prepare_frame_plan(source, info, start=0, end=2, mode="detail")
+        result = render_frame_page(
+            source,
+            info,
+            plan,
+            offset=0,
+            count=plan.observation_count,
             budget=FrameBudget(1 << 20, 1280 * 720, 1, FRAME_ANALYSIS_FRAMES),
         )
-    body = json.loads(result.text)
     assert len(result.images) == 1
-    assert len(body["frames"]) == 3
-    assert [item["observation_position"] for item in body["frames"]] == [0, 1, 2]
-    assert body["complete"] and body["next"] is None
+    assert len(result.index) == 3
+    assert [item["t"] for item in result.index] == [0, 1, 1.5]
+    assert plan.complete
 
 
-def test_unique_image_boundaries_shrink_only_the_delivery_prefix(tmp_path):
-    import json
-
+def test_internal_unique_image_batches_preserve_all_original_observations(tmp_path):
     path = video(tmp_path / "shared-prefix.mkv", ["red", "red", "blue", "red"])
-    delivered, image_counts, page_observations = [], [], []
-    continuation = None
+    delivered, image_counts, batch_observations = [], [], []
     with MediaSource.open(path) as source:
         info = probe_media(source)
-        while True:
-            result = read_video_frames(
-                source, info, start=0, end=2, mode="detail",
-                continuation=continuation,
+        plan = prepare_frame_plan(source, info, start=0, end=2, mode="detail")
+        offset = 0
+        while offset < plan.observation_count:
+            result = render_frame_page(
+                source,
+                info,
+                plan,
+                offset=offset,
+                count=plan.observation_count - offset,
                 budget=FrameBudget(1 << 20, 1280 * 720, 1, FRAME_ANALYSIS_FRAMES),
             )
-            body = json.loads(result.text)
             image_counts.append(len(result.images))
-            page_observations.append(len(body["frames"]))
-            delivered.extend((item["t"], item["observation_position"]) for item in body["frames"])
-            if body["next"] is None:
-                assert body["complete"]
-                break
-            continuation = body["next"]["arguments"]["continuation"]
-    assert page_observations == [1, 1, 1]
+            batch_observations.append(len(result.index))
+            delivered.extend(item["t"] for item in result.index)
+            offset += len(result.index)
+    assert batch_observations == [1, 1, 1]
     assert image_counts == [1, 1, 1]
-    assert delivered == [(0, 0), (1, 1), (1.5, 2)]
+    assert delivered == [0, 1, 1.5]

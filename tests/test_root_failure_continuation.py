@@ -108,7 +108,9 @@ def test_queued_root_continues_after_dependent_work_admission_conflict(
 
     original_admit = ConversationKernelRepository.admit_agent_requests
 
-    def fail_dependent_admission(self, *args, requests, source_tool_attempt_id, **kwargs):
+    def fail_dependent_admission(
+        self, *args, requests, source_tool_attempt_id, **kwargs
+    ):
         # The real tool attempt already exists; reject only its downstream
         # dependent Work admission while retaining the first admitted Work.
         nonlocal conflict_injected, failed_attempt, first_work
@@ -116,9 +118,16 @@ def test_queued_root_continues_after_dependent_work_admission_conflict(
             assert release_failure.wait(timeout=10)
             conflict_injected = True
             failed_attempt = source_tool_attempt_id
-            raise ConversationKernelConflict("injected dependent Work admission conflict")
-        rows = original_admit(self, *args, requests=requests,
-                              source_tool_attempt_id=source_tool_attempt_id, **kwargs)
+            raise ConversationKernelConflict(
+                "injected dependent Work admission conflict"
+            )
+        rows = original_admit(
+            self,
+            *args,
+            requests=requests,
+            source_tool_attempt_id=source_tool_attempt_id,
+            **kwargs,
+        )
         accepted_works.extend(row["work_id"] for row in rows)
         first_work = rows[0]["work_id"]
         return rows
@@ -131,6 +140,7 @@ def test_queued_root_continues_after_dependent_work_admission_conflict(
 
     class CodeModeWorkModel(DirectKernelModelPort):
         """Exercise real ROOT wire planning, replay persistence and epoch install."""
+
         def __init__(self):
             super().__init__(model_runtime=runtime)
             self.child = CallbackScriptedKernelModel(stream)
@@ -146,10 +156,12 @@ def test_queued_root_continues_after_dependent_work_admission_conflict(
             self.requests.append(request)
             root_calls += 1
             if root_calls == 1:
-                arguments = {"code": (
-                    'const first = await tools.run_agent([{instruction:"wait for release",context:{mode:"none"}}]);'
-                    'await tools.run_agent([{instruction:"use predecessor",depends_on:[first.works[0]],context:{mode:"none"}}]);'
-                )}
+                arguments = {
+                    "code": (
+                        'const first = await tools.run_agent([{instruction:"wait for release",materials:[]}]);'
+                        'await tools.run_agent([{instruction:"use predecessor",depends_on:[first.content[0].value.work],materials:[]}]);'
+                    )
+                }
                 delta = {
                     "reasoning_content": "delegate safely",
                     "tool_calls": [
@@ -168,7 +180,11 @@ def test_queued_root_continues_after_dependent_work_admission_conflict(
                 recovered.set()
                 delta = {"content": "RECOVERED"}
             else:
-                delta = {"content": "CELL_ACCEPTED" if root_calls == 2 else "CELL_FAILURE_OBSERVED"}
+                delta = {
+                    "content": "CELL_ACCEPTED"
+                    if root_calls == 2
+                    else "CELL_FAILURE_OBSERVED"
+                }
             request.prepared_call.call.target.transport._adapter._mock_chunks = [
                 {"choices": [{"index": 0, "delta": delta, "finish_reason": None}]},
                 {
@@ -220,9 +236,10 @@ def test_queued_root_continues_after_dependent_work_admission_conflict(
             release_failure.set()
             records = await _settled_formal_records(session, expected=1)
             assert len(records) == 1
-            assert records[0]["kind"] == "error"
-            assert records[0]["error"]["code"] == "bridge_error"
-            assert "injected dependent Work admission conflict" in records[0]["error"]["message"]
+            assert records[0]["kind"] == "diagnostic"
+            diagnostic = json.loads(records[0]["text"])
+            assert diagnostic["code"] == "bridge_error"
+            assert "injected dependent Work admission conflict" in diagnostic["message"]
 
             async def wait_failure_delivered():
                 while root_calls < 3 or session._active_task is not None:
@@ -267,7 +284,9 @@ def test_queued_root_continues_after_dependent_work_admission_conflict(
             assert accepted_works == [first_work]
             assert child_calls == 1
             assert root_calls == 4
-            with psycopg.connect(isolated_migrated_postgres_database.runtime_dsn) as connection:
+            with psycopg.connect(
+                isolated_migrated_postgres_database.runtime_dsn
+            ) as connection:
                 assert connection.execute(
                     "SELECT count(*) FROM pulsara_v3.prompt_queue_items q "
                     "JOIN pulsara_v3.sessions s ON s.id=q.session_id "

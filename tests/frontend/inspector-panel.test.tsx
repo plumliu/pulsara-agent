@@ -113,7 +113,6 @@ const capabilitySnapshot: CapabilitySnapshot = {
         tools: [],
       },
     ],
-    collisions: [],
   },
 };
 

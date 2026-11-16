@@ -22,24 +22,6 @@ from pulsara_agent.identity import derive_id
 SESSION_ID = derive_id("session", "test-fixture", "open-in-pulsara")
 
 
-def test_presentation_control_is_not_partially_accepted_when_it_does_not_fit(tmp_path):
-    from pulsara_agent.ports.tool_execution import ToolCall
-    from pulsara_agent.message import ToolResultState
-
-    class NoRoom:
-        def fits(self, body):
-            return False
-
-    async def resolve(_kind, _identity):
-        pytest.fail("PANEL requests do not need an object lookup")
-
-    tool = OpenInPulsaraTool(tmp_path)
-    call = ToolCall("external-provider-call", "open_in_pulsara",
-        {"targets": [{"kind": "PANEL", "name": "browser"}]}, page_budget=NoRoom())
-    result = asyncio.run(tool.execute_async(call, resolve_object=resolve))
-    assert result.status is ToolResultState.ERROR
-    assert result.page_complete
-    assert json.loads(result.output)["error"] == "PRESENTATION_RESULT_TOO_LARGE"
 
 
 @pytest.mark.parametrize('arguments,rejected', [
@@ -73,19 +55,16 @@ def test_real_tool_gate_and_invocation(tmp_path, arguments, rejected):
             if rejected:
                 return
             result = await port.invoke(**{k: v for k, v in ids.items() if k != 'session_id'}, arguments=arguments, invocation_context=context)
-            assert result.state == 'SUCCESS'
-            value = json.loads(result.content)
-            if arguments['targets'] == [{'kind': 'PANEL', 'name': 'browser'}]:
-                assert value == {'targets': [{'target': {'kind': 'PANEL', 'name': 'browser'}}]}
-            elif len(arguments['targets']) == 2:
-                assert value['targets'] == []
-                assert [e['index'] for e in value['errors']] == [0, 1]
+            assert result.state == 'APPLICATION_ERROR'
+            text = "\n".join(part.value for part in result.content.content)
+            if len(arguments['targets']) == 5:
+                assert result.result_facts["presentation_targets"] == (
+                    {"target":{"kind":"PATH","path":str(tmp_path/'missing #?.md')}},)
+                assert "已接受 targets[1]" in text
+                assert all(f"targets[{index}] 未接受" in text for index in (0,2,3,4))
             else:
-                assert [e['index'] for e in value['errors']] == [0, 2, 4]
-                assert value['targets'] == [
-                    {'target': {'kind': 'PATH', 'path': str(tmp_path / 'missing #?.md')}},
-                    {'target': {'kind': 'PROCESS', 'process_id': 'process:aaaaaaaaaaaaaaaaaaaaaaaaaa'}, 'host_session_id': 'host:aaaaaaaaaaaaaaaaaaaaaaaaaa'},
-                ]
+                assert result.result_facts == {}
+                assert all(f"targets[{index}] 未接受" in text for index in range(len(arguments['targets'])))
         finally:
             borrow.close()
             await port.aclose(timeout_seconds=2)
@@ -144,9 +123,10 @@ def test_real_tool_rejects_removed_wrappers_without_aliases(tmp_path):
         try:
             assert not isinstance(port.prepare_resolved_invocation(tool_name='open_in_pulsara', arguments=arguments, surface_borrow=borrow), PreparedToolPreparationRejection)
             result = await port.invoke(**{k: v for k, v in ids.items() if k != 'session_id'}, arguments=arguments, invocation_context=context)
-            value = json.loads(result.content)
-            assert value['targets'] == []
-            assert [error['index'] for error in value['errors']] == [0, 1, 2, 3, 4, 5]
+            assert result.state == "APPLICATION_ERROR"
+            assert result.result_facts == {}
+            text = "\n".join(part.value for part in result.content.content)
+            assert all(f"targets[{index}] 未接受" in text for index in range(6))
         finally:
             borrow.close()
             await port.aclose(timeout_seconds=2)
@@ -191,16 +171,16 @@ def test_object_requests_use_resolved_calling_context_and_keep_original_indexes(
         {"kind": "URL", "url": "https://example.test"},
     ]}
     result = asyncio.run(tool.execute_async(ToolCall(id="call:test", name=tool.name, arguments=arguments), resolve_object=resolve))
-    value = json.loads(result.output)
-    assert [error["index"] for error in value["errors"]] == [1, 2, 6, 7]
-    assert resolved == [("AGENT", agent_id), ("AGENT", retired_id), ("CELL", cell_id)]
-    assert value["targets"] == [
-        {"target": arguments["targets"][0], "root_session_id": "session:ddddddddddddddddddddddddda"},
-        {"target": arguments["targets"][3], "root_session_id": "session:ddddddddddddddddddddddddda", "host_session_id": "host:aaaaaaaaaaaaaaaaaaaaaaaaaa"},
-        {"target": arguments["targets"][4], "root_session_id": "session:ddddddddddddddddddddddddda"},
-        {"target": arguments["targets"][5], "root_session_id": "session:ddddddddddddddddddddddddda", "host_session_id": "host:aaaaaaaaaaaaaaaaaaaaaaaaaa"},
-        {"target": arguments["targets"][8]},
-    ]
+    from pulsara_agent.message import ToolResultState
+    assert result.status is ToolResultState.ERROR
+    text = "\n".join(part.value for part in result.business_value.content)
+    assert all(f"targets[{index}] 未接受" in text for index in range(1,8))
+    assert "已接受 targets[0]、targets[8]" in text
+    assert resolved == [("AGENT",agent_id),("AGENT",retired_id)]
+    assert result.result_facts["presentation_targets"] == (
+        {"target":arguments["targets"][0],"root_session_id":tool.root_session_id},
+        {"target":arguments["targets"][8]},
+    )
 
 
 def test_shared_object_reader_rejects_root_and_other_root_without_touching_lifecycle():
@@ -281,16 +261,13 @@ def test_real_dispatch_resolves_objects_through_common_read_owners(tmp_path):
                 {"kind": "AGENT", "agent_id": root}, {"kind": "CELL", "cell_id": retired},
                 {"kind": "CELL", "cell_id": cell}, {"kind": "PANEL", "name": "cells"},
             ]}, invocation_context=context)
-            value = json.loads(result.content)
-            assert result.state == "SUCCESS"
-            assert [error["index"] for error in value["errors"]] == [1, 2, 3]
-            assert value["targets"] == [
-                {"target": {"kind": "AGENT", "agent_id": agent}, "root_session_id": root},
-                {"target": {"kind": "CELL", "cell_id": cell}, "root_session_id": root, "host_session_id": "host:aaaaaaaaaaaaaaaaaaaaaaaaaa"},
-                {"target": {"kind": "PANEL", "name": "cells"}, "root_session_id": root, "host_session_id": "host:aaaaaaaaaaaaaaaaaaaaaaaaaa"},
-            ]
-            assert [item["session_id"] for item in reads] == [agent, other]
-            assert [call.args for call in port.capture_code_cell.call_args_list] == [(retired,), (cell,)]
+            assert result.state == "APPLICATION_ERROR"
+            text = "\n".join(part.value for part in result.content.content)
+            assert all(f"targets[{index}] 未接受" in text for index in range(1,6))
+            assert result.result_facts["presentation_targets"] == (
+                {"target":{"kind":"AGENT","agent_id":agent},"root_session_id":root},)
+            assert [item["session_id"] for item in reads] == [agent,other]
+            port.capture_code_cell.assert_not_called()
         finally:
             borrow.close()
             await port.aclose(timeout_seconds=2)
@@ -310,51 +287,45 @@ def test_known_reader_outage_fails_one_target_and_programming_error_still_raises
     async def resolve(kind, identity):
         return resolve_visible_agent(repository, root_session_id=tool.root_session_id, agent_session_id=identity, deadline_monotonic=123)
     call = ToolCall(id="call:test", name=tool.name, arguments={"targets": [
-        {"kind": "PANEL", "name": "capabilities"},
+        {"kind": "URL", "url": "https://one.example.test"},
         {"kind": "AGENT", "agent_id": agent},
-        {"kind": "PANEL", "name": "browser"},
+        {"kind": "URL", "url": "https://two.example.test"},
     ]})
-    value = json.loads(asyncio.run(tool.execute_async(call, resolve_object=resolve)).output)
-    assert value["targets"] == [{"target": call.arguments["targets"][0]}, {"target": call.arguments["targets"][2]}]
-    assert value["errors"] == [{"index": 1, "message": "Agent reader is temporarily unavailable"}]
+    result = asyncio.run(tool.execute_async(call,resolve_object=resolve))
+    from pulsara_agent.message import ToolResultState
+    assert result.status is ToolResultState.ERROR
+    assert result.result_facts["presentation_targets"] == ({"target":call.arguments["targets"][0]},{"target":call.arguments["targets"][2]})
+    text = "\n".join(part.value for part in result.business_value.content)
+    assert "targets[1] 未接受：Agent reader is temporarily unavailable" in text
     reader.side_effect = TypeError("invalid repository row")
     with pytest.raises(TypeError, match="invalid repository row"):
         asyncio.run(tool.execute_async(call, resolve_object=resolve))
 
 
-def test_shared_identity_schemas_reject_wrong_kinds_and_trailing_newlines():
+def test_source_target_schema_is_structural_and_parser_checks_shared_identity():
     from jsonschema import Draft202012Validator
-    from pulsara_agent.identity import derive_id
-    from pulsara_agent.memory.targets import memory_target_schema, parse_memory_target
-    from pulsara_agent.capability.source_query import capability_target_schema
-
-    from pulsara_agent.ports.tool_output import session_entry_source_target_schema
-    target_schema = session_entry_source_target_schema()
-    valid = derive_id("entry", "test-schema", "object")
-    validator = Draft202012Validator(target_schema)
-    assert validator.is_valid({"kind": "SESSION_ENTRY", "entry_id": valid})
-    assert not validator.is_valid({"kind": "SESSION_ENTRY", "entry_id": valid + "\n"})
-    assert not validator.is_valid({"kind": "SESSION_ENTRY", "entry_id": derive_id("memory", "test-schema", "object")})
-    memory = derive_id("memory", "test-schema", "object")
-    validator = Draft202012Validator(memory_target_schema())
-    assert validator.is_valid({"kind": "MEMORY", "memory_id": memory})
-    assert not validator.is_valid({"kind": "MEMORY", "memory_id": memory + "\n"})
-    with pytest.raises(ValueError):
-        parse_memory_target({"kind": "MEMORY", "memory_id": memory + "\n"})
-    server = derive_id("mcp-server", "runtime-target", "docs")
-    assert not Draft202012Validator(capability_target_schema("MCP_SERVER")).is_valid(
-        {"kind": "MCP_SERVER", "runtime_server_id": server + "\n"})
+    from pulsara_agent.ports.tool_output import parse_tool_output_target, session_entry_source_target_schema
+    valid=derive_id("entry","test-schema","object")
+    validator=Draft202012Validator(session_entry_source_target_schema())
+    target={"kind":"SESSION_ENTRY","entry_id":valid}
+    assert validator.is_valid(target)
+    assert parse_tool_output_target(target)==target
+    for identity in (valid+"\n",derive_id("memory","test-schema","object")):
+        supplied={"kind":"SESSION_ENTRY","entry_id":identity}
+        assert validator.is_valid(supplied)
+        with pytest.raises(ValueError):
+            parse_tool_output_target(supplied)
+    assert not validator.is_valid({"kind":"SESSION_ENTRY","entry_id":None})
 
 
-def test_agent_and_cell_schemas_reject_trailing_newline_and_wrong_kind():
-    from jsonschema import Draft202012Validator
-    from pulsara_agent.code_mode.targets import cell_target_schema
-    from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import target_schema
-    for schema, kind, field, identity in [
-        (cell_target_schema(), "CELL", "cell_id", "cell:" + "a" * 26),
-        (target_schema("AGENT"), "AGENT", "agent_id", "session:" + "a" * 26),
-    ]:
-        validator = Draft202012Validator(schema)
-        assert validator.is_valid({"kind": kind, field: identity})
-        assert not validator.is_valid({"kind": kind, field: identity + "\n"})
-        assert not validator.is_valid({"kind": kind, field: "process:" + "a" * 26})
+def test_object_parsers_check_exact_shared_identity_without_format_repair():
+    from pulsara_agent.code_mode.targets import parse_cell_target
+    from pulsara_agent.memory.targets import parse_memory_target
+    for parser,kind,field,identity,wrong in (
+        (parse_cell_target,"CELL","cell_id",derive_id("cell","test-target","valid"),derive_id("process","test-target","wrong")),
+        (parse_memory_target,"MEMORY","memory_id",derive_id("memory","test-target","valid"),derive_id("entry","test-target","wrong")),
+    ):
+        assert parser({"kind":kind,field:identity})
+        for value in (identity+"\n",wrong):
+            with pytest.raises(ValueError):
+                parser({"kind":kind,field:value})

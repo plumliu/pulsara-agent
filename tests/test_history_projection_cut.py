@@ -20,7 +20,7 @@ from pulsara_agent.conversation_kernel.history_projection import (
 from pulsara_agent.conversation_kernel.repository import AssistantTextBlock
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.test_conversation_fork import identity, new_session, repo as repo, rows, turn
-from tests.test_session_content_query import call_block, saved_calls
+from tests.support.history_tools import call_block, saved_calls
 
 pytestmark = pytest.mark.postgres
 

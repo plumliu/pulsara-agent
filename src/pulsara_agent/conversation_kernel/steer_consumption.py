@@ -20,7 +20,6 @@ from pulsara_agent.conversation_kernel.repository import (
     StaleHostWriter,
 )
 from pulsara_agent.conversation_kernel.steer import (
-    MAXIMUM_STEER_CANDIDATE_EXPANDED_BYTES,
     AcceptedSteerDispatchEntry,
     PendingPromptSteerFact,
     PreparedSteerPlanConflictInterruption,
@@ -62,13 +61,7 @@ class SteerConsumptionCoordinator:
         deadline: float,
     ) -> tuple[tuple[PendingPromptSteerFact, QueuedInputContent], ...]:
         result: list[tuple[PendingPromptSteerFact, QueuedInputContent]] = []
-        used = 0
         for fact in facts:
-            if (
-                used + fact.canonical_expanded_bytes
-                > MAXIMUM_STEER_CANDIDATE_EXPANDED_BYTES
-            ):
-                break
             prompt = await self._io.run(
                 self._repository.hydrate_pending_prompt_steer,
                 fact=fact,
@@ -81,7 +74,6 @@ class SteerConsumptionCoordinator:
                 raise ConversationKernelConflict(
                     "pending steer expanded metadata underquoted hydration"
                 )
-            used += prompt.resource_quote.canonical_expanded_bytes
             result.append((fact, prompt))
         return tuple(result)
 

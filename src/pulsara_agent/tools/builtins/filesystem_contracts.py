@@ -1,30 +1,16 @@
-"""Closed model-facing filesystem schemas shared with the builtin catalog."""
+"""Closed file-tool business inputs; delivery paging is owned by NEXT."""
 
-from __future__ import annotations
-
-from pulsara_agent.identity import REVISION_PATTERN
 from pulsara_agent.ports.tool_output import session_entry_source_target_schema
 
 
-DEFAULT_READ_LINES = 2_000
-MAX_READ_LINES = 2_000
-DEFAULT_SEARCH_LIMIT = 50
-MAX_SEARCH_LIMIT = 1_000
+def path_target_schema():
+    return _object(
+        {"kind": {"const": "PATH"}, "path": {"type": "string", "minLength": 1}},
+        ["kind", "path"],
+    )
 
 
-def path_target_schema() -> dict[str, object]:
-    return {
-        "type": "object",
-        "properties": {
-            "kind": {"type": "string", "const": "PATH"},
-            "path": {"type": "string", "minLength": 1},
-        },
-        "required": ["kind", "path"],
-        "additionalProperties": False,
-    }
-
-
-def _object(properties: dict[str, object], required: list[str]) -> dict[str, object]:
+def _object(properties, required):
     return {
         "type": "object",
         "properties": properties,
@@ -33,60 +19,28 @@ def _object(properties: dict[str, object], required: list[str]) -> dict[str, obj
     }
 
 
-def _text_continuation(*, path: bool) -> dict[str, object]:
-    properties: dict[str, object] = {
-        "line": {"type": "integer", "minimum": 1},
-        "char_offset": {"type": "integer", "minimum": 0},
-    }
-    required = ["line", "char_offset"]
-    if path:
-        properties["content_revision"] = {
-            "type": "string",
-            "pattern": "^" + REVISION_PATTERN + "$",
-        }
-        required.append("content_revision")
-    return _object(properties, required)
+def read_file_parameters_schema(*, native=True):
+    path = _object(
+        {
+            "target": path_target_schema(),
+            "offset": {"type": "integer", "not": {"const": 0}},
+            "limit": {"type": "integer", "minimum": 1},
+        },
+        ["target"],
+    )
+    if not native:
+        return path
+    from pulsara_agent.ports.tool_output import next_target_schema
 
-
-def read_file_parameters_schema() -> dict[str, object]:
-    limit = {
-        "type": "integer",
-        "minimum": 1,
-        "maximum": MAX_READ_LINES,
-        "default": DEFAULT_READ_LINES,
-    }
     return {
-        "oneOf": [
-            _object(
-                {
-                    "target": path_target_schema(),
-                    "offset": {"type": "integer", "minimum": 1, "default": 1},
-                    "limit": limit,
-                },
-                ["target"],
-            ),
-            _object(
-                {
-                    "target": path_target_schema(),
-                    "limit": limit,
-                    "continuation": _text_continuation(path=True),
-                },
-                ["target", "continuation"],
-            ),
-            _object({"target": session_entry_source_target_schema()}, ["target"]),
-            _object(
-                {
-                    "target": session_entry_source_target_schema(),
-                    "continuation": _text_continuation(path=False),
-                },
-                ["target", "continuation"],
-            ),
-        ]
+        "type": "object",
+        "oneOf": [path, _object({"target": next_target_schema()}, ["target"])],
     }
 
 
-def write_file_parameters_schema() -> dict[str, object]:
+def write_file_parameters_schema():
     return {
+        "type": "object",
         "oneOf": [
             _object(
                 {"target": path_target_schema(), "content": {"type": "string"}},
@@ -95,74 +49,99 @@ def write_file_parameters_schema() -> dict[str, object]:
             _object(
                 {
                     "target": path_target_schema(),
-                    "source": session_entry_source_target_schema(),
+                    "tool_result_target": session_entry_source_target_schema(),
                 },
-                ["target", "source"],
+                ["target", "tool_result_target"],
             ),
-        ]
+        ],
     }
 
 
-def _search_continuation(*, content: bool) -> dict[str, object]:
-    properties: dict[str, object] = {
-        "path": {"type": "string", "minLength": 1},
-        "partial": {"type": "boolean"},
-    }
-    if content:
-        properties["line"] = {"type": "integer", "minimum": 1}
-    return _object(properties, ["path", "partial"])
-
-
-def _search_properties() -> dict[str, object]:
+def edit_file_parameters_schema():
     return {
-        "target": path_target_schema(),
-        "limit": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": MAX_SEARCH_LIMIT,
-            "default": DEFAULT_SEARCH_LIMIT,
-        },
-    }
-
-
-def search_content_parameters_schema() -> dict[str, object]:
-    common = {
-        **_search_properties(),
-        "pattern": {"type": "string", "minLength": 1},
-        "file_glob": {"type": "string", "minLength": 1},
-    }
-    return {
+        "type": "object",
         "oneOf": [
             _object(
-                {
-                    **common,
-                    "output_mode": {
-                        "type": "string",
-                        "enum": ["content"],
-                        "default": "content",
-                    },
-                    "continuation": _search_continuation(content=True),
-                },
-                ["pattern"],
+                {"target": path_target_schema(), "content": {"type": "string"}},
+                ["target", "content"],
             ),
             _object(
                 {
-                    **common,
-                    "output_mode": {"type": "string", "enum": ["files_only", "count"]},
-                    "continuation": _search_continuation(content=False),
+                    "target": path_target_schema(),
+                    "old_text": {"type": "string"},
+                    "new_text": {"type": "string"},
                 },
-                ["pattern", "output_mode"],
+                ["target", "old_text", "new_text"],
             ),
-        ]
+        ],
     }
 
 
-def find_files_parameters_schema() -> dict[str, object]:
+def search_content_parameters_schema():
     return _object(
         {
-            **_search_properties(),
-            "glob": {"type": "string", "minLength": 1},
-            "continuation": _search_continuation(content=False),
+            "target": path_target_schema(),
+            "pattern": {"type": "string", "minLength": 1},
+            "file_glob": {"type": "string", "minLength": 1},
+            "output_mode": {
+                "type": "string",
+                "enum": ["content", "files_only", "count"],
+            },
         },
+        ["pattern"],
+    )
+
+
+def find_files_parameters_schema():
+    return _object(
+        {"target": path_target_schema(), "glob": {"type": "string", "minLength": 1}},
         ["glob"],
     )
+
+
+def file_tool_result_schema(name, *, output_mode=None):
+    """Complete JS business values; native continuation is not a file result."""
+    from pulsara_agent.ports.tool_execution import tool_business_value_schema
+
+    fields = {"target": path_target_schema()}
+    meta = {}
+    content = None
+    if name == "read_file":
+        meta = {
+            "total_lines": {"type": "integer", "minimum": 0},
+            "file_size": {"type": "integer", "minimum": 0},
+            "had_utf8_bom": {"type": "boolean"},
+        }
+    elif name == "write_file":
+        meta = {"bytes_written": {"type": "integer", "minimum": 0}}
+    elif name == "edit_file":
+        pass
+    elif name in {"find_files", "search_file_content"}:
+        text = _object({"type": {"const": "text"}, "value": {"type": "string"}}, ["type", "value"])
+        target = _object({"type": {"const": "target"}, "value": path_target_schema()}, ["type", "value"])
+        line = _object({"type": {"const": "object"}, "value": _object({
+            "target": path_target_schema(), "line": {"type": "integer", "minimum": 1},
+            "text": {"type": "string"},
+        }, ["target", "line", "text"])}, ["type", "value"])
+        count = _object({"type": {"const": "object"}, "value": _object({
+            "target": path_target_schema(), "count": {"type": "integer", "minimum": 1},
+        }, ["target", "count"])}, ["type", "value"])
+        if name == "find_files" or output_mode == "files_only":
+            parts = [text, target]
+        elif output_mode == "content":
+            parts = [text, line]
+        elif output_mode == "count":
+            parts = [text, count]
+        elif output_mode is None:
+            parts = [text, target, line, count]
+        else:
+            raise ValueError("Unknown search output mode")
+        content = {"type": "array", "items": {"oneOf": parts}}
+    else:
+        raise ValueError("Unknown file tool")
+    return {"oneOf": [
+        tool_business_value_schema(fields=fields, required_fields=("target",), meta=meta,
+            required_meta=tuple(meta), content_schema=content),
+        tool_business_value_schema(fields=fields, required_fields=("target",),
+            content_schema=content, statuses=("ERROR", "CANCELLED")),
+    ]}

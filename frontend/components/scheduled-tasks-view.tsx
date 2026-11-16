@@ -2,7 +2,7 @@ import { randomIdentity } from '../lib/identity';
 import { useCallback, useEffect, useRef, useState, type ReactNode, type SyntheticEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { CalendarClock, ChevronDown, ChevronRight, CircleAlert, Clock3, LoaderCircle, MessageSquare, Pencil, Play, Plus, RefreshCw, SlidersHorizontal, Trash2, X } from 'lucide-react';
-import type { SessionSummary, ToastMessage } from '../lib/pulsara-types';
+import type { SessionSummary, ToastMessage, PermissionMode } from '../lib/pulsara-types';
 import type { ModelCallBindingPayload, ModelConfigurationSummary, ReasoningSelectionPayload } from '../lib/runtime-adapter';
 import { LocalScheduledTasksApi, ScheduledApiError, scheduleLabel, type ScheduledTask, type ScheduledValues, type ScheduleRule, type ScheduledRunRequest, type ScheduledSession } from '../lib/scheduled-tasks-api';
 
@@ -180,7 +180,7 @@ export function ScheduledTasksView({ onNotify, focusTaskId, modelConfigurations,
         <div className="scheduled-toolbar">
           <div className="scheduled-collection-title">{selectedSession ? <MessageSquare size={17} aria-hidden="true" /> : <CalendarClock size={17} aria-hidden="true" />}<h2>{selectedSession ? <button className="scheduled-session-heading" title={selectedSession.title} aria-label={`打开会话：${selectedSession.title}`} onClick={() => onOpenSession(selectedSession.id)}>{selectedSession.title}</button> : '全部任务'}</h2></div>
           <div className="scheduled-toolbar-actions">
-            <label className="scheduled-filter memory-state-select"><SlidersHorizontal size={15} aria-hidden="true" /><select aria-label="任务状态" value={status} disabled={busy} onChange={e => { invalidateListRequests(); setStatus(e.target.value); }}><option value="">全部状态</option>{Object.entries(statusFilters).map(([key,label]) => <option key={key} value={key}>{label}</option>)}</select><ChevronDown size={13} aria-hidden="true" /></label>
+            <label className="scheduled-filter"><SlidersHorizontal size={15} aria-hidden="true" /><select aria-label="任务状态" value={status} disabled={busy} onChange={e => { invalidateListRequests(); setStatus(e.target.value); }}><option value="">全部状态</option>{Object.entries(statusFilters).map(([key,label]) => <option key={key} value={key}>{label}</option>)}</select><ChevronDown size={13} aria-hidden="true" /></label>
             {uncertainRun && <button className="secondary-action" disabled={busy} onClick={() => void act(uncertainRun, 'run')}>确认上次提交</button>}
             <button className="scheduled-icon-button" disabled={busy || loading} onClick={() => void reload()} aria-label="刷新定时任务">{loading ? <LoaderCircle size={16} aria-hidden="true" /> : <RefreshCw size={16} aria-hidden="true" />}</button>
           </div>
@@ -244,15 +244,15 @@ function TaskEditor({onNotify, modelConfigurations, modelCatalogLoading, onCreat
     if (model.reasoning.toggle) reasoningOptions.push({label:'开启',value:{kind:'toggle',enabled:true}},{label:'关闭',value:{kind:'toggle',enabled:false}});
   }
   const [current, setCurrent] = useState(task);
-  const timezone = current?.timezone ?? 'Asia/Shanghai';
+  const [timezone, setTimezone] = useState(current?.timezone ?? 'Asia/Shanghai');
   const timezoneLabel = timezone === 'Asia/Shanghai' ? '' : timezone;
-  const permission = current?.permission_mode ?? 'bypass-permissions';
+  const [permission, setPermission] = useState<PermissionMode>(current?.permission_mode ?? 'bypass-permissions');
   const [name,setName] = useState(task?.name ?? ''); const [prompt,setPrompt] = useState(task?.prompt ?? '');
   const [kind,setKind] = useState<ScheduleRule['kind']>(task?.schedule.kind ?? 'daily');
-  const initial = task?.schedule; const [start,setStart] = useState(initial && 'start_date' in initial ? initial.start_date : new Intl.DateTimeFormat('sv-SE', {timeZone:timezone}).format(new Date()));
+  const initial = task?.schedule; const [start,setStart] = useState(() => initial && 'start_date' in initial ? initial.start_date : new Intl.DateTimeFormat('sv-SE', {timeZone:timezone}).format(new Date()));
   const [time,setTime] = useState(initial && 'time' in initial ? initial.time : '08:00'); const [day,setDay] = useState(initial?.kind === 'monthly' ? initial.day : 1);
   const [days,setDays] = useState(initial?.kind === 'weekly' ? initial.weekdays : [1]); const [seconds,setSeconds] = useState(initial?.kind === 'interval' ? initial.seconds : 86400);
-  const [once,setOnce] = useState(() => initial?.kind === 'once' ? localInput(initial.run_at_utc,task!.timezone) : localInput(new Date(Date.now()+3600000).toISOString(),timezone));
+  const [once,setOnce] = useState(() => initial?.kind === 'once' ? initial.run_at.slice(0, 19) : localInput(new Date(Date.now()+3600000).toISOString(),timezone));
   const [onceChanged, setOnceChanged] = useState(false);
   const [anchor,setAnchor] = useState(() => initial?.kind === 'interval' ? initial.anchor_at_utc : new Date(Math.floor(Date.now()/1000)*1000).toISOString());
   const [preview,setPreview] = useState<string | null>(''); const [busy,setBusy] = useState(false); const previewRevision = useRef(0);
@@ -291,8 +291,12 @@ function TaskEditor({onNotify, modelConfigurations, modelCatalogLoading, onCreat
     saving.current = true; setBusy(true);
     try {
       if (!name.trim() || !prompt.trim()) throw new Error('请填写名称和提示词。');
-      const values: ScheduledValues = { name:name.trim(),prompt:prompt.trim(),timezone,permission_mode:permission,schedule:await rule() };
-      if (current) await api.update(current,values);
+      const values: ScheduledValues = { name,prompt,timezone,permission_mode:permission,schedule:await rule() };
+      if (current) {
+        const changed = Object.fromEntries(Object.entries(values).filter(([key, value]) =>
+          JSON.stringify(value) !== JSON.stringify(current[key as keyof ScheduledValues]))) as Partial<ScheduledValues>;
+        if (Object.keys(changed).length) await api.update(current, changed);
+      }
       else {
         if (!model || model.status !== 'ready') throw new Error('请先选择可用的供应商和模型。');
         // Validate the schedule before allocating an ordinary quick workspace.
@@ -307,8 +311,8 @@ function TaskEditor({onNotify, modelConfigurations, modelCatalogLoading, onCreat
       onNotify('任务未保存', (e as Error).message, 'warning');
       if (e instanceof ScheduledApiError && e.status === 409 && current) {
         try {
-          const latest = await api.get(current.id); if (!mounted.current) return; setCurrent(latest); setName(latest.name); setPrompt(latest.prompt); setKind(latest.schedule.kind);
-          const r = latest.schedule; if ('start_date' in r) setStart(r.start_date); if ('time' in r) setTime(r.time); if (r.kind === 'monthly') setDay(r.day); if (r.kind === 'weekly') setDays(r.weekdays); if (r.kind === 'once') { setOnce(localInput(r.run_at_utc,latest.timezone)); setOnceChanged(false); } if (r.kind === 'interval') { setSeconds(r.seconds); setAnchor(r.anchor_at_utc); }
+          const latest = await api.get(current.id); if (!mounted.current) return; setCurrent(latest); setName(latest.name); setPrompt(latest.prompt); setKind(latest.schedule.kind); setTimezone(latest.timezone); setPermission(latest.permission_mode);
+          const r = latest.schedule; if ('start_date' in r) setStart(r.start_date); if ('time' in r) setTime(r.time); if (r.kind === 'monthly') setDay(r.day); if (r.kind === 'weekly') setDays(r.weekdays); if (r.kind === 'once') { setOnce(r.run_at.slice(0, 19)); setOnceChanged(false); } if (r.kind === 'interval') { setSeconds(r.seconds); setAnchor(r.anchor_at_utc); }
         } catch(refreshError) { if (mounted.current) onNotify('无法读取最新任务配置', (refreshError as Error).message, 'warning'); }
       }
     } finally { saving.current = false; if (mounted.current) setBusy(false); }
@@ -332,8 +336,9 @@ function TaskEditor({onNotify, modelConfigurations, modelCatalogLoading, onCreat
     </>}
     <label>名称<input required disabled={busy} value={name} onChange={e => setName(e.target.value)} /></label><label>提示词<textarea required disabled={busy} rows={5} value={prompt} onChange={e => setPrompt(e.target.value)} /></label>
     <label>时间规则<select disabled={busy} value={kind} onChange={e => setKind(e.target.value as ScheduleRule['kind'])}><option value="daily">每天</option><option value="weekly">每周</option><option value="monthly">每月</option><option value="interval">固定间隔</option><option value="once">只运行一次</option></select></label>
-    {kind === 'once' ? <label>运行时间{timezoneLabel && `（${timezoneLabel}）`}<input type="datetime-local" required disabled={busy} value={once} onChange={e => { setOnceChanged(true); setOnce(e.target.value); }} /></label> : kind === 'interval' ? <><label>间隔（秒）<input type="number" min="1" step="1" required disabled={busy} value={seconds} onChange={e => setSeconds(Number(e.target.value))} /></label><label>固定起点（UTC）<input required disabled={busy} value={anchor} onChange={e => setAnchor(e.target.value)} /></label></> : <><div className="scheduled-fields"><label>开始日期<input type="date" required disabled={busy} value={start} onChange={e => setStart(e.target.value)} /></label><label>时间{timezoneLabel && `（${timezoneLabel}）`}<input type="time" required disabled={busy} value={time} onChange={e => setTime(e.target.value)} /></label></div>{kind === 'monthly' && <label>每月几号<input type="number" min="1" max="31" step="1" required disabled={busy} value={day} onChange={e => setDay(Number(e.target.value))} /></label>}{kind === 'weekly' && <fieldset><legend>星期</legend><div className="scheduled-weekdays">{['一','二','三','四','五','六','日'].map((d,i) => <label key={d}><input type="checkbox" disabled={busy} checked={days.includes(i+1)} onChange={e => setDays(old => e.target.checked ? [...old,i+1].sort() : old.filter(x => x!==i+1))} />{d}</label>)}</div></fieldset>}</>}
+    {kind === 'once' ? <label>运行时间{timezoneLabel && `（${timezoneLabel}）`}<input type="datetime-local" step="1" required disabled={busy} value={once} onChange={e => { setOnceChanged(true); setOnce(e.target.value); }} /></label> : kind === 'interval' ? <><label>间隔（秒）<input type="number" min="900" step="1" required disabled={busy} value={seconds} onChange={e => setSeconds(Number(e.target.value))} /></label><label>固定起点（UTC）<input required disabled={busy} value={anchor} onChange={e => setAnchor(e.target.value)} /></label></> : <><div className="scheduled-fields"><label>开始日期<input type="date" required disabled={busy} value={start} onChange={e => setStart(e.target.value)} /></label><label>时间{timezoneLabel && `（${timezoneLabel}）`}<input type="time" required disabled={busy} value={time} onChange={e => setTime(e.target.value)} /></label></div>{kind === 'monthly' && <label>每月几号<input type="number" min="1" max="31" step="1" required disabled={busy} value={day} onChange={e => setDay(Number(e.target.value))} /></label>}{kind === 'weekly' && <fieldset><legend>星期</legend><div className="scheduled-weekdays">{['一','二','三','四','五','六','日'].map((d,i) => <label key={d}><input type="checkbox" disabled={busy} checked={days.includes(i+1)} onChange={e => setDays(old => e.target.checked ? [...old,i+1].sort() : old.filter(x => x!==i+1))} />{d}</label>)}</div></fieldset>}</>}
 
+    <div className="scheduled-fields"><label>时区<input value={timezone} disabled={busy} onChange={event => setTimezone(event.target.value)} placeholder="Asia/Shanghai" /></label><label>执行权限<select value={permission} disabled={busy} onChange={event => setPermission(event.target.value as PermissionMode)}><option value="read-only">只读</option><option value="ask-permissions">请求权限</option><option value="accept-edits">允许编辑</option><option value="bypass-permissions">允许全部操作</option></select></label></div>
     {preview !== null && <p className="scheduled-preview"><Clock3 size={15} aria-hidden="true" /><span>{current?.status === 'ACTIVE' ? '下一次' : '启用后下一次'}：{preview || '正在计算…'}{timezoneLabel && ` · ${timezoneLabel}`}</span></p>}</div><footer className="scheduled-dialog-actions"><button className="secondary-action" type="button" disabled={busy} onClick={onClose}>取消</button><button className="scheduled-primary" disabled={busy || (!task && (!model || model.status !== 'ready'))}>{busy ? '保存中…' : '保存任务'}</button></footer>
   </form></ScheduledDialog>;
 }

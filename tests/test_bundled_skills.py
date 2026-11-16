@@ -211,9 +211,7 @@ def test_bundled_inventory_defects_are_whole_batch_unavailable(
 
     extra_root = _write_bundled_root(tmp_path / "extra-bundled")
     (extra_root / "README").write_text("extra", encoding="utf-8")
-    with BundledSkillDistributionBindingOwner(
-        _test_resource_root=extra_root
-    ) as owner:
+    with BundledSkillDistributionBindingOwner(_test_resource_root=extra_root) as owner:
         extra = BundledSkillDefinitionProducer(owner).observe()
     assert extra.disposition is BundledSkillDefinitionsDisposition.UNAVAILABLE
     assert extra.unavailable_cause is not None
@@ -223,16 +221,12 @@ def test_bundled_inventory_defects_are_whole_batch_unavailable(
 
     hidden_root = _write_bundled_root(tmp_path / "hidden-bundled")
     (hidden_root / ".build-metadata").mkdir()
-    with BundledSkillDistributionBindingOwner(
-        _test_resource_root=hidden_root
-    ) as owner:
+    with BundledSkillDistributionBindingOwner(_test_resource_root=hidden_root) as owner:
         hidden = BundledSkillDefinitionProducer(owner).observe()
     assert hidden.disposition is BundledSkillDefinitionsDisposition.COMPLETE
 
     nonregular_root = _write_bundled_root(tmp_path / "nonregular-bundled")
-    nonregular_document = (
-        nonregular_root / EXPECTED_BUNDLED_SKILL_NAMES[0] / "SKILL.md"
-    )
+    nonregular_document = nonregular_root / EXPECTED_BUNDLED_SKILL_NAMES[0] / "SKILL.md"
     nonregular_document.unlink()
     nonregular_document.mkdir()
     with BundledSkillDistributionBindingOwner(
@@ -354,16 +348,20 @@ def test_installed_bundled_inventory_is_exact_and_ordinary_readable(
         result = BundledSkillDefinitionProducer(owner).observe()
 
     assert result.disposition is BundledSkillDefinitionsDisposition.COMPLETE
-    assert tuple(item.name for item in result.candidates) == EXPECTED_BUNDLED_SKILL_NAMES
+    assert (
+        tuple(item.name for item in result.candidates) == EXPECTED_BUNDLED_SKILL_NAMES
+    )
     classification = classify_bundled_skill_inventory(
-        BundledInventoryEntry(name, True, True)
-        for name in EXPECTED_BUNDLED_SKILL_NAMES
+        BundledInventoryEntry(name, True, True) for name in EXPECTED_BUNDLED_SKILL_NAMES
     )
     assert classification.valid
     assert classification.diagnostics == ()
     assert not classify_bundled_skill_inventory(
         (
-            *(BundledInventoryEntry(name, True, True) for name in EXPECTED_BUNDLED_SKILL_NAMES),
+            *(
+                BundledInventoryEntry(name, True, True)
+                for name in EXPECTED_BUNDLED_SKILL_NAMES
+            ),
             BundledInventoryEntry("README", False, False),
         )
     ).valid
@@ -372,25 +370,43 @@ def test_installed_bundled_inventory_is_exact_and_ordinary_readable(
         item for item in result.candidates if item.name == "pulsara-skill-installer"
     )
     skill_read = ReadFileTool(tmp_path).execute(
-        ToolCall("call:skill", "read_file", {"target": {"kind": "PATH", "path": str(installer.path)}})
+        ToolCall(
+            "call:skill",
+            "read_file",
+            {"target": {"kind": "PATH", "path": str(installer.path)}},
+        )
     )
     reference = installer.base_dir / "references" / "directory-contract.md"
     reference_read = ReadFileTool(tmp_path).execute(
-        ToolCall("call:reference", "read_file", {"target": {"kind": "PATH", "path": str(reference)}})
+        ToolCall(
+            "call:reference",
+            "read_file",
+            {"target": {"kind": "PATH", "path": str(reference)}},
+        )
     )
     assert skill_read.status is ToolResultState.SUCCESS
     assert reference_read.status is ToolResultState.SUCCESS
-    assert json.loads(skill_read.output)["target"]["path"] == str(installer.path)
-    assert json.loads(reference_read.output)["target"]["path"] == str(reference)
+    assert skill_read.business_value.public_fields["target"]["path"] == str(
+        installer.path
+    )
+    assert reference_read.business_value.public_fields["target"]["path"] == str(
+        reference
+    )
 
     plugin_installer = next(
         item for item in result.candidates if item.name == "pulsara-plugin-installer"
     )
     plugin_skill_read = ReadFileTool(tmp_path).execute(
-        ToolCall("call:plugin-skill", "read_file", {"target": {"kind": "PATH", "path": str(plugin_installer.path)}})
+        ToolCall(
+            "call:plugin-skill",
+            "read_file",
+            {"target": {"kind": "PATH", "path": str(plugin_installer.path)}},
+        )
     )
     assert plugin_skill_read.status is ToolResultState.SUCCESS
-    assert json.loads(plugin_skill_read.output)["target"]["path"] == str(plugin_installer.path)
+    assert plugin_skill_read.business_value.public_fields["target"]["path"] == str(
+        plugin_installer.path
+    )
     for reference_name in (
         "conversion-contract.md",
         "codex-compatible.md",
@@ -405,26 +421,50 @@ def test_installed_bundled_inventory_is_exact_and_ordinary_readable(
             )
         )
         assert plugin_reference_read.status is ToolResultState.SUCCESS
-        assert json.loads(plugin_reference_read.output)["target"]["path"] == str(
-            plugin_reference
-        )
+        assert plugin_reference_read.business_value.public_fields["target"][
+            "path"
+        ] == str(plugin_reference)
 
     mcp_installer = next(
         item for item in result.candidates if item.name == "pulsara-mcp-installer"
     )
     mcp_skill_read = ReadFileTool(tmp_path).execute(
-        ToolCall("call:mcp-skill", "read_file", {"target": {"kind": "PATH", "path": str(mcp_installer.path)}})
+        ToolCall(
+            "call:mcp-skill",
+            "read_file",
+            {"target": {"kind": "PATH", "path": str(mcp_installer.path)}},
+        )
     )
     assert mcp_skill_read.status is ToolResultState.SUCCESS
-    assert json.loads(mcp_skill_read.output)["target"]["path"] == str(mcp_installer.path)
-    mcp_reference = mcp_installer.base_dir / "references" / "connection-configuration.md"
+    assert mcp_skill_read.business_value.public_fields["target"]["path"] == str(
+        mcp_installer.path
+    )
+    mcp_reference = (
+        mcp_installer.base_dir / "references" / "connection-configuration.md"
+    )
     mcp_reference_read = ReadFileTool(tmp_path).execute(
-        ToolCall("call:mcp-config-reference", "read_file", {"target": {"kind": "PATH", "path": str(mcp_reference)}})
+        ToolCall(
+            "call:mcp-config-reference",
+            "read_file",
+            {"target": {"kind": "PATH", "path": str(mcp_reference)}},
+        )
     )
     assert mcp_reference_read.status is ToolResultState.SUCCESS
-    assert json.loads(mcp_reference_read.output)["target"]["path"] == str(mcp_reference)
+    assert mcp_reference_read.business_value.public_fields["target"]["path"] == str(
+        mcp_reference
+    )
+    assert (
+        "".join(part.value for part in mcp_skill_read.business_value.content)
+        == mcp_installer.path.read_text()
+    )
+    assert (
+        "".join(part.value for part in mcp_reference_read.business_value.content)
+        == mcp_reference.read_text()
+    )
 
-    analysis = next(item for item in result.candidates if item.name == "pulsara-data-analysis")
+    analysis = next(
+        item for item in result.candidates if item.name == "pulsara-data-analysis"
+    )
     assert analysis.source is SkillSource.BUNDLED
     assert analysis.origin == BundledSkillOrigin("bundled_skills/pulsara-data-analysis")
     for relative_path in (
@@ -447,7 +487,9 @@ def test_installed_bundled_inventory_is_exact_and_ordinary_readable(
             )
         )
         assert resource_read.status is ToolResultState.SUCCESS
-        assert json.loads(resource_read.output)["target"]["path"] == str(resource)
+        assert resource_read.business_value.public_fields["target"]["path"] == str(
+            resource
+        )
 
     docs = next(item for item in result.candidates if item.name == "pulsara-docs")
     assert docs.source is SkillSource.BUNDLED
@@ -476,7 +518,9 @@ def test_installed_bundled_inventory_is_exact_and_ordinary_readable(
             )
         )
         assert resource_read.status is ToolResultState.SUCCESS
-        assert json.loads(resource_read.output)["target"]["path"] == str(resource)
+        assert resource_read.business_value.public_fields["target"]["path"] == str(
+            resource
+        )
 
     pdf = next(item for item in result.candidates if item.name == "pulsara-pdf")
     assert pdf.source is SkillSource.BUNDLED
@@ -495,7 +539,9 @@ def test_installed_bundled_inventory_is_exact_and_ordinary_readable(
             )
         )
         assert resource_read.status is ToolResultState.SUCCESS
-        assert json.loads(resource_read.output)["target"]["path"] == str(resource)
+        assert resource_read.business_value.public_fields["target"]["path"] == str(
+            resource
+        )
 
     sheets = next(item for item in result.candidates if item.name == "pulsara-sheets")
     assert sheets.source is SkillSource.BUNDLED
@@ -520,331 +566,398 @@ def test_installed_bundled_inventory_is_exact_and_ordinary_readable(
             )
         )
         assert resource_read.status is ToolResultState.SUCCESS
-        assert json.loads(resource_read.output)["target"]["path"] == str(resource)
+        assert resource_read.business_value.public_fields["target"]["path"] == str(
+            resource
+        )
 
 
+def _accepted_agent_example(members):
+    return {
+        "meta": {"status": "SUCCESS"},
+        "content": [
+            {
+                "type": "object",
+                "value": {
+                    "agent": {"kind": "AGENT", "agent_id": member["agent_id"]},
+                    "work": {"kind": "WORK", "work_id": member["work_id"]},
+                    "work_status": "queued",
+                },
+            }
+            for member in members
+        ],
+    }
 
-@pytest.mark.parametrize("available,decision,stopped_phase", [
-    (False, False, None), (True, False, None), (True, True, None),
-    (True, True, 1), (True, True, 2),
-])
-def test_code_mode_workflow_example_reuses_real_targets_and_guards_decision(
-    available: bool, decision: bool, stopped_phase: int | None,
-) -> None:
+
+def _example_records(value):
+    return [part["value"] for part in value["content"] if part["type"] == "object"]
+
+
+@pytest.mark.parametrize("work_status", ["completed", "stopped"])
+def test_code_mode_main_skill_dispatches_dependencies_and_reads_exact_work(work_status):
     from pulsara_agent.code_mode import CodeModeToolResult
     from pulsara_agent.identity import is_valid_id
 
-    source = _code_mode_example("agent-orchestration/workflows.md", 0)
-    calls = []
-    batches = []
-    readme = {"target": {"kind": "PATH", "path": "README.md"}, "content": "Project context"}
+    accepted, calls = [], []
+
     async def invoke(call):
         calls.append(call)
-        if call.tool_name == "read_file":
-            assert call.arguments == {"target": readme["target"], "limit": 160}
-            value = readme
-        elif call.tool_name == "run_agent":
-            members = call.arguments["members"]
-            value = {
-                "agents": [{"kind": "AGENT", "agent_id": member["agent_id"]} for member in members],
-                "works": [{"kind": "WORK", "work_id": member["work_id"]} for member in members],
-                "details": [{"work_title": member["parameters"]["work_title"], "status": "pending"} for member in members],
-            }
-            assert all(is_valid_id(item["agent_id"], "session") for item in value["agents"])
-            assert all(is_valid_id(item["work_id"], "queue") for item in value["works"])
-            if len(batches) == 1:
-                implementation, review = members
-                assert implementation["parameters"]["target"] == batches[0]["agents"][0]
-                assert implementation["parameters"]["materials"] == batches[0]["works"]
-                assert review["parameters"]["target"] == batches[0]["agents"][1]
-                assert review["parameters"]["depends_on"] == [value["works"][0]]
-                assert value["agents"] == batches[0]["agents"]
-            elif len(batches) == 2:
-                assert available and decision and len(members) == 1
-                assert members[0]["parameters"]["target"] == batches[1]["agents"][0]
-                assert members[0]["parameters"]["materials"] == [batches[1]["works"][1]]
-            batches.append(value)
-        elif call.tool_name == "wait_agent":
-            expected = batches[-1]["agents"]
-            if len(batches) == 2:
-                expected = [expected[1]]
-            assert call.arguments == {"agents": expected, "until": "idle"}
-            value = {"state": "settled", "until": "idle", "observations": [], "pending_targets": []}
-        elif call.tool_name == "query_agents":
-            stopped = stopped_phase == len(batches)
-            assert call.arguments["target"] in batches[-1]["works"]
-            value = {
-                "target": call.arguments["target"],
-                "status": "stopped" if stopped else "completed",
-                "final": None if stopped else "Concrete review",
-                "diagnostic": "Stopped by user" if stopped else None,
-            }
-        elif call.tool_name == "decide":
-            assert available
-            assert set(call.arguments) == {"condition", "inputs"}
-            assert json.loads(call.arguments["inputs"][0]) == {
-                "project_context": readme["content"], "review": "Concrete review",
-            }
-            value = {"decisions": [decision]}
-        else:
-            raise AssertionError(call.tool_name)
-        return CodeModeToolResult(value=value)
-
-    output = asyncio.run(_execute_code_mode_example(source, invoke, available))
-    names = [call.tool_name for call in calls]
-    phase_one = ["read_file", "run_agent", "wait_agent", "query_agents", "query_agents"]
-    phase_two = ["run_agent", "wait_agent", "query_agents"]
-    if stopped_phase is not None:
-        assert len(batches) == stopped_phase
-        assert names == phase_one + (phase_two if stopped_phase == 2 else [])
-        stopped_reviews = output[-1]["findings"] if stopped_phase == 1 else [output[-1]["review"]]
-        for stopped_review in stopped_reviews:
-            assert stopped_review["target"] in batches[-1]["works"]
-            assert stopped_review["status"] == "stopped"
-            assert stopped_review["final"] is None
-        return
-    assert len(batches) == (3 if available and decision else 2)
-    assert names == phase_one + phase_two + [
-        *(["decide"] if available else []),
-        *(["run_agent", "wait_agent", "query_agents"] if available and decision else []),
-    ]
-    for index in (0, 1):
-        assert output[index] == {"agents": batches[index]["agents"], "works": batches[index]["works"]}
-    if not available:
-        assert output[-1]["condition"]
-        assert json.loads(output[-1]["inputs"][0])["review"] == "Concrete review"
-        assert output[-1]["source"] == readme
-        assert output[-1]["works"] == batches[1]["works"]
-    if available and decision:
-        assert output[-1]["target"] == batches[2]["works"][0]
-    else:
-        assert output[-1]["review"]["target"] == batches[1]["works"][1]
-
-
-
-@pytest.mark.parametrize("wake_state", ["timeout", "message_available"])
-def test_workflow_early_wake_does_not_advance_unfinished_work(wake_state):
-    from pulsara_agent.code_mode import CodeModeToolResult
-
-    source = _code_mode_example("agent-orchestration/workflows.md", 0)
-    calls, dispatches = [], []
-    async def invoke(call):
-        calls.append(call)
-        if call.tool_name == "read_file":
-            value = {"content": "Project context"}
-        elif call.tool_name == "run_agent":
-            assert not dispatches, "unfinished investigation must not submit implementation"
-            members = call.arguments["members"]
-            value = {"agents": [{"kind": "AGENT", "agent_id": m["agent_id"]} for m in members],
-                     "works": [{"kind": "WORK", "work_id": m["work_id"]} for m in members], "details": []}
-            dispatches.append(value)
-        elif call.tool_name == "wait_agent":
-            assert call.arguments == {"agents": dispatches[0]["agents"], "until": "idle"}
-            value = {"state": wake_state, "until": "idle", "observations": [
-                {"target": target, "condition": "pending"} for target in dispatches[0]["agents"]],
-                "pending_targets": dispatches[0]["agents"]}
-        else:
-            assert call.tool_name == "query_agents"
-            value = {"target": call.arguments["target"], "status": "running"}
-        return CodeModeToolResult(value=value)
-
-    output = asyncio.run(_execute_code_mode_example(source, invoke, True))
-    assert [call.tool_name for call in calls] == ["read_file", "run_agent", "wait_agent", "query_agents", "query_agents"]
-    assert output[1]["observation"]["state"] == wake_state
-    assert all(item["status"] == "running" for item in output[-1]["findings"])
-
-
-def test_coordination_example_deduplicates_agents_and_queries_each_work():
-    from pulsara_agent.code_mode import CodeModeToolResult
-    from pulsara_agent.identity import random_id
-
-    agent = {"kind": "AGENT", "agent_id": random_id("session")}
-    works = [{"kind": "WORK", "work_id": random_id("queue")} for _ in range(2)]
-    batch = {"agents": [agent, agent], "works": works}
-    source = "const batch = " + json.dumps(batch) + ";\n"
-    source += _code_mode_example("agent-orchestration/coordination.md", 1)
-    calls = []
-    async def invoke(call):
-        calls.append(call)
-        if call.tool_name == "wait_agent":
-            assert call.arguments == {"agents": [agent], "until": "idle"}
-            value = {"state": "settled", "until": "idle", "observations": [
-                {"target": agent, "condition": "idle"}], "pending_targets": []}
-        else:
-            assert call.tool_name == "query_agents"
-            value = {"target": call.arguments["target"], "status": "completed", "final": "Evidence"}
-        return CodeModeToolResult(value=value)
-    output = asyncio.run(_execute_code_mode_example(source, invoke, False))
-    assert [call.arguments["target"] for call in calls[1:]] == works
-    assert [item["target"] for item in output[1]] == works
-
-def test_code_mode_main_skill_dispatches_teammates_with_real_refs():
-    from pulsara_agent.code_mode import CodeModeToolResult
-
-    source = _code_mode_example("SKILL.md", 1)
-    dispatches, waited, queried = [], [], []
-
-    async def invoke(call):
         if call.tool_name == "run_agent":
             members = call.arguments["members"]
             assert len(members) == 2
-            agents = [{"kind": "AGENT", "agent_id": m["agent_id"]} for m in members]
-            works = [{"kind": "WORK", "work_id": m["work_id"]} for m in members]
-            for index, member in enumerate(members):
-                assert json.dumps(agents[1 - index], separators=(",", ":")) in member["parameters"]["instruction"]
-            result = {"agents": agents, "works": works, "details": [{}, {}]}
-            dispatches.append(result)
-            return CodeModeToolResult(value=result)
-        if call.tool_name == "wait_agent":
-            waited.append(call.arguments)
-            return CodeModeToolResult(value={"state": "settled", "until": "idle", "observations": [], "pending_targets": []})
-        assert call.tool_name == "query_agents"
-        queried.append(call.arguments["target"])
-        return CodeModeToolResult(value={"target": call.arguments["target"], "status": "completed", "final": "Evidence"})
-
-    output = asyncio.run(_execute_code_mode_example(source, invoke, False))
-    assert len(dispatches) == 1
-    assert waited == [{"agents": dispatches[0]["agents"], "until": "idle"}]
-    assert queried == dispatches[0]["works"]
-    assert output[0] == {key: dispatches[0][key] for key in ("agents", "works")}
-    assert [item["target"] for item in output[1]] == queried
-
-
-def test_code_mode_examples_continue_agents_in_fresh_cell_with_work_dependency():
-    from pulsara_agent.code_mode import CodeModeToolResult
-
-    batches, waits = [], []
-
-    async def invoke(call):
-        if call.tool_name == "run_agent":
-            members = call.arguments["members"]
-            agents = [{"kind": "AGENT", "agent_id": m["agent_id"]} for m in members]
-            works = [{"kind": "WORK", "work_id": m["work_id"]} for m in members]
-            if batches:
-                assert agents == batches[0]["agents"]
-                assert all(target not in batches[0]["works"] for target in works)
-                assert [m["parameters"]["target"] for m in members] == agents
-                assert members[1]["parameters"]["depends_on"] == [works[0]]
-                assert all("context" not in m["parameters"] for m in members)
-            value = {"agents": agents, "works": works, "details": [{}, {}]}
-            batches.append(value)
+            assert members[0]["parameters"]["materials"] == [
+                {"kind": "CONTEXT_MATERIAL", "turns": 1}
+            ]
+            assert members[1]["parameters"]["depends_on"] == [
+                {"kind": "WORK", "work_id": members[0]["work_id"]}
+            ]
+            value = _accepted_agent_example(members)
+            accepted.extend(_example_records(value))
+            assert all(
+                is_valid_id(row["agent"]["agent_id"], "session")
+                and is_valid_id(row["work"]["work_id"], "queue")
+                for row in accepted
+            )
         elif call.tool_name == "wait_agent":
-            waits.append(call.arguments)
-            value = {"state": "settled", "until": "idle", "observations": [], "pending_targets": []}
+            assert call.arguments == {
+                "works": [row["work"] for row in accepted],
+                "settle": "all",
+                "timeout_seconds": 60,
+            }
+            value = {
+                "meta": {"status": "SUCCESS", "wait_reason": "condition_met"},
+                "content": [
+                    {"type": "object", "value": {**row, "work_status": work_status}}
+                    for row in accepted
+                ],
+            }
         else:
             assert call.tool_name == "query_agents"
-            assert call.arguments["target"] in batches[-1]["works"]
-            value = {"target": call.arguments["target"], "status": "completed", "final": "Evidence"}
+            assert call.arguments == {"target": accepted[0]["work"]}
+            detail = {
+                "target": accepted[0]["work"],
+                "agent": accepted[0]["agent"],
+                "work_title": "Investigate parser",
+                "work_status": work_status,
+                "instruction": "Investigate the parser and report evidence.",
+            }
+            detail.update(
+                {"final": "Concrete evidence"}
+                if work_status == "completed"
+                else {"diagnostic": "Stopped by user"}
+            )
+            value = {
+                "meta": {"status": "SUCCESS"},
+                "content": [{"type": "object", "value": detail}],
+            }
         return CodeModeToolResult(value=value)
 
-    first_source = _code_mode_example("agent-orchestration/examples.md", 2)
-    first_output = asyncio.run(_execute_code_mode_example(first_source, invoke, False))
-    assert first_output[0]["agents"] == batches[0]["agents"]
-
-    # A separate execution has fresh JS globals. Transfer the exact logged JSON,
-    # as ROOT does when constructing another Cell, rather than sharing a variable.
-    next_source = "const team = " + json.dumps(first_output[0]) + ";\n"
-    next_source += _code_mode_example("agent-orchestration/examples.md", 3)
-    next_output = asyncio.run(_execute_code_mode_example(next_source, invoke, False))
-
-    assert len(batches) == 2
-    assert waits == [
-        {"agents": batches[0]["agents"], "until": "idle"},
-        {"agents": [batches[1]["agents"][1]], "until": "idle"},
+    output = asyncio.run(
+        _execute_code_mode_example(_code_mode_example("SKILL.md", 1), invoke, False)
+    )
+    assert [call.tool_name for call in calls] == [
+        "run_agent",
+        "wait_agent",
+        "query_agents",
     ]
-    assert next_output[0]["agents"] == first_output[0]["agents"]
-    assert next_output[0]["works"] == batches[1]["works"]
-    assert next_output[1]["target"] == batches[1]["works"][1]
+    assert _example_records(output[0]) == accepted
+    assert [row["work_status"] for row in _example_records(output[1])] == [
+        work_status,
+        work_status,
+    ]
+    assert _example_records(output[2])[0]["target"] == accepted[0]["work"]
+    assert _example_records(output[2])[0].get(
+        "final", _example_records(output[2])[0].get("diagnostic")
+    ) == ("Concrete evidence" if work_status == "completed" else "Stopped by user")
+
+
+def test_code_mode_teammate_example_uses_actual_preallocated_refs():
+    from pulsara_agent.code_mode import CodeModeToolResult
+
+    accepted = []
+
+    async def invoke(call):
+        assert call.tool_name == "run_agent"
+        members = call.arguments["members"]
+        value = _accepted_agent_example(members)
+        rows = _example_records(value)
+        for index, member in enumerate(members):
+            assert (
+                json.dumps(rows[1 - index]["agent"], separators=(",", ":"))
+                in member["parameters"]["instruction"]
+            )
+        accepted.append(value)
+        return CodeModeToolResult(value=value)
+
+    output = asyncio.run(
+        _execute_code_mode_example(
+            _code_mode_example("agent-orchestration/examples.md", 1), invoke, False
+        )
+    )
+    assert output == accepted
+
+
+def test_code_mode_dependency_example_waits_for_every_exact_work():
+    from pulsara_agent.code_mode import CodeModeToolResult
+
+    records, calls = [], []
+
+    async def invoke(call):
+        calls.append(call)
+        if call.tool_name == "run_agent":
+            members = call.arguments["members"]
+            assert members[1]["parameters"]["depends_on"] == [
+                {"kind": "WORK", "work_id": members[0]["work_id"]}
+            ]
+            value = _accepted_agent_example(members)
+            records.extend(_example_records(value))
+        else:
+            assert call.tool_name == "wait_agent"
+            assert call.arguments == {
+                "works": [row["work"] for row in records],
+                "settle": "all",
+            }
+            value = {
+                "meta": {"status": "SUCCESS", "wait_reason": "timeout"},
+                "content": [
+                    {"type": "object", "value": {**row, "work_status": status}}
+                    for row, status in zip(
+                        records, ("completed", "running"), strict=True
+                    )
+                ],
+            }
+        return CodeModeToolResult(value=value)
+
+    output = asyncio.run(
+        _execute_code_mode_example(
+            _code_mode_example("agent-orchestration/examples.md", 2), invoke, False
+        )
+    )
+    assert [call.tool_name for call in calls] == ["run_agent", "wait_agent"]
+    assert output[0]["meta"]["wait_reason"] == "timeout"
+    assert [row["work"] for row in _example_records(output[0])] == [
+        row["work"] for row in records
+    ]
+    assert [row["work_status"] for row in _example_records(output[0])] == [
+        "completed",
+        "running",
+    ]
+
+
+def test_code_mode_examples_reuse_actual_agent_in_a_fresh_cell():
+    from pulsara_agent.code_mode import CodeModeToolResult
+
+    batches = []
+
+    async def invoke(call):
+        assert call.tool_name == "run_agent"
+        members = call.arguments["members"]
+        if batches:
+            target = _example_records(batches[0])[0]["agent"]
+            assert members[0]["parameters"]["target"] == target
+            assert members[0]["agent_id"] == target["agent_id"]
+            assert members[0]["parameters"]["materials"] == [
+                {"kind": "CONTEXT_MATERIAL", "turns": 1}
+            ]
+            assert (
+                members[0]["work_id"]
+                != _example_records(batches[0])[0]["work"]["work_id"]
+            )
+        value = _accepted_agent_example(members)
+        batches.append(value)
+        return CodeModeToolResult(value=value)
+
+    first = asyncio.run(
+        _execute_code_mode_example(
+            _code_mode_example("agent-orchestration/examples.md", 1), invoke, False
+        )
+    )
+    agent_id = _example_records(first[0])[0]["agent"]["agent_id"]
+    source = _code_mode_example("agent-orchestration/examples.md", 3).replace(
+        "session:aaaaaaaaaaaaaaaaaaaaaaaaaa", agent_id
+    )
+    second = asyncio.run(_execute_code_mode_example(source, invoke, False))
+    assert (
+        _example_records(second[0])[0]["agent"]
+        == _example_records(first[0])[0]["agent"]
+    )
+    assert second == [batches[1]]
 
 
 @pytest.mark.parametrize("available", [False, True])
-def test_code_mode_history_example_preserves_sources_and_positional_judgments(
-    available: bool,
-) -> None:
+def test_code_mode_decision_example_guards_actual_availability_and_preserves_positions(
+    available,
+):
     from pulsara_agent.code_mode import CodeModeToolResult
-    from pulsara_agent.identity import random_id
 
-    from pulsara_agent.ports.session_content import session_entry_target
-
-    candidates = []
-    for text in ("Keep Skill guidance concrete", "Install this Skill", "Keep Skill guidance concrete"):
-        target = session_entry_target(random_id("session"), random_id("entry"))
-        candidates.append({
-            "target": target, "title": "Skill discussion", "score": 1.0,
-            "messages": [{
-                "role": "user", "label": "user", "at": "2026-11-07T10:00:00Z", "text": text,
-                "target": target,
-                "read": {"tool": "read_session_content", "arguments": {"target": target, "limit": 1}},
-            }],
-        })
-    source = "const page = " + json.dumps({"items": candidates}) + ";\n"
-    source += _code_mode_example("tool-calling/examples.md", 3)
     calls = []
 
     async def invoke(call):
         calls.append(call)
         assert available and call.tool_name == "decide"
-        assert set(call.arguments) == {"condition", "inputs"}
-        inputs = [json.loads(item) for item in call.arguments["inputs"]]
-        assert inputs == [
-            [{key: message[key] for key in ("role", "at", "text")} for message in item["messages"]]
-            for item in candidates
-        ]
-        return CodeModeToolResult(value={"decisions": [True, False, True]})
+        assert call.arguments == {
+            "condition": "Does this describe an export failure?",
+            "inputs": ["Export did not create a file.", "The file opens correctly."],
+        }
+        return CodeModeToolResult(
+            value={
+                "meta": {"status": "SUCCESS"},
+                "content": [{"type": "object", "value": {"decisions": [True, False]}}],
+            }
+        )
 
-    output = asyncio.run(_execute_code_mode_example(source, invoke, available))
-    assert len(output) == 1
+    output = asyncio.run(
+        _execute_code_mode_example(
+            _code_mode_example("tool-calling/examples.md", 3), invoke, available
+        )
+    )
     if available:
         assert len(calls) == 1
-        assert output == [{"matches": [candidates[0], candidates[2]]}]
+        assert output == [["Export did not create a file."]]
     else:
         assert calls == []
-        assert output[0]["condition"]
-        assert len(output[0]["inputs"]) == 3
-        assert output[0]["candidates"] == candidates
+        assert output == [
+            {
+                "condition": "Does this describe an export failure?",
+                "inputs": [
+                    "Export did not create a file.",
+                    "The file opens correctly.",
+                ],
+            }
+        ]
+
+
+def test_code_mode_main_skill_combines_complete_text_and_typed_image_items():
+    from pulsara_agent.code_mode import CodeModeToolResult
+    from pulsara_agent.identity import random_id
+
+    image = {"kind": "IMAGE_REF", "image_ref": random_id("image")}
+    calls = []
+
+    async def invoke(call):
+        calls.append(call)
+        if call.tool_name == "read_file":
+            assert call.arguments == {"target": {"kind": "PATH", "path": "README.md"}}
+            value = {
+                "meta": {"status": "SUCCESS"},
+                "content": [{"type": "text", "value": "Complete project context"}],
+            }
+        else:
+            assert call.tool_name == "view_image"
+            assert call.arguments == {"target": {"kind": "PATH", "path": "chart.png"}}
+            value = {
+                "meta": {"status": "SUCCESS"},
+                "content": [{"type": "image", "value": image}],
+            }
+        return CodeModeToolResult(value=value)
+
+    output = asyncio.run(
+        _execute_code_mode_example(_code_mode_example("SKILL.md", 0), invoke, False)
+    )
+    assert [call.tool_name for call in calls] == ["read_file", "view_image"]
+    assert output == [
+        {
+            "content": [
+                {"type": "text", "value": "Complete project context"},
+                {"type": "image", "value": image},
+            ]
+        }
+    ]
+
+
+def test_code_mode_mcp_example_queries_the_current_directory_shape():
+    from pulsara_agent.code_mode import CodeModeToolResult
+
+    calls = []
+    value = {
+        "meta": {"status": "SUCCESS"},
+        "content": [{"type": "text", "value": "Matching MCP tools"}],
+    }
+
+    async def invoke(call):
+        calls.append(call)
+        assert call.tool_name == "query_capabilities"
+        assert call.arguments == {"kind": "MCP", "query": "find issues"}
+        return CodeModeToolResult(value=value)
+
+    output = asyncio.run(
+        _execute_code_mode_example(
+            _code_mode_example("tool-calling/patterns.md", 1), invoke, False
+        )
+    )
+    assert len(calls) == 1
+    assert output == [value]
 
 
 def _code_mode_example(reference: str, index: int) -> str:
     with BundledSkillDistributionBindingOwner() as owner:
         inventory = BundledSkillDefinitionProducer(owner).observe()
-        skill = next(item for item in inventory.candidates if item.name == "pulsara-code-mode")
-        path = skill.base_dir / reference if reference == "SKILL.md" else skill.base_dir / "references" / reference
+        skill = next(
+            item for item in inventory.candidates if item.name == "pulsara-code-mode"
+        )
+        path = (
+            skill.base_dir / reference
+            if reference == "SKILL.md"
+            else skill.base_dir / "references" / reference
+        )
         text = path.read_text(encoding="utf-8")
     return re.findall(r"```js\n(.*?)\n```", text, re.DOTALL)[index]
 
 
 async def _execute_code_mode_example(source, invoke, available):
     from pulsara_agent.code_mode import CodeModeHost
-    from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import run_agent_parameters_schema
+    from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import (
+        run_agent_parameters_schema,
+    )
     from pulsara_agent.identity import random_id
 
     host = CodeModeHost()
     output = []
     try:
         cell_id = await host.start(
-            source=source, source_exec_attempt_id=random_id("attempt"),
-            turn_id=random_id("turn"), snapshot=object(),
+            source=source,
+            source_exec_attempt_id=random_id("attempt"),
+            turn_id=random_id("turn"),
+            snapshot=object(),
             tool_catalog={
-                **{name: {} for name in ("read_file", "wait_agent", "query_agents", "decide")},
+                **{
+                    name: {}
+                    for name in (
+                        "read_file",
+                        "view_image",
+                        "wait_agent",
+                        "query_agents",
+                        "query_capabilities",
+                        "decide",
+                    )
+                },
                 "run_agent": {"parameters": run_agent_parameters_schema()},
             },
-            invoke=invoke, decision_available=available,
+            invoke=invoke,
+            decision_available=available,
         )
         cell = host._cell(cell_id)
         async with asyncio.timeout(15):
             while True:
-                lease = await host.lease_output(cell_id) if cell_id in host._cells else None
+                lease = (
+                    await host.lease_output(cell_id) if cell_id in host._cells else None
+                )
                 if lease is not None:
                     assert lease.record["kind"] == "log", lease.record
-                    output.append(json.loads(lease.record["text"]))
+                    assert len(lease.record["values"]) == 1
+                    output.append(lease.record["values"][0]["value"])
                     await host.acknowledge_output(lease)
-                elif cell.state in {"completed", "failed", "terminated"} and not cell.pending and not cell.output:
+                elif (
+                    cell.state in {"completed", "failed", "terminated"}
+                    and not cell.pending
+                    and not cell.output
+                ):
                     assert cell.state == "completed", cell.error
                     return output
                 else:
                     await asyncio.sleep(0.001)
     finally:
         await host.aclose()
+
 
 def _inspect(
     workspace: Path,
@@ -894,20 +1007,33 @@ description: {description}
 
 
 def test_script_manual_is_only_projected_to_root(tmp_path):
-    from pulsara_agent.capability.plugin_skill_contracts import PluginSkillDefinitionsDisposition
-    from pulsara_agent.conversation_kernel.capability import KernelSkillProjectionComposer
+    from pulsara_agent.capability.plugin_skill_contracts import (
+        PluginSkillDefinitionsDisposition,
+    )
+    from pulsara_agent.conversation_kernel.capability import (
+        KernelSkillProjectionComposer,
+    )
     from pulsara_agent.model_input.contracts import ModelInputScopeKind
 
     with BundledSkillDistributionBindingOwner() as binding:
         composer = KernelSkillProjectionComposer(
-            workspace_root=tmp_path, bundled_binding_owner=binding,
-            plugin_definitions_provider=lambda: FrozenPluginSkillDefinitions(PluginSkillDefinitionsDisposition.COMPLETE),
+            workspace_root=tmp_path,
+            bundled_binding_owner=binding,
+            plugin_definitions_provider=lambda: FrozenPluginSkillDefinitions(
+                PluginSkillDefinitionsDisposition.COMPLETE
+            ),
             loose_producer=LooseSkillDefinitionProducer(
-                user_product_skills_root=tmp_path / 'user', user_agents_skills_root=tmp_path / 'agents'),
+                user_product_skills_root=tmp_path / "user",
+                user_agents_skills_root=tmp_path / "agents",
+            ),
         )
-        root = composer.freeze_owner_snapshot(conversation_scope_kind=ModelInputScopeKind.ROOT)
-        child = composer.freeze_owner_snapshot(conversation_scope_kind=ModelInputScopeKind.SUBAGENT)
-        assert 'pulsara-code-mode' in {s.name for s in root.inspection.winners}
-        assert 'pulsara-code-mode' not in {s.name for s in child.inspection.winners}
+        root = composer.freeze_owner_snapshot(
+            conversation_scope_kind=ModelInputScopeKind.ROOT
+        )
+        child = composer.freeze_owner_snapshot(
+            conversation_scope_kind=ModelInputScopeKind.SUBAGENT
+        )
+        assert "pulsara-code-mode" in {s.name for s in root.inspection.winners}
+        assert "pulsara-code-mode" not in {s.name for s in child.inspection.winners}
         assert len(root.source_snapshot.facts) == len(child.source_snapshot.facts) + 1
         assert composer.freeze_projection_input(child).inspection is child.inspection

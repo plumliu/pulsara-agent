@@ -1,4 +1,4 @@
-import {cleanup, fireEvent, render, screen, waitFor} from '@testing-library/react';
+import {act, cleanup, fireEvent, render, screen, waitFor} from '@testing-library/react';
 import {afterEach, expect, it, vi} from 'vitest';
 import {McpImporter} from '../../frontend/components/mcp-importer';
 
@@ -19,12 +19,12 @@ it('allows Escape to dismiss the dialog except while a preview or import is sett
   fireEvent.click(screen.getByRole('button', {name: '读取预览'}));
   fireEvent.keyDown(window, {key: 'Escape'});
   expect(onClose).not.toHaveBeenCalled();
-  finishPreview([preview]);
+  await act(async () => { finishPreview([preview]); });
   await screen.findByLabelText('选择服务（分别导入）');
   fireEvent.click(screen.getByRole('button', {name: '确认导入此服务'}));
   fireEvent.keyDown(window, {key: 'Escape'});
   expect(onClose).not.toHaveBeenCalled();
-  finishImport(true);
+  await act(async () => { finishImport(true); });
   await screen.findByRole('button', {name: '已导入'});
   fireEvent.keyDown(window, {key: 'Escape'});
   expect(onClose).toHaveBeenCalledTimes(1);

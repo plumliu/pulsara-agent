@@ -1,8 +1,8 @@
-# Pulsara 展示工具修订与使用教程草案
+# Pulsara 展示工具合同与使用教程
 
 共用规则见[原生工具修订草案索引](../PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 1、2 章；完整结果保存、原生 12k 分页及 NEXT 沿[统一交付草案](../PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)。
 
-状态：讨论草案，未实施。本族只有 open_in_pulsara 一个 ROOT 原生工具，不提供 JS API。当前确定参数、精简返回值、原生示例及错误语义。TypeScript 只描述合同，不表示存在脚本入口。本轮只改文档。
+状态：当前生效合同。本族只有 open_in_pulsara 一个 ROOT 原生工具，不提供 JS API。当前确定参数、精简返回值、原生示例及错误语义。TypeScript 只描述合同，不表示存在脚本入口。
 
 ## 1. open_in_pulsara：向用户展示目标
 

@@ -10,7 +10,6 @@ from __future__ import annotations
 from pulsara_agent.identity import require_id
 from pulsara_agent.conversation_kernel.contracts import CanonicalContent
 from pulsara_agent.scheduling.contracts import ScheduledProvenance
-from pulsara_agent.ports.terminal_observation import cell_output_provider_text
 
 from pulsara_agent.conversation_kernel.interruption import (
     read_executed_notices,
@@ -73,7 +72,6 @@ from pulsara_agent.model_input.contracts import (
     plan_handoff_compile_fact_fingerprint,
     plan_workflow_compile_fact_fingerprint,
     approved_plan_materialization_fingerprint,
-    provider_input_item_fingerprint,
     previous_turn_outcome_fingerprint,
 )
 from pulsara_agent.model_input.continuity import ProviderInputContinuityScope
@@ -100,7 +98,6 @@ from pulsara_agent.primitives.context import (
 )
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.plan_workflow import (
-    PlanApprovedMaterializationDisposition,
     PlanHandoffKind,
     PlanWorkflowEnteredBy,
     PlanWorkflowStatus,
@@ -118,9 +115,6 @@ from pulsara_agent.primitives.tool_observation import (
     ToolObservationOrigin,
     canonical_utc_timestamp,
     tool_observation_timing_fingerprint,
-)
-from pulsara_agent.primitives.tool_result_projection import (
-    classify_tool_result_delivery,
 )
 from pulsara_agent.llm.provider_replay import ProviderReplayTargetCompatibilityFact
 from pulsara_agent.storage.postgres_connection_provider import (
@@ -370,15 +364,23 @@ class CanonicalProviderInputReader:
                 prompt_bytes += canonical_prompt_body_resource_quote(body).canonical_expanded_bytes
             cell_output_bytes = 0
             cell_rows = connection.execute(
-                """SELECT id FROM pulsara_v3.transcript_entries
+                """SELECT * FROM pulsara_v3.transcript_entries
                    WHERE session_id=%s AND entry_kind='TERMINAL_OBSERVATION'
                      AND (entry_sequence>%s OR id=ANY(%s::text[]))
                      AND entry_sequence<=%s ORDER BY entry_sequence""",
                 (cut.session_id, floor, list(retained_entry_ids), cut.provider_input_through_sequence),
             ).fetchall()
             for cell_row in cell_rows:
-                text = self._entry_text(connection, str(cell_row["id"]), cut.session_id)
-                cell_output_bytes += len(cell_output_provider_text(text).encode("utf-8"))
+                from pulsara_agent.conversation_kernel._repository.queue_content import (
+                    input_owner_metadata,
+                )
+
+                _cell_body, expanded = input_owner_metadata(
+                    connection,
+                    row={**cell_row, "input_origin": "CELL_OUTPUT"},
+                    transcript_entry_id=str(cell_row["id"]),
+                )
+                cell_output_bytes += expanded
             quote = connection.execute(
                 """
                 WITH selected_entries AS (
@@ -674,6 +676,31 @@ class CanonicalProviderInputReader:
                 """,
                 (cut.session_id, cut.provider_input_through_sequence),
             ).fetchone()["through_sequence"]
+            # Successful reads are execution facts, including unpublished JS
+            # calls. Keep only their resolved paths in this repeatable-read cut;
+            # private tool results never become provider transcript items.
+            file_reads = connection.execute(
+                """
+                SELECT r.public_fields->'target'->>'path' AS path
+                FROM pulsara_v3.tool_results AS r
+                JOIN pulsara_v3.transcript_entries AS e
+                  ON e.session_id = r.session_id AND e.id = r.result_entry_id
+                LEFT JOIN pulsara_v3.tool_invocations AS i
+                  ON i.session_id = r.session_id AND i.id = r.invocation_id
+                LEFT JOIN pulsara_v3.content_parts AS call
+                  ON call.session_id = r.session_id
+                 AND call.entry_id = r.tool_call_entry_id
+                 AND call.tool_call_id = r.tool_call_id
+                WHERE r.session_id = %s AND e.entry_sequence <= %s
+                  AND r.result_state = 'SUCCESS'
+                  AND COALESCE(call.tool_name, i.tool_name) = 'read_file'
+                  AND r.public_fields->'target'->>'kind' = 'PATH'
+                  AND json_typeof(r.public_fields->'target'->'path') = 'string'
+                GROUP BY r.public_fields->'target'->>'path'
+                ORDER BY min(e.entry_sequence), path
+                """,
+                (cut.session_id, cut.provider_input_through_sequence),
+            ).fetchall()
             return freeze_compaction_canonical_read(
                 scope=scope,
                 turn_status=str(row["status"]),
@@ -688,6 +715,7 @@ class CanonicalProviderInputReader:
                     if ending.owner_id != cut.turn_id
                 ),
                 latest_assistant_input_through_sequence=None if consumed is None else int(consumed),
+                successful_file_read_paths=tuple(item["path"] for item in file_reads),
             )
 
 
@@ -865,6 +893,7 @@ class CanonicalProviderInputReader:
                        CASE e.entry_owner_kind WHEN 'EXECUTED_TURN' THEN e.turn_id
                             WHEN 'IMPORTED_HISTORY' THEN e.imported_history_group_id END AS turn_id,
                        e.entry_sequence, e.entry_kind, e.input_origin, e.scheduled_input,
+                       e.source_cell_id, e.source_record_sequence, e.cell_output_kind,
                        e.context_binding_revision_id,
                        e.provider_input_through_sequence,
                        e.source_plan_workflow_id,
@@ -965,22 +994,10 @@ class CanonicalProviderInputReader:
                 )
                 late.append(observation)
                 result_row = result
-                result_parts, result_body_text, result_bytes = self._result_projection(connection, result_row)
+                result_parts, result_body_text, result_bytes, native_page = self._result_projection(connection, result_row)
                 result_images = tuple(part for part in result_parts if isinstance(part, LLMImagePart))
-                if call.tool_name == "annotate_media" and str(result["result_state"]) == "SUCCESS":
-                    from pulsara_agent.primitives.tool_result_projection import project_tool_result_storage_body
-                    result_body_text = project_tool_result_storage_body(result_body_text,
-                        ToolObservationOrigin.BUILTIN, tool_name=call.tool_name,
-                        result_state=str(result["result_state"]))
-                late_text = _canonical_json_text(
-                    {
-                        "tool_call_id": call.tool_call_id,
-                        "result_state": result["result_state"],
-                        "result": result_body_text,
-                    }
-                )
-                late_content = (LLMTextPart(late_text), *result_images)
-                late_expanded_bytes = len(late_text.encode("utf-8")) + sum(len(image.immutable_bytes) for image in result_images)
+                late_content = result_parts
+                late_expanded_bytes = result_bytes
                 canonical_bytes += late_expanded_bytes
                 late_items.append(
                     (
@@ -995,14 +1012,7 @@ class CanonicalProviderInputReader:
                             tool_request_entry_id=request_entry_id,
                             tool_result_context=_tool_result_metadata(result),
                             tool_result_body_text=result_body_text,
-                            tool_result_delivery=(
-                                classify_tool_result_delivery(
-                                    tool_name=call.tool_name,
-                                    public_arguments=thaw_json(call.arguments),
-                                    result_state=str(result["result_state"]),
-                                    has_image_attachment=bool(result_images),
-                                )
-                            ),
+                            native_page=native_page,
                             tool_call_ordinal=call_ordinal,
                             tool_call_arguments=call.arguments,
                             tool_call_name=call.tool_name if result_images else None,
@@ -1063,17 +1073,31 @@ class CanonicalProviderInputReader:
                     )
                     continue
                 if kind == "TERMINAL_OBSERVATION":
-                    text = cell_output_provider_text(self._entry_text(connection, entry_id, cut.session_id))
-                    content = text.encode("utf-8")
-                    canonical_bytes += len(content)
+                    from pulsara_agent.conversation_kernel._repository.queue_content import (
+                        read_cell_entry_provider_parts,
+                    )
+                    from pulsara_agent.ports.terminal_observation import (
+                        CellOutputSource,
+                        cell_output_canonical_body,
+                    )
+
+                    cell_parts = read_cell_entry_provider_parts(
+                        connection, session_id=cut.session_id, entry_id=entry_id
+                    )
+                    canonical_bytes += cell_output_canonical_body(cell_parts)[1]
                     items.append(
                         ProviderInputItem(
                             item_kind=ProviderInputItemKind.TERMINAL_OBSERVATION,
                             source_entry_id=entry_id,
                             source_entry_sequence=sequence,
                             source_turn_id=str(row["turn_id"]),
-                            content=(LLMTextPart(text),),
+                            content=cell_parts,
                             input_origin=CanonicalInputOriginKind.CELL_OUTPUT,
+                            cell_output_source=CellOutputSource(
+                                str(row["source_cell_id"]),
+                                int(row["source_record_sequence"]),
+                                str(row["cell_output_kind"]),
+                            ),
                         )
                     )
                     continue
@@ -1161,7 +1185,7 @@ class CanonicalProviderInputReader:
                                 "imported call has both visible result and closure"
                             )
                         result_row = result
-                        result_parts, result_body_text, result_bytes = self._result_projection(connection, result_row)
+                        result_parts, result_body_text, result_bytes, native_page = self._result_projection(connection, result_row)
                         canonical_bytes += result_bytes
                         items.append(
                             ProviderInputItem(
@@ -1174,15 +1198,7 @@ class CanonicalProviderInputReader:
                                 tool_request_entry_id=entry_id,
                                 tool_result_context=_tool_result_metadata(result),
                                 tool_result_body_text=result_body_text,
-                                tool_result_delivery=classify_tool_result_delivery(
-                                    tool_name=call.tool_name,
-                                    public_arguments=thaw_json(call.arguments),
-                                    result_state=str(result["result_state"]),
-                                    has_image_attachment=any(
-                                        isinstance(part, LLMImagePart)
-                                        for part in result_parts
-                                    ),
-                                ),
+                                native_page=native_page,
                                 tool_call_ordinal=call_ordinal,
                                 tool_call_arguments=call.arguments,
                                 tool_call_name=call.tool_name if any(isinstance(part, LLMImagePart) for part in result_parts) else None,
@@ -1302,6 +1318,7 @@ class CanonicalProviderInputReader:
                 binding=binding,
                 items=frozen_items,
             )
+            plan_original = _plan_mode_original_input(connection,session_id=cut.session_id,workflow_id=permission.plan_workflow_id)
             provisional = FrozenCanonicalCompileSnapshot.__new__(
                 FrozenCanonicalCompileSnapshot
             )
@@ -1309,6 +1326,7 @@ class CanonicalProviderInputReader:
             object.__setattr__(provisional, "context_binding_fact", binding_fact)
             object.__setattr__(provisional, "run_permission_snapshot", permission)
             object.__setattr__(provisional, "plan_workflow_fact", workflow_fact)
+            object.__setattr__(provisional, "plan_mode_original_input", plan_original)
             object.__setattr__(provisional, "plan_handoff_fact", handoff_fact)
             object.__setattr__(
                 provisional, "approved_plan_materialization_fact", approved_fact
@@ -1322,6 +1340,7 @@ class CanonicalProviderInputReader:
                 context_binding_fact=binding_fact,
                 run_permission_snapshot=permission,
                 plan_workflow_fact=workflow_fact,
+                plan_mode_original_input=plan_original,
                 plan_handoff_fact=handoff_fact,
                 approved_plan_materialization_fact=approved_fact,
                 previous_turn_outcome_fact=previous_turn_outcome_fact,
@@ -1680,6 +1699,26 @@ def _permission_snapshot_from_binding(
     )
 
 
+def _plan_mode_original_input(connection,*,session_id,workflow_id):
+    if workflow_id is None:
+        return None
+    # The entered call's real provider cut proves which human input had been delivered.
+    # User-entered planning with no preceding turn has no inferred quotation.
+    row=connection.execute("""
+        SELECT u.* FROM pulsara_v3.plan_workflows w
+        JOIN pulsara_v3.transcript_entries a ON a.session_id=w.session_id AND a.id=w.entry_assistant_entry_id
+        JOIN pulsara_v3.transcript_entries u ON u.session_id=w.session_id AND u.turn_id=w.entry_turn_id
+        WHERE w.session_id=%s AND w.id=%s
+          AND u.entry_sequence<=a.provider_input_through_sequence
+          AND u.entry_kind IN ('USER_MESSAGE','USER_STEER')
+          AND u.input_origin IN ('HUMAN_MESSAGE','HUMAN_STEER')
+        ORDER BY u.entry_sequence DESC LIMIT 1
+        """,(session_id,workflow_id)).fetchone()
+    if row is None:
+        return None
+    return hydrate_canonical_prompt_owner(connection,row=row,transcript_entry_id=str(row["id"])).content.parts
+
+
 def _plan_workflow_compile_fact(
     connection,
     *,
@@ -1825,23 +1864,6 @@ def _plan_handoff_compile_facts(
         request_semantic_digest=str(row["request_semantic_digest"]),
         arguments=frozen_arguments,
     )
-    pinned_item = next(
-        (
-            item
-            for item in items
-            if item.source_entry_id == str(row["assistant_entry_id"])
-            and any(
-                call.tool_call_id == str(row["tool_call_id"])
-                for call in item.tool_calls
-            )
-        ),
-        None,
-    )
-    disposition = (
-        PlanApprovedMaterializationDisposition.PIN_EXISTING_CANONICAL_BLOCK
-        if pinned_item is not None
-        else PlanApprovedMaterializationDisposition.MATERIALIZE_REFERENCED_BLOCK
-    )
     approved_values = {
         "session_id": cut.session_id,
         "workspace_id": str(binding["workspace_id"]),
@@ -1853,12 +1875,7 @@ def _plan_handoff_compile_facts(
         "request_semantic_digest": str(row["request_semantic_digest"]),
         "content_identity": extracted.identity,
         "exact_plan_utf8": extracted.exact_plan_utf8,
-        "disposition": disposition,
-        "pinned_canonical_item_fingerprint": (
-            None
-            if pinned_item is None
-            else provider_input_item_fingerprint(pinned_item)
-        ),
+
     }
     provisional_approved = ApprovedPlanMaterializationFact.__new__(
         ApprovedPlanMaterializationFact
@@ -2086,11 +2103,11 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
                        r.session_id AS result_session_id, r.id AS result_id,
                        r.result_state, r.result_entry_id,
                        r.public_fields, r.output_unavailability_reason,
+                       r.source_result_entry_id,r.native_projection,r.result_facts,
                        r.result_origin_kind, r.observed_at,
                        r.observation_duration_microseconds,
                        r.observation_origin_kind,
                        r.tool_reported_duration_microseconds,
-                       r.model_visible_memory_fact_ids,
                        e.entry_sequence, e.session_id, e.workspace_id,
                        CASE e.entry_owner_kind WHEN 'EXECUTED_TURN' THEN e.turn_id
                             WHEN 'IMPORTED_HISTORY' THEN e.imported_history_group_id END AS result_turn_id
@@ -2162,16 +2179,13 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
 
     @staticmethod
     def _result_projection(connection, result):
-        from pulsara_agent.conversation_kernel.tool_outputs import read_accepted_tool_business_value, project_tool_result_export
+        from pulsara_agent.conversation_kernel.tool_outputs import native_tool_observation_in_connection
         if result["output_unavailability_reason"] is not None:
-            text = "Tool result content could not be accepted: " + str(result["output_unavailability_reason"])
-            return (LLMTextPart(text),), text, len(text.encode("utf-8"))
-        value = read_accepted_tool_business_value(connection, result)
-        text = project_tool_result_export(value).decode("utf-8")
-        from pulsara_agent.conversation_kernel.prompt_storage import read_image_reference_in_connection
-        images = tuple(read_image_reference_in_connection(connection, image_ref=part["value"]["image_ref"])
-                       for part in value["content"] if part["type"] == "image")
-        return (LLMTextPart(text), *images), text, len(text.encode("utf-8")) + sum(len(image.immutable_bytes) for image in images)
+            text = "meta:\n  status: ERROR\n\ncontent:\n操作结果已取得，完整结果未保存或保存未确认：" + str(result["output_unavailability_reason"])
+            return (LLMTextPart(text),), text, len(text.encode("utf-8")), None
+        page, pending = native_tool_observation_in_connection(connection, result)
+        text = page.canonical_text
+        return (LLMTextPart(text), *page.images), text, len(text.encode("utf-8")) + sum(len(image.immutable_bytes) for image in page.images), page if pending else None
 
     @staticmethod
     def _entry_text(connection, entry_id, session_id):
@@ -2411,6 +2425,7 @@ def _read_retained_prefix_rows(
                CASE e.entry_owner_kind WHEN 'EXECUTED_TURN' THEN e.turn_id
                     WHEN 'IMPORTED_HISTORY' THEN e.imported_history_group_id END AS turn_id,
                e.entry_sequence, e.entry_kind, e.input_origin, e.scheduled_input,
+                       e.source_cell_id, e.source_record_sequence, e.cell_output_kind,
                e.context_binding_revision_id, e.provider_input_through_sequence,
                e.source_plan_workflow_id, e.source_plan_interaction_id,
                e.source_plan_handoff_kind, e.imported_source_plan_workflow_id,
@@ -2620,6 +2635,7 @@ def _tool_result_metadata(
         fact_fingerprint=tool_observation_timing_fingerprint(provisional_timing),
     )
     return ProviderToolResultContextMetadata(
+        public_fields=row["public_fields"],
         session_id=str(row["result_session_id"]),
         result_id=str(row["result_id"]),
         result_entry_id=str(row["result_entry_id"]),
@@ -2630,9 +2646,6 @@ def _tool_result_metadata(
             else ToolOutputUnavailableReason(
                 str(row["output_unavailability_reason"])
             )
-        ),
-        model_visible_memory_fact_ids=tuple(
-            str(value) for value in row["model_visible_memory_fact_ids"]
         ),
         timing=timing,
     )

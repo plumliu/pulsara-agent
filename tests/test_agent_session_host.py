@@ -1,7 +1,6 @@
 """Real Host/queue/runner execution for reusable Agent sessions."""
 from __future__ import annotations
 
-from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 
 import asyncio
 import json
@@ -10,10 +9,10 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from psycopg.rows import dict_row
+from pulsara_agent.conversation_kernel.content_parts import read_content_parts
 
 from pulsara_agent.identity import random_id
 from pulsara_agent.llm.input import LLMImagePart, PromptContent, text_part_values
-from pulsara_agent.model_input.lowering import decode_tool_result_observation
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.test_round4_plan_host import _DetachedDraftModel, _open_test_session, _tool_call, _text
@@ -24,7 +23,7 @@ pytestmark = pytest.mark.postgres
 def _delegate(model, call_id, arguments):
     """Use the real Guest bridge and wait for its delivered admission receipt."""
     model.pending_delegation = {"call_id": call_id, "marker": call_id, "target": None}
-    code = "console.log({delegation:" + json.dumps(call_id) + ",admitted:await tools.run_agent(" + json.dumps([arguments]) + ")});"
+    code = "const r=await tools.run_agent(" + json.dumps([arguments]) + "); console.log({delegation:" + json.dumps(call_id) + ",admitted:r.content.map(p=>p.value)});"
     return _tool_call('exec_cell', call_id, {'code': code})
 
 
@@ -38,33 +37,23 @@ def _delegation_progress(model, request):
                 value = json.loads(text)
             except ValueError:
                 continue
-            if isinstance(value, dict):
-                value = value.get('pulsara_terminal_observation', value)
-            if not isinstance(value, dict) or set(value) != {
-                'cell_id', 'source_turn_id', 'source_exec_attempt_id', 'record_sequence', 'record'
-            }:
+            if not isinstance(value, dict) or value.get('delegation') != pending['marker']:
                 continue
-            record = value['record']
-            if record.get('kind') != 'log':
-                continue
-            receipt = json.loads(record['text'])
-            if receipt.get('delegation') == pending['marker']:
-                admitted = receipt['admitted']
-                assert len(admitted['agents']) == len(admitted['works']) == len(admitted['details']) == 1, receipt
-                assert admitted['agents'][0]['kind'] == 'AGENT', receipt
-                assert admitted['works'][0]['kind'] == 'WORK', receipt
-                model.pending_delegation = None
-                return None
+            admitted = value['admitted']
+            assert len(admitted)==1, value
+            assignment=admitted[0]
+            assert assignment['agent']['kind']=='AGENT' and assignment['work']['kind']=='WORK', value
+            model.pending_delegation=None
+            return None
     message = next(message for message in reversed(request.compiled_input.messages)
                    if message.role == 'tool_result' and message.tool_call_id == pending['call_id'])
-    observed = decode_tool_result_observation(text_part_values(message.content)[0])
-    assert observed['result_state'] == 'SUCCESS', observed
-    payload = json.loads(observed['body'])
+    text=text_part_values(message.content)[0]
+    payload=json.JSONDecoder().raw_decode(text[text.index('{'):])[0]
+    assert payload['meta']['status']=='SUCCESS', text
     if pending['target'] is None:
-        assert payload['accepted'], payload
-        pending['target'] = payload['target']
+        pending['target']=payload['target']
     else:
-        assert payload['state'] not in {'failed', 'terminated'}, payload
+        assert payload['meta']['cell_status'] not in {'failed','terminated'}, text
     pending['call_id'] = random_id('call')
     return _tool_call('manage_cell', pending['call_id'],
                       {'action': 'wait', 'target': pending['target'], 'yield_time_ms': 1000})
@@ -145,7 +134,7 @@ class KnownQueryModel(_DetachedDraftModel):
                                     {'target': {'kind': 'WORK', 'work_id': self.work_b}})
             elif self.query_before_delegation and index == 1:
                 self.root_query_result_input = request.compiled_input
-                arguments['context'] = {'mode': 'last_n', 'turns': 1}
+                arguments['materials'] = [{'kind':'CONTEXT_MATERIAL','turns':1}]
                 events = _delegate(self, random_id('call'), arguments)
             else:
                 events = (_delegate(self, random_id('call'), arguments)
@@ -232,7 +221,7 @@ def test_native_child_query_executes_and_tool_result_does_not_introduce_contacts
                 assert {row['known_session_id'] for row in related} == {model.target_b}
                 result = connection.execute('''SELECT r.result_state FROM pulsara_v3.tool_results r
                     JOIN pulsara_v3.tool_invocations i ON i.id=r.invocation_id AND i.session_id=r.session_id
-                    JOIN pulsara_v3.assistant_message_blocks b ON b.session_id=i.session_id AND b.tool_call_id=i.tool_call_id
+                    JOIN pulsara_v3.content_parts b ON b.session_id=i.session_id AND b.entry_id=i.assistant_entry_id AND b.tool_call_id=i.tool_call_id AND b.type='tool_call'
                     WHERE r.session_id=%s AND b.tool_name='query_agents' ''', (a_id,)).fetchall()
                 assert [row['result_state'] for row in result] == ['SUCCESS']
             model.send_release.set()
@@ -241,7 +230,7 @@ def test_native_child_query_executes_and_tool_result_does_not_introduce_contacts
             await eventually(sent)
             sent_text = '\n'.join(t for message in model.send_result_input.messages
                                   for t in text_part_values(message.content))
-            assert 'queued' in sent_text
+            assert '消息已加入接收方当前轮次的输入队列' in sent_text
             with root.repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,
                     row_factory=dict_row, deadline_monotonic=monotonic()+10) as connection:
                 related = connection.execute('SELECT observer_session_id,known_session_id FROM pulsara_v3.agent_known_sessions WHERE observer_session_id=ANY(%s)', ([a_id, model.target_c],)).fetchall()
@@ -366,9 +355,9 @@ def test_same_agent_uses_real_common_engine_and_retains_prefix_across_work(
                     AND entry_kind='USER_MESSAGE' ORDER BY entry_sequence""", (model.agent_id,)).fetchall()
                 assert [entry['input_origin'] for entry in child_inputs] == ['AGENT_INSTRUCTION', 'AGENT_INSTRUCTION']
                 assert child_inputs[0]['entry_sequence'] == 1
-                rows = connection.execute("SELECT input_origin,inline_content FROM pulsara_v3.transcript_entries WHERE session_id=%s ORDER BY entry_sequence", (root.session_id,)).fetchall()
+                rows = connection.execute("SELECT id,input_origin FROM pulsara_v3.transcript_entries WHERE session_id=%s ORDER BY entry_sequence", (root.session_id,)).fetchall()
                 assert not any(r['input_origin'] == 'AGENT_MATERIAL' for r in rows)
-                assert not any(b'CHILD_FIRST_FINAL' in bytes(r['inline_content'] or b'') for r in rows)
+                assert not any('CHILD_FIRST_FINAL' in str(part.value) for row in rows for part in read_content_parts(connection,entry_id=row['id']))
                 queued = connection.execute("SELECT id FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND input_origin='AGENT_MATERIAL'", (root.session_id,)).fetchall()
                 assert queued == []
             assert works[0]['final'] == 'CHILD_FIRST_FINAL'
@@ -384,10 +373,10 @@ def test_same_agent_uses_real_common_engine_and_retains_prefix_across_work(
     asyncio.run(scenario())
 
 
-def test_agent_image_path_stays_text_until_real_view_image_tool(
+def test_agent_image_path_stays_text_and_media_tool_remains_root_only(
     tmp_path, monkeypatch, stage2_migrated_postgres_database,
 ):
-    """Delegated context and instructions are text; viewing is an explicit tool call."""
+    """Delegated context stays text and cannot grant ROOT-only media authority."""
     import pulsara_agent.conversation_kernel.host as kernel_host
     from PIL import Image
     from pulsara_agent.conversation_kernel.direct_model import DirectKernelModelPort
@@ -412,13 +401,13 @@ def test_agent_image_path_stays_text_until_real_view_image_tool(
                 self.root_calls += 1
                 events = (_delegate(self, random_id('call'), {
                     'instruction': 'Inspect image.png with view_image.',
-                    'context': {'mode': 'last_n', 'turns': 1},
+                    'materials':[{'kind':'CONTEXT_MATERIAL','turns':1}],
                 }) if self.root_calls == 1 else _text('ROOT_DONE'))
             else:
                 self.child_requests.append(request)
                 events = (_tool_call('view_image', random_id('call'), {
                     'target': {'kind': 'PATH', 'path': 'image.png'},
-                }) if len(self.child_requests) == 1 else _text('IMAGE_VIEWED'))
+                }) if len(self.child_requests) == 1 else _text('IMAGE_ACCESS_DENIED'))
             for event in events:
                 yield event
 
@@ -463,12 +452,15 @@ def test_agent_image_path_stays_text_until_real_view_image_tool(
                 initial = connection.execute("""SELECT id, input_origin FROM pulsara_v3.transcript_entries
                     WHERE session_id=%s AND turn_id=%s AND entry_kind='USER_MESSAGE' ORDER BY entry_sequence""",
                     (model.child_requests[0].session_id, model.child_requests[0].turn_id)).fetchall()
-                assert [entry['input_origin'] for entry in initial] == ['AGENT_MATERIAL', 'AGENT_INSTRUCTION']
-                references = connection.execute("""SELECT count(*) FROM pulsara_v3.canonical_image_refs
-                    WHERE session_id=%s AND transcript_entry_id=ANY(%s)""",
+                assert [entry['input_origin'] for entry in initial] == ['AGENT_INSTRUCTION','AGENT_MATERIAL']
+                references = connection.execute("""SELECT count(*) FROM pulsara_v3.content_parts
+                    WHERE session_id=%s AND entry_id=ANY(%s) AND type='image'""",
                     (model.child_requests[0].session_id, [entry['id'] for entry in initial])).fetchone()
                 assert references['count'] == 0
-            assert any(isinstance(part, LLMImagePart) for message in after.messages for part in message.content)
+            assert not any(isinstance(part,LLMImagePart) for message in after.messages for part in message.content)
+            with root.repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,row_factory=dict_row,deadline_monotonic=monotonic()+10) as connection:
+                result=connection.execute("SELECT result_state FROM pulsara_v3.tool_results WHERE session_id=%s",(model.child_requests[0].session_id,)).fetchall()
+            assert [row['result_state'] for row in result]==['TOOL_UNAVAILABLE']
             assert after.system_prompt == before.system_prompt
             assert after.tools == before.tools
             assert after.messages[:len(before.messages)] == before.messages
@@ -737,8 +729,9 @@ def test_child_first_preparation_adopts_real_common_snapshot_for_next_work(
                     result = next((message for message in reversed(request.compiled_input.messages)
                                    if message.role == 'tool_result' and message.tool_call_id == pending), None)
                     assert result is not None, f'missing result for {pending}'
-                    payload = json.loads(''.join(text_part_values(result.content)))['pulsara_tool_result']
-                    assert payload['result_state'] == 'SUCCESS', payload
+                    from tests.test_agent_code_mode_execution import _native_fields
+                    payload=_native_fields(''.join(text_part_values(result.content)))
+                    assert payload['meta']['status']=='SUCCESS',payload
                     for event in _text('ROOT_FINISHED'):
                         yield event
                     return
@@ -753,7 +746,7 @@ def test_child_first_preparation_adopts_real_common_snapshot_for_next_work(
                     from types import SimpleNamespace
                     self.message_injected = True
                     outcome = await self.core._send_agent_message(self.root_id, 'AGENT_MESSAGE_DURING_TOOL',
-                        SimpleNamespace(session_id=self.agent_id, work_id=None, page_budget=ToolResultPageBudget(tool_call_id=random_id("call"))))
+                        SimpleNamespace(session_id=self.agent_id, work_id=None))
                     assert outcome['delivery'] == 'queued'
             elif not self.child_requests:
                 self.requests.append(request)
@@ -821,11 +814,11 @@ def test_child_first_preparation_adopts_real_common_snapshot_for_next_work(
                     deadline_monotonic=monotonic()+10)
                 with root.repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,
                         row_factory=dict_row, deadline_monotonic=monotonic()+10) as connection:
-                    calls = connection.execute('''SELECT b.tool_name,r.result_state,e.inline_content
-                        FROM pulsara_v3.assistant_message_blocks b
+                    calls = connection.execute('''SELECT b.tool_name,r.result_state,r.result_entry_id
+                        FROM pulsara_v3.content_parts b
                         LEFT JOIN pulsara_v3.tool_results r ON r.session_id=b.session_id AND r.tool_call_id=b.tool_call_id
                         LEFT JOIN pulsara_v3.transcript_entries e ON e.session_id=r.session_id AND e.id=r.result_entry_id
-                        WHERE b.session_id=%s AND b.tool_name IS NOT NULL ORDER BY b.assistant_entry_id,b.block_ordinal''',
+                        WHERE b.session_id=%s AND b.type='tool_call' ORDER BY b.entry_id,b.ordinal''',
                         (root.session_id,)).fetchall()
                 compact_rows = [{k: row.get(k) for k in ('work_id', 'status', 'terminal_reason', 'turn_id')} for row in rows]
                 raise AssertionError(f'child did not complete: rows={compact_rows!r}; compactions={compactions!r}; '
@@ -960,8 +953,8 @@ def test_process_loss_takeover_does_not_replay_running_work_or_settled_tools_and
             with root.repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,
                     row_factory=dict_row,deadline_monotonic=monotonic()+10) as connection:
                 attempts=connection.execute("""SELECT count(*) FROM pulsara_v3.tool_invocations i
-                    JOIN pulsara_v3.assistant_message_blocks b ON b.session_id=i.session_id
-                        AND b.assistant_entry_id=i.assistant_entry_id AND b.tool_call_id=i.tool_call_id
+                    JOIN pulsara_v3.content_parts b ON b.session_id=i.session_id AND b.type='tool_call'
+                        AND b.entry_id=i.assistant_entry_id AND b.tool_call_id=i.tool_call_id
                     JOIN pulsara_v3.tool_results r ON r.session_id=i.session_id AND r.invocation_id=i.id
                     WHERE i.session_id=%s AND b.tool_name='exec_process'""",
                     (identities['agent_id'],)).fetchone()['count']
@@ -1021,10 +1014,10 @@ def test_live_exec_keeps_bypass_snapshot_after_root_read_only_turn_and_prefix_st
             async def output_delivered():
                 with root.repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,
                         row_factory=dict_row, deadline_monotonic=monotonic()+10) as connection:
-                    delivered = connection.execute("""SELECT e.inline_content FROM pulsara_v3.transcript_entries e
+                    delivered = connection.execute("""SELECT e.id FROM pulsara_v3.transcript_entries e
                         WHERE e.session_id=%s AND e.entry_kind='TERMINAL_OBSERVATION'
                         ORDER BY e.entry_sequence""", (root.session_id,)).fetchall()
-                return any(b'OLD_CELL_BYPASS_FROZEN' in bytes(row['inline_content'] or b'') for row in delivered)
+                    return any('OLD_CELL_BYPASS_FROZEN' in str(part.value) for row in delivered for part in read_content_parts(connection,entry_id=row['id']))
             await eventually(output_delivered)
             async def output_turn_settled():
                 return not root.code_mode_cells() and root.active_root_turn_id() is None

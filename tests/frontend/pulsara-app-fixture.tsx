@@ -194,7 +194,6 @@ const capabilitySnapshot: CapabilitySnapshot = {
         parallelSafe: true,
       }],
     }],
-    collisions: [],
   },
 };
 
@@ -484,7 +483,7 @@ class FakeConnection implements RuntimeConnection {
       case 'capability-form':
         return {kind: 'capability-form', form: {action: 'REMOVE_LOCAL_MCP', scope: 'USER', prefill: {server_id: 'fixture'}}};
       case 'plan-question':
-        return { kind: 'plan-question', question: '选择发布方式', options: [], allowFreeText: true };
+        return { kind: 'plan-question', question: '选择发布方式', options: [] };
       case 'plan-draft':
         return { kind: 'plan-draft', body: '# 实施方案\n\n- 检查契约\n- 验证结果' };
       case 'tool-confirmation':

@@ -94,6 +94,42 @@ class PostgresCanonicalImageReferenceReadPort:
             )
 
 
+def read_image_reference_metadata_in_connection(
+    connection: Connection,
+    *,
+    image_ref: str,
+) -> CanonicalPromptImageDescriptor:
+    """Validate an immutable global asset descriptor without loading payload."""
+    require_id(image_ref, "image")
+    row = connection.execute(
+        """SELECT workspace_id, logical_digest, logical_size, media_type, codec, width, height
+           FROM pulsara_v3.blobs WHERE id = %s""",
+        (image_ref,),
+    ).fetchone()
+    if row is None:
+        raise CanonicalImageReferenceUnavailable(image_ref)
+    if row["workspace_id"] is not None or row["codec"] != PROMPT_IMAGE_BLOB_CODEC:
+        raise ConversationKernelConflict("image asset properties are invalid")
+    digest, media_type = str(row["logical_digest"]), str(row["media_type"])
+    if image_ref != _blob_id(
+        None, digest, media_type, PROMPT_IMAGE_BLOB_CODEC, image=True
+    ):
+        raise ConversationKernelConflict(
+            "image asset identity does not match its content"
+        )
+    try:
+        return CanonicalPromptImageDescriptor(
+            image_ref,
+            digest,
+            int(row["logical_size"]),
+            media_type,
+            row["width"],
+            row["height"],
+        )
+    except (ValueError, TypeError) as exc:
+        raise ConversationKernelConflict("image asset metadata is invalid") from exc
+
+
 def read_image_reference_in_connection(
     connection: Connection,
     *,
@@ -113,29 +149,31 @@ def read_image_reference_in_connection(
         or maximum_encoded_bytes < 1
     ):
         raise CanonicalImageReferenceResourceExceeded("image read allowance is invalid")
-    row = connection.execute(
-        """SELECT workspace_id, logical_digest, logical_size, media_type, codec, width, height
-           FROM pulsara_v3.blobs WHERE id = %s""",
-        (image_ref,),
-    ).fetchone()
-    if row is None:
-        raise CanonicalImageReferenceUnavailable(image_ref)
-    if row["workspace_id"] is not None or row["codec"] != PROMPT_IMAGE_BLOB_CODEC:
-        raise ConversationKernelConflict("image asset properties are invalid")
-    size = int(row["logical_size"])
-    if size < 1:
-        raise ConversationKernelConflict("image asset byte size is invalid")
-    if maximum_encoded_bytes is not None and size > maximum_encoded_bytes:
+    descriptor = read_image_reference_metadata_in_connection(
+        connection, image_ref=image_ref
+    )
+    if (
+        maximum_encoded_bytes is not None
+        and descriptor.encoded_bytes > maximum_encoded_bytes
+    ):
         raise CanonicalImageReferenceResourceExceeded(
             "image exceeds its read allowance"
         )
-    digest, media_type = str(row["logical_digest"]), str(row["media_type"])
-    if image_ref != _blob_id(
-        None, digest, media_type, PROMPT_IMAGE_BLOB_CODEC, image=True
-    ):
-        raise ConversationKernelConflict(
-            "image asset identity does not match its content"
-        )
+    return read_image_reference_payload_in_connection(connection, descriptor=descriptor)
+
+
+def read_image_reference_payload_in_connection(
+    connection: Connection, *, descriptor: CanonicalPromptImageDescriptor
+) -> LLMImagePart:
+    """Read and verify payload using metadata confirmed by the asset owner."""
+    if not isinstance(descriptor, CanonicalPromptImageDescriptor):
+        raise TypeError("image payload read requires its validated descriptor")
+    image_ref, size, digest, media_type = (
+        descriptor.image_ref,
+        descriptor.encoded_bytes,
+        descriptor.digest,
+        descriptor.media_type,
+    )
     payload = PostgresCanonicalBlobStore.read_exact_in_connection(
         connection,
         blob_id=image_ref,
@@ -152,7 +190,7 @@ def read_image_reference_in_connection(
 
     try:
         actual_mime, width, height = _validated_image_facts(payload, media_type)
-        if (width, height) != (row["width"], row["height"]):
+        if (width, height) != (descriptor.width, descriptor.height):
             raise ValueError("stored image dimensions differ from decoded bytes")
         return LLMImagePart(
             image_ref=image_ref,
@@ -326,35 +364,9 @@ def validate_canonical_prompt_owner_metadata(
         ordinal_stop=ordinal_stop,
     ):
         if part.type == "image":
-            image_ref = require_id(part.value["image_ref"], "image")
-            asset = connection.execute(
-                """SELECT workspace_id,logical_digest,logical_size,media_type,codec,width,height
-                   FROM pulsara_v3.blobs WHERE id=%s""",
-                (image_ref,),
-            ).fetchone()
-            if asset is None:
-                raise CanonicalImageReferenceUnavailable(image_ref)
-            if (
-                asset["workspace_id"] is not None
-                or asset["codec"] != PROMPT_IMAGE_BLOB_CODEC
-                or image_ref
-                != _blob_id(
-                    None,
-                    str(asset["logical_digest"]),
-                    str(asset["media_type"]),
-                    PROMPT_IMAGE_BLOB_CODEC,
-                    image=True,
-                )
-            ):
-                raise ConversationKernelConflict("image asset metadata is invalid")
             parts.append(
-                CanonicalPromptImageDescriptor(
-                    image_ref,
-                    str(asset["logical_digest"]),
-                    int(asset["logical_size"]),
-                    str(asset["media_type"]),
-                    asset["width"],
-                    asset["height"],
+                read_image_reference_metadata_in_connection(
+                    connection, image_ref=part.value["image_ref"]
                 )
             )
         elif part.type == "text":

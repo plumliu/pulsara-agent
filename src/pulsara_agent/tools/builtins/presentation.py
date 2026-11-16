@@ -1,7 +1,6 @@
 """Normalize advisory display requests; view owners perform actual reads/navigation."""
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from collections.abc import Awaitable, Callable
-import json
 import re
 from urllib.parse import urlsplit
 
@@ -9,9 +8,9 @@ from pulsara_agent.code_mode.contracts import CodeModeError
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.identity import require_id
 from pulsara_agent.conversation_kernel.presentation_targets import PresentationReadUnavailable, ResolvedPresentationObject
-from pulsara_agent.ports.tool_execution import ToolCall, ToolExecutionResult
+from pulsara_agent.ports.tool_execution import ToolCall, ToolBusinessValue, ToolExecutionResult, freeze_tool_json_object
+from pulsara_agent.conversation_kernel.content_parts import ResultPart
 from pulsara_agent.tools.builtins.workspace import WorkspaceTool
-from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 
 
 
@@ -27,8 +26,8 @@ class OpenInPulsaraTool(WorkspaceTool):
         if "kind" in target and not isinstance(target["kind"], str):
             raise ValueError("不支持的目标类型")
         tag = "kind"
-        kind = {"PATH": "file", "URL": "browser", "PROCESS": "terminal", "MCP_SERVER": "mcp", "PANEL": "panel", "AGENT": "agent", "CELL": "cell"}.get(target.get("kind"))
-        fields = {"file": "path", "browser": "url", "terminal": "process_id", "mcp": "runtime_server_id", "panel": "name", "agent": "agent_id", "cell": "cell_id"}
+        kind = {"PATH": "file", "URL": "browser", "AGENT": "agent"}.get(target.get("kind"))
+        fields = {"file": "path", "browser": "url", "agent": "agent_id"}
         if not isinstance(kind, str) or kind not in fields:
             raise ValueError("不支持的目标类型")
         field = fields[kind]
@@ -37,8 +36,8 @@ class OpenInPulsaraTool(WorkspaceTool):
         value = target[field]
         if not isinstance(value, str) or not value.strip() or '\x00' in value:
             raise ValueError(f"{field} 必须是非空文本")
-        if kind in {"terminal", "mcp", "agent", "cell"}:
-            require_id(value, {"terminal": "process", "mcp": "mcp-server", "agent": "session", "cell": "cell"}[kind])
+        if kind == "agent":
+            require_id(value, "session")
         value = value.strip()
         result = {"type": kind, field: value}
         if kind == "file":
@@ -58,51 +57,41 @@ class OpenInPulsaraTool(WorkspaceTool):
             except ValueError:
                 # Never echo a supplied URL: rejected input may contain credentials.
                 raise ValueError("请输入不含凭据的完整 HTTP(S) 地址") from None
-        elif kind == "panel":
-            if value not in {"capabilities", "background", "subagents", "cells", "browser"}:
-                raise ValueError("入口名称只支持 capabilities、background、subagents、cells、browser")
-        elif kind in {"terminal", "mcp"}:
-            result["host_session_id"] = require_id(self.host_session_id, "host")
         public = {"target": {"kind": target["kind"], field: result[field]}}
-        if "host_session_id" in result:
-            public["host_session_id"] = result["host_session_id"]
-        if kind in {"agent", "cell"} or (kind == "panel" and value in {"subagents", "cells"}):
+        if kind == "agent":
             if not self.root_session_id:
                 raise ValueError("ROOT context is unavailable")
             public["root_session_id"] = require_id(self.root_session_id, "session")
-        if kind == "cell" or (kind == "panel" and value == "cells"):
-            if not self.host_session_id:
-                raise ValueError("Host context is unavailable")
-            public["host_session_id"] = require_id(self.host_session_id, "host")
         return public
 
     async def execute_async(self, call: ToolCall, *, resolve_object: Callable[[str, str], Awaitable[ResolvedPresentationObject]]) -> ToolExecutionResult:
-        targets, errors = [], []
-        for index, target in enumerate(call.arguments["targets"]):
+        arguments = call.arguments
+        if set(arguments) != {"targets"} or not isinstance(arguments["targets"], (list, tuple)) or not arguments["targets"]:
+            raise ValueError("open_in_pulsara 只接受非空 targets 数组。")
+        targets, accepted_indexes, errors = [], [], []
+        for index, target in enumerate(arguments["targets"]):
             try:
                 normalized = self.normalize_target(target)
                 value = normalized["target"]
-                if value["kind"] in {"AGENT", "CELL"}:
-                    kind = value["kind"]
-                    identity = value["agent_id" if kind == "AGENT" else "cell_id"]
-                    resolved = await resolve_object(kind, identity)
-                    if (resolved.kind != kind or resolved.target_id != identity
-                            or resolved.root_session_id != self.root_session_id
-                            or (kind == "CELL" and resolved.host_session_id != self.host_session_id)):
-                        raise ValueError("Object owner does not match the calling context")
-                targets.append(normalized)
+                if value["kind"] == "AGENT":
+                    identity = value["agent_id"]
+                    resolved = await resolve_object("AGENT", identity)
+                    if (resolved.kind != "AGENT" or resolved.target_id != identity
+                            or resolved.root_session_id != self.root_session_id):
+                        raise ValueError("对象不属于当前 ROOT 会话。")
+                targets.append(freeze_tool_json_object(normalized))
+                accepted_indexes.append(index)
             except (ValueError, LookupError, CodeModeError, PresentationReadUnavailable, TimeoutError, ConnectionError) as error:
-                errors.append({"index": index, "message": str(error)})
-        body = {"targets": targets}
-        if errors:
-            body["errors"] = errors
-        output = json.dumps(body, ensure_ascii=False)
-        budget = call.page_budget or ToolResultPageBudget(tool_call_id=call.id)
-        if not budget.fits(output):
-            # Display happens only after this complete control payload is
-            # accepted. A partial result must never silently lose tab requests.
-            return replace(self._result(call, status=ToolResultState.ERROR, output=json.dumps({
-                "error": "PRESENTATION_RESULT_TOO_LARGE",
-                "message": "No display requests were accepted. Split targets into smaller calls.",
-            })), page_complete=True)
-        return replace(self._result(call, status=ToolResultState.SUCCESS, output=output), page_complete=True)
+                errors.append((index, str(error)))
+        if not errors:
+            explanation = "已提交展示请求。"
+        else:
+            explanation = ("已接受 " + "、".join(f"targets[{index}]" for index in accepted_indexes) + " 的展示请求。"
+                           if accepted_indexes else "没有展示请求被接受。")
+            explanation += "".join(f"\ntargets[{index}] 未接受：{message}" for index, message in errors)
+        return ToolExecutionResult(
+            call_id=call.id, tool_name=call.name,
+            status=ToolResultState.ERROR if errors else ToolResultState.SUCCESS,
+            business_value=ToolBusinessValue(content=(ResultPart("text", explanation),)),
+            result_facts={"presentation_targets": tuple(targets)} if targets else {},
+        )

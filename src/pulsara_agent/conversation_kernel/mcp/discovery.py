@@ -149,7 +149,7 @@ async def discover_mcp_catalog(
             invalid_tool_count += 1
             continue
         provider_name = names[item.name]
-        public_description = _sanitize_text(item.description or "", 8 * 1024)
+        public_description = item.description or ""
         descriptor = context_fingerprint(
             "mcp-tool-semantic:v1",
             {
@@ -401,7 +401,7 @@ def _resource(server_id: str, item: types.Resource) -> McpResourceSemanticFact:
         "server_id": server_id,
         "uri": _bounded_public_identity(str(item.uri), 32 * 1024),
         "name": _bounded_public_identity(item.name, 8 * 1024),
-        "description": _sanitize_text(item.description or "", 8 * 1024),
+        "description": item.description or "",
         "mime_type": (
             _bounded_public_identity(item.mime_type, 1024)
             if item.mime_type is not None
@@ -423,7 +423,7 @@ def _resource_template(
         "server_id": server_id,
         "uri_template": _bounded_public_identity(item.uri_template, 32 * 1024),
         "name": _bounded_public_identity(item.name, 8 * 1024),
-        "description": _sanitize_text(item.description or "", 8 * 1024),
+        "description": item.description or "",
         "mime_type": (
             _bounded_public_identity(item.mime_type, 1024)
             if item.mime_type is not None
@@ -450,7 +450,7 @@ def _prompt(server_id: str, item: types.Prompt) -> McpPromptSemanticFact:
     payload = {
         "server_id": server_id,
         "name": _bounded_public_identity(item.name, 8 * 1024),
-        "description": _sanitize_text(item.description or "", 8 * 1024),
+        "description": item.description or "",
         "arguments": arguments,
     }
     fact = McpPromptSemanticFact(

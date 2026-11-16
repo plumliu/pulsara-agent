@@ -1,33 +1,35 @@
 # Public MCP Configuration and Advanced Administration
 
-## Complete public candidates
+## Public candidates
 
-Ordinary setup omits `config` so the shared editor collects connection inputs.
-Supply an object only when the complete public settings are known. A connection
-summary from inspection is not an UPDATE template; UPDATE replaces the entire
-entry, including settings that were not in that summary. Preserve current truth
-or use the prefilled editor.
-
-For a known Streamable HTTP service requiring no authentication:
+Ordinary setup omits config so the shared editor collects inputs. ADD candidates
+need an explicit transport and its required fields. For a known Streamable HTTP
+service requiring no authentication, config can be:
 
 ```json
-{"display_name":"Docs","enabled":true,"transport":{"type":"streamable_http","endpoint":"https://example.org/mcp"},"auth":{"type":"none"}}
+{"transport":{"type":"streamable_http","endpoint":"https://example.org/mcp"},"auth":{"type":"none"}}
 ```
 
-This is the value of `config`, not a whole management call. Supply the user's
-actual endpoint. For explicit legacy SSE use transport type `sse`; do not probe
-transport types by guesswork. Explicitly approved loopback HTTP requires
-`allow_http_localhost:true` inside transport. It does not authorize non-loopback
-plain HTTP. HTTPS endpoints may use public, private or loopback addresses.
-DNS and proxy routing follow the host network through the HTTP client.
+Use the actual endpoint; explicit legacy SSE uses type:sse. Stdio uses type:stdio,
+command, optional args, workspace-relative cwd and public-only env. HTTP uses
+endpoint and optional top-level public_headers, not process fields. A vendor CLI
+is not necessarily an MCP server.
 
-A stdio transport uses `type:"stdio"`, `command`, an `args` array, optional
-workspace-relative `cwd`, and public-only `env`. Obtain the vendor's actual MCP
-command instead of assuming its ordinary CLI is an MCP server. Authentication,
-managed environment/header secrets and unknown configuration go through the
-editor; never place secret values in candidates or read private settings to
-construct them. Environment references are an advanced option, not a reason to
-export credentials.
+ADD defaults to enabled, auth:none and ROOT_AND_SUBAGENTS. UPDATE patches only
+provided fields, including nested transport fields; omitted settings and private
+configuration remain unchanged. env/public_headers mappings replace their editable
+maps as a whole: {} clears one; omission preserves it. args:[] means no arguments.
+Changing an independent transport requires the new branch's required fields.
+
+Plugin updates cannot alter package command/args/cwd/transport or independently
+toggle its connection. config:null removes its whole overlay, restoring package
+settings and the default subagent scope; config:{} preserves it.
+
+Auth selects only none/oauth/bearer/static_headers; selecting the same type keeps
+its private settings. Credentials, unknown inputs and advanced policy—including
+subagent restriction, local-HTTP permission and special OAuth settings—belong to
+the user editor. Never put secrets in public env, headers, endpoint/query or argv,
+or read private settings to construct config.
 
 ## User-only import
 
@@ -55,5 +57,5 @@ can use ordinary ADD_LOCAL_MCP when recovery is requested; do not fabricate an o
 entry just to REMOVE it. If existing YAML/entry cannot be parsed, explain the
 specific boundary and discuss restoring valid config; do not raw-edit managed
 config to bypass review or credential owners. A missing entry does not prove
-private credentials or local OAuth grants were cleared. Read actual settlement,
-cleanup and adoption results; never promise revocation of remote tokens.
+private credentials or local OAuth grants were cleared. Read meta.status and content for actual
+settlement, cleanup and refresh effects; never promise revocation of remote tokens.

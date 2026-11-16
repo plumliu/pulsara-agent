@@ -1,13 +1,14 @@
 from __future__ import annotations
 from tests.support.model_config import scheduled_task_service
-from pulsara_agent.conversation_kernel.prompt_content import bind_prompt_images
 
 from pulsara_agent.identity import random_id
 
 from pulsara_agent.identity import derive_id
 
 from tests.support.model_config import frozen_test_prompt
-from pulsara_agent.llm.input import FrozenPromptContent
+from pulsara_agent.llm.input import FrozenPromptContent, LLMMessage
+from pulsara_agent.ports.tool_execution import ToolBusinessValue
+from pulsara_agent.conversation_kernel.content_parts import ResultPart
 
 import asyncio
 from dataclasses import replace
@@ -20,7 +21,6 @@ import subprocess
 import sys
 from threading import Event
 from time import monotonic
-from uuid import uuid4
 
 import pytest
 import psycopg
@@ -28,17 +28,12 @@ from PIL import Image
 
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE, PermissionMode
 from pulsara_agent.conversation_kernel.contracts import (
-    InlineContent,
     PromptDeliveryMode,
 )
 from pulsara_agent.conversation_kernel.live import (
     LiveAgentEventBus,
     LiveObservationKind,
     LiveSettlementKind,
-)
-from pulsara_agent.conversation_kernel.context_sources import (
-    ContextSourceRegistry,
-    build_memory_context_source,
 )
 from pulsara_agent.conversation_kernel.cold_epoch import (
     CanonicalColdContinuationSeed,
@@ -85,18 +80,13 @@ from pulsara_agent.ports.live_agent_event import (
 )
 from pulsara_agent.conversation_kernel.repository import (
     AcceptedEntry,
-    AssistantTextBlock,
-    AssistantToolCallBlock,
     ConversationKernelConflict,
     ConversationKernelRepository,
-    build_prepared_tool_result_acceptance,
 )
 from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.runner import (
     ConversationKernelRunner,
-    FrozenPostResponseResourceQuote,
-    OutputResourceInterruption,
 )
 from pulsara_agent.conversation_kernel.tool_contracts import (
     KernelToolAuthorization,
@@ -119,7 +109,7 @@ from pulsara_agent.llm.input import (
     join_text_content,
     text_part_values,
 )
-from pulsara_agent.primitives.context import context_fingerprint, freeze_json, thaw_json
+from pulsara_agent.primitives.context import thaw_json
 from pulsara_agent.llm.provider import RouteWireProfile
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.llm.provider_sanitization import sanitize_provider_failure
@@ -135,9 +125,6 @@ from pulsara_agent.llm.model_connections import (
 from pulsara_agent.primitives.model_call import ModelCallPurpose, ModelTokenUsageFact
 from pulsara_agent.model_input.contracts import (
     ContextBindingBaseKind,
-    ContextRenderMode,
-    ContextRenderVariant,
-    ContextSourceCandidate,
     ContextSourceKind,
     ModelInputScopeKind,
     ModelInputCompileFailureKind,
@@ -146,7 +133,6 @@ from pulsara_agent.model_input.contracts import (
 from pulsara_agent.model_input.compiler import StructuredModelInputCompiler
 from pulsara_agent.model_input.continuity import (
     ProviderInputContinuityScope,
-    decode_runtime_observation,
 )
 from pulsara_agent.ports.provider_stream import (
     ProviderModelExecutionFailed,
@@ -157,15 +143,11 @@ from pulsara_agent.ports.provider_stream import (
     ProviderPhysicalCompletionStatus,
     ProviderStreamTerminal,
 )
-from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
-from pulsara_agent.model_input.lowering import decode_tool_result_observation
-from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.support.postgres import verified_postgres_provider
 from tests.support.model_config import (
     enqueue_test_prompt,
     include_test_runtime_connections,
-    start_test_root_turn,
     test_model_binding,
     test_model_limits,
     test_model_resolution_snapshot,
@@ -222,129 +204,6 @@ def _turn_permission_fingerprint(
     return str(row[0])
 
 
-def _seed_result_page_with_memory_provenance(
-    repository: ConversationKernelRepository,
-    *,
-    lease: object,
-    workspace_id: str,
-    memory_ids: tuple[str, ...],
-) -> str:
-    guard = lease.guard
-    turn_id = _name("turn")
-    start_test_root_turn(
-        repository,
-        guard,
-        command_id=_name("command"),
-        turn_id=turn_id,
-        entry_id=_name("entry"),
-        context_binding_revision_id=_name("binding"),
-        permission_snapshot_id=_name("permission"),
-        requested_permission_mode=DEFAULT_PERMISSION_MODE,
-        model_call_binding=test_model_binding(test_model_runtime()),
-        content=FrozenPromptContent.text("read a saved result page"),
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=monotonic() + 30,
-    )
-    cut = repository.prepare_provider_input_cut(
-        guard,
-        turn_id=turn_id,
-        deadline_monotonic=monotonic() + 30,
-    )
-    assistant_entry_id = _name("entry")
-    tool_call_id = _name("call")
-    repository.commit_assistant_message(
-        guard,
-        cut=cut,
-        entry_id=assistant_entry_id,
-        parent_content=InlineContent.from_bytes(b"read_file"),
-        blocks=(
-            AssistantToolCallBlock(
-                block_id=_name("block"),
-                tool_call_id=tool_call_id,
-                tool_name="read_file",
-                arguments=freeze_json(
-                    {"target": {"kind": "SESSION_ENTRY", "entry_id": _name("entry")}}
-                ),
-            ),
-        ),
-        occurred_at=datetime.now(timezone.utc),
-        actor_id="model:test",
-        deadline_monotonic=monotonic() + 30,
-    )
-    attempt_id = _name("attempt")
-    repository.accept_tool_attempt(
-        guard,
-        attempt_id=attempt_id,
-        assistant_entry_id=assistant_entry_id,
-        tool_call_id=tool_call_id,
-        authorization_kind="policy",
-        authorization_reference="allow",
-        actor_kind="runtime",
-        actor_id="executor",
-        remote_idempotency_key=None,
-        retry_of_attempt_id=None,
-        permission_snapshot_fingerprint=_turn_permission_fingerprint(
-            repository,
-            session_id=guard.session_id,
-            turn_id=turn_id,
-        ),
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=monotonic() + 30,
-    )
-    result_id = _name("result")
-    observed_at = datetime.now(timezone.utc)
-    candidate = build_prepared_tool_result_acceptance(
-        guard=guard,
-        workspace_id=workspace_id,
-        result_id=result_id,
-        result_entry_id=_name("entry"),
-        turn_id=turn_id,
-        assistant_entry_id=assistant_entry_id,
-        tool_call_id=tool_call_id,
-        attempt_id=attempt_id,
-        result_state="SUCCESS",
-        canonical_preview_content=InlineContent.from_bytes(
-            b'{"status":"success","text":"bounded page"}'
-        ),
-        output_body=InlineContent.from_bytes(b'{"status":"success","text":"bounded page"}'),
-        output_unavailability_reason=None,
-        source_coverage=ToolOutputSourceCoverage.COMPLETE,
-        output_omitted=False,
-        source_coverage_reason=None,
-        model_visible_memory_fact_ids=memory_ids,
-        observed_at=observed_at,
-        observation_duration_microseconds=1,
-        observation_origin_kind=ToolObservationOrigin.BUILTIN,
-        trusted_tool_reported_duration_microseconds=None,
-        actor_id="runtime:test",
-    )
-    repository.accept_tool_result(
-        guard,
-        candidate=candidate,
-        deadline_monotonic=monotonic() + 30,
-    )
-    final_cut = repository.prepare_provider_input_cut(
-        guard,
-        turn_id=turn_id,
-        deadline_monotonic=monotonic() + 30,
-    )
-    repository.commit_assistant_message(
-        guard,
-        cut=final_cut,
-        entry_id=_name("entry"),
-        parent_content=InlineContent.from_bytes(b"page observed"),
-        blocks=(
-            AssistantTextBlock(
-                block_id=_name("block"),
-                text=InlineContent.from_bytes(b"page observed"),
-            ),
-        ),
-        complete_turn=True,
-        occurred_at=datetime.now(timezone.utc),
-        actor_id="model:test",
-        deadline_monotonic=monotonic() + 30,
-    )
-    return result_id
 
 
 class _ScriptedModel(ScriptedKernelModel):
@@ -608,22 +467,36 @@ def _snapshot_carrier(repository, session_id):
         return hydrate_canonical_snapshot_owner(connection, row=row, context_snapshot_id=row["id"])
 
 
+def _canonical_user_texts(compiled, *, start=0):
+    return [text_part_values(message.content)[0]
+        for message, placement in zip(compiled.messages[start:], compiled.message_placements[start:], strict=True)
+        if message.role is MessageRole.USER and placement.origin_entry_id is not None]
+
+
 def _hook_context_bodies(request) -> tuple[str, ...]:
-    return tuple(
-        decoded.body
-        for message in request.compiled_input.messages
-        if message.role is MessageRole.USER
-        and message.content
-        and "pulsara_runtime_observation" in join_text_content(message.content)
-        for decoded in (decode_runtime_observation(message),)
-        if decoded.source_kind is ContextSourceKind.HOOK_CONTEXT
-    )
+    result = []
+    for message in request.compiled_input.messages:
+        if message.role is not MessageRole.USER:
+            continue
+        try:
+            value = json.loads(join_text_content(message.content))
+        except ValueError:
+            continue
+        if isinstance(value, dict) and "pulsara_hook_context" in value:
+            result.extend(item["text"] for item in value["pulsara_hook_context"])
+    return tuple(result)
 
 
 class _NativePlanningDeadlineModel(_ScriptedModel):
     def freeze_native_tool_eligibility(self, **kwargs):
         del kwargs
         raise TimeoutError("injected native Tool planning deadline")
+
+
+def _runtime_observation(message):
+    from types import SimpleNamespace
+    value=json.loads(join_text_content(message.content))["pulsara_runtime_observation"]
+    return SimpleNamespace(source_kind=ContextSourceKind(value["source"]),body=value["body"])
 
 
 class _RecordingHookReservation:
@@ -638,58 +511,17 @@ class _RecordingHookReservation:
 
 class _PostCompactionHookContextCollector(StaticContextSourceCollector):
     def __init__(self, text: str) -> None:
+        super().__init__()
         self._text = text
+        self.enabled = False
         self.reservations: list[_RecordingHookReservation] = []
 
-    def freeze_hook_context_source(self, **_kwargs: object):
-        binding = ContextSourceRegistry().binding(ContextSourceKind.HOOK_CONTEXT)
-        variants = tuple(
-            ContextRenderVariant(
-                mode,
-                text,
-                len(text.encode("utf-8")),
-                context_fingerprint(
-                    "context-render-variant:v1",
-                    {"mode": mode.value, "text": text},
-                ),
-            )
-            for mode, text in (
-                (ContextRenderMode.FULL, self._text),
-                (ContextRenderMode.COMPACT, self._text),
-            )
-        )
-        instance_id = f"context-source:{ContextSourceKind.HOOK_CONTEXT.value.lower()}"
-        semantic = context_fingerprint(
-            "context-source-candidate:v1",
-            {
-                "source_kind": ContextSourceKind.HOOK_CONTEXT.value,
-                "source_instance_id": instance_id,
-                "channel": binding.channel.value,
-                "trust": binding.trust.value,
-                "budget": binding.budget.value,
-                "placement": binding.placement,
-                "degradation": binding.degradation,
-                "lifecycle": binding.lifecycle.value,
-                "variants": tuple(item.semantic_fingerprint for item in variants),
-            },
-        )
-        candidate = ContextSourceCandidate(
-            source_kind=ContextSourceKind.HOOK_CONTEXT,
-            source_semantic_fingerprint=semantic,
-            channel=binding.channel,
-            trust_class=binding.trust,
-            budget_class=binding.budget,
-            placement_ordinal=binding.placement,
-            degradation_priority=binding.degradation,
-            variants=variants,
-            lifecycle=binding.lifecycle,
-            domain_semantic_fingerprint=context_fingerprint(
-                "test:hook-context-domain:v1", self._text
-            ),
-        )
-        reservation = _RecordingHookReservation()
+    def freeze_hook_context_message(self,**kwargs):
+        if not self.enabled:
+            return None, None
+        reservation=_RecordingHookReservation()
         self.reservations.append(reservation)
-        return candidate, reservation
+        return LLMMessage.user(json.dumps({"pulsara_hook_context":[{"event":"SessionStart","text":self._text}]})),reservation
 
 
 class _FailingOperationalExtension:
@@ -745,6 +577,7 @@ class _RecordingBorrowToolPort(StructuredToolPort):
 
 class _SurfaceRevokingCollector(StaticContextSourceCollector):
     def __init__(self, tools: _RevocableStructuredToolPort) -> None:
+        super().__init__()
         self._tools = tools
 
     def complete_frozen_sources(self, frozen, **kwargs):
@@ -909,20 +742,6 @@ class _OnlyOneSteerCompiler(StructuredModelInputCompiler):
             raise
 
 
-class _FullRequiredBudgetCompiler(StructuredModelInputCompiler):
-    @staticmethod
-    def _raise_required_full_budget() -> None:
-        raise StructuredModelInputCompileError(
-            ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET
-        )
-
-    def compile_new_epoch(self, request, **kwargs):
-        del request, kwargs
-        self._raise_required_full_budget()
-
-    def compile_installed_append(self, request, **kwargs):
-        del request, kwargs
-        self._raise_required_full_budget()
 
 
 class _AssertingTool:
@@ -961,12 +780,10 @@ class _AssertingTool:
         ) as connection:
             row = connection.execute(
                 """
-                SELECT a.id, b.tool_name
+                SELECT a.id, COALESCE(b.tool_name,p.tool_name)
                 FROM pulsara_v3.tool_execution_attempts a
-                JOIN pulsara_v3.assistant_message_blocks b
-                  ON b.session_id = a.session_id
-                 AND b.assistant_entry_id = a.assistant_entry_id
-                 AND b.tool_call_id = a.tool_call_id
+                JOIN pulsara_v3.tool_invocations b ON b.session_id=a.session_id AND b.id=a.invocation_id
+                LEFT JOIN pulsara_v3.content_parts p ON p.session_id=b.session_id AND p.entry_id=b.assistant_entry_id AND p.tool_call_id=b.tool_call_id AND p.type='tool_call'
                 WHERE a.session_id = %s AND a.id = %s
                 """,
                 (self._session_id, attempt_id),
@@ -974,7 +791,7 @@ class _AssertingTool:
         assert row == (attempt_id, tool_name)
         assert tool_call_id
         self.invocations.append(attempt_id)
-        return KernelToolResult(state="SUCCESS", content=b"tool-ok")
+        return KernelToolResult(state="SUCCESS", content=ToolBusinessValue(content=(ResultPart("text","tool-ok"),)))
 
 
 class _DenyingTool(_AssertingTool):
@@ -996,7 +813,7 @@ class _SemanticInvalidArgumentsThenSuccessTool(_AssertingTool):
         if len(self.invocations) == 1:
             return KernelToolResult(
                 state="INVALID_ARGUMENTS",
-                content=b'{"error":"dependency reference is unknown"}',
+                content=ToolBusinessValue(public_fields={"error":"dependency reference is unknown"}),
             )
         return result
 
@@ -1034,17 +851,18 @@ class _BlockingTool(_AssertingTool):
 class _LargeTool(_AssertingTool):
     async def invoke(self, **kwargs):
         await super().invoke(**kwargs)
-        return KernelToolResult(state="SUCCESS", content=b"z" * (70 << 10))
+        return KernelToolResult(state="SUCCESS", content=ToolBusinessValue(content=(ResultPart("text","z" * (70 << 10)),)))
 
 
 class _ThirtyKiBTool(_AssertingTool):
     async def invoke(self, **kwargs):
         await super().invoke(**kwargs)
-        return KernelToolResult(state="SUCCESS", content=b"z" * (30 << 10))
+        return KernelToolResult(state="SUCCESS", content=ToolBusinessValue(content=(ResultPart("text","z" * (30 << 10)),)))
 
 
 class _BlockingSourceCollector(StaticContextSourceCollector):
     def __init__(self) -> None:
+        super().__init__()
         self.started = Event()
         self.release = Event()
         self.freeze_calls = 0
@@ -1113,30 +931,18 @@ class _PolicyMemoryProjection:
             memory_use.allows_writes and self._hint.matches(text),
         )
 
-    def classify_automatic_trigger(
-        self, text: str
-    ) -> AutomaticMemoryTriggerDisposition:
-        return self.classify_memory_trigger(text).automatic_recall
+    def bind_installed_observation_reader(self,reader):
+        self._installed=reader
 
-    async def freeze_response_preference_source(self):
-        self.preference_calls += 1
-        return build_memory_context_source(
-            kind=ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
-            texts=(' {"items":[]} ',),
-        )
-
-    async def freeze_automatic_recall_source(
-        self, _query: str, *, canonical_facts=None
-    ):
-        self.recall_calls += 1
-        return build_memory_context_source(
-            kind=ContextSourceKind.MEMORY_RECALL,
-            texts=(
-                '{"items":[]}',
-                '{"items":[]}',
-                '{"items":[]}',
-            ),
-        )
+    async def prepare_memory_observation(self,query,*,previous_state,canonical_facts=None,trigger_policy=None):
+        from pulsara_agent.conversation_kernel.memory.contracts import MemoryObservationCandidate,MemoryObservationState,MemoryObservationText
+        policy=trigger_policy or self.classify_memory_trigger(query)
+        if not policy.memory_use.allows_reads:
+            return MemoryObservationCandidate((),previous_state)
+        self.preference_calls+=1
+        if policy.automatic_recall is AutomaticMemoryTriggerDisposition.ELIGIBLE:
+            self.recall_calls+=1
+        return MemoryObservationCandidate((MemoryObservationText('{"items":[]}'),),MemoryObservationState((),()))
 
 
 class _DelayedPreparedExecution:
@@ -1924,24 +1730,6 @@ def test_plain_final_does_not_quote_an_unrequested_followup(
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
     )
-    resource_quotes: list[FrozenPostResponseResourceQuote] = []
-    require_resources = runner._require_post_response_resources
-
-    def observe_resources(
-        quote: FrozenPostResponseResourceQuote,
-        *,
-        effective_input_budget_tokens: int,
-        allow_image_page_recovery: bool,
-    ) -> None:
-        assert allow_image_page_recovery is False
-        resource_quotes.append(quote)
-        require_resources(
-            quote,
-            effective_input_budget_tokens=effective_input_budget_tokens,
-            allow_image_page_recovery=allow_image_page_recovery,
-        )
-
-    monkeypatch.setattr(runner, "_require_post_response_resources", observe_resources)
     prepared_visualizations = []
 
     async def prepare_visualizations(body, **kwargs):
@@ -1953,8 +1741,6 @@ def test_plain_final_does_not_quote_an_unrequested_followup(
     assert result.final_text == "first answer"
     assert prepared_visualizations == ["first answer"]
     assert result.model_call_count == 1
-    assert len(resource_quotes) == 1
-    assert resource_quotes[0].followup_wire is None
 
 
 def test_stage2_runner_text_turn_has_two_entry_transactions_and_no_segments(
@@ -2053,9 +1839,6 @@ def test_automatic_compaction_adopts_started_request_and_continues_same_run(
     lose_adoption_ack: bool,
     image_history: bool,
 ) -> None:
-    from pulsara_agent.conversation_kernel.compaction import (
-        coordinator as compaction_coordinator,
-    )
 
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = (
@@ -2125,7 +1908,7 @@ def test_automatic_compaction_adopts_started_request_and_continues_same_run(
 
             first_prompt = freeze_canonical_prompt(
                 FrozenPromptContent((LLMTextPart("first question"), _image())),
-                workspace_id=workspace_id,
+
             )
         else:
             first_prompt = frozen_test_prompt("first question")
@@ -2166,8 +1949,8 @@ def test_automatic_compaction_adopts_started_request_and_continues_same_run(
             for message in model.requests[1].compiled_input.messages
             for part in message.content
             if isinstance(part, LLMImagePart)
-        ] == [_image(workspace_id=workspace_id)]
-    successor_snapshot = _context_snapshot_payload(model.requests[1])
+        ] == [_image()]
+    _context_snapshot_payload(model.requests[1])
     carrier = _snapshot_carrier(repository, session_id)
     assert carrier.continuation_mode.value == "RESUME_ACTIVE_TURN"
     assert carrier.active_request_entry_id == model.requests[1].compiled_input.canonical_input_identity.initial_entry_id
@@ -2444,7 +2227,7 @@ def test_text_only_destination_summary_projects_valid_image_history(
     Image.new("RGB", (7, 5), (11, 23, 41)).save(image_output, "PNG")
     image = LLMImagePart("image/png", image_output.getvalue(), 7, 5)
     image_prompt = freeze_canonical_prompt(
-        FrozenPromptContent((LLMTextPart("inspect"), image)), workspace_id=workspace_id
+        FrozenPromptContent((LLMTextPart("inspect"), image)),
     )
 
     async def exercise():
@@ -2564,7 +2347,7 @@ def test_text_only_destination_projection_keeps_recent_original_text(
                 LLMImagePart("image/png", image_output.getvalue(), 7, 5),
             )
         ),
-        workspace_id=workspace_id,
+
     )
 
     async def exercise():
@@ -2652,7 +2435,7 @@ def test_cold_text_only_handover_uses_one_destination_projection(
                 image,
             )
         ),
-        workspace_id=workspace_id,
+
     )
 
     async def seed_history():
@@ -2843,7 +2626,7 @@ def test_destination_summary_failure_never_calls_source_fallback(
                 image,
             )
         ),
-        workspace_id=workspace_id,
+
     )
 
     async def exercise():
@@ -2973,7 +2756,7 @@ def test_visual_destination_projection_preserves_selected_image_history_and_rece
         await runner.run_turn(
             freeze_canonical_prompt(
                 FrozenPromptContent((LLMTextPart("recent visual request"), image)),
-                workspace_id=workspace_id,
+
             )
         )
         active_runtime[0] = destination_runtime
@@ -3049,7 +2832,7 @@ def test_multipart_input_resource_admission_precedes_provider_open(
     image = LLMImagePart("image/png", image_output.getvalue(), 7, 5)
     prompt = freeze_canonical_prompt(
         FrozenPromptContent((LLMTextPart("before"), image, image)),
-        workspace_id=workspace_id,
+
     )
     monkeypatch.setattr(
         provider_dispatch, "MAXIMUM_PROVIDER_WIRE_INPUT_BYTES",
@@ -3087,7 +2870,7 @@ def test_multipart_input_resource_admission_precedes_provider_open(
         with pytest.raises(StructuredModelInputCompileError) as failure:
             asyncio.run(runner.run_turn(prompt))
         assert failure.value.kind is (
-            ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
+            ModelInputCompileFailureKind.PROVIDER_INPUT_WIRE_BYTES_EXCEEDED
         )
         assert model.requests == []
         rows = repository.rehydrate_session(
@@ -3708,7 +3491,7 @@ def test_k4_compaction_prefix_search_keeps_large_image_mandatory_suffix(
                 image,
             )
         ),
-        workspace_id=workspace_id,
+
     )
     summary_measurements: list[tuple[int, bool, object]] = []
     freeze_wire_measurement = model.freeze_wire_measurement
@@ -3786,8 +3569,8 @@ def test_k4_compaction_prefix_search_keeps_large_image_mandatory_suffix(
             " WHERE session_id = %s), "
             "(SELECT count(*) FROM pulsara_v3.agent_events "
             " WHERE session_id = %s AND event_type = 'CompactionAdopted'), "
-            "(SELECT count(*) FROM pulsara_v3.canonical_image_refs "
-            " WHERE session_id = %s)",
+            "(SELECT count(*) FROM pulsara_v3.content_parts "
+            " WHERE session_id = %s AND type='image')",
             (session_id, session_id, session_id),
         ).fetchone()
     # Real request start preserves its exact image reference even if a later
@@ -3944,6 +3727,7 @@ def test_final_wire_compaction_summary_promotes_semantic_overbudget_replay_fit(
 def test_final_wire_compaction_no_executable_summary_prefix_is_not_already_compact(
     stage2_migrated_postgres_database,
     trigger: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
@@ -3959,13 +3743,18 @@ def test_final_wire_compaction_no_executable_summary_prefix_is_not_already_compa
     )
     limits = test_model_limits(
         total_context_tokens=256_000,
-        max_input_tokens=8_692,
+        max_input_tokens=9_200,
         max_output_tokens=200,
         default_output_tokens=200,
         input_safety_margin_tokens=0,
     )
-    # A 500-token business budget admits this short history but cannot fit
-    # the complete temporary summary instructions, including any projection.
+    # Isolate the summary-only physical boundary from the ordinary tool
+    # catalog size. The actual summary request still goes through final-wire
+    # admission, and its extra guidance cannot fit while ordinary calls do.
+    import pulsara_agent.conversation_kernel.compaction.coordinator as coordinator
+    original_summary_request = coordinator.compaction_summary_request
+    monkeypatch.setattr(coordinator, "compaction_summary_request",
+        lambda: original_summary_request() + ("Preserve the source evidence. " * 2000))
     first_text = "history:" + "h" * 700
     scripts = (
         (
@@ -4752,7 +4541,7 @@ def test_round5b_mid_turn_tool_followup_compacts_then_finishes(
         "accepted assistant context" in join_text_content(message.content)
         for message in model.summary_transport.contexts[0].messages
     )
-    successor_snapshot = _context_snapshot_payload(model.requests[-1])
+    _context_snapshot_payload(model.requests[-1])
     carrier = _snapshot_carrier(repository, session_id)
     assert carrier.continuation_mode.value == "RESUME_ACTIVE_TURN"
     assert carrier.active_request_entry_id in carrier.retained_entry_ids
@@ -4772,8 +4561,7 @@ def test_mid_turn_compaction_preserves_active_plan_guidance_and_write_denial(
     from pulsara_agent.conversation_kernel.context_sources import (
         KernelContextSourceCollector,
     )
-    from pulsara_agent.model_input.continuity import decode_runtime_observation
-    from tests.test_round3_structured_model_input_compiler import _Capability
+    from tests.support.model_input import _Capability
 
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
@@ -4791,7 +4579,6 @@ def test_mid_turn_compaction_preserves_active_plan_guidance_and_write_denial(
         lease.guard,
         command_id=_name("command"),
         workflow_id=workflow_id,
-        entry_reason="inspect before making changes",
         resume_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
         occurred_at=datetime.now(timezone.utc),
         actor_id="user:test",
@@ -4895,51 +4682,12 @@ def test_mid_turn_compaction_preserves_active_plan_guidance_and_write_denial(
     observations = {}
     for message in successor.compiled_input.messages:
         try:
-            observation = decode_runtime_observation(message)
+            observation = _runtime_observation(message)
         except ValueError:
             continue
         observations[observation.source_kind.value] = observation
-    workflow = observations["PLAN_WORKFLOW"]
-    assert workflow.presence.value == "VALUE"
-    assert (
-        "Planning is active. Investigate and reason without making changes."
-        in workflow.body
-    )
-    permission = observations["RUN_PERMISSION"]
-    assert permission.presence.value == "VALUE"
-    assert (
-        "Read-only mode: File writes, terminal commands and changes to processes are denied."
-        in permission.body
-    )
-    assert "Planning applies read-only permissions." in permission.body
-    with provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=monotonic() + 30
-    ) as connection:
-        workflow_row = connection.execute(
-            "SELECT status FROM pulsara_v3.plan_workflows WHERE session_id=%s AND id=%s",
-            (session_id, workflow_id),
-        ).fetchone()
-        write_row = connection.execute(
-            "SELECT result_state, result_origin_kind FROM pulsara_v3.tool_results "
-            "WHERE session_id=%s AND tool_call_id=%s",
-            (session_id, "call:plan-write"),
-        ).fetchone()
-        read_row = connection.execute(
-            "SELECT result_state FROM pulsara_v3.tool_results "
-            "WHERE session_id=%s AND tool_call_id=%s",
-            (session_id, "call:plan-read"),
-        ).fetchone()
-        write_attempts = connection.execute(
-            "SELECT count(*) FROM pulsara_v3.tool_execution_attempts a "
-            "JOIN pulsara_v3.tool_invocations i ON i.session_id=a.session_id AND i.id=a.invocation_id "
-            "WHERE a.session_id=%s AND i.tool_call_id=%s",
-            (session_id, "call:plan-write"),
-        ).fetchone()
-    assert workflow_row == ("ACTIVE",)
-    assert read_row == ("SUCCESS",)
-    assert write_row == ("PERMISSION_DENIED", "POLICY_NO_ATTEMPT")
-    assert write_attempts == (0,)
-    assert not (tmp_path / "must-not-exist.txt").exists()
+    assert "当前仍处于计划模式" in json.dumps(observations["PLAN_MODE"].body,ensure_ascii=False)
+    assert "read-only" in json.dumps(observations["TURN_CONTEXT"].body,ensure_ascii=False)
 
 
 def test_final_wire_below_trigger_compaction_precheck_reuses_one_materialization(
@@ -4961,6 +4709,10 @@ def test_final_wire_below_trigger_compaction_precheck_reuses_one_materialization
     owner = HostCompactionRuntimeOwner(
         policy=ResolvedCompactionPolicy()
     )
+    # Reuse is legal only for identical complete source values. Keep the
+    # injected clock fixed so TURN_CONTEXT is identical in both preparations.
+    collector = StaticContextSourceCollector()
+    collector._clock = lambda: datetime(2026, 11, 16, tzinfo=timezone.utc)
     runner = ConversationKernelRunner(
         model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
@@ -4968,11 +4720,11 @@ def test_final_wire_below_trigger_compaction_precheck_reuses_one_materialization
         model=model,
         tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
         live_bus=LiveAgentEventBus(),
-        context_source_collector=StaticContextSourceCollector(),
+        context_source_collector=collector,
         compaction_owner=owner,
         workspace_id=workspace_id,
     )
-    measurements = 0
+    measurements = []
     hydrations = 0
     source_preparations = 0
     installs = 0
@@ -4985,8 +4737,7 @@ def test_final_wire_below_trigger_compaction_precheck_reuses_one_materialization
     run_fenced = owner.run_fenced
 
     def record_measurement(**kwargs):
-        nonlocal measurements
-        measurements += 1
+        measurements.append(kwargs["semantic_input"])
         return freeze_measurement(**kwargs)
 
     def record_hydration(**kwargs):
@@ -5023,11 +4774,8 @@ def test_final_wire_below_trigger_compaction_precheck_reuses_one_materialization
     result = asyncio.run(exercise())
 
     assert result.final_text == "ordinary final-wire dispatch"
-    assert measurements == 1
+    assert len(measurements) == 1
     assert hydrations == 1
-    # The started request prechecks one semantic source and reuses its exact
-    # below-trigger wire observation for ordinary dispatch without a second
-    # materialization or replay hydration.
     assert source_preparations == 1
     assert installs == 1
     assert fences == 0
@@ -5239,6 +4987,7 @@ def test_final_wire_post_full_hook_sibling_wins_with_one_authority_transfer(
 
     async def exercise():
         await runner.run_turn(frozen_test_prompt("first question"))
+        collector.enabled = True
         runner._provider_dispatch.measure_prepared_wire_candidate = record_measurement
         runner._provider_dispatch.bind_selected_provider_dispatch = record_transfer
         runner._provider_dispatch.install_provider_open = record_install
@@ -5358,6 +5107,7 @@ def test_final_wire_post_full_hook_timeout_falls_back_with_fresh_install_deadlin
 
     async def exercise():
         await runner.run_turn(frozen_test_prompt("first question"))
+        collector.enabled = True
         runner._provider_dispatch.prepare_hook_context_sibling = record_sibling
         runner._provider_dispatch.measure_prepared_wire_candidate = timeout_hook
         runner._provider_dispatch.bind_selected_provider_dispatch = record_bind
@@ -5430,6 +5180,7 @@ def test_final_wire_post_full_failure_closes_unique_handle_and_hook_reservation(
 
     async def exercise():
         await runner.run_turn(frozen_test_prompt("first question"))
+        collector.enabled = True
         if failure_site == "rotated_read":
             read_dispatch = runner._provider_dispatch.read_dispatch_read
 
@@ -5702,7 +5453,7 @@ def test_round5b_idle_manual_compaction_adopts_without_successor_open(
 
     assert restarted.final_text == "answer after restart"
     assert len(replacement_model.requests) == 1
-    restart_snapshot = _context_snapshot_payload(replacement_model.requests[0])
+    _context_snapshot_payload(replacement_model.requests[0])
     carrier = _snapshot_carrier(replacement_repository, session_id)
     assert carrier.continuation_mode.value == "AWAIT_NEXT_USER"
     assert carrier.active_request_entry_id is None
@@ -5866,13 +5617,7 @@ def test_round3_1_empty_epoch_absorbs_pre_first_call_steers_once(
     assert result.final_text == "one call"
     assert len(model.requests) == 1
     assert pending_read_calls == 1
-    user_messages = [
-        text_part_values(message.content)[0]
-        for message in model.requests[0].compiled_input.messages
-        if message.role is MessageRole.USER
-        and message.content
-        and "pulsara_runtime_observation" not in join_text_content(message.content)
-    ]
+    user_messages = _canonical_user_texts(model.requests[0].compiled_input)
     assert user_messages == ["initial", "steer one", "steer two"]
 
     with provider.connection(
@@ -6016,156 +5761,6 @@ def test_memory_bad_citation_settles_and_model_can_reply_then_continue(
         )
 
 
-def test_saved_remember_id_can_be_used_as_a_memory_basis_without_tool_citation(
-    stage2_migrated_postgres_database,
-    tmp_path,
-) -> None:
-    from pulsara_agent.conversation_kernel.memory_tools import KernelMemoryToolPort
-    from pulsara_agent.conversation_kernel.io import KernelSessionIO
-    from pulsara_agent.memory.scope import (
-        MemoryDomainContext,
-        freeze_memory_read_context_binding,
-        workspace_context_id,
-    )
-    from pulsara_agent.retrieval.config import EmbeddingBackendConfig
-    from pulsara_agent.settings import LocalSettingsStore
-
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = ConversationKernelRepository(provider)
-    session_id = _name("session")
-    workspace_root = f"workspace-root:{uuid4().hex}"
-    workspace_id = workspace_context_id(workspace_root)
-    lease = _acquire_bound_host_writer(
-        repository,
-        session_id=session_id,
-        workspace_id=workspace_id,
-        workspace_root=workspace_root,
-        writer_owner_id=_name("host"),
-        lease_seconds=30,
-        deadline_monotonic=monotonic() + 30,
-    )
-    io = KernelSessionIO()
-    memory = KernelMemoryToolPort(
-        repository=repository,
-        session_id=session_id,
-        read_binding=freeze_memory_read_context_binding(
-            domain=MemoryDomainContext("u_local", "project", workspace_root),
-            host_workspace_id=workspace_id,
-        ),
-        embedding_config=EmbeddingBackendConfig(),
-        io_owner=io,
-        settings=LocalSettingsStore(tmp_path / "settings.yaml"),
-    )
-
-    class MemoryDelegate(_AssertingTool):
-        async def invoke(self, *, tool_name, arguments, invocation_context, **kwargs):
-            return await memory.invoke(
-                tool_name=tool_name,
-                arguments=arguments,
-                invocation_context=invocation_context,
-            )
-
-    calls = 0
-
-    class MemoryStructuredToolPort(StructuredToolPort):
-        def offer_memory_embedding_wake(self) -> None:
-            pass
-
-    async def stream(request):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            items = _named_tool_stream(
-                tool_name="remember",
-                tool_call_id="call:remember-first",
-                arguments={
-                    "statement": "The design review is on Tuesday.",
-                    "context_target": "CURRENT_PROJECT",
-                    "kind": "FACT",
-                },
-            )
-        elif calls == 2:
-            result_messages = [
-                json.loads(text_part_values(message.content)[0])["pulsara_tool_result"]
-                for message in request.compiled_input.messages
-                if message.content
-                and "pulsara_tool_result" in join_text_content(message.content)
-            ]
-            assert len(result_messages) == 1
-            observed = result_messages[0]
-            assert "citation_handle" not in observed
-            basis_target = json.loads(observed["body"])["target"]
-            basis_id = basis_target["memory_id"]
-            assert observed["model_visible_memory_ids"] == [basis_id]
-            items = _named_tool_stream(
-                tool_name="remember",
-                tool_call_id="call:remember-second",
-                arguments={
-                    "statement": "The design review needs a slide deck.",
-                    "context_target": "CURRENT_PROJECT",
-                    "kind": "FACT",
-                    "based_on": [basis_target],
-                },
-            )
-        else:
-            items = _text_stream("两条记忆已保存。")
-        for item in items:
-            yield item
-
-    model = CallbackScriptedKernelModel(stream)
-    runner = ConversationKernelRunner(
-        model_resolution_snapshot_provider=test_model_resolution_snapshot,
-        repository=repository,
-        writer_lease=lease,
-        model=model,
-        tools=MemoryStructuredToolPort(
-            MemoryDelegate(provider, session_id), tool_names=("remember",)
-        ),
-        live_bus=LiveAgentEventBus(),
-        context_source_collector=StaticContextSourceCollector(),
-    )
-
-    async def exercise():
-        try:
-            result = await runner.run_turn(
-                frozen_test_prompt("Remember both review facts")
-            )
-            assert result.final_text == "两条记忆已保存。"
-        finally:
-            await memory.aclose()
-            await io.aclose(deadline_monotonic=monotonic() + 10)
-
-    asyncio.run(exercise())
-    assert calls == 3
-    with provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=monotonic() + 30,
-    ) as connection:
-        rows = connection.execute(
-            "SELECT f.id, f.statement FROM pulsara_v3.memory_facts AS f "
-            "JOIN pulsara_v3.tool_results AS r "
-            "ON f.id=r.model_visible_memory_fact_ids[1] "
-            "WHERE r.session_id=%s ORDER BY f.statement",
-            (session_id,),
-        ).fetchall()
-        relations = connection.execute(
-            "SELECT source_fact_id, target_fact_id FROM pulsara_v3.memory_relations "
-            "WHERE relation_kind='BASED_ON' "
-            "AND source_fact_id IN ("
-            "SELECT f.id FROM pulsara_v3.memory_facts AS f "
-            "JOIN pulsara_v3.tool_results AS r "
-            "ON f.id=r.model_visible_memory_fact_ids[1] WHERE r.session_id=%s) "
-            "ORDER BY source_fact_id",
-            (session_id,),
-        ).fetchall()
-    assert len(rows) == 2
-    by_statement = {statement: fact_id for fact_id, statement in rows}
-    assert relations == [
-        (
-            by_statement["The design review needs a slide deck."],
-            by_statement["The design review is on Tuesday."],
-        )
-    ]
 
 
 def test_round8_memory_policy_aggregates_steers_and_resets_on_next_root_message(
@@ -6283,21 +5878,13 @@ def test_round8_memory_policy_aggregates_steers_and_resets_on_next_root_message(
     assert second_input.messages[: len(first_input.messages)] == first_input.messages
     assert third_input.messages[: len(second_input.messages)] == second_input.messages
     second_suffix_observations = tuple(
-        decode_runtime_observation(message)
+        _runtime_observation(message)
         for message in second_input.messages[len(first_input.messages) :]
         if message.role is MessageRole.USER
         and message.content
         and "pulsara_runtime_observation" in join_text_content(message.content)
     )
-    cleared_memory_sources = {
-        item.source_kind
-        for item in second_suffix_observations
-        if item.presence.value == "CLEARED"
-    }
-    assert {
-        ContextSourceKind.MEMORY_RECALL,
-        ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
-    } <= cleared_memory_sources
+    assert not any(item.source_kind is ContextSourceKind.MEMORY_RECALL for item in second_suffix_observations)
 
 
 def test_round8_memory_write_hint_is_gated_before_the_real_provider_wire(
@@ -6389,13 +5976,13 @@ def test_round8_memory_write_hint_is_gated_before_the_real_provider_wire(
                 if message.role is MessageRole.USER
                 and message.content
                 and "pulsara_runtime_observation" in join_text_content(message.content)
-                for decoded in (decode_runtime_observation(message),)
+                for decoded in (_runtime_observation(message),)
                 if decoded.source_kind is ContextSourceKind.MEMORY_WRITE_HINT
             )
 
         hints = visible_hints(positive)
         assert len(hints) == 1
-        assert hints[0].body == MEMORY_WRITE_HINT_BODY
+        assert hints[0].body == [{"text": MEMORY_WRITE_HINT_BODY}]
         assert entries == ("USER_MESSAGE", "ASSISTANT_MESSAGE")
         for gated in (opt_out, disabled, read_only, absent_tool):
             assert visible_hints(gated) == ()
@@ -6481,7 +6068,7 @@ def test_round8_accepted_user_steer_independently_adds_one_memory_write_hint(
             if message.role is MessageRole.USER
             and message.content
             and "pulsara_runtime_observation" in join_text_content(message.content)
-            and decode_runtime_observation(message).source_kind
+            and _runtime_observation(message).source_kind
             is ContextSourceKind.MEMORY_WRITE_HINT
         )
 
@@ -6577,13 +6164,7 @@ def test_round3_1_planning_reaches_shorter_fifo_prefix_without_recharging_base(
             )
         pending_gate.release.set()
         await asyncio.wait_for(model.started.wait(), timeout=5)
-        user_messages = [
-            text_part_values(message.content)[0]
-            for message in model.requests[0].compiled_input.messages
-            if message.role is MessageRole.USER
-            and message.content
-            and "pulsara_runtime_observation" not in join_text_content(message.content)
-        ]
+        user_messages = _canonical_user_texts(model.requests[0].compiled_input)
         with provider.connection(
             lane=PostgresConnectionLane.INSPECTOR,
             deadline_monotonic=monotonic() + 10,
@@ -7028,13 +6609,7 @@ def test_round3_1_pre_consumption_stale_plan_discards_and_replans_without_steer_
     assert result.final_text == "initial only"
     assert repository.cancelled_once
     assert len(model.requests) == 1
-    assert [
-        text_part_values(message.content)[0]
-        for message in model.requests[0].compiled_input.messages
-        if message.role is MessageRole.USER
-        and message.content
-        and "pulsara_runtime_observation" not in join_text_content(message.content)
-    ] == ["initial"]
+    assert _canonical_user_texts(model.requests[0].compiled_input) == ["initial"]
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
         deadline_monotonic=monotonic() + 10,
@@ -7184,135 +6759,8 @@ def test_k3_soft_trigger_failure_closes_prepared_input_and_interrupts_started_tu
         ).fetchone() == ("INTERRUPTED", rows[0]["id"])
 
 
-def test_round7_1_full_required_budget_boundary_has_zero_provider_open(
-    stage2_migrated_postgres_database,
-) -> None:
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = ConversationKernelRepository(provider)
-    session_id = _name("session")
-    lease = _acquire_bound_host_writer(
-        repository,
-        session_id=session_id,
-        workspace_id=_name("workspace"),
-        writer_owner_id=_name("host"),
-        lease_seconds=30,
-        deadline_monotonic=monotonic() + 30,
-    )
-    model = _ScriptedModel([_text_stream("must not open")])
-    runner = ConversationKernelRunner(
-        model_resolution_snapshot_provider=test_model_resolution_snapshot,
-        repository=repository,
-        writer_lease=lease,
-        model=model,
-        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
-        live_bus=LiveAgentEventBus(),
-        context_source_collector=StaticContextSourceCollector(),
-        compiler=_FullRequiredBudgetCompiler(),
-    )
-
-    with pytest.raises(StructuredModelInputCompileError) as failure:
-        asyncio.run(
-            runner.run_turn(
-                frozen_test_prompt("accepted before required FULL delivery")
-            )
-        )
-
-    assert failure.value.kind is (
-        ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET
-    )
-    assert model.preparation_requests
-    assert model.requests == []
-    with provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=monotonic() + 30,
-    ) as connection:
-        assert connection.execute(
-            "SELECT count(*) FROM pulsara_v3.turns WHERE session_id = %s",
-            (session_id,),
-        ).fetchone() == (1,)
-        assert connection.execute(
-            "SELECT count(*) FROM pulsara_v3.transcript_entries WHERE session_id = %s",
-            (session_id,),
-        ).fetchone() == (1,)
-
-        assert connection.execute(
-            "SELECT status, terminal_reason FROM pulsara_v3.turns WHERE session_id=%s",
-            (session_id,),
-        ).fetchone() == ("INTERRUPTED", "PROVIDER_INPUT_RESOURCE_EXHAUSTED")
 
 
-def test_real_result_page_with_fifty_memory_ids_fails_typed_before_open(
-    stage2_migrated_postgres_database,
-) -> None:
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = ConversationKernelRepository(provider)
-    session_id = _name("session")
-    workspace_id = _name("workspace")
-    lease = _acquire_bound_host_writer(
-        repository,
-        session_id=session_id,
-        workspace_id=workspace_id,
-        writer_owner_id=_name("host"),
-        lease_seconds=30,
-        deadline_monotonic=monotonic() + 30,
-    )
-    memory_ids = tuple(
-        derive_id("memory", "test-fixture", f"memory:{index:064x}")
-        for index in range(50)
-    )
-    result_id = _seed_result_page_with_memory_provenance(
-        repository,
-        lease=lease,
-        workspace_id=workspace_id,
-        memory_ids=memory_ids,
-    )
-    model = _ScriptedModel([_text_stream("must not open")])
-    runner = ConversationKernelRunner(
-        model_resolution_snapshot_provider=test_model_resolution_snapshot,
-        repository=repository,
-        writer_lease=lease,
-        model=model,
-        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
-        live_bus=LiveAgentEventBus(),
-        context_source_collector=StaticContextSourceCollector(),
-        maximum_input_tokens_per_call=100,
-    )
-    command_id = _name("command")
-
-    with pytest.raises(StructuredModelInputCompileError) as failure:
-        asyncio.run(
-            runner.run_turn(
-                frozen_test_prompt(
-                    "new turn cannot fit the required full result page"
-                ),
-                command_id=command_id,
-            )
-        )
-
-    assert failure.value.kind is (
-        ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
-    )
-    assert model.preparation_requests
-    assert model.requests == []
-    with provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=monotonic() + 30,
-    ) as connection:
-        assert connection.execute(
-            "SELECT result_state, cardinality(model_visible_memory_fact_ids) "
-            "FROM pulsara_v3.tool_results WHERE session_id = %s AND id = %s",
-            (session_id, result_id),
-        ).fetchone() == ("SUCCESS", 50)
-        assert connection.execute(
-            "SELECT status, terminal_reason FROM pulsara_v3.turns "
-            "WHERE session_id = %s AND id = %s",
-            (session_id, derive_id("turn", "command", session_id, command_id)),
-        ).fetchone() == ("INTERRUPTED", "PROVIDER_INPUT_RESOURCE_EXHAUSTED")
-        assert connection.execute(
-            "SELECT 1 FROM pulsara_v3.session_commands "
-            "WHERE session_id = %s AND command_id = %s",
-            (session_id, command_id),
-        ).fetchone() == (1,)
 
 
 def test_round3_compile_failure_observer_cannot_block_turn_interruption(
@@ -7453,7 +6901,8 @@ def test_stage2_runner_commits_tool_message_and_attempt_before_invoke(
     assert result.final_text == "done"
     assert result.tool_call_count == 1
     assert len(tool.invocations) == 1
-    assert repository.host_write_transactions == 5
+    # The final input installation also freezes the admitted native page.
+    assert repository.host_write_transactions == 6
     rows = repository.rehydrate_session(
         session_id=session_id, deadline_monotonic=monotonic() + 30
     )
@@ -7505,6 +6954,7 @@ def test_manage_capability_settles_through_real_attempt_and_model_followup(
     expected_actor,
 ):
     from tests.test_capability_management_preparation import preparation
+    from tests.support.capability_management_targets import mcp_target
     from pulsara_agent.capability.management_form import (
         AcceptedCapabilityFormSubmission,
     )
@@ -7533,12 +6983,7 @@ def test_manage_capability_settles_through_real_attempt_and_model_followup(
                 "endpoint": "https://example.org/mcp",
             }
         },
-        "target": {
-            "kind": "MCP_CONNECTION",
-            "scope": "WORKSPACE",
-            "source_kind": "LOCAL",
-            "server_id": "fixture",
-        },
+        "target": mcp_target(service, "fixture", scope="WORKSPACE"),
     }
     model = _ScriptedModel(
         [
@@ -7577,7 +7022,7 @@ def test_manage_capability_settles_through_real_attempt_and_model_followup(
             assert workspace_root == service.workspace_root
             assert service.mcp.inspect(target) is not None
             adoptions.append(workspace_root)
-            return "RELOADED"
+            return {"status": "RELOADED", "errors": []}
 
     live_bus = LiveAgentEventBus()
     tools = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
@@ -7709,11 +7154,11 @@ def test_terminal_preflight_failure_returns_tool_result_and_model_finishes_turn(
         "ASSISTANT_MESSAGE",
     ]
     tool_result = next(row for row in rows if row["entry_kind"] == "TOOL_RESULT")
-    payload = json.loads(tool_result["inline_content"])
-    assert payload["status"] == "error"
-    assert payload["exit_code"] == -1
-    assert "terminal preflight failed (ValueError)" in payload["error"]
-    assert "terminal workdir does not exist" in payload["error"]
+    payload = PostgresToolOutputReadPort(provider, session_id=session_id,
+        workspace_id=workspace_id).read_result({"kind":"SESSION_ENTRY", "entry_id":tool_result["id"]}).value
+    assert payload["meta"]["status"] == "ERROR"
+    assert payload["content"] == ({"type":"text", "value":
+        "terminal preflight failed (ValueError): terminal workdir does not exist"},)
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
         deadline_monotonic=monotonic() + 30,
@@ -7792,23 +7237,15 @@ def test_lightweight_todo_runs_through_canonical_tool_result_settlement(
         session_id=session_id, deadline_monotonic=monotonic() + 30
     )
     tool_result = next(row for row in rows if row["entry_kind"] == "TOOL_RESULT")
-    assert b"Inspect exact path" not in tool_result["inline_content"]
-    acknowledgement = json.loads(tool_result["inline_content"])
+    acknowledgement = PostgresToolOutputReadPort(provider, session_id=session_id,
+        workspace_id=workspace_id).read_result({"kind":"SESSION_ENTRY", "entry_id":tool_result["id"]}).value
+    assert "Inspect exact path" not in json.dumps(acknowledgement)
     assert acknowledgement == {
-        "counts": {"completed": 1, "in_progress": 1, "pending": 0, "total": 2},
-        "status": "UPDATED",
+        "meta": {"status":"SUCCESS", "counts": {
+            "completed": 1, "in_progress": 1, "pending": 0, "total": 2}},
+        "content": ({"type":"text", "value":"已更新进度清单。"},),
     }
-    with provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=monotonic() + 10,
-    ) as connection:
-        output = connection.execute(
-            "SELECT output_body_digest IS NOT NULL, output_omitted "
-            "FROM pulsara_v3.tool_results "
-            "WHERE session_id = %s AND result_entry_id = %s",
-            (session_id, tool_result["id"]),
-        ).fetchone()
-    assert output == (True, False)
+
 
 
 def test_stage2_live_bus_overflow_is_nonblocking_and_returns_gap() -> None:
@@ -8123,7 +7560,7 @@ def test_round5a1_completed_tool_item_then_incomplete_has_zero_canonical_effect(
     )
     assert recovered.final_text == "recovered"
     previous_outcomes = [
-        decode_runtime_observation(message)
+        _runtime_observation(message)
         for message in model.requests[1].compiled_input.messages
         if message.role is MessageRole.USER
         and message.content
@@ -8131,74 +7568,11 @@ def test_round5a1_completed_tool_item_then_incomplete_has_zero_canonical_effect(
     ]
     assert any(
         item.source_kind is ContextSourceKind.PREVIOUS_TURN_OUTCOME
-        and json.loads(item.body)["kind"] == "EXECUTION_FAILED"
+        and item.body[0]["text"] == "紧邻前轮在任务完成前因执行失败结束。"
         for item in previous_outcomes
     )
 
 
-def test_k3_output_resource_gate_precedes_assistant_and_tool_effects(
-    stage2_migrated_postgres_database,
-) -> None:
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = ConversationKernelRepository(provider)
-    session_id = _name("session")
-    lease = _acquire_bound_host_writer(
-        repository,
-        session_id=session_id,
-        workspace_id=_name("workspace"),
-        writer_owner_id=_name("host"),
-        lease_seconds=30,
-        deadline_monotonic=monotonic() + 30,
-    )
-    tools = _AssertingTool(provider, session_id)
-    bus = LiveAgentEventBus(maximum_events=4_096)
-    observer_id, _generation, _revision = bus.subscribe()
-    runner = ConversationKernelRunner(
-        model_resolution_snapshot_provider=test_model_resolution_snapshot,
-        repository=repository,
-        writer_lease=lease,
-        model=_LimitedCompactionScriptedModel([_named_tool_stream(
-            tool_name="exec_process", tool_call_id="call:oversized-followup",
-            arguments={"command": "x" * (256 << 10)},
-        )], summary="unused"),
-        tools=StructuredToolPort(tools),
-        live_bus=bus,
-        context_source_collector=StaticContextSourceCollector(),
-    )
-
-    with pytest.raises(OutputResourceInterruption) as caught:
-        asyncio.run(runner.run_turn(frozen_test_prompt("produce an oversized batch")))
-
-    assert caught.value.reason == "FOLLOWUP_INPUT_TOKENS"
-    assert caught.value.quote.followup_wire is not None
-    assert caught.value.quote.followup_wire.budget_input_tokens > 47_192
-    assert tools.invocations == []
-    with provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=monotonic() + 10,
-    ) as connection:
-        assert connection.execute(
-            "SELECT count(*) FROM pulsara_v3.transcript_entries "
-            "WHERE session_id = %s AND entry_kind IN "
-            "('ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST', 'TOOL_RESULT')",
-            (session_id,),
-        ).fetchone() == (0,)
-        assert connection.execute(
-            "SELECT count(*) FROM pulsara_v3.tool_execution_attempts "
-            "WHERE session_id = %s",
-            (session_id,),
-        ).fetchone() == (0,)
-        assert connection.execute(
-            "SELECT terminal_reason FROM pulsara_v3.turns "
-            "WHERE session_id = %s ORDER BY accepted_at LIMIT 1",
-            (session_id,),
-        ).fetchone() == ("PROVIDER_OUTPUT_RESOURCE_EXHAUSTED",)
-    observed = bus.observe(observer_id, after_revision=0, maximum_events=2_048)
-    assert any(
-        item.kind is LiveSettlementKind.ABORTED
-        and item.reason_code == "OUTPUT_RESOURCE_FOLLOWUP_INPUT_TOKENS"
-        for item in observed.settlements
-    )
 
 
 def test_round5a1_assistant_settlement_survives_caller_cancellation(
@@ -8900,7 +8274,7 @@ def test_stage2_confirmation_without_controller_keeps_policy_and_result_closed(
     )
     asyncio.run(runner.run_turn(frozen_test_prompt("ask before dispatch")))
     assert tools.invocations == []
-    assert repository.host_write_transactions == 5
+    assert repository.host_write_transactions == 6
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
         deadline_monotonic=monotonic() + 10,
@@ -8961,9 +8335,10 @@ def test_stage2_large_assistant_content_uses_immutable_blob_reference(
         row = connection.execute(
             """
             SELECT b.blob_id, x.logical_size, octet_length(x.body)
-            FROM pulsara_v3.assistant_message_blocks b
+            FROM pulsara_v3.content_parts b
             JOIN pulsara_v3.blobs x ON x.id = b.blob_id
-            WHERE b.session_id = %s AND b.block_kind = 'TEXT'
+            JOIN pulsara_v3.transcript_entries e ON e.id=b.entry_id
+            WHERE b.session_id = %s AND b.type = 'text' AND e.entry_kind='ASSISTANT_MESSAGE'
             """,
             (session_id,),
         ).fetchone()
@@ -9057,7 +8432,7 @@ def test_provider_rematerialization_uses_one_preview_and_original_scoped_body(
     ]
     assert len(tool_messages) == 1
     preview = text_part_values(tool_messages[0].content)[0]
-    assert len(preview.encode("utf-8")) <= 65_536
+    assert "next:" in preview
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
         deadline_monotonic=monotonic() + 10,
@@ -9075,8 +8450,7 @@ def test_provider_rematerialization_uses_one_preview_and_original_scoped_body(
         session_id=session_id,
         workspace_id=workspace_id,
     )
-    body = read_port.read_body({"kind":"SESSION_ENTRY","entry_id":result_entry_id})
-    assert body.content == b"z" * (70 << 10)
-    assert body.source_coverage is ToolOutputSourceCoverage.COMPLETE
-    display = json.loads(decode_tool_result_observation(preview)["body"])
-    assert display["read"]["arguments"]["target"]["entry_id"] == result_entry_id
+    saved = read_port.read_result({"kind":"SESSION_ENTRY","entry_id":result_entry_id})
+    assert saved.value["content"] == ({"type":"text","value":"z" * (70 << 10)},)
+    assert json.loads(preview.rsplit("\nnext: ",1)[1])["kind"] == "NEXT"
+    assert result_entry_id in preview

@@ -31,7 +31,10 @@ from pulsara_agent.conversation_kernel.image_validation import (
     PromptImageValidationError,
     _validated_image_facts,
 )
-from pulsara_agent.conversation_kernel.prompt_content import (freeze_canonical_prompt, hydrate_canonical_prompt_body)
+from pulsara_agent.conversation_kernel.prompt_content import (
+    freeze_canonical_prompt,
+    hydrate_canonical_prompt_body,
+)
 from pulsara_agent.conversation_kernel.provider_dispatch import (
     _parent_context_user_projection,
 )
@@ -262,7 +265,9 @@ def test_host_worker_close_terminates_and_reaps_active_decode() -> None:
 
 
 @pytest.mark.parametrize("close_fails", [False, True])
-def test_host_worker_start_failure_closes_pipe_and_releases_slot(monkeypatch, close_fails) -> None:
+def test_host_worker_start_failure_closes_pipe_and_releases_slot(
+    monkeypatch, close_fails
+) -> None:
     class Connection:
         closed = False
 
@@ -347,13 +352,17 @@ def test_host_worker_stops_after_reply_before_exit(monkeypatch, stop) -> None:
                         lambda: kwargs["deadline_monotonic"] + 1,
                     )
                 joining.set()
-            return await original_reap(process, connection, terminate=terminate, **kwargs)
+            return await original_reap(
+                process, connection, terminate=terminate, **kwargs
+            )
 
         monkeypatch.setattr(validator, "_reap_active", observe_reap)
-        task = asyncio.create_task(validator.freeze(
-            PromptContent((PromptImagePart(_encoded_image("PNG"), "image/png"),)),
-            deadline_monotonic=monotonic() + setup_timeout,
-        ))
+        task = asyncio.create_task(
+            validator.freeze(
+                PromptContent((PromptImagePart(_encoded_image("PNG"), "image/png"),)),
+                deadline_monotonic=monotonic() + setup_timeout,
+            )
+        )
         try:
             await asyncio.wait_for(joining.wait(), timeout=setup_timeout)
             if stop == "cancel":
@@ -377,7 +386,8 @@ def test_host_worker_stops_after_reply_before_exit(monkeypatch, stop) -> None:
 
 @pytest.mark.parametrize("failure_stage", ["receive", "close_child"])
 def test_host_worker_communication_failure_terminates_reaps_and_closes(
-    monkeypatch, failure_stage,
+    monkeypatch,
+    failure_stage,
 ) -> None:
     class Connection:
         closed = False
@@ -496,7 +506,7 @@ def test_complete_content_is_the_inflight_hook_identity_and_text_projection() ->
     def key(prompt):
         return _IngressHookReservationKey(
             _IngressHookApiVariant.DIRECT,
-            'command:63iu4b6cbi3nyvtngv4tql2t7a',
+            "command:63iu4b6cbi3nyvtngv4tql2t7a",
             prompt,
             PermissionMode.BYPASS_PERMISSIONS,
             None,
@@ -526,7 +536,9 @@ def test_original_rows_hydrate_in_owner_order_and_lower_images_without_copying()
     images = []
     for sequence, (content, image_payloads) in enumerate(zip(originals, payloads), 1):
         frozen = freeze_canonical_prompt(content)
-        hydrated = hydrate_canonical_prompt_body(body=frozen.body, image_payloads=image_payloads)
+        hydrated = hydrate_canonical_prompt_body(
+            body=frozen.body, image_payloads=image_payloads
+        )
         assert hydrated == frozen
         item = FrozenProviderInputItem(
             FrozenProviderInputItemKind.USER,
@@ -536,9 +548,11 @@ def test_original_rows_hydrate_in_owner_order_and_lower_images_without_copying()
             hydrated.content.parts,
             input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
         )
-        lowered = lower_canonical_item(item).fixed_message
+        lowered = lower_canonical_item(item).message
         assert lowered is not None
-        images.extend(part for part in lowered.content if isinstance(part, LLMImagePart))
+        images.extend(
+            part for part in lowered.content if isinstance(part, LLMImagePart)
+        )
     assert tuple(images) == (image_a, image_b, image_b, image_c)
 
 

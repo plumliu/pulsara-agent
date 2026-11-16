@@ -2,6 +2,8 @@
 
 import asyncio
 from dataclasses import replace
+from io import BytesIO
+from PIL import Image
 from time import monotonic
 
 import pytest
@@ -21,6 +23,8 @@ from pulsara_agent.conversation_kernel.repository import (
 )
 from pulsara_agent.conversation_kernel.runner import ConversationKernelRunner
 from pulsara_agent.conversation_kernel.tool_contracts import KernelToolResult
+from pulsara_agent.conversation_kernel.content_parts import ResultPart
+from pulsara_agent.ports.tool_execution import ToolBusinessValue
 from pulsara_agent.identity import random_id
 from pulsara_agent.llm.input import FrozenPromptContent, LLMImagePart, LLMTextPart
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
@@ -104,6 +108,8 @@ def test_pending_image_prefix_preparation_allows_actual_batch_append_before_adop
         ),
         summary="Earlier work established the historical context.",
     )
+    encoded_image = BytesIO()
+    Image.new("RGB", (2, 2), (11, 23, 41)).save(encoded_image, "PNG")
     image = bind_prompt_images(
         FrozenPromptContent(
             (
@@ -111,12 +117,11 @@ def test_pending_image_prefix_preparation_allows_actual_batch_append_before_adop
                     '{"video_frames":true,"frames":[{"n":1,"image":1,"t":12.5}],"next":null}'
                 ),
                 replace(
-                    bound_test_image("image/png", b"pending-real-page", 2, 2),
+                    bound_test_image("image/png", encoded_image.getvalue(), 2, 2),
                     image_ref=None,
                 ),
             )
         ),
-        workspace_id=workspace_id,
     )
 
     class Tool(_AssertingTool):
@@ -143,18 +148,35 @@ def test_pending_image_prefix_preparation_allows_actual_batch_append_before_adop
                 )
                 observed["partial_batch_guard"] = True
             return (
-                KernelToolResult(state="SUCCESS", content=image)
+                KernelToolResult(
+                    state="SUCCESS",
+                    content=ToolBusinessValue(
+                        {},
+                        (
+                            ResultPart("object", {"frames": [{"n": 1, "t": 12.5}]}),
+                            ResultPart(
+                                "image",
+                                {
+                                    "kind": "IMAGE_REF",
+                                    "image_ref": image.parts[1].image_ref,
+                                },
+                            ),
+                        ),
+                    ),
+                    pending_images=(image.parts[1],),
+                )
                 if kwargs["tool_name"] == "read_video_frames"
                 else KernelToolResult(
-                    state="SUCCESS", content=b"associated source text"
+                    state="SUCCESS",
+                    content=ToolBusinessValue(
+                        {}, (ResultPart("text", "associated source text"),)
+                    ),
                 )
             )
 
     tool = Tool(provider, session_id)
     owner = HostCompactionRuntimeOwner(
-        policy=ResolvedCompactionPolicy(
-            automatic_enabled=False
-        )
+        policy=ResolvedCompactionPolicy(automatic_enabled=False)
     )
     runner = ConversationKernelRunner(
         model_resolution_snapshot_provider=test_model_resolution_snapshot,
@@ -220,6 +242,15 @@ def test_pending_image_prefix_preparation_allows_actual_batch_append_before_adop
                 pending.close()
             batch = await original_execute(**kwargs)
             assert batch.tool_call_count == 2
+            with provider.connection(
+                lane=PostgresConnectionLane.INSPECTOR,
+                deadline_monotonic=monotonic() + 30,
+            ) as connection:
+                actual = connection.execute(
+                    "SELECT r.result_state,r.public_fields,(SELECT jsonb_agg(p.inline_value) FROM pulsara_v3.content_parts p WHERE p.entry_id=r.result_entry_id) FROM pulsara_v3.tool_results r WHERE r.session_id=%s ORDER BY r.accepted_at",
+                    (session_id,),
+                ).fetchall()
+            assert [row[0] for row in actual] == ["SUCCESS", "SUCCESS"], actual
             # The pending closed-cut handle permits actual result acceptance;
             # the exact batch guard accepts the advanced, complete suffix.
             repository.require_pending_tool_batch_compaction_safe(

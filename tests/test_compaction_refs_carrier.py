@@ -95,13 +95,16 @@ def test_carrier_persists_only_summary_selection_and_minimal_continuation():
     carrier = _carrier(refs=(active,), active=active)
     assert json.loads(carrier.body) == {
         "continuation": {
-            "mode": "RESUME_ACTIVE_TURN", "active_request_entry_id": active
+            "mode": "RESUME_ACTIVE_TURN",
+            "active_request_entry_id": active,
         },
         "earlier_context_summary": "Earlier investigation is complete.",
         "retained_entry_ids": [active],
     }
     assert parse_compaction_snapshot_carrier(carrier.body) == carrier
-    assert compaction_snapshot_canonical_expanded_bytes(carrier.body) == len(carrier.body)
+    assert compaction_snapshot_canonical_expanded_bytes(carrier.body) == len(
+        carrier.body
+    )
     assert not hasattr(carrier, "active_request")
     assert not hasattr(carrier, "recent_human_requests")
     assert not hasattr(carrier, "handoff_instruction")
@@ -111,7 +114,7 @@ def test_carrier_persists_only_summary_selection_and_minimal_continuation():
 def test_active_request_may_be_selected_prefix_or_normal_suffix(active_in_prefix):
     active = _id("entry", "active")
     carrier = _carrier(refs=(active,) if active_in_prefix else (), active=active)
-    message = lower_canonical_item(_snapshot(carrier)).fixed_message
+    message = lower_canonical_item(_snapshot(carrier)).message
     assert message is not None and message.role is MessageRole.USER
     assert message.content == (
         LLMTextPart(
@@ -122,14 +125,19 @@ def test_active_request_may_be_selected_prefix_or_normal_suffix(active_in_prefix
     assert active not in message.content[0].text
 
 
-@pytest.mark.parametrize("mutate", [
-    lambda value: value.update(recent_human_requests=[]),
-    lambda value: value["continuation"].update(instruction="HANDOFF"),
-    lambda value: value.update(retained_entry_ids=["not-an-entry"]),
-    lambda value: value.update(retained_entry_ids=[_id("entry", "x")] * 2),
-    lambda value: value["continuation"].update(active_request_entry_id=_id("entry", "x")),
-    lambda value: value.update(earlier_context_summary=""),
-])
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda value: value.update(recent_human_requests=[]),
+        lambda value: value["continuation"].update(instruction="HANDOFF"),
+        lambda value: value.update(retained_entry_ids=["not-an-entry"]),
+        lambda value: value.update(retained_entry_ids=[_id("entry", "x")] * 2),
+        lambda value: value["continuation"].update(
+            active_request_entry_id=_id("entry", "x")
+        ),
+        lambda value: value.update(earlier_context_summary=""),
+    ],
+)
 def test_carrier_rejects_noncontract_payloads(mutate):
     value = json.loads(_carrier().body)
     mutate(value)
@@ -148,7 +156,9 @@ def test_range_retains_exact_prefix_rows_and_suffix_with_real_content_charge():
     first = _original("first", 2, "large original " * 1000)
     same_text_other_identity = _original("second", 4, first.content[0].text)
     suffix = _original("new", 12, "new input")
-    carrier = _carrier(refs=(first.source_entry_id, same_text_other_identity.source_entry_id))
+    carrier = _carrier(
+        refs=(first.source_entry_id, same_text_other_identity.source_entry_id)
+    )
     selected = _range((_snapshot(carrier), first, same_text_other_identity, suffix))
     assert selected.ordered_items == (first, same_text_other_identity, suffix)
     assert selected.retained_entry_ids == carrier.retained_entry_ids
@@ -157,10 +167,12 @@ def test_range_retains_exact_prefix_rows_and_suffix_with_real_content_charge():
         for item in (first, same_text_other_identity, suffix)
     )
     assert selected.canonical_utf8_bytes > len(carrier.body)
-    assert lower_canonical_item(first).fixed_message.content == first.content
+    assert lower_canonical_item(first).message.content == first.content
 
 
-@pytest.mark.parametrize("failure", ["missing", "suffix", "reversed", "unordered", "assistant", "unselected"])
+@pytest.mark.parametrize(
+    "failure", ["missing", "suffix", "reversed", "unordered", "assistant", "unselected"]
+)
 def test_range_fails_closed_on_invalid_prefix_references(failure):
     first = _original("first", 2)
     second = _original("second", 4)
@@ -176,7 +188,14 @@ def test_range_fails_closed_on_invalid_prefix_references(failure):
         refs = tuple(reversed(refs))
         rows = tuple(reversed(rows))
     elif failure == "assistant":
-        rows = (first, replace(second, item_kind=FrozenProviderInputItemKind.ASSISTANT, input_origin=None))
+        rows = (
+            first,
+            replace(
+                second,
+                item_kind=FrozenProviderInputItemKind.ASSISTANT,
+                input_origin=None,
+            ),
+        )
     else:
         rows = (first, second, _original("not-selected", 8))
     carrier = _carrier(refs=refs)
@@ -196,6 +215,6 @@ def test_system_prompts_share_the_neutral_context_description():
     assert DEFAULT_SYSTEM_PROMPT.count(sentence) == 1
     assert DEFAULT_SUBAGENT_SYSTEM_PROMPT.count(sentence) == 1
     policy = ResolvedCompactionPolicy()
-    assert policy.auto_trigger_ratio == .85
+    assert policy.auto_trigger_ratio == 0.85
     assert not hasattr(policy, "minimum_reclaim_tokens")
     assert not hasattr(policy, "post_compaction_target_ratio")

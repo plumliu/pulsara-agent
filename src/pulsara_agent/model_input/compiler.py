@@ -1,14 +1,8 @@
-"""Deterministic structured model-input allocation.
-
-The compiler accepts only immutable provider-neutral facts.  It performs no
-I/O and has no authority outside the duration of one function call.
-"""
+"""Single-value context compilation with immutable installed provider prefixes."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from enum import IntEnum
-import json
 from time import monotonic
 
 from pulsara_agent.llm.input import (
@@ -17,8 +11,6 @@ from pulsara_agent.llm.input import (
     LLMTextPart,
     MessageRole,
     content_has_image,
-    join_text_content,
-    llm_content_identity_value,
 )
 from pulsara_agent.model_input._stable_input_identity import compiled_input_identity
 from pulsara_agent.model_input.contracts import (
@@ -28,12 +20,7 @@ from pulsara_agent.model_input.contracts import (
     ContextChannel,
     ContextCompileReport,
     ContextPublicDiagnosticCode,
-    ContextRenderMode,
-    ContextSourceCandidate,
-    ContextSourceAbsenceKind,
     ContextSourceKind,
-    ContextSourceLifecycle,
-    ContextTrustClass,
     FrozenCompiledMessagePlacement,
     FrozenCompiledModelInput,
     FrozenModelInputSemanticProjection,
@@ -41,10 +28,8 @@ from pulsara_agent.model_input.contracts import (
     FrozenProviderInputItemKind,
     ModelInputCompileFailureKind,
     StructuredModelInputCompileError,
-    StructuredModelInputCompileRequest,
     StructuredModelInputLimits,
     STRUCTURED_MODEL_INPUT_LIMITS,
-    ToolResultProviderRenderMode,
     ToolAttachmentSource,
     ToolAttachmentSourceMember,
     compiled_tool_result_source_fingerprint,
@@ -52,356 +37,40 @@ from pulsara_agent.model_input.contracts import (
 )
 from pulsara_agent.model_input.continuity import (
     FrozenProviderInputAppendCompileResult,
-    FrozenProviderInputAppendPlanningInput,
     FrozenProviderInputAppendSemanticProjection,
     NewTriggerAnchor,
     ProcessLocalCanonicalFrontier,
-    ProcessLocalSourceHead,
-    SourceObservationLifecycle,
-    SourceObservationPresence,
-    encode_runtime_observation,
-    provider_input_dispatch_anchor_value,
+    InstalledObservationState,
 )
 from pulsara_agent.model_input.lowering import (
     LoweredCanonicalItem,
-    image_reference_part,
     lower_canonical_item,
-    source_variant_message,
 )
 from pulsara_agent.primitives.context import (
     canonical_json_bytes,
     context_fingerprint,
-    thaw_json,
+    freeze_json,
 )
-from pulsara_agent.primitives.plan_workflow import (
-    PlanApprovedMaterializationDisposition,
-)
-from pulsara_agent.tools.builtins.filesystem import (
-    ViewImageSource,
-)
-
-
-class _SacrificeRank(IntEnum):
-    DEBUG = 0
-    OPTIONAL = 1
-    IMPORTANT = 2
-    MUST_KEEP = 3
-
-
-_SOURCE_POLICY = {
-    ContextSourceKind.BASE_SYSTEM: (
-        ContextChannel.SYSTEM,
-        ContextTrustClass.ROOT_INSTRUCTION,
-        ContextBudgetClass.MUST_KEEP,
-        0,
-        0,
-        (ContextRenderMode.FULL,),
-        ContextSourceLifecycle.EPOCH_ROOT,
-    ),
-    ContextSourceKind.RUNTIME_ENVIRONMENT: (
-        ContextChannel.RUNTIME_OBSERVATION,
-        ContextTrustClass.TRUSTED_RUNTIME_FACT,
-        ContextBudgetClass.MUST_KEEP,
-        10,
-        10,
-        (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
-        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
-    ),
-    ContextSourceKind.RUN_PERMISSION: (
-        ContextChannel.RUNTIME_OBSERVATION,
-        ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
-        ContextBudgetClass.MUST_KEEP,
-        20,
-        12,
-        (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
-        ContextSourceLifecycle.TURN_APPEND,
-    ),
-    ContextSourceKind.PLAN_HANDOFF: (
-        ContextChannel.RUNTIME_OBSERVATION,
-        ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
-        ContextBudgetClass.MUST_KEEP,
-        30,
-        11,
-        (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
-        ContextSourceLifecycle.ONE_SHOT,
-    ),
-    ContextSourceKind.PLAN_WORKFLOW: (
-        ContextChannel.RUNTIME_OBSERVATION,
-        ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
-        ContextBudgetClass.MUST_KEEP,
-        40,
-        10,
-        (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
-        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
-    ),
-    ContextSourceKind.USER_ACTIONS: (
-        ContextChannel.RUNTIME_OBSERVATION,
-        ContextTrustClass.TRUSTED_RUNTIME_FACT,
-        ContextBudgetClass.OPTIONAL,
-        48,
-        90,
-        (ContextRenderMode.FULL,),
-        ContextSourceLifecycle.ONE_SHOT,
-    ),
-    ContextSourceKind.SKILL_CATALOG: (
-        ContextChannel.RUNTIME_OBSERVATION,
-        ContextTrustClass.UNTRUSTED_OBSERVATION,
-        ContextBudgetClass.IMPORTANT,
-        50,
-        30,
-        (ContextRenderMode.FULL, ContextRenderMode.UNAVAILABLE_MINIMAL),
-        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
-    ),
-    ContextSourceKind.MCP_CATALOG: (
-        ContextChannel.RUNTIME_OBSERVATION,
-        ContextTrustClass.UNTRUSTED_OBSERVATION,
-        ContextBudgetClass.IMPORTANT,
-        55,
-        35,
-        (ContextRenderMode.FULL, ContextRenderMode.COMPACT, ContextRenderMode.REF_ONLY),
-        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
-    ),
-    ContextSourceKind.ACTIVE_SKILL: (
-        ContextChannel.RUNTIME_OBSERVATION,
-        ContextTrustClass.UNTRUSTED_OBSERVATION,
-        ContextBudgetClass.MUST_KEEP,
-        60,
-        20,
-        (ContextRenderMode.FULL, ContextRenderMode.UNAVAILABLE_MINIMAL),
-        ContextSourceLifecycle.ACTIVATION_SNAPSHOT,
-    ),
-    ContextSourceKind.PREVIOUS_TURN_OUTCOME: (
-        ContextChannel.RUNTIME_OBSERVATION,
-        ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
-        ContextBudgetClass.MUST_KEEP,
-        45,
-        10,
-        (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
-        ContextSourceLifecycle.TURN_APPEND,
-    ),
-    ContextSourceKind.RUNTIME_CLOCK: (
-        ContextChannel.RUNTIME_OBSERVATION,
-        ContextTrustClass.TRUSTED_RUNTIME_FACT,
-        ContextBudgetClass.OPTIONAL,
-        90,
-        80,
-        (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
-        ContextSourceLifecycle.CALL_APPEND,
-    ),
-    ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD: (
-        ContextChannel.RUNTIME_OBSERVATION,
-        ContextTrustClass.UNTRUSTED_OBSERVATION,
-        ContextBudgetClass.IMPORTANT,
-        62,
-        42,
-        (ContextRenderMode.FULL,),
-        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
-    ),
-    ContextSourceKind.MEMORY_RECALL: (
-        ContextChannel.RUNTIME_OBSERVATION,
-        ContextTrustClass.UNTRUSTED_OBSERVATION,
-        ContextBudgetClass.IMPORTANT,
-        65,
-        48,
-        (ContextRenderMode.FULL, ContextRenderMode.COMPACT, ContextRenderMode.REF_ONLY),
-        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
-    ),
-    ContextSourceKind.MEMORY_WRITE_HINT: (
-        ContextChannel.RUNTIME_OBSERVATION,
-        ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
-        ContextBudgetClass.OPTIONAL,
-        95,
-        85,
-        (ContextRenderMode.FULL,),
-        ContextSourceLifecycle.CALL_APPEND,
-    ),
-    ContextSourceKind.HOOK_CONTEXT: (
-        ContextChannel.RUNTIME_OBSERVATION,
-        ContextTrustClass.UNTRUSTED_OBSERVATION,
-        ContextBudgetClass.IMPORTANT,
-        68,
-        60,
-        (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
-        ContextSourceLifecycle.ONE_SHOT,
-    ),
-    ContextSourceKind.COMPACTION_RUNTIME_HANDOFF: (
-        ContextChannel.RUNTIME_OBSERVATION,
-        ContextTrustClass.UNTRUSTED_OBSERVATION,
-        ContextBudgetClass.MUST_KEEP,
-        75,
-        15,
-        (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
-        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
-    ),
-    ContextSourceKind.RETAINED_SKILL_CONTEXT: (
-        ContextChannel.RUNTIME_OBSERVATION,
-        ContextTrustClass.UNTRUSTED_OBSERVATION,
-        ContextBudgetClass.MUST_KEEP,
-        61,
-        21,
-        (ContextRenderMode.FULL,),
-        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
-    ),
-}
-
-_SOURCE_ABSENCE_POLICY = {
-    ContextSourceKind.BASE_SYSTEM: frozenset(),
-    ContextSourceKind.RUNTIME_ENVIRONMENT: frozenset(),
-    ContextSourceKind.RUNTIME_CLOCK: frozenset({ContextSourceAbsenceKind.UNAVAILABLE}),
-    ContextSourceKind.RUN_PERMISSION: frozenset(),
-    ContextSourceKind.PLAN_HANDOFF: frozenset(
-        {ContextSourceAbsenceKind.NOT_APPLICABLE}
-    ),
-    ContextSourceKind.PLAN_WORKFLOW: frozenset(
-        {ContextSourceAbsenceKind.EXPLICIT_EMPTY}
-    ),
-    ContextSourceKind.USER_ACTIONS: frozenset(
-        {ContextSourceAbsenceKind.NOT_APPLICABLE}
-    ),
-    ContextSourceKind.SKILL_CATALOG: frozenset(
-        {ContextSourceAbsenceKind.EXPLICIT_EMPTY, ContextSourceAbsenceKind.UNAVAILABLE}
-    ),
-    ContextSourceKind.MCP_CATALOG: frozenset(
-        {
-            ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-            ContextSourceAbsenceKind.NOT_APPLICABLE,
-            ContextSourceAbsenceKind.UNAVAILABLE,
-        }
-    ),
-    ContextSourceKind.ACTIVE_SKILL: frozenset(
-        {
-            ContextSourceAbsenceKind.NOT_APPLICABLE,
-            ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-            ContextSourceAbsenceKind.UNAVAILABLE,
-        }
-    ),
-    ContextSourceKind.PREVIOUS_TURN_OUTCOME: frozenset(
-        {ContextSourceAbsenceKind.EXPLICIT_EMPTY}
-    ),
-    ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD: frozenset(
-        {
-            ContextSourceAbsenceKind.NOT_APPLICABLE,
-            ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-            ContextSourceAbsenceKind.UNAVAILABLE,
-        }
-    ),
-    ContextSourceKind.MEMORY_RECALL: frozenset(
-        {
-            ContextSourceAbsenceKind.NOT_APPLICABLE,
-            ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-            ContextSourceAbsenceKind.UNAVAILABLE,
-        }
-    ),
-    ContextSourceKind.MEMORY_WRITE_HINT: frozenset(
-        {ContextSourceAbsenceKind.NOT_APPLICABLE}
-    ),
-    ContextSourceKind.HOOK_CONTEXT: frozenset(
-        {ContextSourceAbsenceKind.EXPLICIT_EMPTY}
-    ),
-    ContextSourceKind.COMPACTION_RUNTIME_HANDOFF: frozenset(
-        {
-            ContextSourceAbsenceKind.NOT_APPLICABLE,
-            ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-        }
-    ),
-    ContextSourceKind.RETAINED_SKILL_CONTEXT: frozenset(
-        {
-            ContextSourceAbsenceKind.NOT_APPLICABLE,
-            ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-        }
-    ),
-}
 
 
 def estimate_runtime_handoff_pca_tokens(body: str) -> int:
-    """Quote the real source encoder and both supported pure wire serializers."""
-    from pulsara_agent.llm.adapters.openai.chat_completions import chat_semantic_wire_group
-    from pulsara_agent.llm.adapters.openai.responses import responses_semantic_wire_group
+    """Quote the real handoff message through both supported wire serializers."""
+    from pulsara_agent.llm.adapters.openai.chat_completions import (
+        chat_semantic_wire_group,
+    )
+    from pulsara_agent.llm.adapters.openai.responses import (
+        responses_semantic_wire_group,
+    )
     from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV3
 
-    message = encode_runtime_observation(
-        source_kind=ContextSourceKind.COMPACTION_RUNTIME_HANDOFF,
-        trust_class=ContextTrustClass.UNTRUSTED_OBSERVATION,
-        lifecycle=SourceObservationLifecycle.SNAPSHOT,
-        presence=SourceObservationPresence.VALUE,
-        body=body,
-    )
     estimator = PulsaraHeuristicTokenEstimatorV3()
+    message = LLMMessage.user(body)
     return max(
-        sum(estimator.estimate_wire_json_component(item) for item in serializer(message))
+        sum(
+            estimator.estimate_wire_json_component(item) for item in serializer(message)
+        )
         for serializer in (chat_semantic_wire_group, responses_semantic_wire_group)
     )
-
-
-@dataclass(slots=True)
-class _SourceState:
-    candidate: ContextSourceCandidate
-    selected: int = 0
-    omitted: bool = False
-    exhausted: bool = False
-
-    def __post_init__(self) -> None:
-        self.selected = tuple(item.mode for item in self.candidate.variants).index(
-            self.candidate.initial_mode
-        )
-
-    def variant(self):
-        return self.candidate.variants[self.selected]
-
-    def text(self) -> str | None:
-        return None if self.omitted else self.variant().text
-
-    def mode(self) -> ContextRenderMode | None:
-        return None if self.omitted else self.variant().mode
-
-    def is_unavailable(self) -> bool:
-        return self.mode() is ContextRenderMode.UNAVAILABLE_MINIMAL
-
-    def message(self) -> LLMMessage:
-        if self.omitted or self.candidate.channel is ContextChannel.SYSTEM:
-            raise ValueError("source state has no runtime observation message")
-        variant = self.variant()
-        return source_variant_message(self.candidate, variant.text, mode=variant.mode)
-
-    def advance(self) -> bool:
-        if self.is_unavailable():
-            return False
-        if self.selected + 1 < len(self.candidate.variants):
-            self.selected += 1
-            return True
-        if (
-            self.candidate.budget_class is not ContextBudgetClass.MUST_KEEP
-            and not self.omitted
-        ):
-            self.omitted = True
-            return True
-        return False
-
-
-@dataclass(slots=True)
-class _ToolState:
-    lowered: LoweredCanonicalItem
-    current_turn: bool
-
-    @property
-    def item(self):
-        return self.lowered.source
-
-    def message(self) -> LLMMessage:
-        return self.lowered.tool_result_variants[0].message
-
-    def mode(self) -> ToolResultProviderRenderMode:
-        return ToolResultProviderRenderMode.FULL
-
-    def first_mode(self) -> ToolResultProviderRenderMode:
-        return self.lowered.tool_result_variants[0].mode
-
-
-@dataclass(frozen=True, slots=True)
-class _Layout:
-    system_prompt: str
-    messages: tuple[LLMMessage, ...]
-    message_placements: tuple[FrozenCompiledMessagePlacement, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -413,75 +82,49 @@ class _ExpandedTranscriptMessage:
 
 
 def _tool_attachment_message(source: ToolAttachmentSource) -> LLMMessage:
-    images: list[tuple[str, ViewImageSource, LLMImagePart]] = []
+    images = []
     for member in source.members:
-        arguments = member.source.tool_call_arguments
-        if arguments is None:
-            raise ValueError("tool attachment source lacks frozen arguments")
-        thawed_arguments = thaw_json(arguments)
-        if not isinstance(thawed_arguments, dict):
-            raise ValueError("tool attachment source arguments are invalid")
-        from pulsara_agent.tools.builtins.media import parse_image_tool_source
-
-        image_source = parse_image_tool_source(
-            member.source.tool_call_name, thawed_arguments
-        )
         assert isinstance(member.source.content, tuple)
-        source_images = tuple(
-            part for part in member.source.content if isinstance(part, LLMImagePart)
-        )
-        if (
-            not source_images
-            or member.source.tool_call_id is None
-            or (
-                member.source.tool_call_name == "view_image" and len(source_images) != 1
-            )
-        ):
-            raise ValueError("tool attachment member image is invalid")
+        if member.source.tool_call_id is None:
+            raise ValueError("tool attachment lacks its actual call identity")
         images.extend(
-            (member.source.tool_call_id, image_source, image) for image in source_images
+            (member.source.tool_call_id, image)
+            for image in member.source.content
+            if isinstance(image, LLMImagePart)
         )
     return tool_image_attachment_message(tuple(images))
 
 
 def tool_image_attachment_message(
-    members: tuple[tuple[str, ViewImageSource, LLMImagePart], ...],
+    members: tuple[tuple[str, LLMImagePart], ...],
 ) -> LLMMessage:
-    """Build the common compiler/provider projection for ToolResult images."""
-
+    """One associated user carrier for the selected logical tool-result page."""
     if not members:
         raise ValueError("tool image attachment requires at least one image")
-    parts: list[LLMTextPart | LLMImagePart] = [
-        LLMTextPart("The following images were read by tools.")
-    ]
-    for tool_call_id, source, image in members:
+    parts = []
+    for tool_call_id, image in members:
         if (
             not tool_call_id
-            or not isinstance(source, ViewImageSource)
             or not isinstance(image, LLMImagePart)
+            or image.image_ref is None
         ):
-            raise ValueError("tool image attachment member is invalid")
+            raise ValueError("tool image attachment member lacks its saved identity")
         parts.append(
             LLMTextPart(
                 canonical_json_bytes(
                     {
-                        "tool_image_source": {
-                            "tool_call_id": tool_call_id,
-                            **source.provider_value(),
-                        }
+                        "tool_call_id": tool_call_id,
+                        "image": {"kind": "IMAGE_REF", "image_ref": image.image_ref},
                     }
                 ).decode("utf-8")
             )
         )
-        parts.append(image_reference_part(image))
         parts.append(image)
     return LLMMessage(role=MessageRole.USER, content=tuple(parts))
 
 
 def _expand_lowered_transcript(
     lowered: tuple[LoweredCanonicalItem, ...],
-    *,
-    selected_message_by_identity: dict[int, LLMMessage],
 ) -> tuple[_ExpandedTranscriptMessage, ...]:
     """Expand selected canonical items, merging image results by assistant batch."""
 
@@ -516,11 +159,7 @@ def _expand_lowered_transcript(
 
     expanded: list[_ExpandedTranscriptMessage] = []
     for index, item in enumerate(lowered):
-        message = (
-            item.fixed_message
-            if item.fixed_message is not None
-            else selected_message_by_identity[id(item)]
-        )
+        message = item.message
         expanded.append(
             _ExpandedTranscriptMessage(
                 message=message,
@@ -560,2031 +199,6 @@ class _CompileDeadline:
             )
 
 
-@dataclass(frozen=True, slots=True)
-class _AppendSourceEmission:
-    source_kind: ContextSourceKind
-    placement_ordinal: int
-    presence: SourceObservationPresence
-    lifecycle: SourceObservationLifecycle
-    semantic_fingerprint: str
-    trust_class: ContextTrustClass
-    state: _SourceState | None = None
-    fixed_message: LLMMessage | None = None
-    requires_installed_replacement: bool = False
-    unavailable_semantic_fingerprint: str | None = None
-
-    def __post_init__(self) -> None:
-        if (self.state is None) == (self.fixed_message is None):
-            raise ValueError("append source emission union is invalid")
-        if self.unavailable_semantic_fingerprint is not None and self.state is None:
-            raise ValueError("fixed source emission has unavailable fallback")
-
-    def effective_presence(self) -> SourceObservationPresence:
-        if self.state is not None and self.state.is_unavailable():
-            return SourceObservationPresence.UNAVAILABLE
-        return self.presence
-
-    def effective_lifecycle(self) -> SourceObservationLifecycle:
-        if self.state is not None and self.state.is_unavailable():
-            return SourceObservationLifecycle.UNAVAILABLE
-        return self.lifecycle
-
-    def effective_semantic_fingerprint(self) -> str:
-        if self.state is not None and self.state.is_unavailable():
-            if self.unavailable_semantic_fingerprint is None:
-                raise ValueError("minimal unavailable emission lacks identity")
-            return self.unavailable_semantic_fingerprint
-        return self.semantic_fingerprint
-
-
-def _catalog_render_identity(candidate, text):
-    if candidate.source_kind is ContextSourceKind.MCP_CATALOG:
-        # The selected visible summary, not hidden schema versions or an unused
-        # FULL variant, defines this snapshot's installed prefix occurrence.
-        return context_fingerprint(
-            "pulsara:mcp-catalog-render:v1",
-            {"text": text},
-        )
-    return candidate.domain_semantic_fingerprint
-
-
-class StructuredModelInputCompiler:
-    def __init__(
-        self,
-        *,
-        limits: StructuredModelInputLimits = STRUCTURED_MODEL_INPUT_LIMITS,
-    ) -> None:
-        self._limits = limits
-
-    @staticmethod
-    def _source_state_with_render_floor(candidate, floors, wire_selection):
-        state = _SourceState(candidate)
-        if wire_selection is not None:
-            decision = next(
-                (
-                    item
-                    for item in wire_selection.source_decisions
-                    if item.source_kind is candidate.source_kind
-                ),
-                None,
-            )
-            if decision is not None:
-                state.omitted = not decision.included
-                if decision.included:
-                    state.selected = tuple(
-                        item.mode for item in candidate.variants
-                    ).index(decision.selected_mode)
-        source_floors = dict(floors)
-        if candidate.source_kind in source_floors:
-            floor = source_floors[candidate.source_kind]
-            if floor is None:
-                if (
-                    candidate.budget_class is ContextBudgetClass.MUST_KEEP
-                    or state.is_unavailable()
-                ):
-                    raise ValueError(
-                        "required source cannot be omitted by a wire floor"
-                    )
-                state.omitted = True
-            else:
-                index = tuple(item.mode for item in candidate.variants).index(floor)
-                state.selected = max(state.selected, index)
-        return state
-
-    @staticmethod
-    def _apply_tool_render_selection(states, wire_selection, floors):
-        choices = {} if wire_selection is None else {
-            item.source_entry_fingerprint: item.selected_mode
-            for item in wire_selection.tool_result_decisions
-        }
-        lower_bounds = dict(floors)
-        for state in states:
-            identity = compiled_tool_result_source_fingerprint(state.item)
-            if any(mode is not ToolResultProviderRenderMode.FULL for mode in (
-                choices.get(identity, ToolResultProviderRenderMode.FULL),
-                lower_bounds.get(identity, ToolResultProviderRenderMode.FULL),
-            )):
-                raise ValueError("frozen tool projections only allow FULL delivery")
-
-    @staticmethod
-    def _validate_wire_selection(request, selection):
-        if selection is not None and (
-            selection.canonical_input_identity != request.canonical_input.identity
-            or selection.compile_binding_fingerprint
-            != request.compile_binding.binding_fingerprint
-            or selection.source_collection_fingerprint
-            != request.sources.collection_fingerprint
-        ):
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
-            )
-
-    def next_wire_render_floors(
-        self,
-        *,
-        request,
-        compiled,
-        source_floors=(),
-        tool_floors=(),
-        planning=None,
-        deadline_monotonic: float | None = None,
-    ):
-        """Advance one legal context-source variant on the frozen compile basis.
-
-        Final wire measurement owns fit; the compiler owns legal render order.
-        Append decisions cover only uninstalled delta; a cold epoch may reselect
-        its history. Finite variants terminate without a retry/lifetime cap.
-        """
-        deadline = _CompileDeadline(deadline_monotonic)
-        deadline.check()
-        decisions = {item.source_kind: item for item in compiled.source_decisions}
-        eligible = []
-        previous_heads = (
-            {}
-            if planning is None or planning.predecessor_view is None
-            else {
-                item.source_kind: item
-                for item in planning.predecessor_view.source_heads
-            }
-        )
-        for candidate in request.sources.candidates:
-            deadline.check()
-            decision = decisions.get(candidate.source_kind)
-            if decision is None or not decision.included:
-                continue
-            state = self._source_state_with_render_floor(
-                candidate, source_floors, compiled
-            )
-            if not self._source_can_advance(state):
-                continue
-            next_mode = (
-                candidate.variants[state.selected + 1].mode
-                if state.selected + 1 < len(candidate.variants)
-                else None
-            )
-            if (
-                next_mode is None
-                and candidate.source_kind in previous_heads
-                and candidate.lifecycle
-                in {
-                    ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
-                    ContextSourceLifecycle.TURN_APPEND,
-                    ContextSourceLifecycle.TURN_SNAPSHOT,
-                    ContextSourceLifecycle.ACTIVATION_SNAPSHOT,
-                }
-            ):
-                # Installed state needs an explicit legal replacement, never silent omission.
-                continue
-            eligible.append(
-                (
-                    self._source_degradation_key(candidate),
-                    candidate.source_kind,
-                    next_mode,
-                )
-            )
-        deadline.check()
-        if not eligible:
-            return None
-        _, identity, mode = min(eligible)
-        sources = dict(source_floors)
-        sources[identity] = mode
-        return (
-            tuple(sorted(sources.items(), key=lambda item: item[0].value)),
-            tuple(tool_floors),
-        )
-
-    def compile(
-        self,
-        request: StructuredModelInputCompileRequest,
-        *,
-        deadline_monotonic: float | None = None,
-        source_render_floors: tuple[
-            tuple[ContextSourceKind, ContextRenderMode | None], ...
-        ] = (),
-        tool_render_floors: tuple[tuple[str, ToolResultProviderRenderMode], ...] = (),
-        wire_selection: FrozenCompiledModelInput | None = None,
-    ) -> FrozenCompiledModelInput:
-        result = self._compile(
-            request,
-            deadline_monotonic=deadline_monotonic,
-            semantic_projection=False,
-            source_render_floors=source_render_floors,
-            tool_render_floors=tool_render_floors,
-            wire_selection=wire_selection,
-        )
-        assert isinstance(result, FrozenCompiledModelInput)
-        return result
-
-    def project(
-        self,
-        request: StructuredModelInputCompileRequest,
-        *,
-        deadline_monotonic: float | None = None,
-    ) -> FrozenModelInputSemanticProjection:
-        """Run normal lowering without granting execution or requiring token fit."""
-
-        result = self._compile(
-            request,
-            deadline_monotonic=deadline_monotonic,
-            semantic_projection=True,
-        )
-        assert isinstance(result, FrozenModelInputSemanticProjection)
-        return result
-
-    def _compile(
-        self,
-        request: StructuredModelInputCompileRequest,
-        *,
-        deadline_monotonic: float | None,
-        semantic_projection: bool,
-        source_render_floors: tuple[
-            tuple[ContextSourceKind, ContextRenderMode | None], ...
-        ] = (),
-        tool_render_floors: tuple[tuple[str, ToolResultProviderRenderMode], ...] = (),
-        wire_selection: FrozenCompiledModelInput | None = None,
-    ) -> FrozenCompiledModelInput | FrozenModelInputSemanticProjection:
-        self._validate_wire_selection(request, wire_selection)
-        deadline = _CompileDeadline(deadline_monotonic)
-        deadline.check()
-        deadline.check()
-        self._validate_sources(request)
-        surface = request.compile_binding.tool_surface
-        self._validate_tool_surface(request)
-        deadline.check()
-        canonical_items = self._materialize_approved_plan(
-            request
-        )
-        lowered_items: list[LoweredCanonicalItem] = []
-        for item in canonical_items:
-            deadline.check()
-            lowered_items.append(
-                lower_canonical_item(
-                    item,
-                )
-            )
-        lowered = tuple(lowered_items)
-        deadline.check()
-        source_states = [
-            self._source_state_with_render_floor(
-                item, source_render_floors, wire_selection
-            )
-            for item in request.sources.candidates
-        ]
-        tool_states = [
-            _ToolState(
-                item,
-                current_turn=(
-                    item.source.source_turn_id
-                    == request.canonical_input.identity.turn_id
-                ),
-            )
-            for item in lowered
-            if item.tool_result_variants
-        ]
-        self._apply_tool_render_selection(
-            tool_states, wire_selection, tool_render_floors
-        )
-        self._validate_tool_delivery_variants(tool_states)
-        self._validate_source_byte_bounds(request)
-        if self._omit_oversized_user_actions(request):
-            for state in source_states:
-                if state.candidate.source_kind is ContextSourceKind.USER_ACTIONS:
-                    state.omitted = True
-        diagnostics = [item.code for item in request.sources.diagnostics]
-
-        layout = self._layout(
-            request,
-            lowered=lowered,
-            sources=source_states,
-            tools=tool_states,
-            deadline=deadline,
-        )
-        degraded_source_kinds = {
-            state.candidate.source_kind
-            for state in source_states
-            if state.omitted or state.mode() is not state.candidate.initial_mode
-        }
-
-        source_decisions = tuple(
-            CompiledSourceDecision(
-                source_kind=state.candidate.source_kind,
-                source_instance_fingerprint=state.candidate.source_semantic_fingerprint,
-                channel=state.candidate.channel,
-                selected_mode=state.mode(),
-                included=not state.omitted,
-                reason_code=(
-                    "OMITTED_FOR_BUDGET"
-                    if state.omitted
-                    else "SELECTED_UNAVAILABLE"
-                    if state.is_unavailable()
-                    and state.candidate.initial_mode
-                    is ContextRenderMode.UNAVAILABLE_MINIMAL
-                    else "UNAVAILABLE_FOR_BUDGET"
-                    if state.is_unavailable()
-                    else "SELECTED_FULL"
-                    if state.mode() is ContextRenderMode.FULL
-                    else "DEGRADED_FOR_BUDGET"
-                ),
-            )
-            for state in sorted(
-                source_states, key=lambda item: self._placement_key(item.candidate)
-            )
-        )
-        tool_decisions = tuple(
-            CompiledToolResultDecision(
-                source_entry_fingerprint=compiled_tool_result_source_fingerprint(
-                    state.item
-                ),
-                current_turn=state.item.source_turn_id
-                == request.canonical_input.identity.turn_id,
-                first_legal_mode=state.first_mode(),
-                selected_mode=state.mode(),
-                delivery_requirement=(state.item.tool_result_delivery.requirement),
-                full_delivery_reason=state.item.tool_result_delivery.reason,
-                reason_code="SELECTED_FULL",
-            )
-            for state in tool_states
-        )
-        omitted_sources = sum(state.omitted for state in source_states)
-        if degraded_source_kinds:
-            self._add_diagnostic(
-                diagnostics, ContextPublicDiagnosticCode.SOURCE_DEGRADED
-            )
-        if omitted_sources:
-            self._add_diagnostic(
-                diagnostics, ContextPublicDiagnosticCode.SOURCE_OMITTED
-            )
-        if (
-            len(source_decisions) + len(tool_decisions)
-            > self._limits.maximum_decision_samples
-        ):
-            self._add_diagnostic(
-                diagnostics, ContextPublicDiagnosticCode.DECISION_SAMPLE_TRUNCATED
-            )
-        diagnostic_codes = tuple(dict.fromkeys(diagnostics))[
-            : self._limits.maximum_diagnostics
-        ]
-        if (
-            len(canonical_json_bytes(tuple(item.value for item in diagnostic_codes)))
-            > self._limits.maximum_public_diagnostic_bytes
-        ):
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
-            )
-        if semantic_projection:
-            deadline.check()
-            return FrozenModelInputSemanticProjection(
-                canonical_input_identity=request.canonical_input.identity,
-                system_prompt=layout.system_prompt,
-                messages=layout.messages,
-                message_placements=layout.message_placements,
-                tools=surface.tool_specs,
-                source_decisions=source_decisions,
-                tool_result_decisions=tool_decisions,
-                diagnostic_codes=diagnostic_codes,
-                source_collection_fingerprint=(request.sources.collection_fingerprint),
-                compile_binding_fingerprint=(
-                    request.compile_binding.binding_fingerprint
-                ),
-            )
-        decision_digest = context_fingerprint(
-            "model-input-decisions-public:v1",
-            {
-                "sources": tuple(
-                    (
-                        d.source_kind.value,
-                        None if d.selected_mode is None else d.selected_mode.value,
-                        d.included,
-                        d.reason_code,
-                    )
-                    for d in source_decisions
-                ),
-                "tool_results": tuple(
-                    (
-                        d.current_turn,
-                        d.first_legal_mode.value,
-                        d.selected_mode.value,
-                        d.delivery_requirement.value,
-                        None
-                        if d.full_delivery_reason is None
-                        else d.full_delivery_reason.value,
-                        d.reason_code,
-                    )
-                    for d in tool_decisions
-                ),
-            },
-        )
-        report = ContextCompileReport(
-            tool_surface_fingerprint=surface.surface_fingerprint,
-            protected_prefix_message_count=0,
-            protected_prefix_logical_bytes=0,
-            protected_prefix_fingerprint=None,
-            degraded_source_count=len(degraded_source_kinds),
-            omitted_source_count=omitted_sources,
-            degraded_tool_result_count=0,
-            omitted_tool_result_body_count=0,
-            decision_digest=decision_digest,
-        )
-        compiled_fingerprint = compiled_input_identity(
-            estimator_fingerprint=request.compile_binding.estimator_fingerprint,
-            effective_input_budget_tokens=request.compile_binding.effective_input_budget_tokens,
-            source_contents=self._identity_source_contents(request, source_decisions),
-            tool_messages=tuple(state.message() for state in tool_states),
-            checkpoint=deadline.check,
-            context_id=request.context_id,
-            canonical_input_identity=request.canonical_input.identity,
-            system_prompt=layout.system_prompt,
-            messages=layout.messages,
-            tools=surface.tool_specs,
-            source_decisions=source_decisions,
-            tool_result_decisions=tool_decisions,
-            compile_report=report,
-            diagnostic_codes=diagnostic_codes,
-            source_collection_fingerprint=request.sources.collection_fingerprint,
-            compile_binding_fingerprint=request.compile_binding.binding_fingerprint,
-        )
-        deadline.check()
-        return FrozenCompiledModelInput(
-            context_id=request.context_id,
-            canonical_input_identity=request.canonical_input.identity,
-            system_prompt=layout.system_prompt,
-            messages=layout.messages,
-            message_placements=layout.message_placements,
-            tools=surface.tool_specs,
-            source_decisions=source_decisions,
-            tool_result_decisions=tool_decisions,
-            compile_report=report,
-            diagnostic_codes=diagnostic_codes,
-            source_collection_fingerprint=request.sources.collection_fingerprint,
-            compiled_semantic_fingerprint=compiled_fingerprint,
-            compile_binding_fingerprint=request.compile_binding.binding_fingerprint,
-        )
-
-    def compile_installed_append(
-        self,
-        request: StructuredModelInputCompileRequest,
-        *,
-        planning: FrozenProviderInputAppendPlanningInput,
-        deadline_monotonic: float | None = None,
-        source_render_floors: tuple[
-            tuple[ContextSourceKind, ContextRenderMode | None], ...
-        ] = (),
-        tool_render_floors: tuple[tuple[str, ToolResultProviderRenderMode], ...] = (),
-        wire_selection: FrozenCompiledModelInput | None = None,
-    ) -> FrozenProviderInputAppendCompileResult:
-        """Compile one causally appended input without relowering old messages."""
-
-        result = self._compile_append(
-            request,
-            planning=planning,
-            deadline_monotonic=deadline_monotonic,
-            semantic_projection=False,
-            source_render_floors=source_render_floors,
-            tool_render_floors=tool_render_floors,
-            wire_selection=wire_selection,
-            new_epoch=False,
-        )
-        assert isinstance(result, FrozenProviderInputAppendCompileResult)
-        return result
-
-    def compile_new_epoch(
-        self,
-        request: StructuredModelInputCompileRequest,
-        *,
-        planning: FrozenProviderInputAppendPlanningInput,
-        deadline_monotonic: float | None = None,
-        source_render_floors: tuple[
-            tuple[ContextSourceKind, ContextRenderMode | None], ...
-        ] = (),
-        tool_render_floors: tuple[tuple[str, ToolResultProviderRenderMode], ...] = (),
-        wire_selection: FrozenCompiledModelInput | None = None,
-    ) -> FrozenProviderInputAppendCompileResult:
-        """Fully reproject canonical truth for one authorized epoch boundary."""
-
-        result = self._compile_append(
-            request,
-            planning=planning,
-            deadline_monotonic=deadline_monotonic,
-            semantic_projection=False,
-            source_render_floors=source_render_floors,
-            tool_render_floors=tool_render_floors,
-            wire_selection=wire_selection,
-            new_epoch=True,
-        )
-        assert isinstance(result, FrozenProviderInputAppendCompileResult)
-        return result
-
-    def project_installed_append(
-        self,
-        request: StructuredModelInputCompileRequest,
-        *,
-        planning: FrozenProviderInputAppendPlanningInput,
-        deadline_monotonic: float | None = None,
-    ) -> FrozenProviderInputAppendSemanticProjection:
-        """Freeze a prospective append without creating executable input."""
-
-        result = self._compile_append(
-            request,
-            planning=planning,
-            deadline_monotonic=deadline_monotonic,
-            semantic_projection=True,
-            new_epoch=False,
-        )
-        assert isinstance(result, FrozenProviderInputAppendSemanticProjection)
-        return result
-
-    def project_new_epoch(
-        self,
-        request: StructuredModelInputCompileRequest,
-        *,
-        planning: FrozenProviderInputAppendPlanningInput,
-        deadline_monotonic: float | None = None,
-    ) -> FrozenProviderInputAppendSemanticProjection:
-        """Project a full destination root without install authority."""
-
-        result = self._compile_append(
-            request,
-            planning=planning,
-            deadline_monotonic=deadline_monotonic,
-            semantic_projection=True,
-            new_epoch=True,
-        )
-        assert isinstance(result, FrozenProviderInputAppendSemanticProjection)
-        return result
-
-    def _compile_append(
-        self,
-        request: StructuredModelInputCompileRequest,
-        *,
-        planning: FrozenProviderInputAppendPlanningInput,
-        deadline_monotonic: float | None,
-        semantic_projection: bool,
-        new_epoch: bool,
-        source_render_floors: tuple[
-            tuple[ContextSourceKind, ContextRenderMode | None], ...
-        ] = (),
-        tool_render_floors: tuple[tuple[str, ToolResultProviderRenderMode], ...] = (),
-        wire_selection: FrozenCompiledModelInput | None = None,
-    ) -> (
-        FrozenProviderInputAppendCompileResult
-        | FrozenProviderInputAppendSemanticProjection
-    ):
-        self._validate_wire_selection(request, wire_selection)
-        deadline = _CompileDeadline(deadline_monotonic)
-        deadline.check()
-        deadline.check()
-        identity = request.canonical_input.identity
-        if (
-            planning.scope.session_id != identity.session_id
-            or planning.scope.scope_kind is not identity.conversation_scope_kind
-        ):
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
-            )
-        fingerprints_list: list[str] = []
-        for item in request.canonical_input.items:
-            deadline.check()
-            fingerprints_list.append(provider_input_item_fingerprint(item))
-        fingerprints = tuple(fingerprints_list)
-        predecessor = planning.predecessor_view
-        predecessor_count = (
-            0
-            if predecessor is None
-            else len(predecessor.canonical_frontier.ordered_item_fingerprints)
-        )
-        same_base = predecessor is None or (
-            predecessor.canonical_frontier.context_base_semantic_identity
-            == request.canonical_facts.context_binding_fact.context_base_semantic_identity
-        )
-        prefix_matches = predecessor is None or (
-            fingerprints[:predecessor_count]
-            == predecessor.canonical_frontier.ordered_item_fingerprints
-        )
-        # A new epoch may select a different adopted base. Within one base,
-        # neither an append nor a boundary may rewrite canonical history.
-        if predecessor is not None and same_base and not prefix_matches:
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
-            )
-        expected_planning_delta = (
-            fingerprints[predecessor_count:]
-            if predecessor is not None and same_base and prefix_matches
-            else fingerprints
-        )
-        if expected_planning_delta != planning.canonical_delta_fingerprints:
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
-            )
-        frontier = ProcessLocalCanonicalFrontier(
-            latest_context_binding_revision_id=(
-                request.canonical_facts.context_binding_fact.binding_revision_id
-            ),
-            context_base_semantic_identity=(
-                request.canonical_facts.context_binding_fact.context_base_semantic_identity
-            ),
-            through_sequence=identity.provider_input_through_sequence,
-            ordered_item_fingerprints=fingerprints,
-        )
-        if not new_epoch:
-            if predecessor is None or not same_base:
-                raise StructuredModelInputCompileError(
-                    ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
-                )
-            try:
-                predecessor.canonical_frontier.require_prefix_of(frontier)
-            except ValueError as exc:
-                raise StructuredModelInputCompileError(
-                    ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
-                ) from exc
-            return self._compile_compatible_append(
-                request,
-                planning=planning,
-                predecessor=predecessor,
-                frontier=frontier,
-                deadline=deadline,
-                semantic_projection=semantic_projection,
-                source_render_floors=source_render_floors,
-                tool_render_floors=tool_render_floors,
-                wire_selection=wire_selection,
-            )
-
-        # New epochs fully project effective canonical truth. Boundary
-        # authority is validated by continuity; compiler mismatch never grants it.
-        fresh = (
-            self.project(request, deadline_monotonic=deadline.value)
-            if semantic_projection
-            else self.compile(
-                request,
-                deadline_monotonic=deadline.value,
-                source_render_floors=source_render_floors,
-                tool_render_floors=tool_render_floors,
-                wire_selection=wire_selection,
-            )
-        )
-        deadline.check()
-        all_materialized = self._materialize_approved_plan(request)
-        old_count = 0
-        delta_items = all_materialized[old_count:]
-        lowered_delta_values: list[LoweredCanonicalItem] = []
-        for item in delta_items:
-            deadline.check()
-            lowered_delta_values.append(
-                lower_canonical_item(
-                    item,
-                )
-            )
-        lowered_delta = tuple(lowered_delta_values)
-        tool_modes = {
-            decision.source_entry_fingerprint: decision.selected_mode
-            for decision in fresh.tool_result_decisions
-        }
-        selected_delta_messages = tuple(
-            _selected_lowered_message(item, tool_modes=tool_modes)
-            for item in lowered_delta
-        )
-        expanded_delta = _expand_lowered_transcript(
-            lowered_delta,
-            selected_message_by_identity={
-                id(item): message
-                for item, message in zip(
-                    lowered_delta, selected_delta_messages, strict=True
-                )
-                if item.fixed_message is None
-            },
-        )
-        delta_messages = tuple(item.message for item in expanded_delta)
-
-        previous_heads = {item.source_kind: item for item in ()}
-        source_decisions = {item.source_kind: item for item in fresh.source_decisions}
-        observation_messages: list[tuple[int, str, LLMMessage]] = []
-        resulting_heads = dict(previous_heads)
-        candidates = {item.source_kind: item for item in request.sources.candidates}
-        absent = {item.source_kind: item for item in request.sources.absent_facts}
-        for kind in ContextSourceKind:
-            if kind is ContextSourceKind.BASE_SYSTEM:
-                continue
-            candidate = candidates.get(kind)
-            absence = absent.get(kind)
-            previous = previous_heads.get(kind)
-            decision = source_decisions.get(kind)
-            presence: SourceObservationPresence | None = None
-            lifecycle: SourceObservationLifecycle | None = None
-            body = ""
-            trust: ContextTrustClass
-            semantic: str
-            placement: int
-            if candidate is not None:
-                if decision is None or not decision.included:
-                    continue
-                selected = next(
-                    (
-                        variant
-                        for variant in candidate.variants
-                        if variant.mode is decision.selected_mode
-                    ),
-                    None,
-                )
-                if selected is None:
-                    raise StructuredModelInputCompileError(
-                        ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
-                    )
-                if selected.mode is ContextRenderMode.UNAVAILABLE_MINIMAL:
-                    presence = SourceObservationPresence.UNAVAILABLE
-                    lifecycle = SourceObservationLifecycle.UNAVAILABLE
-                    body = ""
-                    semantic_domain = context_fingerprint(
-                        "pulsara:minimal-unavailable-source:v1",
-                        {
-                            "source_kind": candidate.source_kind.value,
-                            "source_semantic_fingerprint": (
-                                candidate.domain_semantic_fingerprint
-                            ),
-                        },
-                    )
-                else:
-                    presence = SourceObservationPresence.VALUE
-                    lifecycle = _observation_lifecycle(candidate.lifecycle)
-                    body = selected.text
-                    semantic_domain = _catalog_render_identity(candidate, body)
-                trust = candidate.trust_class
-                placement = candidate.placement_ordinal
-                semantic = _source_occurrence_fingerprint(
-                    semantic_domain,
-                    lifecycle=candidate.lifecycle,
-                    turn_id=identity.turn_id,
-                    model_call_index=request.model_call_index,
-                    dispatch_anchor=planning.dispatch_anchor,
-                )
-                if candidate.lifecycle is ContextSourceLifecycle.CALL_APPEND:
-                    should_append = True
-                else:
-                    should_append = previous is None or (
-                        previous.presence is not presence
-                        or previous.semantic_fingerprint != semantic
-                    )
-            elif absence is not None:
-                if absence.source_kind in {
-                    ContextSourceKind.HOOK_CONTEXT,
-                    ContextSourceKind.USER_ACTIONS,
-                }:
-                    # Advisory ONE_SHOT data has no provider-visible clearing
-                    # semantics when its future slot is empty.
-                    continue
-                if _preserve_same_turn_retained_source(
-                    previous,
-                    source_kind=absence.source_kind,
-                    turn_id=identity.turn_id,
-                ):
-                    continue
-                trust = absence.trust_class
-                placement = absence.placement_ordinal
-                semantic = _source_occurrence_fingerprint(
-                    absence.domain_semantic_fingerprint,
-                    lifecycle=absence.lifecycle,
-                    turn_id=identity.turn_id,
-                    model_call_index=request.model_call_index,
-                    dispatch_anchor=planning.dispatch_anchor,
-                )
-                if absence.absence_kind is ContextSourceAbsenceKind.NOT_APPLICABLE:
-                    continue
-                if absence.absence_kind is ContextSourceAbsenceKind.UNAVAILABLE:
-                    # RUNTIME_CLOCK is the only currently optional unavailable
-                    # source and is intentionally omitted with its diagnostic.
-                    if absence.lifecycle is ContextSourceLifecycle.CALL_APPEND:
-                        continue
-                    presence = SourceObservationPresence.UNAVAILABLE
-                    lifecycle = SourceObservationLifecycle.UNAVAILABLE
-                else:
-                    presence = SourceObservationPresence.CLEARED
-                    lifecycle = SourceObservationLifecycle.CLEARED
-                # Empty/unavailable state has no provider-visible meaning until
-                # it invalidates an installed value.  Repeating the same closed
-                # absence is a no-op even across a later turn/activation.
-                should_append = (
-                    previous is not None and previous.presence is not presence
-                )
-            else:
-                continue
-            if not should_append or presence is None or lifecycle is None:
-                continue
-            message = encode_runtime_observation(
-                source_kind=kind,
-                trust_class=trust,
-                lifecycle=lifecycle,
-                presence=presence,
-                body=body,
-            )
-            observation_messages.append((placement, kind.value, message))
-            observation_fingerprint = context_fingerprint(
-                "pulsara:installed-runtime-observation:v1",
-                {"message": _llm_message_value(message)},
-            )
-            resulting_heads[kind] = ProcessLocalSourceHead(
-                source_kind=kind,
-                presence=presence,
-                semantic_fingerprint=semantic,
-                installed_observation_fingerprint=observation_fingerprint,
-                last_emitted_turn_id=identity.turn_id,
-                last_emitted_model_call_index=request.model_call_index,
-            )
-        ordered_observations = tuple(
-            item[2] for item in sorted(observation_messages, key=lambda item: item[:2])
-        )
-
-        prefix_messages: tuple[LLMMessage, ...] = ()
-        system_prompt = fresh.system_prompt
-        tools = fresh.tools
-        if isinstance(planning.dispatch_anchor, NewTriggerAnchor):
-            indexes = tuple(
-                index
-                for index, item in enumerate(expanded_delta)
-                if item.origin_entry_id == planning.dispatch_anchor.source_entry_id
-                and item.origin_item_fingerprint
-                == planning.dispatch_anchor.provider_input_item_fingerprint
-            )
-            if len(indexes) != 1:
-                raise StructuredModelInputCompileError(
-                    ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
-                )
-            trigger_index = indexes[0]
-            suffix_messages = (
-                *delta_messages[:trigger_index],
-                *ordered_observations,
-                *delta_messages[trigger_index:],
-            )
-        else:
-            suffix_messages = (*delta_messages, *ordered_observations)
-        messages = (*prefix_messages, *suffix_messages)
-        delta_placement_values = tuple(
-            (
-                item.message,
-                item.origin_entry_id,
-                item.origin_item_fingerprint,
-                item.tool_attachment_source,
-            )
-            for item in expanded_delta
-        )
-        observation_placement_values = tuple(
-            (
-                item[2],
-                None,
-                context_fingerprint(
-                    "pulsara.compiled-runtime-observation-origin:v1",
-                    {"source_kind": item[1], "message": _llm_message_value(item[2])},
-                ),
-                None,
-            )
-            for item in sorted(observation_messages, key=lambda item: item[:2])
-        )
-        if isinstance(planning.dispatch_anchor, NewTriggerAnchor):
-            suffix_placement_values = (
-                *delta_placement_values[:trigger_index],
-                *observation_placement_values,
-                *delta_placement_values[trigger_index:],
-            )
-        else:
-            suffix_placement_values = (
-                *delta_placement_values,
-                *observation_placement_values,
-            )
-        prefix_placements: tuple[FrozenCompiledMessagePlacement, ...] = ()
-        message_placements = _compiled_message_placements(
-            prefix=prefix_placements,
-            values=suffix_placement_values,
-        )
-        if semantic_projection:
-            return FrozenProviderInputAppendSemanticProjection(
-                projected_input=FrozenModelInputSemanticProjection(
-                    canonical_input_identity=identity,
-                    system_prompt=system_prompt,
-                    messages=messages,
-                    message_placements=message_placements,
-                    tools=tools,
-                    source_decisions=fresh.source_decisions,
-                    tool_result_decisions=fresh.tool_result_decisions,
-                    diagnostic_codes=fresh.diagnostic_codes,
-                    source_collection_fingerprint=(
-                        request.sources.collection_fingerprint
-                    ),
-                    compile_binding_fingerprint=(
-                        request.compile_binding.binding_fingerprint
-                    ),
-                ),
-                canonical_frontier=frontier,
-                appended_message_count=len(suffix_messages),
-            )
-        decision_digest = context_fingerprint(
-            "pulsara:model-input-append-decisions:v1",
-            {
-                "predecessor": (
-                    None
-                    if predecessor is None
-                    else predecessor.semantic_prefix_fingerprint
-                ),
-                "observations": tuple(
-                    item.installed_observation_fingerprint
-                    for item in resulting_heads.values()
-                ),
-                "delta": planning.canonical_delta_fingerprints,
-            },
-        )
-        report = replace(
-            fresh.compile_report,
-            decision_digest=decision_digest,
-        )
-        compiled_fingerprint = compiled_input_identity(
-            estimator_fingerprint=request.compile_binding.estimator_fingerprint,
-            effective_input_budget_tokens=request.compile_binding.effective_input_budget_tokens,
-            source_contents=self._identity_source_contents(
-                request, fresh.source_decisions
-            ),
-            tool_messages=tuple(
-                message
-                for item, message in zip(
-                    lowered_delta, selected_delta_messages, strict=True
-                )
-                if item.tool_result_variants
-            ),
-            protected_messages=messages,
-            context_messages=ordered_observations,
-            checkpoint=deadline.check,
-            context_id=request.context_id,
-            canonical_input_identity=identity,
-            system_prompt=system_prompt,
-            messages=messages,
-            tools=tools,
-            source_decisions=fresh.source_decisions,
-            tool_result_decisions=fresh.tool_result_decisions,
-            compile_report=report,
-            diagnostic_codes=fresh.diagnostic_codes,
-            source_collection_fingerprint=request.sources.collection_fingerprint,
-            compile_binding_fingerprint=request.compile_binding.binding_fingerprint,
-        )
-        deadline.check()
-        compiled = FrozenCompiledModelInput(
-            context_id=request.context_id,
-            canonical_input_identity=identity,
-            system_prompt=system_prompt,
-            messages=messages,
-            message_placements=message_placements,
-            tools=tools,
-            source_decisions=fresh.source_decisions,
-            tool_result_decisions=fresh.tool_result_decisions,
-            compile_report=report,
-            diagnostic_codes=fresh.diagnostic_codes,
-            source_collection_fingerprint=request.sources.collection_fingerprint,
-            compiled_semantic_fingerprint=compiled_fingerprint,
-            compile_binding_fingerprint=request.compile_binding.binding_fingerprint,
-        )
-        return FrozenProviderInputAppendCompileResult(
-            compiled_input=compiled,
-            canonical_frontier=frontier,
-            source_heads=tuple(
-                resulting_heads[kind]
-                for kind in sorted(resulting_heads, key=lambda item: item.value)
-            ),
-            appended_message_count=len(suffix_messages),
-        )
-
-    def _compile_compatible_append(
-        self,
-        request: StructuredModelInputCompileRequest,
-        *,
-        planning: FrozenProviderInputAppendPlanningInput,
-        predecessor: object,
-        frontier: ProcessLocalCanonicalFrontier,
-        deadline: _CompileDeadline,
-        semantic_projection: bool,
-        source_render_floors: tuple[
-            tuple[ContextSourceKind, ContextRenderMode | None], ...
-        ] = (),
-        tool_render_floors: tuple[tuple[str, ToolResultProviderRenderMode], ...] = (),
-        wire_selection: FrozenCompiledModelInput | None = None,
-    ) -> (
-        FrozenProviderInputAppendCompileResult
-        | FrozenProviderInputAppendSemanticProjection
-    ):
-        """Allocate only the not-yet-installed suffix of a compatible epoch."""
-
-        deadline.check()
-        self._validate_sources(request)
-        self._validate_tool_surface(request)
-        omit_user_actions = self._omit_oversized_user_actions(request)
-        previous_messages = predecessor.messages
-        previous_heads = {item.source_kind: item for item in predecessor.source_heads}
-        old_count = len(predecessor.canonical_frontier.ordered_item_fingerprints)
-        delta_items = request.canonical_input.items[old_count:]
-        self._require_provider_safe_delta(delta_items)
-        lowered_delta_values: list[LoweredCanonicalItem] = []
-        for item in delta_items:
-            deadline.check()
-            lowered_delta_values.append(
-                lower_canonical_item(
-                    item,
-                )
-            )
-        lowered_delta = tuple(lowered_delta_values)
-        tool_states = [
-            _ToolState(
-                item,
-                current_turn=(
-                    item.source.source_turn_id
-                    == request.canonical_input.identity.turn_id
-                ),
-            )
-            for item in lowered_delta
-            if item.tool_result_variants
-        ]
-        self._apply_tool_render_selection(
-            tool_states, wire_selection, tool_render_floors
-        )
-        self._validate_tool_delivery_variants(tool_states)
-
-        emissions: list[_AppendSourceEmission] = []
-        for candidate in request.sources.candidates:
-            deadline.check()
-            if candidate.source_kind is ContextSourceKind.BASE_SYSTEM:
-                continue
-            previous = previous_heads.get(candidate.source_kind)
-            state = self._source_state_with_render_floor(
-                candidate, source_render_floors, wire_selection
-            )
-            if (
-                omit_user_actions
-                and candidate.source_kind is ContextSourceKind.USER_ACTIONS
-            ):
-                state.omitted = True
-            if (
-                state.omitted
-                and previous is not None
-                and candidate.lifecycle
-                in {
-                    ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
-                    ContextSourceLifecycle.TURN_APPEND,
-                    ContextSourceLifecycle.TURN_SNAPSHOT,
-                    ContextSourceLifecycle.ACTIVATION_SNAPSHOT,
-                }
-            ):
-                raise StructuredModelInputCompileError(
-                    ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
-                )
-            semantic = _source_occurrence_fingerprint(
-                _catalog_render_identity(candidate, state.text()),
-                lifecycle=candidate.lifecycle,
-                turn_id=request.canonical_input.identity.turn_id,
-                model_call_index=request.model_call_index,
-                dispatch_anchor=planning.dispatch_anchor,
-            )
-            unavailable_semantic = (
-                _source_occurrence_fingerprint(
-                    context_fingerprint(
-                        "pulsara:minimal-unavailable-source:v1",
-                        {
-                            "source_kind": candidate.source_kind.value,
-                            "source_semantic_fingerprint": (
-                                candidate.domain_semantic_fingerprint
-                            ),
-                        },
-                    ),
-                    lifecycle=candidate.lifecycle,
-                    turn_id=request.canonical_input.identity.turn_id,
-                    model_call_index=request.model_call_index,
-                    dispatch_anchor=planning.dispatch_anchor,
-                )
-                if any(
-                    variant.mode is ContextRenderMode.UNAVAILABLE_MINIMAL
-                    for variant in candidate.variants
-                )
-                else None
-            )
-            initial_presence = (
-                SourceObservationPresence.UNAVAILABLE
-                if state.is_unavailable()
-                else SourceObservationPresence.VALUE
-            )
-            initial_semantic = (
-                unavailable_semantic if state.is_unavailable() else semantic
-            )
-            if initial_semantic is None:
-                raise StructuredModelInputCompileError(
-                    ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
-                )
-            should_append = (
-                candidate.lifecycle is ContextSourceLifecycle.CALL_APPEND
-                or previous is None
-                or previous.presence is not initial_presence
-                or previous.semantic_fingerprint != initial_semantic
-            )
-            if not should_append:
-                continue
-            emissions.append(
-                _AppendSourceEmission(
-                    source_kind=candidate.source_kind,
-                    placement_ordinal=candidate.placement_ordinal,
-                    presence=SourceObservationPresence.VALUE,
-                    lifecycle=_observation_lifecycle(candidate.lifecycle),
-                    semantic_fingerprint=semantic,
-                    trust_class=candidate.trust_class,
-                    state=state,
-                    requires_installed_replacement=(
-                        previous is not None
-                        and candidate.lifecycle
-                        in {
-                            ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
-                            ContextSourceLifecycle.TURN_APPEND,
-                            ContextSourceLifecycle.TURN_SNAPSHOT,
-                            ContextSourceLifecycle.ACTIVATION_SNAPSHOT,
-                        }
-                    ),
-                    unavailable_semantic_fingerprint=unavailable_semantic,
-                )
-            )
-
-        for absence in request.sources.absent_facts:
-            deadline.check()
-            if absence.source_kind is ContextSourceKind.BASE_SYSTEM:
-                raise StructuredModelInputCompileError(
-                    ModelInputCompileFailureKind.REQUIRED_SOURCE_UNAVAILABLE
-                )
-            if absence.source_kind in {
-                ContextSourceKind.HOOK_CONTEXT,
-                ContextSourceKind.USER_ACTIONS,
-            }:
-                # HOOK_CONTEXT is an advisory ONE_SHOT suffix.  Its absence on
-                # a later call must neither clear the installed observation nor
-                # synthesize a second provider-visible message.
-                continue
-            previous = previous_heads.get(absence.source_kind)
-            if _preserve_same_turn_retained_source(
-                previous,
-                source_kind=absence.source_kind,
-                turn_id=request.canonical_input.identity.turn_id,
-            ):
-                continue
-            if (
-                absence.lifecycle is ContextSourceLifecycle.CALL_APPEND
-                and absence.absence_kind is ContextSourceAbsenceKind.UNAVAILABLE
-            ):
-                continue
-            if absence.absence_kind is ContextSourceAbsenceKind.NOT_APPLICABLE:
-                continue
-            if absence.absence_kind is ContextSourceAbsenceKind.UNAVAILABLE:
-                presence = SourceObservationPresence.UNAVAILABLE
-                lifecycle = SourceObservationLifecycle.UNAVAILABLE
-            else:
-                presence = SourceObservationPresence.CLEARED
-                lifecycle = SourceObservationLifecycle.CLEARED
-            semantic = _source_occurrence_fingerprint(
-                absence.domain_semantic_fingerprint,
-                lifecycle=absence.lifecycle,
-                turn_id=request.canonical_input.identity.turn_id,
-                model_call_index=request.model_call_index,
-                dispatch_anchor=planning.dispatch_anchor,
-            )
-            # An absent source that has never been installed has no stale state
-            # to invalidate.  In particular, an empty catalog/skill does not
-            # create a fake initial head merely to say nothing.
-            if previous is None:
-                continue
-            if (
-                previous.presence is presence
-                and previous.semantic_fingerprint == semantic
-            ):
-                continue
-            message = encode_runtime_observation(
-                source_kind=absence.source_kind,
-                trust_class=absence.trust_class,
-                lifecycle=lifecycle,
-                presence=presence,
-                body="",
-            )
-            emissions.append(
-                _AppendSourceEmission(
-                    source_kind=absence.source_kind,
-                    placement_ordinal=absence.placement_ordinal,
-                    presence=presence,
-                    lifecycle=lifecycle,
-                    semantic_fingerprint=semantic,
-                    trust_class=absence.trust_class,
-                    fixed_message=message,
-                    requires_installed_replacement=True,
-                )
-            )
-
-        diagnostics = [item.code for item in request.sources.diagnostics]
-        layout = self._append_layout(
-            request,
-            planning=planning,
-            predecessor=predecessor,
-            lowered_delta=lowered_delta,
-            emissions=emissions,
-            tools=tool_states,
-            deadline=deadline,
-        )
-        degraded_source_kinds = {
-            item.state.candidate.source_kind
-            for item in emissions
-            if item.state is not None
-            and (
-                item.state.omitted
-                or item.state.mode() is not item.state.candidate.initial_mode
-            )
-        }
-        source_decisions = tuple(
-            CompiledSourceDecision(
-                source_kind=item.source_kind,
-                source_instance_fingerprint=(
-                    item.semantic_fingerprint
-                    if item.state is None
-                    else item.state.candidate.source_semantic_fingerprint
-                ),
-                channel=ContextChannel.RUNTIME_OBSERVATION,
-                selected_mode=(
-                    ContextRenderMode.FULL if item.state is None else item.state.mode()
-                ),
-                included=(item.state is None or not item.state.omitted),
-                reason_code=(
-                    "OMITTED_FOR_BUDGET"
-                    if item.state is not None and item.state.omitted
-                    else "SELECTED_UNAVAILABLE"
-                    if item.state is not None
-                    and item.state.is_unavailable()
-                    and item.state.candidate.initial_mode
-                    is ContextRenderMode.UNAVAILABLE_MINIMAL
-                    else "UNAVAILABLE_FOR_BUDGET"
-                    if item.state is not None and item.state.is_unavailable()
-                    else "SELECTED_FULL"
-                    if item.state is None or item.state.mode() is ContextRenderMode.FULL
-                    else "DEGRADED_FOR_BUDGET"
-                ),
-            )
-            for item in sorted(
-                emissions,
-                key=lambda value: (value.placement_ordinal, value.source_kind.value),
-            )
-        )
-        tool_decisions = tuple(
-            CompiledToolResultDecision(
-                source_entry_fingerprint=compiled_tool_result_source_fingerprint(
-                    state.item
-                ),
-                current_turn=state.current_turn,
-                first_legal_mode=state.first_mode(),
-                selected_mode=state.mode(),
-                delivery_requirement=(state.item.tool_result_delivery.requirement),
-                full_delivery_reason=state.item.tool_result_delivery.reason,
-                reason_code="SELECTED_FULL",
-            )
-            for state in tool_states
-        )
-        omitted_sources = sum(
-            item.state is not None and item.state.omitted for item in emissions
-        )
-        if degraded_source_kinds:
-            self._add_diagnostic(
-                diagnostics, ContextPublicDiagnosticCode.SOURCE_DEGRADED
-            )
-        if omitted_sources:
-            self._add_diagnostic(
-                diagnostics, ContextPublicDiagnosticCode.SOURCE_OMITTED
-            )
-        diagnostic_codes = tuple(dict.fromkeys(diagnostics))[
-            : self._limits.maximum_diagnostics
-        ]
-        if semantic_projection:
-            return FrozenProviderInputAppendSemanticProjection(
-                projected_input=FrozenModelInputSemanticProjection(
-                    canonical_input_identity=request.canonical_input.identity,
-                    system_prompt=layout.system_prompt,
-                    messages=layout.messages,
-                    message_placements=layout.message_placements,
-                    tools=predecessor.tools,
-                    source_decisions=source_decisions,
-                    tool_result_decisions=tool_decisions,
-                    diagnostic_codes=diagnostic_codes,
-                    source_collection_fingerprint=(
-                        request.sources.collection_fingerprint
-                    ),
-                    compile_binding_fingerprint=(
-                        request.compile_binding.binding_fingerprint
-                    ),
-                ),
-                canonical_frontier=frontier,
-                appended_message_count=(len(layout.messages) - len(previous_messages)),
-            )
-        prefix_fingerprint = predecessor.semantic_prefix_fingerprint
-        decision_digest = context_fingerprint(
-            "pulsara:model-input-append-decisions:v2",
-            {
-                "protected_prefix": prefix_fingerprint,
-                "sources": tuple(
-                    (
-                        item.source_kind.value,
-                        None
-                        if item.selected_mode is None
-                        else item.selected_mode.value,
-                        item.included,
-                        item.reason_code,
-                    )
-                    for item in source_decisions
-                ),
-                "tool_results": tuple(
-                    (
-                        item.current_turn,
-                        item.selected_mode.value,
-                        item.reason_code,
-                    )
-                    for item in tool_decisions
-                ),
-            },
-        )
-        report = ContextCompileReport(
-            tool_surface_fingerprint=(
-                predecessor.tool_exposure_plan.direct_tool_surface.surface_fingerprint
-            ),
-            protected_prefix_message_count=len(previous_messages),
-            protected_prefix_logical_bytes=predecessor.logical_bytes,
-            protected_prefix_fingerprint=prefix_fingerprint,
-            degraded_source_count=len(degraded_source_kinds),
-            omitted_source_count=omitted_sources,
-            degraded_tool_result_count=0,
-            omitted_tool_result_body_count=0,
-            decision_digest=decision_digest,
-        )
-        compiled_fingerprint = compiled_input_identity(
-            estimator_fingerprint=request.compile_binding.estimator_fingerprint,
-            effective_input_budget_tokens=request.compile_binding.effective_input_budget_tokens,
-            source_contents=tuple(
-                item.fixed_message
-                if item.state is None
-                else None
-                if item.state.omitted
-                else item.state.message()
-                for item in sorted(
-                    emissions,
-                    key=lambda value: (
-                        value.placement_ordinal,
-                        value.source_kind.value,
-                    ),
-                )
-            ),
-            tool_messages=tuple(state.message() for state in tool_states),
-            protected_messages=previous_messages,
-            context_messages=tuple(
-                item.fixed_message if item.state is None else item.state.message()
-                for item in emissions
-                if item.state is None or not item.state.omitted
-            ),
-            checkpoint=deadline.check,
-            context_id=request.context_id,
-            canonical_input_identity=request.canonical_input.identity,
-            system_prompt=layout.system_prompt,
-            messages=layout.messages,
-            tools=predecessor.tools,
-            source_decisions=source_decisions,
-            tool_result_decisions=tool_decisions,
-            compile_report=report,
-            diagnostic_codes=diagnostic_codes,
-            source_collection_fingerprint=request.sources.collection_fingerprint,
-            compile_binding_fingerprint=request.compile_binding.binding_fingerprint,
-        )
-        deadline.check()
-        compiled = FrozenCompiledModelInput(
-            context_id=request.context_id,
-            canonical_input_identity=request.canonical_input.identity,
-            system_prompt=layout.system_prompt,
-            messages=layout.messages,
-            message_placements=layout.message_placements,
-            tools=predecessor.tools,
-            source_decisions=source_decisions,
-            tool_result_decisions=tool_decisions,
-            compile_report=report,
-            diagnostic_codes=diagnostic_codes,
-            source_collection_fingerprint=request.sources.collection_fingerprint,
-            compiled_semantic_fingerprint=compiled_fingerprint,
-            compile_binding_fingerprint=request.compile_binding.binding_fingerprint,
-        )
-        resulting_heads = dict(previous_heads)
-        for item in emissions:
-            if item.state is not None and item.state.omitted:
-                continue
-            message = (
-                item.fixed_message
-                if item.fixed_message is not None
-                else item.state.message()
-            )
-            assert message is not None
-            resulting_heads[item.source_kind] = ProcessLocalSourceHead(
-                source_kind=item.source_kind,
-                presence=item.effective_presence(),
-                semantic_fingerprint=item.effective_semantic_fingerprint(),
-                installed_observation_fingerprint=context_fingerprint(
-                    "pulsara:installed-runtime-observation:v1",
-                    {"message": _llm_message_value(message)},
-                ),
-                last_emitted_turn_id=request.canonical_input.identity.turn_id,
-                last_emitted_model_call_index=request.model_call_index,
-            )
-        return FrozenProviderInputAppendCompileResult(
-            compiled_input=compiled,
-            canonical_frontier=frontier,
-            source_heads=tuple(
-                resulting_heads[kind]
-                for kind in sorted(resulting_heads, key=lambda value: value.value)
-            ),
-            appended_message_count=len(layout.messages) - len(previous_messages),
-        )
-
-    def _append_layout(
-        self,
-        request: StructuredModelInputCompileRequest,
-        *,
-        planning: FrozenProviderInputAppendPlanningInput,
-        predecessor: object,
-        lowered_delta: tuple[LoweredCanonicalItem, ...],
-        emissions: list[_AppendSourceEmission],
-        tools: list[_ToolState],
-        deadline: _CompileDeadline,
-    ) -> _Layout:
-        deadline.check()
-        tool_by_identity = {id(state.lowered): state for state in tools}
-        expanded_delta = _expand_lowered_transcript(
-            lowered_delta,
-            selected_message_by_identity={
-                identity: state.message()
-                for identity, state in tool_by_identity.items()
-            },
-        )
-        delta_messages = tuple(item.message for item in expanded_delta)
-        ordered_observations = tuple(
-            message
-            for _placement, _kind, message in sorted(
-                (
-                    (
-                        item.placement_ordinal,
-                        item.source_kind.value,
-                        item.fixed_message
-                        if item.fixed_message is not None
-                        else None
-                        if item.state is None or item.state.omitted
-                        else item.state.message(),
-                    )
-                    for item in emissions
-                ),
-                key=lambda value: value[:2],
-            )
-            if message is not None
-        )
-        if isinstance(planning.dispatch_anchor, NewTriggerAnchor):
-            indexes = tuple(
-                index
-                for index, item in enumerate(expanded_delta)
-                if item.origin_entry_id == planning.dispatch_anchor.source_entry_id
-                and item.origin_item_fingerprint
-                == planning.dispatch_anchor.provider_input_item_fingerprint
-            )
-            if len(indexes) != 1:
-                raise StructuredModelInputCompileError(
-                    ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
-                )
-            trigger_index = indexes[0]
-            suffix = (
-                *delta_messages[:trigger_index],
-                *ordered_observations,
-                *delta_messages[trigger_index:],
-            )
-        else:
-            suffix = (*delta_messages, *ordered_observations)
-        messages = (*predecessor.messages, *suffix)
-        suffix_placement_values: list[
-            tuple[LLMMessage, str | None, str | None, ToolAttachmentSource | None]
-        ] = []
-        delta_values = tuple(
-            (
-                item.message,
-                item.origin_entry_id,
-                item.origin_item_fingerprint,
-                item.tool_attachment_source,
-            )
-            for item in expanded_delta
-        )
-        observation_values = tuple(
-            (
-                message,
-                None,
-                _observation_origin_fingerprint(
-                    source_kind=kind,
-                    semantic_fingerprint=semantic,
-                    text=join_text_content(message.content),
-                ),
-                None,
-            )
-            for _placement, kind_value, message in sorted(
-                (
-                    (
-                        item.placement_ordinal,
-                        item.source_kind.value,
-                        item.fixed_message
-                        if item.fixed_message is not None
-                        else None
-                        if item.state is None or item.state.omitted
-                        else item.state.message(),
-                    )
-                    for item in emissions
-                ),
-                key=lambda value: value[:2],
-            )
-            if message is not None
-            for kind in (ContextSourceKind(kind_value),)
-            for semantic in (
-                context_fingerprint(
-                    "pulsara.append-runtime-observation-semantic:v1",
-                    _llm_message_value(message),
-                ),
-            )
-        )
-        if isinstance(planning.dispatch_anchor, NewTriggerAnchor):
-            suffix_placement_values.extend(delta_values[:trigger_index])
-            suffix_placement_values.extend(observation_values)
-            suffix_placement_values.extend(delta_values[trigger_index:])
-        else:
-            suffix_placement_values.extend(delta_values)
-            suffix_placement_values.extend(observation_values)
-        prefix_placements = predecessor.message_placements
-        placements = _compiled_message_placements(
-            prefix=prefix_placements,
-            values=tuple(suffix_placement_values),
-        )
-        deadline.check()
-        return _Layout(predecessor.system_prompt, messages, placements)
-
-    @staticmethod
-    def _require_provider_safe_delta(
-        delta: tuple[FrozenProviderInputItem, ...],
-    ) -> None:
-        for index, item in enumerate(delta):
-            if item.item_kind is not FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST:
-                continue
-            expected = tuple(call.tool_call_id for call in item.tool_calls)
-            observed: list[str] = []
-            cursor = index + 1
-            while cursor < len(delta):
-                successor = delta[cursor]
-                if successor.item_kind not in {
-                    FrozenProviderInputItemKind.TOOL_RESULT,
-                    FrozenProviderInputItemKind.TOOL_RESULT_CLOSURE,
-                }:
-                    break
-                if successor.tool_call_id is not None:
-                    observed.append(successor.tool_call_id)
-                cursor += 1
-            if tuple(observed) != expected:
-                raise StructuredModelInputCompileError(
-                    ModelInputCompileFailureKind.CANONICAL_DELTA_NOT_PROVIDER_SAFE
-                )
-
-    def _validate_sources(self, request: StructuredModelInputCompileRequest) -> None:
-        sources = request.sources
-        if (
-            len(sources.candidates) - int(self._omit_oversized_user_actions(request))
-            > self._limits.maximum_source_candidates
-        ):
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
-            )
-        if len(sources.diagnostics) > self._limits.maximum_diagnostics:
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
-            )
-        present = {candidate.source_kind for candidate in sources.candidates}
-        absent = {fact.source_kind for fact in sources.absent_facts}
-        if present | absent != set(ContextSourceKind):
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
-            )
-        if not {
-            ContextSourceKind.BASE_SYSTEM,
-            ContextSourceKind.RUNTIME_ENVIRONMENT,
-            ContextSourceKind.RUN_PERMISSION,
-        }.issubset(present):
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.REQUIRED_SOURCE_UNAVAILABLE
-            )
-        expected_optional = {
-            ContextSourceKind.PLAN_HANDOFF: (
-                request.canonical_facts.plan_handoff_fact is not None
-            ),
-            ContextSourceKind.PLAN_WORKFLOW: (
-                request.canonical_facts.plan_workflow_fact is not None
-            ),
-            ContextSourceKind.PREVIOUS_TURN_OUTCOME: (
-                request.canonical_facts.previous_turn_outcome_fact is not None
-            ),
-        }
-        if any(
-            ((kind in present) != expected_presence)
-            for kind, expected_presence in expected_optional.items()
-        ):
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
-            )
-        for candidate in sources.candidates:
-            expected = _SOURCE_POLICY.get(candidate.source_kind)
-            if (
-                expected is None
-                or (
-                    candidate.channel,
-                    candidate.trust_class,
-                    candidate.budget_class,
-                    candidate.placement_ordinal,
-                    candidate.degradation_priority,
-                    tuple(variant.mode for variant in candidate.variants),
-                    candidate.lifecycle,
-                )
-                != expected
-            ):
-                raise StructuredModelInputCompileError(
-                    ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
-                )
-            if len(candidate.variants) > self._limits.maximum_variants_per_source:
-                raise StructuredModelInputCompileError(
-                    ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
-                )
-            if any(
-                variant.utf8_bytes > self._limits.maximum_single_source_variant_bytes
-                for variant in candidate.variants
-            ) and not (
-                candidate.source_kind is ContextSourceKind.USER_ACTIONS
-                and self._omit_oversized_user_actions(request)
-            ):
-                raise StructuredModelInputCompileError(
-                    ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
-                )
-            # The frozen source and physical contracts validate each variant;
-            # final-wire measurement
-            # decides whether dispatch should advance to another render floor.
-        for fact in sources.absent_facts:
-            expected = _SOURCE_POLICY.get(fact.source_kind)
-            if expected is None:
-                raise StructuredModelInputCompileError(
-                    ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
-                )
-            (
-                _channel,
-                trust,
-                budget,
-                placement,
-                degradation,
-                _modes,
-                lifecycle,
-            ) = expected
-            if (
-                fact.trust_class is not trust
-                or fact.budget_class is not budget
-                or fact.placement_ordinal != placement
-                or fact.degradation_priority != degradation
-                or fact.lifecycle is not lifecycle
-                or fact.absence_kind not in _SOURCE_ABSENCE_POLICY[fact.source_kind]
-            ):
-                raise StructuredModelInputCompileError(
-                    ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
-                )
-
-    def _validate_tool_surface(
-        self, request: StructuredModelInputCompileRequest
-    ) -> None:
-        surface = request.compile_binding.tool_surface
-        if len(surface.tool_specs) > self._limits.maximum_tool_specs:
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.TOOL_SURFACE_INVALID
-            )
-        if (
-            sum(len(tool.canonical_bytes) for tool in surface.tool_specs)
-            > self._limits.maximum_tool_spec_canonical_bytes
-        ):
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.TOOL_SURFACE_INVALID
-            )
-
-
-    def _omit_oversized_user_actions(
-        self, request: StructuredModelInputCompileRequest
-    ) -> bool:
-        candidates = request.sources.candidates
-        action = next(
-            (
-                item for item in candidates
-                if item.source_kind is ContextSourceKind.USER_ACTIONS
-            ),
-            None,
-        )
-        if action is None:
-            return False
-        return (
-            len(candidates) > self._limits.maximum_source_candidates
-            or any(
-                v.utf8_bytes > self._limits.maximum_single_source_variant_bytes
-                for v in action.variants
-            )
-            or sum(item.variants[0].utf8_bytes for item in candidates)
-            > self._limits.maximum_aggregate_full_source_bytes
-            or sum(v.utf8_bytes for item in candidates for v in item.variants)
-            > self._limits.maximum_aggregate_source_variant_bytes
-        )
-
-    def _validate_source_byte_bounds(
-        self,
-        request: StructuredModelInputCompileRequest,
-    ) -> None:
-        candidates = request.sources.candidates
-        if self._omit_oversized_user_actions(request):
-            candidates = tuple(
-                item for item in candidates
-                if item.source_kind is not ContextSourceKind.USER_ACTIONS
-            )
-        aggregate_full = sum(item.variants[0].utf8_bytes for item in candidates)
-        aggregate_all = sum(
-            variant.utf8_bytes for item in candidates for variant in item.variants
-        )
-        if aggregate_full > self._limits.maximum_aggregate_full_source_bytes:
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
-            )
-        if aggregate_all > self._limits.maximum_aggregate_source_variant_bytes:
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
-            )
-
-    @staticmethod
-    def _materialize_approved_plan(
-        request: StructuredModelInputCompileRequest,
-    ) -> tuple[FrozenProviderInputItem, ...]:
-        approved = request.canonical_facts.approved_plan_materialization_fact
-        if (
-            approved is None
-            or approved.disposition
-            is PlanApprovedMaterializationDisposition.PIN_EXISTING_CANONICAL_BLOCK
-        ):
-            return request.canonical_input.items
-        handoff = request.canonical_facts.plan_handoff_fact
-        if handoff is None:
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
-            )
-        try:
-            exact_plan = approved.exact_plan_utf8.decode("utf-8")
-        except UnicodeDecodeError as exc:  # central extraction normally proves this
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
-            ) from exc
-        indexes = tuple(
-            index
-            for index, item in enumerate(request.canonical_input.items)
-            if item.item_kind is FrozenProviderInputItemKind.PLAN_CONTINUATION
-            and item.source_entry_id == handoff.carrier_entry_id
-            and item.source_turn_id == handoff.target_turn_id
-        )
-        if len(indexes) != 1:
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
-            )
-        index = indexes[0]
-        original = request.canonical_input.items[index]
-        try:
-            original_text = join_text_content(original.content)
-            storage_value = json.loads(original_text)
-        except (TypeError, ValueError) as exc:
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
-            ) from exc
-        if not isinstance(storage_value, dict) or set(storage_value) != {
-            "pulsara_plan_continuation"
-        }:
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
-            )
-        projection = storage_value["pulsara_plan_continuation"]
-        if not isinstance(projection, dict) or projection != {
-            "status": "APPROVED",
-            "transition": "APPROVED_PLAN",
-        }:
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
-            )
-        # Add the exact centrally extracted Plan to the already-validated
-        # provider DTO.  No storage identity descriptor or delimiter reaches
-        # the prepared model call.
-        storage_value = {
-            "pulsara_plan_continuation": {
-                **projection,
-                "approved_plan": exact_plan,
-            }
-        }
-        materialized_text = canonical_json_bytes(storage_value).decode("utf-8")
-        replacement = FrozenProviderInputItem(
-            item_kind=original.item_kind,
-            source_entry_id=original.source_entry_id,
-            source_entry_sequence=original.source_entry_sequence,
-            source_turn_id=original.source_turn_id,
-            content=(LLMTextPart(materialized_text),),
-            input_origin=original.input_origin,
-            tool_calls=original.tool_calls,
-            tool_call_id=original.tool_call_id,
-            tool_result_context=original.tool_result_context,
-            tool_result_body_text=original.tool_result_body_text,
-            tool_result_delivery=original.tool_result_delivery,
-        )
-        items = list(request.canonical_input.items)
-        items[index] = replacement
-        return tuple(items)
-
-    def _layout(
-        self,
-        request: StructuredModelInputCompileRequest,
-        *,
-        lowered: tuple[LoweredCanonicalItem, ...],
-        sources: list[_SourceState],
-        tools: list[_ToolState],
-        deadline: _CompileDeadline | None = None,
-    ) -> _Layout:
-        active_deadline = deadline or _CompileDeadline(None)
-        active_deadline.check()
-        system_fragments = [
-            text
-            for state in sorted(
-                sources, key=lambda item: self._placement_key(item.candidate)
-            )
-            if state.candidate.channel is ContextChannel.SYSTEM
-            and (text := state.text()) is not None
-        ]
-        system_prompt = "\n\n".join(system_fragments)
-        observations = tuple(
-            (
-                state.message(),
-                _observation_origin_fingerprint(
-                    source_kind=state.candidate.source_kind,
-                    semantic_fingerprint=state.candidate.domain_semantic_fingerprint,
-                    text=join_text_content(state.message().content),
-                ),
-            )
-            for state in sorted(
-                sources, key=lambda item: self._placement_key(item.candidate)
-            )
-            if state.candidate.channel is ContextChannel.RUNTIME_OBSERVATION
-            and not state.omitted
-        )
-        tool_by_identity = {id(state.lowered): state for state in tools}
-        expanded_transcript = _expand_lowered_transcript(
-            lowered,
-            selected_message_by_identity={
-                identity: state.message()
-                for identity, state in tool_by_identity.items()
-            },
-        )
-        transcript = tuple(
-            (
-                item.message,
-                item.origin_item_fingerprint,
-                item.origin_entry_id,
-                item.tool_attachment_source,
-            )
-            for item in expanded_transcript
-        )
-        if request.dispatch_anchor_entry_id is None:
-            ordered = (
-                *transcript,
-                *((item[0], item[1], None, None) for item in observations),
-            )
-        else:
-            indexes = tuple(
-                index
-                for index, item in enumerate(lowered)
-                if item.source.source_entry_id == request.dispatch_anchor_entry_id
-            )
-            if len(indexes) != 1:
-                raise StructuredModelInputCompileError(
-                    ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
-                )
-            index = indexes[0]
-            ordered = (
-                *transcript[:index],
-                *((item[0], item[1], None, None) for item in observations),
-                *transcript[index:],
-            )
-        messages = tuple(item[0] for item in ordered)
-        placements = _compiled_message_placements(
-            prefix=(),
-            values=tuple((item[0], item[2], item[1], item[3]) for item in ordered),
-        )
-        active_deadline.check()
-        return _Layout(system_prompt, messages, placements)
-
-    @staticmethod
-    def _identity_source_contents(request, decisions):
-        candidates = {
-            c.source_semantic_fingerprint: c for c in request.sources.candidates
-        }
-        contents = []
-        for decision in decisions:
-            if not decision.included:
-                contents.append(None)
-                continue
-            candidate = candidates[decision.source_instance_fingerprint]
-            variant = next(
-                v for v in candidate.variants if v.mode is decision.selected_mode
-            )
-            contents.append(
-                variant.text
-                if candidate.channel is ContextChannel.SYSTEM
-                else source_variant_message(candidate, variant.text, mode=variant.mode)
-            )
-        return tuple(contents)
-
-    @staticmethod
-    def _placement_key(candidate: ContextSourceCandidate) -> tuple[object, ...]:
-        return (
-            candidate.channel.value,
-            candidate.placement_ordinal,
-            candidate.source_kind.value,
-        )
-
-    @staticmethod
-    def _source_degradation_key(
-        candidate: ContextSourceCandidate,
-    ) -> tuple[object, ...]:
-        rank = _SacrificeRank[candidate.budget_class.name]
-        return (
-            int(rank),
-            -candidate.degradation_priority,
-            1,
-            "SOURCE",
-            candidate.source_kind.value,
-        )
-
-    @staticmethod
-    def _source_can_advance(state: _SourceState) -> bool:
-        return (
-            not state.omitted
-            and not state.exhausted
-            and not state.is_unavailable()
-            and (
-                state.selected + 1 < len(state.candidate.variants)
-                or state.candidate.budget_class is not ContextBudgetClass.MUST_KEEP
-            )
-        )
-
-    @staticmethod
-    def _validate_tool_delivery_variants(tools: list[_ToolState]) -> None:
-        if any(
-            len(state.lowered.tool_result_variants) != 1
-            or state.first_mode() is not ToolResultProviderRenderMode.FULL
-            for state in tools
-        ):
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_NOT_INLINEABLE
-            )
-
-    def _add_diagnostic(
-        self,
-        diagnostics: list[ContextPublicDiagnosticCode],
-        code: ContextPublicDiagnosticCode,
-    ) -> None:
-        if code in diagnostics or len(diagnostics) >= self._limits.maximum_diagnostics:
-            return
-        diagnostics.append(code)
-
-
-
-
-def _llm_message_value(message: LLMMessage) -> object:
-    return {
-        "role": message.role.value,
-        "content": llm_content_identity_value(message.content),
-        # Preserve the established fingerprint value after removing the
-        # superseded semantic-thinking DTO slot.
-        "thinking": (),
-        "tool_calls": tuple(
-            (item.id, item.name, item.arguments) for item in message.tool_calls
-        ),
-        "tool_call_id": message.tool_call_id,
-        "name": message.name,
-        "arguments": message.arguments,
-    }
-
-
-def _observation_origin_fingerprint(
-    *, source_kind: ContextSourceKind, semantic_fingerprint: str, text: str
-) -> str:
-    return context_fingerprint(
-        "pulsara.compiled-runtime-observation-origin:v1",
-        {
-            "source_kind": source_kind.value,
-            "semantic": semantic_fingerprint,
-            "text": text,
-        },
-    )
-
-
 def _compiled_message_placements(
     *,
     prefix: tuple[FrozenCompiledMessagePlacement, ...],
@@ -2621,94 +235,548 @@ def _compiled_message_placements(
     return tuple(placements)
 
 
-def _selected_lowered_message(
-    item: LoweredCanonicalItem,
-    *,
-    tool_modes: dict[str, ToolResultProviderRenderMode],
-) -> LLMMessage:
-    if item.fixed_message is not None:
-        return item.fixed_message
-    mode = tool_modes.get(compiled_tool_result_source_fingerprint(item.source))
-    if mode is None:
-        raise StructuredModelInputCompileError(
-            ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+class StructuredModelInputCompiler:
+    def __init__(
+        self, *, limits: StructuredModelInputLimits = STRUCTURED_MODEL_INPUT_LIMITS
+    ) -> None:
+        self._limits = limits
+
+    def next_wire_omissions(
+        self,
+        *,
+        request,
+        compiled,
+        omitted_sources=(),
+        omit_hook_context=False,
+        deadline_monotonic=None,
+    ):
+        _CompileDeadline(deadline_monotonic).check()
+        for candidate in request.sources.candidates:
+            if (
+                candidate.source_kind not in omitted_sources
+                and candidate.budget_class is not ContextBudgetClass.MUST_KEEP
+            ):
+                return ((*omitted_sources, candidate.source_kind), omit_hook_context)
+        if request.sources.hook_context is not None and not omit_hook_context:
+            return (tuple(omitted_sources), True)
+        return None
+
+    def compile(
+        self,
+        request,
+        *,
+        deadline_monotonic=None,
+        omitted_sources=(),
+        omit_hook_context=False,
+        wire_selection=None,
+        unavailable_native_pages=False,
+    ):
+        return self._compile(
+            request,
+            deadline_monotonic=deadline_monotonic,
+            omitted_sources=omitted_sources,
+            omit_hook_context=omit_hook_context,
+            wire_selection=wire_selection,
+            unavailable_native_pages=unavailable_native_pages,
+            projection=False,
         )
-    matches = tuple(
-        variant.message for variant in item.tool_result_variants if variant.mode is mode
-    )
-    if len(matches) != 1:
-        raise StructuredModelInputCompileError(
-            ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+
+    def project(self, request, *, deadline_monotonic=None):
+        return self._compile(
+            request, deadline_monotonic=deadline_monotonic, projection=True
         )
-    return matches[0]
 
-
-def _observation_lifecycle(
-    lifecycle: ContextSourceLifecycle,
-) -> SourceObservationLifecycle:
-    mapping = {
-        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE: SourceObservationLifecycle.SNAPSHOT,
-        ContextSourceLifecycle.CALL_APPEND: SourceObservationLifecycle.CALL,
-        ContextSourceLifecycle.TURN_APPEND: SourceObservationLifecycle.TURN,
-        ContextSourceLifecycle.TURN_SNAPSHOT: SourceObservationLifecycle.TURN,
-        ContextSourceLifecycle.ACTIVATION_SNAPSHOT: (
-            SourceObservationLifecycle.ACTIVATION
-        ),
-        ContextSourceLifecycle.ONE_SHOT: SourceObservationLifecycle.ONE_SHOT,
-    }
-    try:
-        return mapping[lifecycle]
-    except KeyError as exc:
-        raise StructuredModelInputCompileError(
-            ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
-        ) from exc
-
-
-def _preserve_same_turn_retained_source(
-    previous: ProcessLocalSourceHead | None,
-    *,
-    source_kind: ContextSourceKind,
-    turn_id: str,
-) -> bool:
-    return bool(
-        source_kind is ContextSourceKind.RETAINED_SKILL_CONTEXT
-        and previous is not None
-        and previous.presence is SourceObservationPresence.VALUE
-        and previous.last_emitted_turn_id == turn_id
-    )
-
-
-def _source_occurrence_fingerprint(
-    domain_semantic_fingerprint: str,
-    *,
-    lifecycle: ContextSourceLifecycle,
-    turn_id: str,
-    model_call_index: int,
-    dispatch_anchor: object,
-) -> str:
-    occurrence: object = None
-    if lifecycle in {
-        ContextSourceLifecycle.TURN_APPEND,
-        ContextSourceLifecycle.TURN_SNAPSHOT,
-    }:
-        occurrence = ("turn", turn_id)
-    elif lifecycle is ContextSourceLifecycle.ACTIVATION_SNAPSHOT:
-        occurrence = (
-            "activation",
-            provider_input_dispatch_anchor_value(dispatch_anchor),
+    def compile_installed_append(
+        self,
+        request,
+        *,
+        planning,
+        deadline_monotonic=None,
+        omitted_sources=(),
+        omit_hook_context=False,
+        wire_selection=None,
+        unavailable_native_pages=False,
+    ):
+        return self._compile(
+            request,
+            planning=planning,
+            new_epoch=False,
+            deadline_monotonic=deadline_monotonic,
+            omitted_sources=omitted_sources,
+            omit_hook_context=omit_hook_context,
+            wire_selection=wire_selection,
+            unavailable_native_pages=unavailable_native_pages,
+            projection=False,
         )
-    elif lifecycle is ContextSourceLifecycle.CALL_APPEND:
-        occurrence = ("call", turn_id, model_call_index)
-    elif lifecycle is ContextSourceLifecycle.ONE_SHOT:
-        occurrence = ("one-shot", domain_semantic_fingerprint)
-    return context_fingerprint(
-        "pulsara:context-source-occurrence:v1",
-        {
-            "domain": domain_semantic_fingerprint,
-            "lifecycle": lifecycle.value,
-            "occurrence": occurrence,
-        },
-    )
+
+    def compile_new_epoch(
+        self,
+        request,
+        *,
+        planning,
+        deadline_monotonic=None,
+        omitted_sources=(),
+        omit_hook_context=False,
+        wire_selection=None,
+        unavailable_native_pages=False,
+    ):
+        return self._compile(
+            request,
+            planning=planning,
+            new_epoch=True,
+            deadline_monotonic=deadline_monotonic,
+            omitted_sources=omitted_sources,
+            omit_hook_context=omit_hook_context,
+            wire_selection=wire_selection,
+            unavailable_native_pages=unavailable_native_pages,
+            projection=False,
+        )
+
+    def project_installed_append(self, request, *, planning, deadline_monotonic=None):
+        return self._compile(
+            request,
+            planning=planning,
+            new_epoch=False,
+            deadline_monotonic=deadline_monotonic,
+            projection=True,
+        )
+
+    def project_new_epoch(self, request, *, planning, deadline_monotonic=None):
+        return self._compile(
+            request,
+            planning=planning,
+            new_epoch=True,
+            deadline_monotonic=deadline_monotonic,
+            projection=True,
+        )
+
+    def _compile(
+        self,
+        request,
+        *,
+        planning=None,
+        new_epoch=True,
+        deadline_monotonic=None,
+        omitted_sources=(),
+        omit_hook_context=False,
+        wire_selection=None,
+        unavailable_native_pages=False,
+        projection=False,
+    ):
+        deadline = _CompileDeadline(deadline_monotonic)
+        deadline.check()
+        if wire_selection is not None and (
+            wire_selection.canonical_input_identity != request.canonical_input.identity
+            or wire_selection.compile_binding_fingerprint
+            != request.compile_binding.binding_fingerprint
+            or wire_selection.source_collection_fingerprint
+            != request.sources.collection_fingerprint
+        ):
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+            )
+        identity = request.canonical_input.identity
+        surface = request.compile_binding.tool_surface
+        if surface.conversation_scope_kind is not identity.conversation_scope_kind:
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.TOOL_SURFACE_INVALID
+            )
+        base = tuple(
+            item
+            for item in request.sources.candidates
+            if item.channel is ContextChannel.SYSTEM
+        )
+        if len(base) != 1 or base[0].source_kind is not ContextSourceKind.BASE_SYSTEM:
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.REQUIRED_SOURCE_UNAVAILABLE
+            )
+        if any(kind is not ContextSourceKind.USER_ACTIONS for kind in omitted_sources):
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+            )
+        fingerprints = []
+        for item in request.canonical_input.items:
+            deadline.check()
+            fingerprints.append(provider_input_item_fingerprint(item))
+        fingerprints = tuple(fingerprints)
+        frontier = ProcessLocalCanonicalFrontier(
+            request.canonical_facts.context_binding_fact.binding_revision_id,
+            request.canonical_facts.context_binding_fact.context_base_semantic_identity,
+            identity.provider_input_through_sequence,
+            fingerprints,
+        )
+        predecessor = None if planning is None else planning.predecessor_view
+        old_count = (
+            0
+            if predecessor is None
+            else len(predecessor.canonical_frontier.ordered_item_fingerprints)
+        )
+        same_base = (
+            predecessor is None
+            or predecessor.canonical_frontier.context_base_semantic_identity
+            == frontier.context_base_semantic_identity
+        )
+        if (
+            predecessor is not None
+            and same_base
+            and fingerprints[:old_count]
+            != predecessor.canonical_frontier.ordered_item_fingerprints
+        ):
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+            )
+        if planning is not None:
+            if (
+                planning.scope.session_id != identity.session_id
+                or planning.scope.scope_kind is not identity.conversation_scope_kind
+                or planning.canonical_delta_fingerprints
+                != (
+                    fingerprints[old_count:]
+                    if predecessor is not None and same_base
+                    else fingerprints
+                )
+            ):
+                raise StructuredModelInputCompileError(
+                    ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+                )
+        if not new_epoch:
+            if predecessor is None:
+                raise StructuredModelInputCompileError(
+                    ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+                )
+            try:
+                predecessor.canonical_frontier.require_prefix_of(frontier)
+            except ValueError as error:
+                raise StructuredModelInputCompileError(
+                    ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+                ) from error
+            if (
+                predecessor.system_prompt != base[0].text
+                or predecessor.tools != surface.tool_specs
+            ):
+                raise StructuredModelInputCompileError(
+                    ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+                )
+        items = (
+            request.canonical_input.items
+            if new_epoch
+            else request.canonical_input.items[old_count:]
+        )
+        if not new_epoch:
+            self._require_provider_safe_delta(items)
+        lowered = []
+        for item in items:
+            deadline.check()
+            if item.item_kind is FrozenProviderInputItemKind.PLAN_CONTINUATION:
+                continue
+            modalities = request.compile_binding.target_fact.input_modalities
+            if (
+                item.native_page is not None
+                and modalities is not None
+                and "image" not in modalities
+            ):
+                from pulsara_agent.conversation_kernel.native_tool_delivery import (
+                    prepare_unsupported_native_page,
+                )
+
+                page = prepare_unsupported_native_page(item.native_page)
+                text = page.canonical_text
+                item = replace(
+                    item,
+                    content=(LLMTextPart(text),),
+                    tool_result_body_text=text,
+                    native_page=page,
+                )
+            if unavailable_native_pages and item.native_page is not None:
+                from pulsara_agent.conversation_kernel.native_tool_delivery import (
+                    prepare_unavailable_native_page,
+                )
+
+                page = prepare_unavailable_native_page(
+                    item.native_page,
+                    session_id=identity.session_id,
+                    error="实际 provider 输入在合法压缩后仍无法容纳当前页。",
+                )
+                text = page.canonical_text
+                item = replace(
+                    item,
+                    content=(LLMTextPart(text),),
+                    tool_result_body_text=text,
+                    native_page=page,
+                )
+            lowered.append(lower_canonical_item(item,
+                supports_images=modalities is None or "image" in modalities))
+        tool_states = tuple(
+            item
+            for item in lowered
+            if item.source.item_kind
+            in {
+                FrozenProviderInputItemKind.TOOL_RESULT,
+                FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
+            }
+        )
+        expanded = list(_expand_lowered_transcript(tuple(lowered)))
+        transcript = [
+            (
+                item.message,
+                item.origin_entry_id,
+                item.origin_item_fingerprint,
+                item.tool_attachment_source,
+            )
+            for item in expanded
+        ]
+        candidates = tuple(
+            sorted(
+                request.sources.candidates,
+                key=lambda item: (item.placement_ordinal, item.source_kind.value),
+            )
+        )
+        decisions = tuple(
+            CompiledSourceDecision(
+                item.source_kind,
+                item.source_semantic_fingerprint,
+                item.channel,
+                item.source_kind not in omitted_sources,
+            )
+            for item in candidates
+        )
+        source_messages = []
+        for item in candidates:
+            if (
+                item.channel is ContextChannel.SYSTEM
+                or item.source_kind in omitted_sources
+            ):
+                continue
+            message = LLMMessage.user(item.text)
+            origin = item.source_semantic_fingerprint
+            source_messages.append((item.source_kind, (message, None, origin, None)))
+        # A cold catalogue starts the context. Active-compaction restoration is
+        # adjacent to the summary and handoff; new input notices stay at its suffix.
+        catalogue = [
+            value
+            for kind, value in source_messages
+            if kind is ContextSourceKind.SKILL_CATALOG
+        ]
+        remaining = [
+            (kind, value)
+            for kind, value in source_messages
+            if kind is not ContextSourceKind.SKILL_CATALOG
+        ]
+        if not new_epoch and catalogue:
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+            )
+        restoration = []
+        if new_epoch and any(
+            item.source.item_kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT
+            for item in lowered
+        ):
+            kinds = {
+                ContextSourceKind.COMPACTION_RUNTIME_HANDOFF,
+                ContextSourceKind.TURN_CONTEXT,
+                ContextSourceKind.PLAN_MODE,
+                ContextSourceKind.APPROVED_PLAN,
+                ContextSourceKind.PREVIOUS_TURN_OUTCOME,
+            }
+            restoration = [value for kind, value in remaining if kind in kinds]
+            remaining = [
+                (kind, value) for kind, value in remaining if kind not in kinds
+            ]
+            index = (
+                next(
+                    i
+                    for i, item in enumerate(expanded)
+                    if item.origin_entry_id
+                    == next(
+                        v.source.source_entry_id
+                        for v in lowered
+                        if v.source.item_kind
+                        is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT
+                    )
+                )
+                + 1
+            )
+            transcript[index:index] = restoration
+        anchor = None if planning is None else planning.dispatch_anchor
+        anchor_entry_id = (
+            anchor.source_entry_id
+            if isinstance(anchor, NewTriggerAnchor)
+            else request.dispatch_anchor_entry_id
+        )
+        insertion = len(transcript)
+        if anchor_entry_id is not None:
+            matching = [
+                i for i, value in enumerate(transcript) if value[1] == anchor_entry_id
+            ]
+            if len(matching) == 1:
+                insertion = matching[0]
+            elif not matching and any(
+                item.source_entry_id == anchor_entry_id
+                and item.item_kind is FrozenProviderInputItemKind.PLAN_CONTINUATION
+                for item in request.canonical_input.items
+            ):
+                insertion = len(transcript)
+            else:
+                raise StructuredModelInputCompileError(
+                    ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+                )
+        transcript[insertion:insertion] = [value for _, value in remaining]
+        prefix_messages = () if new_epoch else predecessor.messages
+        prefix_placements = () if new_epoch else predecessor.message_placements
+        ordered = [*catalogue, *transcript]
+        hook = request.sources.hook_context
+        if hook is not None and not omit_hook_context:
+            ordered.append(
+                (
+                    hook,
+                    None,
+                    context_fingerprint(
+                        "pulsara.hook-message", {"text": hook.content[0].text}
+                    ),
+                    None,
+                )
+            )
+        messages = (*prefix_messages, *(value[0] for value in ordered))
+        placements = _compiled_message_placements(
+            prefix=prefix_placements, values=tuple(ordered)
+        )
+        tools = surface.tool_specs if new_epoch else predecessor.tools
+        system_prompt = base[0].text if new_epoch else predecessor.system_prompt
+        tool_decisions = tuple(
+            CompiledToolResultDecision(
+                compiled_tool_result_source_fingerprint(item.source),
+                item.source.source_turn_id == identity.turn_id,
+                result_entry_id=item.source.source_entry_id
+                if item.source.native_page is not None
+                else None,
+                source_result_entry_id=item.source.native_page.source_entry_id
+                if item.source.native_page is not None
+                else None,
+                native_projection=freeze_json(
+                    item.source.native_page.projection_facts()
+                )
+                if item.source.native_page is not None
+                else None,
+            )
+            for item in tool_states
+        )
+        diagnostics = tuple(
+            dict.fromkeys(item.code for item in request.sources.diagnostics)
+        )
+        if omitted_sources or (hook is not None and omit_hook_context):
+            diagnostics = tuple(
+                dict.fromkeys(
+                    (*diagnostics, ContextPublicDiagnosticCode.SOURCE_OMITTED)
+                )
+            )
+        diagnostics = diagnostics[: self._limits.maximum_diagnostics]
+        common = dict(
+            canonical_input_identity=identity,
+            system_prompt=system_prompt,
+            messages=messages,
+            message_placements=placements,
+            tools=tools,
+            source_decisions=decisions,
+            tool_result_decisions=tool_decisions,
+            diagnostic_codes=diagnostics,
+            source_collection_fingerprint=request.sources.collection_fingerprint,
+            compile_binding_fingerprint=request.compile_binding.binding_fingerprint,
+        )
+        if projection:
+            value = FrozenModelInputSemanticProjection(**common)
+            return (
+                value
+                if planning is None
+                else FrozenProviderInputAppendSemanticProjection(
+                    value, frontier, len(messages) - len(prefix_messages)
+                )
+            )
+        report = ContextCompileReport(
+            surface.surface_fingerprint,
+            len(prefix_messages),
+            0 if new_epoch else predecessor.logical_bytes,
+            None if not prefix_messages else predecessor.semantic_prefix_fingerprint,
+            len(omitted_sources) + int(hook is not None and omit_hook_context),
+            context_fingerprint(
+                "pulsara.compiled-source-selection",
+                {
+                    "sources": tuple(
+                        (item.source_kind.value, item.included) for item in decisions
+                    ),
+                    "hook": hook is not None and not omit_hook_context,
+                },
+            ),
+        )
+        source_contents = tuple(
+            None
+            if item.source_kind in omitted_sources
+            else item.text
+            if item.channel is ContextChannel.SYSTEM
+            else LLMMessage.user(item.text)
+            for item in candidates
+        )
+        # Hook is a separate advisory message, not a source decision or source registry.
+        compiled_fingerprint = compiled_input_identity(
+            context_id=request.context_id,
+            **{
+                key: value
+                for key, value in common.items()
+                if key != "message_placements"
+            },
+            compile_report=report,
+            estimator_fingerprint=request.compile_binding.estimator_fingerprint,
+            effective_input_budget_tokens=request.compile_binding.effective_input_budget_tokens,
+            source_contents=source_contents,
+            tool_messages=tuple(item.message for item in tool_states),
+            protected_messages=prefix_messages,
+            context_messages=tuple(v[0] for _, v in remaining)
+            + tuple(v[0] for v in restoration),
+            checkpoint=deadline.check,
+        )
+        compiled = FrozenCompiledModelInput(
+            context_id=request.context_id,
+            **common,
+            compile_report=report,
+            compiled_semantic_fingerprint=compiled_fingerprint,
+        )
+        if planning is None:
+            return compiled
+        state = replace(
+            request.sources.observation_state or InstalledObservationState(),
+            last_turn_id=identity.turn_id,
+        )
+        return FrozenProviderInputAppendCompileResult(
+            compiled, frontier, state, len(messages) - len(prefix_messages)
+        )
+
+    @staticmethod
+    def _require_provider_safe_delta(
+        delta: tuple[FrozenProviderInputItem, ...],
+    ) -> None:
+        for index, item in enumerate(delta):
+            if item.item_kind is not FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST:
+                continue
+            expected = tuple(call.tool_call_id for call in item.tool_calls)
+            observed: list[str] = []
+            cursor = index + 1
+            while cursor < len(delta):
+                successor = delta[cursor]
+                if successor.item_kind not in {
+                    FrozenProviderInputItemKind.TOOL_RESULT,
+                    FrozenProviderInputItemKind.TOOL_RESULT_CLOSURE,
+                }:
+                    break
+                if successor.tool_call_id is not None:
+                    observed.append(successor.tool_call_id)
+                cursor += 1
+            if tuple(observed) != expected:
+                raise StructuredModelInputCompileError(
+                    ModelInputCompileFailureKind.CANONICAL_DELTA_NOT_PROVIDER_SAFE
+                )
 
 
-__all__ = ["StructuredModelInputCompiler"]
+__all__ = [
+    "StructuredModelInputCompiler",
+    "estimate_runtime_handoff_pca_tokens",
+    "tool_image_attachment_message",
+]

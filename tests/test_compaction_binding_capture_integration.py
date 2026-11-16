@@ -151,9 +151,7 @@ async def _open(tmp_path, monkeypatch, dsn, *, second_connection=False):
         test_model_binding(runtime), reasoning=ReasoningEffortSelection("high")
     )
     await root.update_model_call_binding(high)
-    root._compaction.policy = ResolvedCompactionPolicy(
-        automatic_enabled=False
-    )
+    root._compaction.policy = ResolvedCompactionPolicy(automatic_enabled=False)
     return core, root, model, high, other
 
 
@@ -193,7 +191,6 @@ def test_active_request_settings_edit_keeps_summary_steer_and_first_ordinary_bin
                 root._compaction.policy,
                 automatic_enabled=True,
                 auto_trigger_ratio=ratio * 0.95,
-
             )
             command = random_id("command")
             await root.submit_prompt(
@@ -461,12 +458,19 @@ def test_waiting_work_keeps_accepted_binding_after_parent_selection_changes(
                 command_id=random_id("command"),
                 requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
             )
+
             async def second_admitted():
-                return len(_rows(
-                    root,
-                    "SELECT id FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND input_origin='AGENT_INSTRUCTION'",
-                    (child,),
-                )) == 2
+                return (
+                    len(
+                        _rows(
+                            root,
+                            "SELECT id FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND input_origin='AGENT_INSTRUCTION'",
+                            (child,),
+                        )
+                    )
+                    == 2
+                )
+
             await _eventually(second_admitted)
             rows = _rows(
                 root,

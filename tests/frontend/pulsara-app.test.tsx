@@ -705,7 +705,7 @@ describe('PulsaraApp', () => {
     fireEvent.click(addButton);
     const mcpDialog = await screen.findByRole('dialog', { name: '添加 MCP 服务' });
     expect(inspector.contains(mcpDialog)).toBe(false);
-    expect((within(mcpDialog).getByRole('checkbox', { name: '也向委派 Agent 提供' }) as HTMLInputElement).checked).toBe(false);
+    expect((within(mcpDialog).getByRole('checkbox', { name: '也向委派 Agent 提供' }) as HTMLInputElement).checked).toBe(true);
 
     fireEvent.keyDown(window, { key: 'Escape' });
     expect(screen.queryByRole('dialog', { name: '导入技能' })).toBeNull();
@@ -1391,8 +1391,10 @@ describe('PulsaraApp', () => {
     expect(container.querySelector('.terminal-command')?.textContent).toContain('printf "visible command"');
   });
 
-  it('shows the real edit diff in a bounded output region without a redundant diff-copy button', async () => {
+  it('shows the exact typed edit diff in a bounded region with one copy action', async () => {
     const adapter = new FakeAdapter();
+    const copy=vi.fn(async()=>undefined);
+    stubClipboard(copy);
     const diff = ['@@ -1,40 +1,40 @@', '-old-001', '+new-001', ...Array.from(
       { length: 80 }, (_, index) => ` context-${String(index).padStart(3, '0')}`,
     )].join('\n');
@@ -1403,7 +1405,7 @@ describe('PulsaraApp', () => {
         traces: [{
           id: 'trace-edit-diff', kind: 'edit', toolName: 'edit_file', title: '更新文件',
           subtitle: '已完成', status: 'completed', meta: '操作完成',
-          resultSummary: '操作已完成。', resultText: JSON.stringify({ status: 'success', diff }),
+          businessValue:{meta:{status:'SUCCESS'},target:{kind:'PATH',path:'file.txt'},content:[{type:'text',value:diff}]},
         }],
       }],
       isRunning: false,
@@ -1417,6 +1419,10 @@ describe('PulsaraApp', () => {
     const diffOutput = screen.getByLabelText('文件差异');
     expect(diffOutput.textContent).toBe(diff);
     expect(diffOutput.classList.contains('tool-result-diff')).toBe(true);
+    expect(diffOutput.classList.contains('tool-output-scroll')).toBe(true);
+    expect(within(diffOutput.closest('section')!).getAllByRole('button')).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button',{name:'复制文件差异'}));
+    await waitFor(()=>expect(copy).toHaveBeenCalledExactlyOnceWith(diff));
     expect(screen.queryByText('操作已完成。')).toBeNull();
     expect(screen.queryByRole('button', { name: '复制工具差异' })).toBeNull();
     expect(screen.queryByRole('button', { name: '复制工具展示结果' })).toBeNull();
@@ -3070,7 +3076,7 @@ describe('PulsaraApp', () => {
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
     expect(await screen.findByText('验证新的前端任务')).toBeTruthy();
-    expect(adapter.lastConnection?.enterPlan).toHaveBeenCalledWith('验证新的前端任务', 'read-only');
+    expect(adapter.lastConnection?.enterPlan).toHaveBeenCalledWith('read-only');
     expect(adapter.lastConnection?.submitPrompt).toHaveBeenCalledWith(
       expect.stringMatching(/^command:[a-z2-7]{25}[aeimquy4]$/), textPrompt('验证新的前端任务'), 'read-only',
     );
@@ -3158,7 +3164,7 @@ describe('PulsaraApp', () => {
   });
 
   it.each([
-    ['cancel', '取消规划', { kind: 'plan-draft', decision: 'cancel' }],
+    ['cancel', '取消本次审批', { kind: 'plan-draft', decision: 'cancel' }],
     ['revise', '提交修改意见', {
       kind: 'plan-draft', decision: 'revise', revisionPrompt: {parts: [{type: 'text', text: '保留 `read_file` 与 ROOT'}]},
     }],
@@ -3171,7 +3177,7 @@ describe('PulsaraApp', () => {
     adapter.interactionContent = { kind: 'plan-draft', body: SOURCE_FIDELITY_MARKDOWN };
     const interaction = {
       id: 'plan-review-source', kind: 'plan-draft' as const,
-      workflowId: 'plan-source', workflowRevision: 11,
+      workflowId: 'plan-source', workflowRevision: 11, expiresAtUtc: '2099-01-01T00:00:00Z',
     };
     adapter.connectionValue = {
       ...projection(''), messages: [], isRunning: false, activeTurnId: undefined, interaction,
@@ -3191,9 +3197,7 @@ describe('PulsaraApp', () => {
       interaction,
       resolution,
     ));
-    expect(await screen.findByText(_name === 'revise'
-      ? '已创建继续修订方案的任务。'
-      : '未因本次取消启动这份方案的实施。你可以发送新任务。')).toBeTruthy();
+    expect(await screen.findByText('Pulsara 将继续规划。')).toBeTruthy();
   });
 
   it('shows exact duplicate queued bodies in queue order to an observer', async () => {
@@ -3632,7 +3636,7 @@ describe('PulsaraApp', () => {
     adapter.connectionValue = {
       ...projection(''), messages: [], isRunning: false, activeTurnId: undefined,
       interaction: {
-        id: 'plan-old-session', kind: 'plan-draft', workflowId: 'workflow-old', workflowRevision: 1,
+        id: 'plan-old-session', kind: 'plan-draft', workflowId: 'workflow-old', workflowRevision: 1, expiresAtUtc: '2099-01-01T00:00:00Z',
       },
     };
     const decision = deferred<CommandReceipt>();
@@ -3641,7 +3645,7 @@ describe('PulsaraApp', () => {
     const first = adapter.lastConnection!;
     first.resolveInteraction.mockImplementationOnce(() => decision.promise);
 
-    fireEvent.click(screen.getByRole('button', { name: '取消规划' }));
+    fireEvent.click(screen.getByRole('button', { name: '取消本次审批' }));
     await waitFor(() => expect(first.resolveInteraction).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByRole('button', { name: /另一个会话/ }));
     await screen.findByRole('heading', { name: '另一个会话' });
@@ -3651,7 +3655,7 @@ describe('PulsaraApp', () => {
       planDraftDecision: 'cancel',
     }));
 
-    expect(screen.queryByText('规划已取消')).toBeNull();
+    expect(screen.queryByText('本次审批已取消')).toBeNull();
     expect(adapter.connectCalls).toHaveLength(2);
   });
 
@@ -3675,6 +3679,30 @@ describe('PR04 atomic queue action ownership', () => {
     commandId, status: 'pending', publicCode: 'PROMPT_STEER_QUEUED', promptDelivery: {
       queueItemId: 'replacement', queueStatus: 'PENDING', deliveryMode: 'steer',
     },
+  });
+
+  it('accepts queued Plan revision on the running original turn without a successor', async () => {
+    const adapter = new FakeAdapter();
+    const interaction = {id:'review-current',kind:'plan-draft' as const,
+      workflowId:'plan-current',workflowRevision:2,expiresAtUtc:'2099-01-01T00:00:00Z'};
+    adapter.connectionValue = {...projection(''),messages:[],isRunning:true,activeTurnId:'turn-origin',
+      queuedCount:1,queuedPrompts:[source],interaction,
+      control:{active_turns:[{turn_id:'turn-origin',scope_kind:'ROOT',status:'RUNNING'}]}};
+    renderWorkbench(<PulsaraApp adapter={adapter}/>);
+    const queue = await screen.findByRole('region',{name:'等待处理的输入'});
+    const active = adapter.lastConnection!;
+    const steer = vi.spyOn(active,'steerQueuedPrompt');
+    active.resolveInteraction.mockImplementationOnce(async (_interaction,_resolution,commandId) => ({
+      commandId:commandId!,status:'succeeded',planDraftDecision:'revise',
+    }));
+    fireEvent.click(within(queue).getByRole('button',{name:'发送'}));
+    await waitFor(()=>expect(active.resolveInteraction).toHaveBeenCalledWith(interaction,
+      {kind:'plan-draft',decision:'revise',sourceQueueItemId:source.queueItemId},
+      expect.stringMatching(/^command:[a-z2-7]{25}[aeimquy4]$/)));
+    await waitFor(()=>expect(screen.queryByRole('region',{name:'等待处理的输入'})).toBeNull());
+    expect(screen.queryByText('操作未完成')).toBeNull();
+    expect(steer).not.toHaveBeenCalled();
+    expect(active.submitPrompt).not.toHaveBeenCalled();
   });
 
   it('sends one text-free action, waits for ACK, then exactly replaces the optimistic card', async () => {

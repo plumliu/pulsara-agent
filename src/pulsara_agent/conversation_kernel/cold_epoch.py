@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING
 
 from pulsara_agent.capability.contracts import (
     FrozenCapabilityDispatchCut,
-    FrozenMcpRouteProjection,
     FrozenNativeToolProjectionSet,
     FrozenSkillCapabilityDispatchView,
     FrozenToolCapabilityDispatchView,
@@ -279,9 +278,6 @@ class ColdEpochContinuityCandidateInputs:
     def direct_native_projection_set(self) -> FrozenNativeToolProjectionSet:
         return self.tool_exposure_plan.direct_projection_set
 
-    @property
-    def mcp_route_projection(self) -> FrozenMcpRouteProjection:
-        return self.tool_exposure_plan.mcp_catalog_route_projection
 
 
 @dataclass(frozen=True, slots=True)

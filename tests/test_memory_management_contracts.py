@@ -1,117 +1,52 @@
-from dataclasses import asdict
+"""Current memory text, selection, timestamp and page contracts."""
 
+from datetime import datetime, timezone
 import pytest
-
+from pulsara_agent.identity import random_id
+from pulsara_agent.conversation_kernel.memory.contracts import (
+    memory_title,
+    memory_statement,
+    memory_timestamp,
+    canonical_memory_recorded_at,
+)
 from pulsara_agent.conversation_kernel.memory.management import (
-    MemoryManagementFact,
     MemoryManagementSelection,
-    decode_cursor,
-    deletion_graph,
-    encode_cursor,
     normalized_search,
-    relative_role,
-    validate_product_record,
-    with_end,
+    encode_cursor,
+    decode_cursor,
+    page_size,
 )
 
 
-def edge(source, target, kind="BASED_ON"):
-    return dict(
-        id=f"{kind}:{source}:{target}",
-        source_fact_id=source,
-        target_fact_id=target,
-        relation_kind=kind,
+def test_selection_and_cursor_bind_exact_query():
+    MemoryManagementSelection("project", random_id("workspace"))
+    with pytest.raises(ValueError):
+        MemoryManagementSelection("global", random_id("workspace"))
+    filters = {"search": "中" * 8000, "context": "ctx:global"}
+    cursor = encode_cursor(
+        filters, ("2026-09-05T00:00:00.123456Z", random_id("memory"))
     )
-
-
-@pytest.mark.parametrize(
-    "kind,seed,deleted,restored",
-    [
-        ("BASED_ON", "a", {"a"}, set()),
-        ("BASED_ON", "b", {"a", "b"}, set()),
-        ("SUPERSEDES", "a", {"a"}, {"b"}),
-        ("SUPERSEDES", "b", {"b"}, set()),
-        ("CONTRADICTS", "a", {"a"}, set()),
-        ("CONTRADICTS", "b", {"b"}, set()),
-    ],
-)
-def test_single_edge(kind, seed, deleted, restored):
-    plan = deletion_graph([seed], [edge("a", "b", kind)])
-    assert plan.delete_ids == deleted
-    assert plan.restore_ids == restored
-    assert len(plan.relation_ids) == 1
-
-
-def test_diamond_cycles_and_long_chain():
-    edges = [
-        edge("a", "b"),
-        edge("a", "c"),
-        edge("b", "d"),
-        edge("c", "d"),
-        edge("d", "a"),
-    ]
-    assert deletion_graph(["d"], edges).delete_ids == {"a", "b", "c", "d"}
-    edges = [edge(str(i + 1), str(i)) for i in range(2000)]
-    assert len(deletion_graph(["0"], edges).delete_ids) == 2001
-
-
-def test_supersede_chain_and_multiple_incoming():
-    edges = [edge("a", "b", "SUPERSEDES"), edge("b", "c", "SUPERSEDES")]
-    assert deletion_graph(["a"], edges).restore_ids == {"b"}
-    assert deletion_graph(["b"], edges).blocked_ancestry == (("c", "a"),)
-    assert deletion_graph(["a", "b"], edges).blocked_ancestry == ()
-    assert deletion_graph(["a", "b"], edges).restore_ids == {"c"}
-    edges.append(edge("d", "c", "SUPERSEDES"))
-    assert deletion_graph(["b"], edges).restore_ids == set()
-
-
-@pytest.mark.parametrize(
-    "source,expected", [(True, "CONFLICTS_WITH"), (False, "CONFLICTS_WITH")]
-)
-def test_relative_conflict_is_symmetric(source, expected):
-    assert relative_role("CONTRADICTS", selected_is_source=source) == expected
-
-
-def test_context_search_and_cursor_contract():
-    with pytest.raises(ValueError):
-        MemoryManagementSelection("global", "ctx:global")
-    assert normalized_search("  100%_\\  ") == "100%_\\"
-    with pytest.raises(ValueError):
-        normalized_search("中" * 342)
-    filters = {"search": "中" * 341, "context": "ctx:global"}
-    cursor = encode_cursor(filters, ("instant", "id"))
-    assert decode_cursor(cursor, filters, 2) == ("instant", "id")
+    assert decode_cursor(cursor, filters, 2)[0].endswith(".123456Z")
     with pytest.raises(ValueError):
         decode_cursor(cursor, {"search": "different"}, 2)
+    assert normalized_search("  100%_\\  ") == "100%_\\"
+    assert normalized_search("字" * 8000) == "字" * 8000
+    for size in (0, 101, True):
+        with pytest.raises(ValueError):
+            page_size(size)
 
 
-def test_confirmation_keeps_complete_text_and_subsecond_updated_at():
-    fact = MemoryManagementFact(
-        'memory:77n3iseeb7g5nrddf77nociut4',
-        "ctx:global",
-        "FACT",
-        "ACTIVE",
-        "完整正文",
-        "2026-09-05T00:00:00Z",
-        "2026-09-05T00:00:00.123456+00:00",
+def test_current_text_and_microsecond_contract():
+    assert memory_title("  Cafe\u0301  ") == "Café"
+    assert (
+        memory_statement("FACT", " \r\n  body\r\n  indented\r\n ") == "body\n  indented"
     )
-    record = {"type": "FACT_DELETE", "fact": asdict(fact)}
-    assert validate_product_record(record) == record
-    assert list(with_end([record]))[-1] == {"type": "END", "counts": {"FACT_DELETE": 1}}
-    with pytest.raises(ValueError):
-        validate_product_record({**record, "fingerprint": "unneeded"})
-
-
-def test_relation_confirmation_has_no_removed_formation_summary():
-    fact = MemoryManagementFact(
-        'memory:77n3iseeb7g5nrddf77nociut4', "ctx:global", "FACT", "ACTIVE",
-        "完整正文", "2026-09-05T00:00:00Z", "2026-09-05T00:00:00.123456+00:00",
+    assert memory_statement("RESPONSE_PREFERENCE", "字" * 90000) == ""
+    for title in ("a\nb", "a" * 129, " "):
+        with pytest.raises(ValueError):
+            memory_title(title)
+    stamp = "2026-09-05T00:00:00.123456Z"
+    assert canonical_memory_recorded_at(memory_timestamp(stamp)) == stamp
+    assert memory_timestamp(stamp) == datetime(
+        2026, 9, 5, 0, 0, 0, 123456, tzinfo=timezone.utc
     )
-    record = {
-        "type": "RELATION_EFFECT", "relation_id": "relation:confirmation",
-        "subject": asdict(fact), "companion": asdict(fact),
-        "relative_role": "UPDATES", "recorded_at": fact.recorded_at, "effect": "REMOVED",
-    }
-    assert validate_product_record(record) == record
-    with pytest.raises(ValueError, match="字段不匹配"):
-        validate_product_record({**record, "public_summary": None})

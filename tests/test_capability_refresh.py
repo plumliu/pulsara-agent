@@ -1,7 +1,11 @@
 """Capability changes refresh the actual owners without a separate model notice."""
 
-from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
-from pulsara_agent.identity import random_id as _new_management_call_id
+from tests.support.capability_management_targets import (
+    mcp_target,
+    plugin_target,
+    hook_target,
+)
+
 
 import asyncio
 import json
@@ -16,49 +20,54 @@ from tests.test_capability_management_preparation import preparation, install_pl
 from tests.test_app_capability_boundary import invoke, query_sources, skill_source
 
 
-
-
-@pytest.mark.parametrize('human', [True, False])
+@pytest.mark.parametrize("human", [True, False])
 def test_context_collection_preserves_separate_human_skill_reference_surfaces(human):
     from pulsara_agent.conversation_kernel.context_sources import (
-        ContextSourceRegistry, KernelContextSourceCollector,
+        KernelContextSourceCollector,
     )
     from pulsara_agent.model_input.contracts import CapabilityActivationSubjectKind
 
     class ActivationReached(Exception):
         pass
 
-    surfaces = ('````\n/quoted-skill', '/comment-skill')
-    registry = ContextSourceRegistry()
+    surfaces = ("````\n/quoted-skill", "/comment-skill")
     frozen = SimpleNamespace(
-        candidates=(), absent_facts=(), diagnostics=(),
-        skill_dispatch_view=object(), skill_owner_snapshot=object())
+        candidates=(),
+        diagnostics=(),
+        skill_dispatch_view=object(),
+        skill_owner_snapshot=object(),
+    )
     received = []
+
     def activation_context(*, user_input):
         received.append(user_input)
         raise ActivationReached
+
     collector = object.__new__(KernelContextSourceCollector)
-    collector._registry = registry
-    collector._capability = SimpleNamespace(activation_context=activation_context, compose=lambda **kwargs: None)
+    collector._capability = SimpleNamespace(
+        activation_context=activation_context, compose=lambda **kwargs: None
+    )
     collector.freeze_non_trigger_sources = lambda **kwargs: frozen
     with pytest.raises(ActivationReached):
         collector.collect(
-            activation_subject=(CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT if human
-                else CapabilityActivationSubjectKind.ROOT_NON_HUMAN_TRIGGER),
+            activation_subject=(
+                CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT
+                if human
+                else CapabilityActivationSubjectKind.ROOT_NON_HUMAN_TRIGGER
+            ),
             # This joined text deliberately has a different delimiter scope.
             # Skills must receive the original independent surfaces instead.
-            activation_text='\n'.join(surfaces), skill_reference_surfaces=surfaces,
-            tool_surface=object(), canonical_facts=object(), tool_exposure_plan=object(),
-            skill_dispatch_view=object(), skill_owner_snapshot=object())
+            activation_text="\n".join(surfaces),
+            skill_reference_surfaces=surfaces,
+            tool_surface=object(),
+            canonical_facts=object(),
+            tool_exposure_plan=object(),
+            skill_dispatch_view=object(),
+            skill_owner_snapshot=object(),
+        )
     assert received == [surfaces if human else ()]
     if human:
         assert received[0] is surfaces
-
-
-
-
-
-
 
 
 def test_user_refresh_reaches_live_hosts_and_workspace_refresh_stays_in_scope(tmp_path):
@@ -85,9 +94,12 @@ def test_user_refresh_reaches_live_hosts_and_workspace_refresh_stays_in_scope(tm
         second.request_capability_refresh.assert_awaited_once_with()
         first.request_capability_refresh.reset_mock()
         second.request_capability_refresh.reset_mock()
-        assert await KernelHostCore.mark_capability_change(
-            core, first.workspace.workspace_root
-        ) == 1
+        assert (
+            await KernelHostCore.mark_capability_change(
+                core, first.workspace.workspace_root
+            )
+            == 1
+        )
         first.request_capability_refresh.assert_awaited_once_with()
         second.request_capability_refresh.assert_not_awaited()
 
@@ -120,8 +132,6 @@ def test_queued_gui_skill_cancellation_does_not_start_a_write(tmp_path, monkeypa
     asyncio.run(run())
 
 
-
-
 @pytest.mark.parametrize("damage", ["manifest", "package"])
 def test_damaged_plugin_inspection_remove_and_reinstall_share_native_owner(
     tmp_path, damage
@@ -141,22 +151,25 @@ def test_damaged_plugin_inspection_remove_and_reinstall_share_native_owner(
                 os.chmod(folder, 0o700)
             shutil.rmtree(root)
         detail = await query_sources(
-            service, target={"kind": "PLUGIN", "scope": "USER", "plugin_id": "example"}
+            service,
+            kind="PLUGIN",
+            target=plugin_target(service, "example", scope="USER"),
         )
-        assert detail["status"] == "UNAVAILABLE" and detail["remove_eligible"]
-        assert all(c["count"] is None for c in detail["components"].values())
+        assert detail["meta"]["status"] == "ERROR"
         removed = await invoke(
-            service, action="REMOVE_PLUGIN", target={"kind":'PLUGIN', 'scope':"USER", 'plugin_id':"example"}
+            service,
+            action="REMOVE_PLUGIN",
+            target=plugin_target(service, "example", scope="USER"),
         )
-        assert removed["status"] == "APPLIED"
+        assert removed.state == "SUCCESS"
         assert (tmp_path / "source" / "plugin.json").exists()
         reinstalled = await invoke(
             service,
             action="INSTALL_PLUGIN",
             scope="USER",
-            source_path=str(tmp_path / "source"),
+            target={"kind": "PATH", "path": str(tmp_path / "source")},
         )
-        assert reinstalled["status"] == "APPLIED"
+        assert reinstalled.state == "SUCCESS"
         await service.mcp.aclose()
 
     asyncio.run(run())
@@ -171,21 +184,27 @@ def test_plugin_removal_rejects_a_changed_instance_without_package_health(tmp_pa
         service = preparation(tmp_path)
         await install_plugin(service, tmp_path)
         prepared = await service.prepare(
-            {'action': "REMOVE_PLUGIN", 'target': {"kind": "PLUGIN", 'scope': "USER", 'plugin_id': "example"}}
+            {
+                "action": "REMOVE_PLUGIN",
+                "target": plugin_target(service, "example", scope="USER"),
+            }
         )
         await invoke(
             service,
             action="INSTALL_PLUGIN",
             scope="USER",
-            source_path=str(tmp_path / "source"),
+            target={"kind": "PATH", "path": str(tmp_path / "source")},
             replace=True,
         )
-        result = await CapabilityManagementCall(service, prepared).execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
-        assert result["status"] != "APPLIED"
+        result = await CapabilityManagementCall(service, prepared).execute()
+        assert result.state != "SUCCESS"
         detail = await query_sources(
-            service, target={"kind": "PLUGIN", "scope": "USER", "plugin_id": "example"}
+            service,
+            kind="PLUGIN",
+            target=plugin_target(service, "example", scope="USER"),
         )
-        assert detail["enabled"] is False
+        assert detail["meta"]["status"] == "SUCCESS"
+        assert not (await service._plugin(None, "example")).enabled
         await service.mcp.aclose()
 
     asyncio.run(run())
@@ -235,13 +254,14 @@ def test_enabled_damaged_plugin_keeps_process_effect_and_cleans_only_owned_crede
             other.owner, ((other, "fixture-workspace-secret"),)
         )
         prepared = await service.prepare(
-            {'action': "REMOVE_PLUGIN", 'target': {"kind": "PLUGIN", 'scope': "USER", 'plugin_id': "example"}}
+            {
+                "action": "REMOVE_PLUGIN",
+                "target": plugin_target(service, "example", scope="USER"),
+            }
         )
         assert prepared.effects.process_control
-        result = await CapabilityManagementCall(service, prepared).execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
-        assert (
-            result["status"] == "APPLIED" and not result["current"]["cleanup_attention"]
-        )
+        result = await CapabilityManagementCall(service, prepared).execute()
+        assert result.state == "SUCCESS" and result.changed
         assert service.mcp.settings.read().mcp_secret(binding) is None
         assert (
             service.mcp.settings.read().mcp_secret(other) == "fixture-workspace-secret"
@@ -265,11 +285,14 @@ def test_loose_skill_damage_uses_directory_identity_and_ordinary_install(
         service = preparation(tmp_path)
         source = skill_source(tmp_path)
         result = await invoke(
-            service, action="INSTALL_LOOSE_SKILL", scope="USER", source_path=str(source)
+            service,
+            action="INSTALL_LOOSE_SKILL",
+            scope="USER",
+            target={"kind": "PATH", "path": str(source)},
         )
         from pathlib import Path
 
-        path = Path(result["target"]["skill_path"])
+        path = Path(result.business_value.public_fields["target"]["skill_path"])
         if damage == "missing_directory":
             shutil.rmtree(path.parent)
         elif damage == "missing_document":
@@ -277,25 +300,26 @@ def test_loose_skill_damage_uses_directory_identity_and_ordinary_install(
         else:
             path.write_text("bad document")
         detail = await query_sources(
-            service, target={"kind": "SKILL", "skill_path": str(path)}
+            service, kind="SKILL", target={"kind": "SKILL", "skill_path": str(path)}
         )
         if damage == "missing_directory":
-            assert not detail["directory_exists"] and not detail["remove_eligible"]
+            assert detail["meta"]["status"] == "ERROR" and not path.parent.exists()
         else:
             assert (
                 await invoke(
                     service,
-                    action="REMOVE_LOOSE_SKILL", target={"kind":'SKILL', 'skill_path':str(path)},
+                    action="REMOVE_LOOSE_SKILL",
+                    target={"kind": "SKILL", "skill_path": str(path)},
                 )
-            )["status"] == "APPLIED"
+            ).state == "SUCCESS"
         assert (
             await invoke(
                 service,
                 action="INSTALL_LOOSE_SKILL",
                 scope="USER",
-                source_path=str(source),
+                target={"kind": "PATH", "path": str(source)},
             )
-        )["status"] == "APPLIED"
+        ).state == "SUCCESS"
         await service.mcp.aclose()
 
     asyncio.run(run())
@@ -309,29 +333,41 @@ def test_missing_mcp_config_uses_add_without_an_artificial_remove(tmp_path, miss
             service.mcp.user_config_path.write_text("servers: {}\n")
         result = await invoke(
             service,
-            action="ADD_LOCAL_MCP", config={"transport": {"type": "stdio", "command": "/missing/demo"}}, target={"kind":'MCP_CONNECTION', 'scope':"USER", 'source_kind':'LOCAL', 'server_id':"demo"},
+            action="ADD_LOCAL_MCP",
+            config={"transport": {"type": "stdio", "command": "/missing/demo"}},
+            target=mcp_target(service, "demo", scope="USER"),
         )
-        assert result["status"] == "APPLIED"
+        assert result.state == "SUCCESS"
         assert (
             await invoke(
-                service, action="REMOVE_LOCAL_MCP", target={"kind":'MCP_CONNECTION', 'scope':"USER", 'source_kind':'LOCAL', 'server_id':"demo"}
+                service,
+                action="REMOVE_LOCAL_MCP",
+                target=mcp_target(service, "demo", scope="USER"),
             )
-        )["status"] == "APPLIED"
+        ).state == "SUCCESS"
         service.mcp.user_config_path.write_text("servers: [")
         with pytest.raises(ParserError):
             await service.prepare(
-                {'action': "ADD_LOCAL_MCP", 'config': {
+                {
+                    "action": "ADD_LOCAL_MCP",
+                    "config": {
                         "transport": {"type": "stdio", "command": "/missing/demo"}
-                    }, 'target': {"kind": "MCP_CONNECTION", 'scope': "USER", 'source_kind': 'LOCAL', 'server_id': "demo"}}
+                    },
+                    "target": mcp_target(service, "demo", scope="USER"),
+                }
             )
-        from pulsara_agent.capability.source_query import CapabilityQueryError
 
-        with pytest.raises(CapabilityQueryError) as unavailable:
-            await query_sources(
-                service,
-                target={'kind': "MCP_CONNECTION", 'source_kind': "LOCAL", 'scope': "USER", 'server_id': "demo"},
-            )
-        assert unavailable.value.code == "SOURCE_OBSERVATION_UNAVAILABLE"
+        unavailable = await query_sources(
+            service, kind="MCP", target=mcp_target(service, "demo", scope="USER")
+        )
+        assert unavailable["meta"]["status"] == "ERROR"
+        assert any(
+            "servers" in item["value"]
+            and str(service.mcp.user_config_path) in item["value"]
+            and "line 1, column 11" in item["value"]
+            for item in unavailable["content"]
+            if item["type"] == "text"
+        )
         assert service.mcp.user_config_path.read_text() == "servers: ["
         await service.mcp.aclose()
 
@@ -361,25 +397,20 @@ def test_local_hook_damage_reuses_disable_and_revoke_without_granting_trust(
             {"action": "SET_HOOK_SOURCE_ENABLED", "enabled": False},
         ):
             result = await invoke(
-                service, target={"kind": "HOOK_SOURCE", "scope": "USER", "source_kind": "LOCAL"}, **arguments
+                service, target=hook_target(service, scope="USER"), **arguments
             )
-            assert result["status"] == "APPLIED"
-            if arguments["action"] == "SET_HOOK_SOURCE_ENABLED":
-                assert result["current"]["enabled"] is False
-            else:
-                assert result["current"]["trust_revoked"] is True
+            assert result.state == "SUCCESS"
+            assert result.changed
         assert all(
             not source.runnable for source in service.hooks.discover().source_snapshots
         )
         if damage == "bad_json":
             detail = await query_sources(
                 service,
-                target={"kind": "HOOK_SOURCE", "scope": "USER", "source_kind": "LOCAL"},
+                kind="HOOK",
+                target=hook_target(service, scope="USER"),
             )
-            assert (
-                detail["enabled"] is None
-                and detail["source_disposition"] == "UNAVAILABLE"
-            )
+            assert detail["meta"]["status"] == "ERROR"
             assert path.read_text() == "{bad"
         await service.mcp.aclose()
 
@@ -387,9 +418,15 @@ def test_local_hook_damage_reuses_disable_and_revoke_without_granting_trust(
 
 
 @pytest.mark.parametrize("kind", ["mcp", "skill"])
-def test_user_capability_toggles_use_the_real_core_deadline(tmp_path, monkeypatch, kind):
+def test_user_capability_toggles_use_the_real_core_deadline(
+    tmp_path, monkeypatch, kind
+):
     from pathlib import Path
-    from pulsara_agent.capability.mcp_management import LocalMcpTarget, config_guard, config_to_entry
+    from pulsara_agent.capability.mcp_management import (
+        LocalMcpTarget,
+        config_guard,
+        config_to_entry,
+    )
     from pulsara_agent.capability.user_skill_config import load_user_skill_config
     from tests.test_project_capability_management import _controller_with_sessions
 
@@ -398,43 +435,71 @@ def test_user_capability_toggles_use_the_real_core_deadline(tmp_path, monkeypatc
     monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "pulsara"))
     skill = home / ".agents/skills/demo/SKILL.md"
     skill.parent.mkdir(parents=True)
-    skill.write_text("---\nname: demo\ndescription: Installed user skill.\n---\nRead the supplied material.\n")
+    skill.write_text(
+        "---\nname: demo\ndescription: Installed user skill.\n---\nRead the supplied material.\n"
+    )
 
     async def run():
         workspace = tmp_path / "workspace"
         workspace.mkdir()
-        controller, _, host, sibling, other = _controller_with_sessions(workspace, tmp_path / "other")
+        controller, _, host, sibling, other = _controller_with_sessions(
+            workspace, tmp_path / "other"
+        )
         controller.inspect_user_capabilities = AsyncMock(return_value={})
         manager = controller.core.mcp_management
         target = LocalMcpTarget("demo")
         try:
             if kind == "mcp":
-                await manager.create(target, {"transport": {"type": "streamable_http", "endpoint": "https://example.org/mcp"}})
+                await manager.create(
+                    target,
+                    {
+                        "transport": {
+                            "type": "streamable_http",
+                            "endpoint": "https://example.org/mcp",
+                        }
+                    },
+                )
             for enabled in (False, True):
                 if kind == "mcp":
                     current = manager.inspect(target)
                     entry = {**config_to_entry(current), "enabled": enabled}
                     outcome = await controller.update_user_mcp_server(
-                        server_id=target.server_id, config=entry, expected=config_guard(current),
+                        server_id=target.server_id,
+                        config=entry,
+                        expected=config_guard(current),
                     )
                     assert manager.inspect(target).enabled is enabled
                 else:
-                    outcome = await controller.set_user_skill_enabled(skill_path=str(skill), enabled=enabled)
+                    outcome = await controller.set_user_skill_enabled(
+                        skill_path=str(skill), enabled=enabled
+                    )
                     assert load_user_skill_config().enabled_for(skill) is enabled
                 assert outcome["operation"]["success"]
                 assert outcome["adoption"]["pending_sessions"] == 3
-            assert (host.refresh_requests, sibling.refresh_requests, other.refresh_requests) == (2, 2, 2)
+            assert (
+                host.refresh_requests,
+                sibling.refresh_requests,
+                other.refresh_requests,
+            ) == (2, 2, 2)
         finally:
             await manager.aclose()
 
     asyncio.run(run())
 
 
-def test_gui_mcp_create_and_remove_preserves_credential_ownership(tmp_path, monkeypatch):
+def test_gui_mcp_create_and_remove_preserves_credential_ownership(
+    tmp_path, monkeypatch
+):
     from pulsara_agent.capability.mcp_management import (
-        LocalMcpTarget, McpSecretMutation, config_guard,
+        LocalMcpTarget,
+        McpSecretMutation,
+        config_guard,
     )
-    from pulsara_agent.mcp_credentials import McpCredentialBinding, ManagedLocalCredentialReference, secret_to_dict
+    from pulsara_agent.mcp_credentials import (
+        McpCredentialBinding,
+        ManagedLocalCredentialReference,
+        secret_to_dict,
+    )
     from tests.test_project_capability_management import _controller_with_sessions
 
     monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "home"))
@@ -442,7 +507,9 @@ def test_gui_mcp_create_and_remove_preserves_credential_ownership(tmp_path, monk
     async def run():
         workspace = tmp_path / "workspace"
         workspace.mkdir()
-        controller, _, host, _, _ = _controller_with_sessions(workspace, tmp_path / "other")
+        controller, _, host, _, _ = _controller_with_sessions(
+            workspace, tmp_path / "other"
+        )
         controller.inspect_user_capabilities = AsyncMock(return_value={})
         host.request_capability_refresh = AsyncMock()
         manager = controller.core.mcp_management
@@ -455,8 +522,16 @@ def test_gui_mcp_create_and_remove_preserves_credential_ownership(tmp_path, monk
             server_id=server_id,
             config={
                 "enabled": False,
-                "transport": {"type": "streamable_http", "endpoint": "https://example.org/mcp"},
-                "auth": {"type": "bearer", "reference": secret_to_dict(ManagedLocalCredentialReference(binding))},
+                "transport": {
+                    "type": "streamable_http",
+                    "endpoint": "https://example.org/mcp",
+                },
+                "auth": {
+                    "type": "bearer",
+                    "reference": secret_to_dict(
+                        ManagedLocalCredentialReference(binding)
+                    ),
+                },
             },
             secret_changes=(McpSecretMutation(binding, secret),),
         )
@@ -464,7 +539,8 @@ def test_gui_mcp_create_and_remove_preserves_credential_ownership(tmp_path, monk
         assert secret not in json.dumps(created)
         host.request_capability_refresh.assert_awaited_once_with()
         removed = await controller.remove_user_mcp_server(
-            server_id=server_id, expected=config_guard(manager.inspect(target)),
+            server_id=server_id,
+            expected=config_guard(manager.inspect(target)),
         )
         assert secret not in json.dumps(removed)
         assert manager.settings.read().mcp_secret(binding) is None
@@ -474,7 +550,10 @@ def test_gui_mcp_create_and_remove_preserves_credential_ownership(tmp_path, monk
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("damage", ["bad_definition", "bad_trust", "unreadable_trust", "untrusted", "disabled"])
+@pytest.mark.parametrize(
+    "damage",
+    ["bad_definition", "bad_trust", "unreadable_trust", "untrusted", "disabled"],
+)
 def test_hook_model_projections_share_unknown_enablement(tmp_path, damage):
     from pulsara_agent.hooks.contracts import HookSourceKind
     from pulsara_agent.hooks.presentation import hook_snapshot_model_public
@@ -493,20 +572,51 @@ def test_hook_model_projections_share_unknown_enablement(tmp_path, damage):
             else:
                 trust_path.mkdir()
         elif damage == "disabled":
-            await invoke(service, action="SET_HOOK_SOURCE_ENABLED", enabled=False, target={"kind":'HOOK_SOURCE', 'scope':"USER", 'source_kind':"LOCAL"})
+            await invoke(
+                service,
+                action="SET_HOOK_SOURCE_ENABLED",
+                enabled=False,
+                target=hook_target(service, scope="USER"),
+            )
         view = service.hooks.discover()
-        snapshot = next(s for s in view.source_snapshots if s.provenance.identity.kind is HookSourceKind.USER_FILE)
-        expected = True if damage == "untrusted" else False if damage == "disabled" else None
+        snapshot = next(
+            s
+            for s in view.source_snapshots
+            if s.provenance.identity.kind is HookSourceKind.USER_FILE
+        )
+        expected = (
+            True if damage == "untrusted" else False if damage == "disabled" else None
+        )
         # Check the damaged state BEFORE mutation can replace its trust rows.
-        detail = await query_sources(service, target={"kind": "HOOK_SOURCE", "scope": "USER", "source_kind": "LOCAL"})
-        assert detail["enabled"] is expected
+        detail = await query_sources(
+            service, kind="HOOK", target=hook_target(service, scope="USER")
+        )
+        status = next(
+            item["value"]["status"]
+            for item in detail["content"]
+            if item["type"] == "object"
+        )
+        assert (
+            "已启用" in status
+            if expected is True
+            else "已停用" in status
+            if expected is False
+            else "未知" in status
+        )
         assert hook_snapshot_model_public(snapshot)["enabled"] is expected
         host = SimpleNamespace(
             _hooks=SimpleNamespace(reload=AsyncMock(return_value=view)),
-            _lock=asyncio.Lock(), _closing=False, _closed=False,
+            _lock=asyncio.Lock(),
+            _closing=False,
+            _closed=False,
         )
         reloaded = await KernelHostSession.reload_hooks(host, deadline_monotonic=None)
-        assert next(s for s in reloaded["sources"] if s["source"] == "USER_FILE")["enabled"] is expected
+        assert (
+            next(s for s in reloaded["sources"] if s["source"] == "USER_FILE")[
+                "enabled"
+            ]
+            is expected
+        )
         assert not snapshot.runnable
         await service.mcp.aclose()
 
@@ -514,7 +624,9 @@ def test_hook_model_projections_share_unknown_enablement(tmp_path, damage):
 
 
 @pytest.mark.parametrize("secret", ["status", "RELOADED", "USER_FILE"])
-def test_reload_status_protocol_is_fixed_and_source_paths_are_dynamic(tmp_path, monkeypatch, secret):
+def test_reload_status_protocol_is_fixed_and_source_paths_are_dynamic(
+    tmp_path, monkeypatch, secret
+):
     import pulsara_agent.conversation_kernel.host as host_module
     from pulsara_agent.hooks.executor import HookSecretScrubSet
 
@@ -523,13 +635,22 @@ def test_reload_status_protocol_is_fixed_and_source_paths_are_dynamic(tmp_path, 
         scrub = HookSecretScrubSet()
         scrub.observe(secret)
         monkeypatch.setattr(host_module.HookSecretScrubSet, "capture", lambda: scrub)
-        host = SimpleNamespace(_hooks=SimpleNamespace(reload=AsyncMock(return_value=service.hooks.discover())),
-                               _lock=asyncio.Lock(), _closing=False, _closed=False)
+        host = SimpleNamespace(
+            _hooks=SimpleNamespace(
+                reload=AsyncMock(return_value=service.hooks.discover())
+            ),
+            _lock=asyncio.Lock(),
+            _closing=False,
+            _closed=False,
+        )
         result = await KernelHostSession.reload_hooks(host, deadline_monotonic=None)
         assert result["status"] == "RELOADED"
-        assert next(source for source in result["sources"] if source["source"] == "USER_FILE")
+        assert next(
+            source for source in result["sources"] if source["source"] == "USER_FILE"
+        )
         assert all(secret not in source["path"] for source in result["sources"])
         await service.mcp.aclose()
+
     asyncio.run(run())
 
 
@@ -539,16 +660,41 @@ def test_saved_credential_projection_preserves_public_context():
     from tests.support.model_config import test_model_runtime as runtime
 
     settings = runtime(api_key="fixture-model-key").settings.read()
-    settings = replace(settings, mcp_oauth=(LocalMcpOAuthRecord(
-        McpCredentialOwner("local", "USER", "demo"), "https://example.org/mcp",
-        "https://issuer.example", "public-client", "read",
-        json.dumps({"access_token": "fixture-access", "refresh_token": "fixture-refresh", "scope": "public-scope"}),
-        json.dumps({"client_id": "public-client", "client_secret": "fixture-client-secret"}),
-        auth_json=json.dumps({"nested": [{"id_token": "fixture-id-token"}]}),
-    ),))
+    settings = replace(
+        settings,
+        mcp_oauth=(
+            LocalMcpOAuthRecord(
+                McpCredentialOwner("local", "USER", "demo"),
+                "https://example.org/mcp",
+                "https://issuer.example",
+                "public-client",
+                "read",
+                json.dumps(
+                    {
+                        "access_token": "fixture-access",
+                        "refresh_token": "fixture-refresh",
+                        "scope": "public-scope",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "client_id": "public-client",
+                        "client_secret": "fixture-client-secret",
+                    }
+                ),
+                auth_json=json.dumps({"nested": [{"id_token": "fixture-id-token"}]}),
+            ),
+        ),
+    )
     scrub = settings.credential_scrub_set()
     public = "https://example.org/mcp public-client public-scope"
-    secrets = ("fixture-model-key", "fixture-access", "fixture-refresh", "fixture-client-secret", "fixture-id-token")
+    secrets = (
+        "fixture-model-key",
+        "fixture-access",
+        "fixture-refresh",
+        "fixture-client-secret",
+        "fixture-id-token",
+    )
     projected = scrub.scrub_text(public + " " + " ".join(secrets))
     assert all(secret not in projected for secret in secrets)
     assert public in projected
@@ -570,10 +716,14 @@ def test_unavailable_settings_do_not_gate_hook_mutation(tmp_path, monkeypatch):
         _canonical_deadline=lambda: monotonic() + 5,
         mark_capability_change=AsyncMock(return_value=0),
     )
-    controller = LocalSessionController(core=core, permission_policy=None, active_skill_names=frozenset())
+    controller = LocalSessionController(
+        core=core, permission_policy=None, active_skill_names=frozenset()
+    )
 
     async def run():
-        outcome = await controller.save_user_hook_config(exists=False, expected_text="", text='{"hooks":{}}')
+        outcome = await controller.save_user_hook_config(
+            exists=False, expected_text="", text='{"hooks":{}}'
+        )
         assert outcome["status"] == "APPLIED"
         assert (tmp_path / "hooks.json").read_text() == '{"hooks":{}}'
         core.mark_capability_change.assert_awaited_once_with(None)
@@ -581,7 +731,9 @@ def test_unavailable_settings_do_not_gate_hook_mutation(tmp_path, monkeypatch):
     asyncio.run(run())
 
 
-def test_queued_native_remove_cleans_credentials_added_while_waiting(tmp_path, monkeypatch):
+def test_queued_native_remove_cleans_credentials_added_while_waiting(
+    tmp_path, monkeypatch
+):
     from pulsara_agent.capability.mcp_management import LocalMcpTarget, config_guard
     from pulsara_agent.mcp_credentials import McpCredentialBinding
     from tests.test_project_capability_management import _controller_with_sessions
@@ -591,23 +743,37 @@ def test_queued_native_remove_cleans_credentials_added_while_waiting(tmp_path, m
     async def run():
         workspace = tmp_path / "workspace"
         workspace.mkdir()
-        controller, _, host, _, _ = _controller_with_sessions(workspace, tmp_path / "other")
+        controller, _, host, _, _ = _controller_with_sessions(
+            workspace, tmp_path / "other"
+        )
         controller.inspect_user_capabilities = AsyncMock(return_value={})
         host.request_capability_refresh = AsyncMock()
         manager = controller.core.mcp_management
         secret = "fixture-secret-created-while-queued"
         server_id = "demo-" + secret
         target = LocalMcpTarget(server_id)
-        await manager.create(target, {"enabled": False, "transport": {"type": "stdio", "command": "/missing/demo"}})
+        await manager.create(
+            target,
+            {
+                "enabled": False,
+                "transport": {"type": "stdio", "command": "/missing/demo"},
+            },
+        )
         async with manager.lane:
-            remove = asyncio.create_task(controller.remove_user_mcp_server(server_id=server_id, expected=config_guard(manager.inspect(target))))
+            remove = asyncio.create_task(
+                controller.remove_user_mcp_server(
+                    server_id=server_id, expected=config_guard(manager.inspect(target))
+                )
+            )
             while not manager.lane._waiters:
                 await asyncio.sleep(0)
             assert not remove.done()
             # A secret installed while REMOVE is queued still belongs to the
             # exact owner selected by the native removal.
             binding = McpCredentialBinding(target.owner, "bearer")
-            await manager.settings.replace_mcp_secrets(target.owner, ((binding, secret),))
+            await manager.settings.replace_mcp_secrets(
+                target.owner, ((binding, secret),)
+            )
         result = await remove
         assert result["operation"]["success"]
         assert secret not in json.dumps(result)

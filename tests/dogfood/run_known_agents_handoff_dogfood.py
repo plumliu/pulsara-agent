@@ -42,14 +42,14 @@ from pulsara_agent.storage.migrations.runner import PostgresMigrationRunner
 from pulsara_agent.workspace_identity import HostWorkspaceInput
 from tests.dogfood.credentials import secret_scrubber
 from tests.dogfood.run_compaction_request_start_dogfood import _rows
-from tests.dogfood.run_content_revision_line_edit_dogfood import _tool_trace, _settle_code_mode_phase
+from tests.support.dogfood_results import _tool_trace, _settle_code_mode_phase
 from tests.dogfood.run_model_switch_handover_dogfood import (
     _ReadOnlySettingsStore,
     _RecordingModelRuntime,
     _RecordingTransport,
 )
 
-DEST = Path("output/known-agents-implementation-20261030/provider.json")
+DEST = Path("output/hardcut-20261116/code-mode-agents/known-agents-provider.json")
 
 
 class HeldExecution:
@@ -238,14 +238,18 @@ async def run(admin_root, runtime_root, selected_wire=None):
                             await root.update_model_call_binding(binding)
 
                             async def turn(text):
-                                trace_start = len(await asyncio.to_thread(_tool_trace, root))
+                                trace_start = len(
+                                    await asyncio.to_thread(_tool_trace, root)
+                                )
                                 result = await root.run_turn(
                                     PromptContent.text(text),
                                     command_id=random_id("command"),
                                     requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
                                 )
                                 case.setdefault("cell_outputs", []).extend(
-                                    await _settle_code_mode_phase(root, trace_start=trace_start)
+                                    await _settle_code_mode_phase(
+                                        root, trace_start=trace_start
+                                    )
                                 )
                                 return result
 
@@ -258,17 +262,28 @@ async def run(admin_root, runtime_root, selected_wire=None):
 
                             async def create(work_title, instruction):
                                 before = set(await ids())
-                                assignments = [{"work_title": work_title, "instruction": instruction}]
+                                assignments = [
+                                    {
+                                        "work_title": work_title,
+                                        "instruction": instruction,
+                                    }
+                                ]
                                 result = await turn(
                                     "Use exec_cell to call tools.run_agent exactly once with this one-element assignment array: "
                                     + json.dumps(assignments, ensure_ascii=False)
-                                    + " Log the returned agents and works arrays with console.log, observe that output, then reply briefly after acceptance. Do not wait for the child to finish."
+                                    + " Log the complete returned meta/content value with console.log, observe that output, then reply briefly after acceptance. Do not wait for the child to finish."
                                 )
                                 after = set(await ids())
                                 case.setdefault("creation_attempts", []).append(
-                                    {"work_title": work_title, "reply": result.final_text, "new_agents": list(after - before)}
+                                    {
+                                        "work_title": work_title,
+                                        "reply": result.final_text,
+                                        "new_agents": list(after - before),
+                                    }
                                 )
-                                assert len(after - before) == 1, f"{work_title}: expected one admitted Agent, got {list(after - before)}"
+                                assert len(after - before) == 1, (
+                                    f"{work_title}: expected one admitted Agent, got {list(after - before)}"
+                                )
                                 return (after - before).pop()
 
                             c = await create(
@@ -322,8 +337,6 @@ async def run(admin_root, runtime_root, selected_wire=None):
                             child._compaction.policy = ResolvedCompactionPolicy(
                                 automatic_enabled=True,
                                 auto_trigger_ratio=ratio * 0.95,
-
-
                             )
                             case.update(
                                 root=root.session_id, a=a, b=b, c=c, before_usage=usage
@@ -354,12 +367,20 @@ async def run(admin_root, runtime_root, selected_wire=None):
                             child._runner.compaction.execute_active = observed
                             followup = (
                                 "Use native query_agents without a target to recover your teammate, then query that AGENT to find its current WORK and query that WORK for its instruction and status. "
-                                "Send that teammate an actual native send_agent_message saying HANDOFF_HELLO. Also use the returned ROOT alias to send ROOT the message ROOT_ALIAS_HELLO. Reply briefly after the tool results."
+                                "Send that teammate an actual native send_agent_message saying HANDOFF_HELLO. Also use the AGENT target with agent_id ROOT to send ROOT the message ROOT_ALIAS_HELLO. Reply briefly after the tool results."
                             )
                             await turn(
                                 "Use exec_cell to call tools.run_agent exactly once with this one-element assignment array to assign a new Work to the existing Agent: "
-                                + json.dumps([{"target": {"kind": "AGENT", "agent_id": a}, "instruction": followup}], ensure_ascii=False)
-                                + " Log the returned agents and works arrays with console.log, observe that output, then reply briefly after acceptance."
+                                + json.dumps(
+                                    [
+                                        {
+                                            "target": {"kind": "AGENT", "agent_id": a},
+                                            "instruction": followup,
+                                        }
+                                    ],
+                                    ensure_ascii=False,
+                                )
+                                + " Log the complete returned meta/content value with console.log, observe that output, then reply briefly after acceptance."
                             )
 
                             async def second_done():
@@ -447,38 +468,63 @@ async def run(admin_root, runtime_root, selected_wire=None):
                             assert listings and any(
                                 b in json.dumps(x["result"])
                                 and c not in json.dumps(x["result"])
-                                and "ROOT" in json.dumps(x["result"])
                                 for x in listings
                             ), listings
                             b_work = next(
                                 item["current_work"]["work_id"]
                                 for entry in listings
-                                for item in entry["result"]["agents"]
-                                if item["agent"]["agent_id"] == b
+                                for part in entry["result"]["content"]
+                                if part["type"] == "object"
+                                for item in (part["value"],)
+                                if item["target"]["agent_id"] == b
                             )
                             assert any(
                                 x["tool_name"] == "query_agents"
                                 and x["arguments"].get("target", {}).get("kind")
                                 == "WORK"
                                 and x["arguments"]["target"]["work_id"] == b_work
-                                and x["result"].get("status") == "running"
+                                and any(
+                                    part["type"] == "object"
+                                    and part["value"]["work_status"] == "running"
+                                    for part in x["result"]["content"]
+                                )
                                 for x in trace
                             ), trace
                             assert any(
                                 x["tool_name"] == "send_agent_message"
                                 and x["arguments"].get("target", {}).get("agent_id")
                                 == b
-                                and "queued" in json.dumps(x["result"])
+                                and x["arguments"]["message"] == "HANDOFF_HELLO"
+                                and x["result"]["meta"]["status"] == "SUCCESS"
                                 for x in trace
                             ), trace
                             assert any(
                                 x["tool_name"] == "send_agent_message"
                                 and x["arguments"].get("target", {}).get("agent_id")
                                 == "ROOT"
-                                and x["result"]["recipient"]["agent_id"]
-                                == root.session_id
+                                and x["arguments"]["message"] == "ROOT_ALIAS_HELLO"
+                                and x["result"]["meta"]["status"] == "SUCCESS"
                                 for x in trace
                             ), trace
+                            case["messages"] = _rows(
+                                root,
+                                "SELECT id,session_id,source_session_id,target_turn_id,status "
+                                "FROM pulsara_v3.prompt_queue_items WHERE source_session_id=%s "
+                                "AND input_origin='AGENT_MESSAGE' ORDER BY session_id,queue_sequence",
+                                (a,),
+                            )
+                            assert {row["session_id"] for row in case["messages"]} == {
+                                b,
+                                root.session_id,
+                            }, case["messages"]
+                            assert all(
+                                row["target_turn_id"]
+                                and row["status"] in {"PENDING", "CONSUMED"}
+                                for row in case["messages"]
+                            )
+                            assert len({row["agent_id"] for row in case["works"]}) == 1
+                            assert all(row["agent_id"] == a for row in case["works"])
+                            assert len({row["work_id"] for row in case["works"]}) == 2
                             case["status"] = "passed"
                     except Exception as error:
                         case["status"] = "failed"

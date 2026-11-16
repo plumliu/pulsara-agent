@@ -976,6 +976,7 @@ def test_project_mcp_transition_keeps_one_editable_row(tmp_path: Path) -> None:
         root_policy=producer.prepare_root_policy(workspace),
         winners=(),
         candidate_issues=(),
+        readable_skills=(),
     )
     _write_config_fixture(
         workspace_root=workspace,
@@ -1053,6 +1054,7 @@ def test_disabled_workspace_mcp_does_not_hide_the_effective_user_server(
         root_policy=producer.prepare_root_policy(workspace),
         winners=(),
         candidate_issues=(),
+        readable_skills=(),
     )
     _write_config_fixture(
         workspace_root=workspace,

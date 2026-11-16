@@ -2,7 +2,7 @@
 
 共用规则见[原生工具修订草案索引](../PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 1、2 章；完整保存、原生 12k／NEXT 和 JS 完整返回沿[统一交付草案](../PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)，有序内容、图片资产及引用读取沿[数据库 hardcut 草案](../PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md)。
 
-状态：讨论草案，未实施。本族四个工具的参数、完整业务值、原生示例及错误语义均在本文件确定。view_image、read_video_frames、read_transcript 提供 ROOT 原生入口和 Code Mode JS API；annotate_media 仅 ROOT 原生，不提供 JS API。本族不向 subagent 开放，不改变 Code Mode 的既有权限模式。本轮只改文档。
+状态：当前合同已接入生产代码，正在完成 hardcut 跨层验收；正常使用仍按实施计划停用。本族四个工具的参数、完整业务值、原生示例及错误语义均在本文件确定。view_image、read_video_frames、read_transcript 提供 ROOT 原生入口和 Code Mode JS API；annotate_media 仅 ROOT 原生，不提供 JS API。本族不向 subagent 开放，不改变 Code Mode 的既有权限模式。
 
 ## 1. view_image：读取图片或静态渲染结果
 

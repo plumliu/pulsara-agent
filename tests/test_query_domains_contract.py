@@ -1,29 +1,20 @@
-"""Query branches share native schemas and preserve their existing domain owners."""
-
-from pulsara_agent.identity import derive_id as _capability_page_id
-from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
-
+"""Current query branches retain exact scope and independent domain owners."""
 
 import asyncio
-import json
 from types import SimpleNamespace as NS
-from unittest.mock import ANY, AsyncMock
-
+from unittest.mock import AsyncMock
 import pytest
 from jsonschema import Draft202012Validator
-
-from pulsara_agent.capability.source_query import (
-    CapabilityQueryError,
-    parse_query,
-    query_input_schema,
-)
+from pulsara_agent.capability.source_query import parse_query, query_input_schema
 from pulsara_agent.conversation_kernel.capability_query import CapabilitySourceQuery
-from pulsara_agent.conversation_kernel.subagents.collaboration_api import CollaborationToolPort
+from pulsara_agent.conversation_kernel.subagents.collaboration_api import (
+    CollaborationToolPort,
+)
 from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import (
     agent_target,
+    work_target,
     query_agents_input_schema,
     validate_collaboration_parameters,
-    work_target,
 )
 from pulsara_agent.identity import derive_id
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
@@ -31,16 +22,12 @@ from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.scheduling.contracts import ScheduledTaskError
 from pulsara_agent.scheduling.requests import (
     creation_status,
-    manage_schedule_schema,
     query_schedules_schema,
     schedule_target,
     validate_action,
     validate_query,
 )
 from pulsara_agent.scheduling.service import ScheduledTaskService
-
-_CAPABILITY_PAGE_BUDGET = ToolResultPageBudget(_capability_page_id("call", "capability-query-test", __name__))
-
 
 ROOT = derive_id("session", "query-domains", "root")
 AGENT = derive_id("session", "query-domains", "agent")
@@ -51,201 +38,272 @@ VALUES = {
     "name": "Review",
     "prompt": "Review the current changes.",
     "timezone": "Asia/Shanghai",
-    "permission_mode": "read-only",
-    "schedule": {
-        "kind": "daily",
-        "start_date": "2030-01-01",
-        "time": "09:00",
-    },
+    "schedule": {"kind": "daily", "start_date": "2030-01-01", "time": "09:00"},
 }
 
 
-@pytest.mark.parametrize("schema,parse,valid,invalid", [
-    (
-        query_input_schema(), parse_query,
-        [{}, {"limit": 1}, {"parent": {"kind": "MCP_SERVER", "runtime_server_id": derive_id("mcp-server", "query-domains", "server")}},
-         {"target": {"kind": "MCP_TOOL", "server_id": "s", "tool_name": "t"}}],
-        [{"target": None}, {"action": "list"},
-         {"target": {"kind": "MCP_SERVER", "runtime_server_id": derive_id("mcp-server", "query-domains", "server")}, "limit": 1},
-         {"target": {"kind": "MCP_SERVER", "runtime_server_id": derive_id("mcp-server", "query-domains", "server")}, "parent": {"kind": "PLUGIN", "scope": "USER", "plugin_id": "p"}}],
-    ),
-    (
-        query_agents_input_schema(), lambda a: validate_collaboration_parameters("query_agents", a),
-        [{}, {"max_items": 50}, {"target": agent_target(AGENT), "max_items": 1}, {"target": work_target(WORK)}],
-        [{"target": None}, {"action": "list"}, {"target": work_target(WORK), "cursor": WORK},
-         {"target": work_target(WORK), "max_items": 1}, {"max_items": True}, {"max_items": 51}],
-    ),
-    (
-        query_schedules_schema(), validate_query,
-        [{}, {"session": None}, {"status": "ACTIVE", "cursor": SCHEDULE}, {"target": schedule_target(SCHEDULE)}],
-        [{"target": None}, {"action": "list"}, {"status": None},
-         {"target": schedule_target(SCHEDULE), "session": None},
-         {"target": schedule_target(SCHEDULE), "cursor": SCHEDULE}],
-    ),
-])
-def test_query_schemas_and_parsers_reject_cross_branch_fields(schema, parse, valid, invalid):
-    Draft202012Validator.check_schema(schema)
+@pytest.mark.parametrize(
+    "schema,parse,valid,invalid",
+    [
+        (
+            query_input_schema(),
+            parse_query,
+            [
+                {"kind": "MCP"},
+                {"kind": "PLUGIN"},
+                {"kind": "SKILL", "scope": "USER"},
+                {
+                    "kind": "MCP",
+                    "target": {
+                        "kind": "MCP_TOOL",
+                        "server_id":"docs", "remote_tool_name":"read",
+                    },
+                },
+            ],
+            [{}, {"kind": "MCP", "limit": 1}, {"kind": "MCP", "target": None}],
+        ),
+        (
+            query_agents_input_schema(),
+            lambda a: validate_collaboration_parameters("query_agents", a),
+            [{}, {"target": agent_target(AGENT)}, {"target": work_target(WORK)}],
+            [
+                {"target": None},
+                {"max_items": 50},
+                {"target": work_target(WORK), "cursor": WORK},
+            ],
+        ),
+        (
+            query_schedules_schema(),
+            validate_query,
+            [{}, {"status": "ALL"}, {"target": schedule_target(SCHEDULE)}],
+            [
+                {"session": None},
+                {"status": None},
+                {"target": schedule_target(SCHEDULE), "status": "ACTIVE"},
+            ],
+        ),
+    ],
+)
+def test_query_schemas_and_parsers_reject_cross_branch_fields(
+    schema, parse, valid, invalid
+):
     validator = Draft202012Validator(schema)
-    for arguments in valid:
-        assert validator.is_valid(arguments), arguments
-        parse(arguments)
-    for arguments in invalid:
-        assert not validator.is_valid(arguments), arguments
+    for args in valid:
+        assert validator.is_valid(args)
+        parse(args)
+    for args in invalid:
+        assert not validator.is_valid(args)
         with pytest.raises(ValueError):
-            parse(arguments)
+            parse(args)
 
 
 def test_capability_owner_rejects_mixed_query_before_observing_runtime(monkeypatch):
-    def unexpected(*args, **kwargs):
-        pytest.fail("an invalid branch must not observe a runtime")
+    query = CapabilitySourceQuery(
+        None, runtime=None, scope=ModelInputScopeKind.ROOT, inspect_tool=None
+    )
 
-    monkeypatch.setattr("pulsara_agent.conversation_kernel.capability_query.runtime_rows", unexpected)
-    query = CapabilitySourceQuery(None, runtime=None, plan=None, scope=ModelInputScopeKind.ROOT, fits_result=_CAPABILITY_PAGE_BUDGET.fits)
-    with pytest.raises(CapabilityQueryError):
-        asyncio.run(query.execute({"target": {"kind": "MCP_SERVER", "runtime_server_id": derive_id("mcp-server", "query-domains", "server")}, "offset": 0}))
+    async def unexpected(*args):
+        pytest.fail("invalid query must not inspect runtime")
+
+    monkeypatch.setattr(query, "_mcp", unexpected)
+    result = asyncio.run(
+        query.execute(
+            {
+                "kind": "MCP",
+                "target": {
+                    "kind": "MCP_CONNECTION",
+                    "config_path": "/exact/mcp.yaml",
+                    "server_id": "docs",
+                },
+                "scope": "USER",
+            }
+        )
+    )
+    assert result["meta"]["status"] == "ERROR"
 
 
-def test_collaboration_query_dispatch_preserves_scope_pages_and_work_details():
+def test_collaboration_query_dispatch_preserves_scope_and_complete_work_details():
     async def run():
-        work_row = {"agent_id": AGENT, "work_id": WORK, "work_title": "Exact title", "instruction": "Exact work", "status": "completed", "final": "Exact final"}
-        repository = NS(list_query_agent_sessions=object(), list_query_agent_works=object(), query_visible_agent_work=object())
+        row = {
+            "agent_id": AGENT,
+            "work_id": WORK,
+            "work_title": "Exact title",
+            "instruction": "Exact work",
+            "status": "completed",
+            "final": "Exact final",
+        }
+        repository = NS(
+            list_query_agent_sessions=object(),
+            list_query_agent_works=object(),
+            query_visible_agent_work=object(),
+        )
         calls = []
 
         async def read(method, **values):
             calls.append((method, values))
-            assert values["root_session_id"] == ROOT
-            assert values["observer_session_id"] in {ROOT, AGENT}
+            assert values["root_session_id"] == ROOT and values[
+                "observer_session_id"
+            ] in {ROOT, AGENT}
             if method is repository.list_query_agent_sessions:
                 return [
-                    {"agent_id": AGENT, "title": "Ada Lovelace",
-                     "ui_current_work_id": WORK, "ui_current_work_title": "Exact work",
-                     "ui_current_work_status": "running", "ui_queued_work_count": 2},
-                    {"agent_id": OTHER, "title": "Alan Turing",
-                     "ui_current_work_id": None, "ui_current_work_title": None,
-                     "ui_current_work_status": None, "ui_queued_work_count": 0},
+                    {
+                        "agent_id": AGENT,
+                        "title": "Ada Lovelace",
+                        "ui_current_work_id": WORK,
+                        "ui_current_work_title": "Exact title",
+                        "ui_queued_work_count": 2,
+                    }
                 ]
             if method is repository.list_query_agent_works:
                 if values["agent_id"] != AGENT:
-                    raise ValueError("AGENT does not exist in this collaboration")
-                return [work_row]
-            assert method is repository.query_visible_agent_work
-            return work_row if values["work_id"] == WORK else None
+                    raise ValueError("AGENT does not exist")
+                return [row]
+            return row if values["work_id"] == WORK else None
 
-        port = CollaborationToolPort(repository=repository, root_session_id=ROOT, session_id=ROOT,
-                                     runtime=NS(read_deadline=lambda: 100), admission_facts=None, io=NS(run=read))
-        context = NS(session_id=ROOT, effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
-                     page_budget=ToolResultPageBudget(tool_call_id=derive_id("call", "query-domains", "agent")))
+        port = CollaborationToolPort(
+            repository=repository,
+            root_session_id=ROOT,
+            session_id=ROOT,
+            runtime=NS(read_deadline=lambda: 100),
+            admission_facts=None,
+            io=NS(run=read),
+        )
+        context = NS(
+            session_id=ROOT,
+            effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
+            code_cell_id=None,
+        )
+
         async def query(arguments):
-            result = await port.invoke(tool_name="query_agents", arguments=arguments, invocation_context=context)
-            return json.loads(result.content)
+            result = await port.invoke(
+                tool_name="query_agents",
+                arguments=arguments,
+                invocation_context=context,
+            )
+            return [p.value for p in result.content.content if p.type == "object"]
 
-        page = await query({"max_items": 1})
-        assert page == {"root": agent_target("ROOT"), "agents": [{"agent": agent_target(AGENT), "name": "Ada Lovelace",
-            "current_work": work_target(WORK), "current_work_title": "Exact work",
-            "current_work_status": "running", "queued_work_count": 2,
-            "inspect": {"tool": "query_agents", "arguments": {"target": agent_target(AGENT)}}}],
-            "next": {"tool": "query_agents", "arguments": {"cursor": AGENT, "max_items": 1}}}
-        assert calls[-1][1]["limit"] == 2
-        assert calls[-1][1]["observer_session_id"] == ROOT
-        works = await query({"target": agent_target(AGENT), "cursor": WORK, "max_items": 1})
-        assert "final" not in works["works"][0]
-        assert works["works"][0]["work_title"] == "Exact title"
-        assert works["works"][0]["inspect"] == {"tool": "query_agents", "arguments": {"target": work_target(WORK)}}
-        assert calls[-1][1]["cursor"] == WORK
+        listed = await query({})
+        assert listed[0]["target"] == agent_target(AGENT) and listed[0][
+            "current_work"
+        ] == work_target(WORK)
+        assert calls[-1][1]["limit"] is None
+        works = await query({"target": agent_target(AGENT)})
+        assert works[0]["work_title"] == "Exact title" and "final" not in works[0]
         exact = await query({"target": work_target(WORK)})
-        assert exact["instruction"] == "Exact work" and exact["final"] == "Exact final"
-        assert exact["work_title"] == "Exact title"
-        with pytest.raises(ValueError, match="AGENT does not exist"):
-            await query({"target": agent_target(OTHER)})
-        before = len(calls)
-        for name in ("list_agents", "inspect_agent"):
-            with pytest.raises(ValueError, match="unknown collaboration"):
-                await port.invoke(tool_name=name, arguments={}, invocation_context=context)
+        assert (
+            exact[0]["instruction"] == "Exact work"
+            and exact[0]["final"] == "Exact final"
+        )
         with pytest.raises(ValueError):
-            await query({"target": agent_target("ROOT")})
-        assert len(calls) == before
-        await port.invoke(tool_name="query_agents", arguments={}, invocation_context=NS(
-            session_id=AGENT, effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS, page_budget=context.page_budget))
+            await query({"target": agent_target(OTHER)})
+        context.session_id = AGENT
+        await query({})
         assert calls[-1][1]["observer_session_id"] == AGENT
-        assert len(calls) == before + 1
 
     asyncio.run(run())
 
 
-def test_schedule_read_defaults_and_write_nulls_keep_independent_owners():
+def test_schedule_queries_are_current_session_and_private_revisions_follow_the_real_rows():
     async def run():
         service = ScheduledTaskService(NS())
-        row = {"id": SCHEDULE, "session_id": ROOT, **VALUES, "revision": 3, "status": "PAUSED"}
-        service.list = AsyncMock(return_value={"tasks": [row], "next_cursor": SCHEDULE})
+        row = {
+            "id": SCHEDULE,
+            "session_id": ROOT,
+            **VALUES,
+            "permission_mode": "read-only",
+            "revision": 3,
+            "status": "PAUSED",
+            "next_run_at": None,
+        }
         service.get = AsyncMock(return_value=row)
         service.create = AsyncMock(return_value=row)
-        options = {"default_session_id": ROOT, "permission_mode": PermissionMode.BYPASS_PERMISSIONS,
-            "page_budget": ToolResultPageBudget(tool_call_id=derive_id("call", "query-domains", "schedule"))}
-        for arguments in ({}, {"session": None}):
-            page = await service.invoke_query(arguments, **options)
-            service.list.assert_awaited_with(session_id=ROOT, model_summary=True)
-            assert page["tasks"][0]["target"] == schedule_target(SCHEDULE)
-            assert page["tasks"][0]["session"] == {"kind": "SESSION", "session_id": ROOT}
-            assert "prompt" not in page["tasks"][0]
-        await service.invoke_query({"session": {"kind": "SESSION", "session_id": OTHER}, "status": "ACTIVE", "cursor": SCHEDULE}, **options)
-        service.list.assert_awaited_with(session_id=OTHER, status="ACTIVE", cursor=SCHEDULE, model_summary=True)
-        exact = await service.invoke_query({"target": schedule_target(SCHEDULE)}, **options)
-        assert exact["revision"] == 3
-        service.get.assert_awaited_once_with(SCHEDULE)
-        for status in ({}, {"status": None}):
-            request = {"action": "create", "values": VALUES, "session": None, **status}
-            assert Draft202012Validator(manage_schedule_schema()).is_valid(request)
-            await service.invoke_manage(request, **options)
-            service.create.assert_awaited_with(values=VALUES, session_id=ROOT, result_check=ANY, **status)
+        options = {
+            "default_session_id": ROOT,
+            "permission_mode": PermissionMode.READ_ONLY,
+            "memory_domain_id": "test-domain",
+        }
+        exact = await service.invoke_query(
+            {"target": schedule_target(SCHEDULE)}, **options
+        )
+        assert exact.value.content[0].value["target"] == schedule_target(SCHEDULE)
+        assert exact.value.content[0].value["prompt"] == "Review the current changes."
+        assert exact.result_facts["schedule_revisions"] == {SCHEDULE: 3}
+        for status in ({}, {"status": "PAUSED"}):
+            result = await service.invoke_manage(
+                {"action": "create", "values": VALUES, **status}, **options
+            )
+            service.create.assert_awaited_with(
+                session_id=ROOT,
+                values={**VALUES, "permission_mode": "read-only"},
+                status=status.get("status"),
+            )
+            assert result.value.public_fields["target"] == schedule_target(SCHEDULE)
             assert creation_status(status.get("status")) == "PAUSED"
-        reads = service.list.await_count
+        service.get.return_value = {**row, "session_id": OTHER}
+        with pytest.raises(ScheduledTaskError, match="不属于当前会话"):
+            await service.invoke_query({"target": schedule_target(SCHEDULE)}, **options)
         with pytest.raises(ScheduledTaskError):
-            await service.invoke_query({"status": None}, **options)
-        assert service.list.await_count == reads
-        for action in ("list", "get"):
-            with pytest.raises(ScheduledTaskError):
-                validate_action({"action": action})
-        with pytest.raises(ScheduledTaskError) as error:
-            await service.invoke_manage({"action": "create", "values": {**VALUES, "permission_mode": "bypass-permissions"}},
-                                        default_session_id=ROOT, permission_mode=PermissionMode.ACCEPT_EDITS,
-                                        page_budget=options["page_budget"])
-        assert error.value.code == "PERMISSION_ESCALATION"
+            await service.invoke_manage(
+                {
+                    "action": "create",
+                    "values": {**VALUES, "permission_mode": "bypass-permissions"},
+                },
+                **options,
+            )
 
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("arguments,expected", [
-    ({"session": {"kind": "SESSION", "session_id": ""}}, "INVALID_ID"),
-    ({"cursor": ""}, "INVALID_ID"),
-    ({"status": "INVALID"}, "INVALID_STATUS"),
-    ({"status": None}, "INVALID_REQUEST"),
-    ({"target": schedule_target(SCHEDULE), "session": None}, "INVALID_REQUEST"),
-])
-def test_schedule_query_domain_errors_precede_schema_without_weakening_branches(arguments, expected):
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"status": None},
+        {"status": "INVALID"},
+        {"target": schedule_target(SCHEDULE), "session": None},
+        {"target": schedule_target(SCHEDULE), "cursor": SCHEDULE},
+    ],
+)
+def test_schedule_query_rejects_cross_branch_fields(args):
     with pytest.raises(ScheduledTaskError) as error:
-        validate_query(arguments)
-    assert error.value.code == expected
+        validate_query(args)
+    assert error.value.code == "INVALID_REQUEST"
 
 
-@pytest.mark.parametrize("arguments,expected,message", [
-    ({"action": "update", "target": schedule_target(""), "expected_revision": 1, "values": {}}, "INVALID_ID", "任务身份字段无效"),
-    ({"action": "pause", "target": schedule_target(SCHEDULE), "expected_revision": True}, "INVALID_REQUEST", "任务版本无效"),
-    ({"action": "create", "values": VALUES, "status": "INVALID"}, "INVALID_REQUEST", "创建状态须为"),
-    ({"action": "switch", "target": schedule_target(SCHEDULE), "expected_revision": 1, "replacement": None}, "INVALID_REQUEST", "切换目标无效"),
-    ({"action": "switch", "target": schedule_target(SCHEDULE), "expected_revision": 1, "replacement": {"kind": "existing"}}, "INVALID_REQUEST", "切换目标字段无效"),
-    ({"action": "update", "target": schedule_target(SCHEDULE), "expected_revision": 1, "values": {}}, "INVALID_REQUEST", "任务操作字段无效"),
-])
-def test_schedule_management_preserves_domain_diagnostics_and_complete_schema(arguments, expected, message):
-    with pytest.raises(ScheduledTaskError, match=message) as error:
-        validate_action(arguments)
-    assert error.value.code == expected
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"action": "update", "target": schedule_target(SCHEDULE), "values": {}},
+        {
+            "action": "pause",
+            "target": schedule_target(SCHEDULE),
+            "expected_revision": 1,
+        },
+        {"action": "create", "values": VALUES, "status": None},
+        {
+            "action": "switch",
+            "target": schedule_target(SCHEDULE),
+            "replacement": {"kind": "existing"},
+        },
+        {
+            "action": "switch",
+            "target": schedule_target(SCHEDULE),
+            "replacement": {"kind": "existing", "target": schedule_target(SCHEDULE)},
+        },
+    ],
+)
+def test_schedule_management_preserves_closed_domain_validation(args):
+    with pytest.raises(ScheduledTaskError):
+        validate_action(args)
 
 
-@pytest.mark.parametrize("query,expected", [
-    ({"session_id": ""}, "INVALID_ID"),
-    ({"cursor": ""}, "INVALID_ID"),
-    ({"status": "INVALID"}, "INVALID_STATUS"),
-])
+@pytest.mark.parametrize(
+    "query,expected",
+    [
+        ({"session_id": ""}, "INVALID_ID"),
+        ({"cursor": ""}, "INVALID_ID"),
+        ({"status": "INVALID"}, "INVALID_STATUS"),
+    ],
+)
 def test_http_schedule_query_preserves_identity_and_status_error_codes(query, expected):
     from pulsara_agent.desktop_app.scheduled_controller import ScheduledTaskController
 

@@ -140,55 +140,6 @@ def test_assembler_rejects_derived_collision_before_live_publication(
     assert "native:second" not in assembler._open
 
 
-@pytest.mark.parametrize("kind", ["turn", "history"])
-def test_tool_result_source_roundtrip_keeps_imported_group_separate_from_execution(
-    kind,
-):
-    from dataclasses import replace
-    from pulsara_agent.primitives.tool_result_projection import (
-        _maximum_tool_result_page_timing,
-        _minimum_full_projection_timing,
-        render_provider_tool_result_logical_message,
-        decode_provider_tool_result_observation,
-        ToolResultLogicalMessageKind,
-    )
-    from pulsara_agent.primitives.tool_observation import (
-        tool_observation_timing_fingerprint,
-        provider_visible_turn_ref,
-    )
-
-    maximum = _maximum_tool_result_page_timing()
-    provisional = object.__new__(type(maximum))
-    for name in maximum.__dataclass_fields__:
-        object.__setattr__(provisional, name, getattr(maximum, name))
-    object.__setattr__(
-        provisional, "source_turn_ref", derive_id(kind, "fixture", "source")
-    )
-    timing = replace(
-        maximum,
-        source_turn_ref=provisional.source_turn_ref,
-        fact_fingerprint=tool_observation_timing_fingerprint(provisional),
-    )
-    rendered = render_provider_tool_result_logical_message(
-        message_kind=ToolResultLogicalMessageKind.TOOL_RESULT,
-        tool_call_id="provider-native-call",
-        body="exact body",
-        result_state="SUCCESS",
-        timing=timing,
-        model_visible_memory_ids=(),
-    )
-    observation = decode_provider_tool_result_observation(rendered.content)["observation"]
-    assert "source_turn_ref" not in observation
-    assert observation["observed_at_utc"] == timing.observed_at_utc
-    assert timing.source_turn_ref == derive_id(kind, "fixture", "source")
-    assert maximum.source_turn_ref.startswith("history:")
-    assert _minimum_full_projection_timing().source_turn_ref.startswith("turn:")
-    assert len(timing.source_turn_ref) <= len(maximum.source_turn_ref)
-    if kind == "history":
-        with pytest.raises(ValueError, match="INVALID_ID"):
-            provider_visible_turn_ref(
-                session_id=random_id("session"), turn_id=timing.source_turn_ref
-            )
 
 
 @pytest.mark.postgres

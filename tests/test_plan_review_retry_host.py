@@ -82,7 +82,7 @@ async def _open_review(
     try:
         await session.enter_plan(
             command_id=random_id("command"),
-            entry_reason="planning",
+
             resume_permission_mode=PermissionMode.ACCEPT_EDITS,
         )
         running = asyncio.create_task(
@@ -420,7 +420,7 @@ def test_question_answer_prospective_input_matches_saved_result_and_resumes(
             arguments={
                 "question": "Which path?",
                 "options": [{"label": "Safe"}, {"label": "Fast"}],
-                "allow_free_text": True,
+
             },
         ) as review:
             session = review.session
@@ -462,23 +462,8 @@ def test_question_answer_prospective_input_matches_saved_result_and_resumes(
                 ).fetchall()
                 assert len(rows) == 1
                 value = read_accepted_tool_business_value(connection, rows[0])
-                expected_answer = (
-                    {"kind": "OPTION", "ordinal": 0, "label": "Safe"}
-                    if answer_kind is PlanQuestionAnswerKind.OPTION
-                    else {"kind": "FREE_TEXT", "text": answer.free_text}
-                )
-                assert value == {
-                    "meta": {"status": "SUCCESS"},
-                    "content": [
-                        {
-                            "type": "object",
-                            "value": {
-                                "plan_control": "QUESTION_ANSWERED",
-                                "answer": expected_answer,
-                            },
-                        }
-                    ],
-                }
+                expected_text = "用户选择：Safe" if answer_kind is PlanQuestionAnswerKind.OPTION else answer.free_text
+                assert value == {"meta":{"status":"SUCCESS"}, "content":[{"type":"text", "value":expected_text}]}
                 assert (
                     connection.execute(
                         "SELECT effective_permission_mode FROM pulsara_v3.turns WHERE id=%s",

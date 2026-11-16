@@ -9,7 +9,7 @@ if (typeof decisionAvailable !== 'boolean') throw new TypeError('Code Mode Decis
 const cell = new Int32Array(cellBuffer, 8), used = new BigInt64Array(cellBuffer, 0, 1);
 const host = new BigInt64Array(hostBuffer);
 const timing = new Float64Array(timingBuffer);
-const diagnosticBytes = Math.min(4096, limits.control_bytes - limits.page_bytes);
+const diagnosticBytes = Math.min(4096, limits.control_bytes);
 let source = workerData.source; delete workerData.source;
 const pending = new Map(), unhandled = new Map(), preparationCharges = new Map();
 let vm, root, helper, deferredFactory, parse, render, diagnose, errorFactory;
@@ -39,9 +39,7 @@ function release(bytes) {
 }
 function emit(kind, text) {
   if(ended || Atomics.load(cell, 1)) throw new Error('Code Mode cell has stopped');
-  const message = {type: 'output', record: {kind, text}};
-  if (Buffer.byteLength(text, 'utf8') > limits.value_bytes)
-    throw new RangeError('Code Mode output value boundary exceeded');
+  const message = {type: 'output', record: {kind, values: JSON.parse(text)}};
   const charge = wireBytes(message) + 256;
   reserve(charge);
   send({...message, charge});
@@ -78,18 +76,7 @@ function clippedError(value) {
     message: String(value?.message ?? 'JavaScript execution failed')
       .slice(0, Math.max(1, Math.floor((diagnosticBytes - 1024) / 4))),
     ...(value?.code ? {code: value.code} : {}),
-    ...(value?.state ? {state: value.state} : {}),
-    ...(value?.result_id ? {result_id: value.result_id} : {}),
-    ...(value?.result_entry_id ? {result_entry_id: value.result_entry_id} : {}),
-    ...(value?.read ? {read: value.read} : {}),
-    ...(value?.required_facts ? {required_facts: value.required_facts} : {}),
-    ...(value?.output_available !== undefined ? {output_available: value.output_available} : {}),
-    ...(value?.source_coverage ? {source_coverage: value.source_coverage} : {}),
-    ...(value?.source_coverage_reason ? {source_coverage_reason: value.source_coverage_reason} : {}),
-    ...(value?.output_unavailability_reason ? {output_unavailability_reason: value.output_unavailability_reason} : {}),
     diagnostic_truncated: true};
-  if (Buffer.byteLength(JSON.stringify(trimmed), 'utf8') > diagnosticBytes - 512)
-    delete trimmed.required_facts;
   return trimmed;
 }
 function fail(error) {
@@ -125,8 +112,6 @@ function disposeDeferred(record) {
 function newRequest(type, name, json, preparation) {
   if (root?.promiseState === 2) accepting = false;
   if (!accepting || ended || tripped || Atomics.load(cell, 1)) throw new Error('Code Mode cell has stopped');
-  if (Buffer.byteLength(json, 'utf8') > limits.value_bytes)
-    throw new RangeError('Code Mode bridge value boundary exceeded');
   let id;
   do { id = randomIdentity('request'); }
   while (pending.has(id) || preparationCharges.has(id) || awaitingResume === id);
@@ -187,7 +172,7 @@ async function checkCompletion() {
           if (returnPresent) {
             const text = vm.callFunction(render, vm.undefined, result.value);
             try { returnText = text.toString(); } finally { text.dispose(); }
-            returnCharge = wireBytes({type:'output',record:{kind:'return',text:returnText}}) + 256;
+            returnCharge = wireBytes({type:'output',record:{kind:'return',values:JSON.parse(returnText)}}) + 256;
             reserve(returnCharge);
           }
           vm.executePendingJobs();
@@ -197,7 +182,7 @@ async function checkCompletion() {
       if (unhandled.size) return checkCompletion();
     }
     if (returnPresent) {
-      send({type:'output', record:{kind:'return',text:returnText}, charge:returnCharge});
+      send({type:'output', record:{kind:'return',values:JSON.parse(returnText)}, charge:returnCharge});
       returnCharge = 0; returnText = null;
     }
     finish('completed');
@@ -238,11 +223,10 @@ try {
     const names = vm.hostToHandle(toolNames);
     const availability = vm.hostToHandle(decisionAvailable);
     const assignmentFields = vm.hostToHandle(runAgentFields);
-    const valueLimit = vm.newNumber(limits.value_bytes);
     const diagnosticChars = vm.newNumber(Math.max(1, Math.floor((diagnosticBytes - 1024) / 4)));
     const install = vm.evalCode(guest, 'pulsara-guest.js');
-    try { helper = vm.callFunction(install, vm.undefined, invoke, prepare, discard, output, names, valueLimit, diagnosticChars, availability, assignmentFields, nameHint); }
-    finally { install.dispose(); nameHint.dispose(); names.dispose(); availability.dispose(); assignmentFields.dispose(); valueLimit.dispose(); diagnosticChars.dispose(); invoke.dispose(); prepare.dispose(); discard.dispose(); output.dispose(); }
+    try { helper = vm.callFunction(install, vm.undefined, invoke, prepare, discard, output, names, diagnosticChars, availability, assignmentFields, nameHint); }
+    finally { install.dispose(); nameHint.dispose(); names.dispose(); availability.dispose(); assignmentFields.dispose(); diagnosticChars.dispose(); invoke.dispose(); prepare.dispose(); discard.dispose(); output.dispose(); }
     owned.push(helper);
     for (const [key, assign] of [
       ['deferred', h => deferredFactory = h], ['parse', h => parse = h], ['render', h => render = h],

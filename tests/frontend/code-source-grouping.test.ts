@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { CanonicalHistoryView } from '../../frontend/lib/runtime-adapter';
-import { parsePresentationResult } from '../../frontend/lib/presentation-targets';
+import { parsePresentationTargets } from '../../frontend/lib/presentation-targets';
 
 const inline = (text: string) => ({kind: 'INLINE', inline_content: Buffer.from(text).toString('base64')});
 afterEach(() => vi.unstubAllGlobals());
@@ -32,6 +32,6 @@ it('groups accepted program results under their exact source exec without extra 
 });
 
 it('rejects removed task presentation targets and task panels', () => {
-  expect(parsePresentationResult(JSON.stringify({targets: [{type: 'task', task_id: 'old'}]}))).toBeUndefined();
-  expect(parsePresentationResult(JSON.stringify({targets: [{target: {kind: 'PANEL', name: 'tasks'}}]}))).toBeUndefined();
+  expect(parsePresentationTargets([{type: 'task', task_id: 'old'}])).toBeUndefined();
+  expect(parsePresentationTargets([{target: {kind: 'PANEL', name: 'tasks'}}])).toBeUndefined();
 });

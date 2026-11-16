@@ -7,18 +7,20 @@ description: Set up MCP connections from authoritative endpoints or commands, co
 
 ## Set up a connection
 
-Use `manage_capability` with the user's scope and a new independent `server_id`:
+Use ROOT-native `manage_capability` with the intended configuration file's actual
+absolute path and a new independent `server_id`:
 
 ```json
-{"action":"ADD_LOCAL_MCP","target":{"kind":"MCP_CONNECTION","scope":"USER","source_kind":"LOCAL","server_id":"docs"}}
+{"target":{"kind":"MCP_CONNECTION","config_path":"/actual/project/.pulsara/mcp.yaml","server_id":"docs"},"action":"ADD_LOCAL_MCP"}
 ```
 
-Omitting `config` opens the shared connection editor. For an existing independent
-connection use `UPDATE_LOCAL_MCP` with its observed `MCP_CONNECTION` target; omission opens
-its prefilled editor. A supplied config replaces the complete entry, not selected
-fields. The editor also controls enablement. Plugin connections instead use
-`CONFIGURE_PLUGIN_MCP_CONNECTION` with their `MCP_CONNECTION` target;
-omit `overlay` for that editor. Package declarations remain package-owned.
+Omitting `config` opens the shared connection editor. Existing independent and
+Plugin connections use `UPDATE_MCP_CONNECTION` with their observed Target;
+omission opens the prefilled editor. A supplied object patches only explicit
+public settings, preserving the rest. Plugin `config:null` removes the whole
+overlay, including its scope override; package declarations remain package-owned.
+New independent and Plugin connections default to ROOT/subagent use; users can
+restrict this in the capability page.
 
 1. Establish the vendor's exact endpoint or stdio command/args/cwd. A vendor CLI
    is not necessarily an MCP server. The official SDK supports Streamable HTTP
@@ -28,7 +30,7 @@ omit `overlay` for that editor. Package declarations remain package-owned.
    scope. Use `USER` for setup there; do not query or manage `WORKSPACE`, or treat
    its temporary working directory as a project. If the user explicitly wants
    project configuration, ask them to open the intended project first.
-   List `kind:"MCP_SERVER"` to avoid duplicates. Inspect an observed target for
+   List `kind:"MCP"` to avoid duplicates. Inspect an observed target for
    the connection location and details; copy its `MCP_CONNECTION` target into management.
 3. Use the editor for unknown settings or credentials. Never put secret values
    in arguments, conversation, logs or packages. Do not read private settings or
@@ -36,35 +38,24 @@ omit `overlay` for that editor. Package declarations remain package-owned.
 4. For an already configured OAuth connection use `AUTHORIZE_MCP` with its
    `MCP_CONNECTION` target. The user authorizes interactively.
    `CLEAR_MCP_AUTHORIZATION` clears local grants, not remote tokens. A background
-   connection cannot initiate browser login. Optional guards can normally be omitted.
+   connection cannot initiate browser login.
 
-Read `references/connection-configuration.md` only when supplying a complete
+Read `references/connection-configuration.md` only when supplying
 public config or handling user-only import/out-of-band administration.
 
 ## Verify and recover
 
-Enabled and approved connections initialize and read their catalogs in the
-background. Opening a session stays available; its first cold-epoch model
-request waits for those initial attempts. A failed connection reports its
-reason while the request continues with the capabilities that are ready.
-Later reconnects adopt through the existing safe point and META path without
-changing the current provider roots.
+Enabled and approved connections discover their catalogs in the background.
+Saving, OAuth authorization, directory discovery and a successful call are
+separate outcomes. Copy observed Targets unchanged: the configured service key
+can differ from the runtime `server_id` in tool/resource Targets.
 
-When checking a connection, copy the exact `MCP_CONNECTION` target returned by
-management or query. A runtime `MCP_SERVER` target is a separate identity: copy
-its complete `runtime_server_id` from query results. Never construct it by
-prefixing the configured `server_id` with `mcp-server:`.
-
-Capability-page actions may produce a brief Runtime result notice. Use its
-reported origin and outcome without repeating the action or inventing leftover
-installation records. Missing files alone do not prove uninstallation. For
-troubleshooting inspect the exact target; known-target management can proceed
-directly. Acknowledge a settled notice from its result; do not query or reload
-merely to confirm it. Diagnose reported damage using the exact public target
-and relevant files, without auditing Runtime implementation as a routine step.
+A capability-page result notice can be acknowledged directly. Do not repeat its
+action or query merely to confirm it; inspect the exact Target for a concrete
+failure or requested diagnosis.
 
 Distinguish a missing executable or unreachable service from missing config.
-Valid config still uses UPDATE_LOCAL_MCP or REMOVE_LOCAL_MCP; confirmed absent
+Valid config still uses UPDATE_MCP_CONNECTION or REMOVE_LOCAL_MCP; confirmed absent
 config can be recreated with ADD_LOCAL_MCP. Unparseable existing config may block
 management: report the specific error; a parse failure does not prove that an
 entry is absent or a previous save failed. Do not infer who changed the file or
@@ -74,25 +65,33 @@ configuration recovery outside this management path. Do not bypass the owner wit
 writes or claim private credentials were cleaned. Diagnosis alone does not
 authorize deleting or recreating a connection.
 
+Read `meta.status` and actual `content`. ERROR may still describe a completed
+change followed by cleanup or refresh failure. Address the failed step without
+repeating a confirmed mutation. ROOT-native `reload_capabilities({})` is for
+incomplete adoption or out-of-band changes, not a routine second step.
 
-Saving, authorizing, discovering tools and executing a tool are distinct outcomes.
-Read mutation status and `adoption` separately. `APPLIED` means the change settled;
-it does not prove availability or whether a form appeared. Managed changes adopt
-at the existing safe point before a later request without rewriting current
-provider roots. For partial adoption, inspect the reported failures and retry
-observation/adoption, not the completed mutation. Explicit `reload_capabilities`
-is for partial adoption or out-of-band changes, not a routine second step.
+Use `query_capabilities` with `kind:"MCP"`: no target lists services; an observed
+MCP_CONNECTION target lists that service's tools; an MCP_TOOL target returns its
+interface. Exact queries use only target and kind. Optional list `query` searches
+tools/services; tool hits already include the full interface and need no second
+query. List filters may include scope or a PLUGIN parent, not a service parent.
 
-List `kind:"MCP_TOOL"` with the copied MCP_CONNECTION or runtime MCP_SERVER target as `parent`, then inspect
-an exact tool target. Its `input_schema` and `invocation.mode` decide the call:
-`DIRECT` uses the named native tool; `META` copies `invocation.target` into
-`use_new_mcp_tool.target` and supplies the tool's `arguments`; `UNAVAILABLE` explains the obstacle. Never guess schemas,
-names or availability. Copy resource targets from list/inspect into
-`read_mcp_resource`. Query `kind:"MCP_PROMPT"` with the copied connection or runtime
-server target as `parent` to check prompt metadata; inspect an exact prompt target
-for its parameter declarations. Users select and expand prompts in the composer
-slash menu. A resource-template target also needs a concrete
-`uri` matching its `uri_template`.
+Read the actual `input_schema`, any `output_schema`, and `invocation`. META uses
+`call_mcp_tool` with the copied `invocation.target` and schema-conforming arguments;
+UNAVAILABLE explains the obstacle. MCP_TOOL_REF is shared by native calls and
+applicable Cells in the same session. Do not guess names, references or schemas.
+
+For an unknown interface, receive its native query result or explicitly output
+it from a preparation Cell before writing a business Cell. A schema only in JS
+memory has not been read by the model. Already known interfaces can be reused.
+`output_schema` describes successful structuredContent, not the full result or
+failures. Connection management has no JS API.
+
+For resources, `read_mcp_resource` takes an MCP_CONNECTION to list resources and
+templates, or an MCP_RESOURCE with the returned server_id and concrete uri to
+read one. Fill a template's uri_template using its actual service identifier.
+Prompts stay in the user's composer slash menu. Native NEXT reads the frozen
+result through read_file; it does not repeat a query or remote call.
 
 Perform a representative call only when requested and appropriate; report what
 passed and what remains unavailable. Authentication failures or disconnects do

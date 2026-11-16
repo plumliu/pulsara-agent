@@ -62,7 +62,6 @@ from pulsara_agent.llm.input import LLMTextPart, PromptContent, prompt_text_proj
 from pulsara_agent.llm.model_connections import ModelCallBinding
 from pulsara_agent.llm.model_target import FrozenModelResolutionSnapshot
 from pulsara_agent.llm.runtime import ModelRuntimeUnavailable
-from pulsara_agent.ports.terminal_observation import CellOutputContent
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 from pulsara_agent.scheduling.contracts import ScheduledAdmission
@@ -1346,6 +1345,16 @@ class _HostPromptOperations:
             await asyncio.sleep(delay_seconds)
             delay_seconds = min(delay_seconds * 2, 0.5)
 
+    async def _quote_cell_output_content(self, lease):
+        return await self._io.run(self.repository.quote_cell_output_content,
+            record=lease.record, deadline_monotonic=self._canonical_deadline())
+
+    async def _prepare_cell_output_content(self, lease):
+        return await self._io.run(self.repository.prepare_cell_output_content,
+            cell_id=lease.cell_id, source_turn_id=lease.source_turn_id,
+            source_exec_attempt_id=lease.source_exec_attempt_id, record_sequence=lease.record_sequence,
+            record=lease.record, deadline_monotonic=self._canonical_deadline())
+
     async def _cell_output_delivery_loop(self) -> None:
         """Transfer each immutable Cell record to the canonical input queue."""
         while True:
@@ -1362,13 +1371,7 @@ class _HostPromptOperations:
                     candidate = PreparedCellOutputIngress(
                         session_id=self.session_id,
                         workspace_id=self.workspace.workspace_key,
-                        content=CellOutputContent(
-                            cell_id=lease.cell_id,
-                            source_turn_id=lease.source_turn_id,
-                            source_exec_attempt_id=lease.source_exec_attempt_id,
-                            record_sequence=lease.record_sequence,
-                            record=lease.record,
-                        ),
+                        content=lease.content,
                         occurred_at=lease.occurred_at,
                         actor_id=self.host_session_id,
                     )

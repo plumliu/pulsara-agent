@@ -163,7 +163,7 @@ def assert_session_aggregate_deleted(repo, guard):
         session_id=guard.session_id, memory_domain_id='u_local', closed_writer=guard,
         deadline_monotonic=monotonic()+30,
     ) == 'DELETED'
-    independent = {'workspaces', 'blobs', 'memory_facts', 'memory_relations', 'memory_embeddings', 'asr_cache'}
+    independent = {'workspaces', 'blobs', 'memory_facts', 'memory_embeddings', 'asr_cache'}
     children = set(CONVERSATION_KERNEL_RELATIONS) - independent - {'sessions', 'agent_known_sessions'}
     for table in children:
         assert rows(repo, sql.SQL('SELECT 1 FROM pulsara_v3.{} WHERE session_id=%s').format(
@@ -361,9 +361,9 @@ def test_historical_snapshot_ignores_future_idle_compaction_and_retains_exact_re
     snapshot_projection = lower_canonical_item(
         actual.items[0],
     )
-    assert snapshot_projection.fixed_message is not None
+    assert snapshot_projection.message is not None
     assert "C2 future summary" not in join_text_content(
-        snapshot_projection.fixed_message.content
+        snapshot_projection.message.content
     )
     nested = fork(repo, child, copied[1]["id"])
     assert nested.created, nested.public_code
@@ -1063,42 +1063,17 @@ def test_fork_copies_exact_prefix_with_no_execution_and_continues(repo):
 def test_fork_reuses_canonical_workspace_and_does_not_reown_shared_memory(
     repo, request: pytest.FixtureRequest
 ):
-    from tests.test_direct_advisory_memory import _open_direct_memory_session
-
-    workspace_root = f"/tmp/{uuid4().hex}"
-    workspace_id = workspace_context_id(workspace_root)
-    lease, _invoke, remember = _open_direct_memory_session(
-        repo, workspace_root=workspace_root
-    )
-    _, saved, _ = remember(
-        "The forked project uses the shared release checklist.", project=True
-    )
-
-    def cleanup_memory() -> None:
-        selection = MemoryManagementSelection("project", workspace_id)
-        preview = repo.memory_deletion_preview(
-            memory_domain_id="u_local",
-            selection=selection,
-            fact_id=saved["target"]["memory_id"],
-            deadline_monotonic=monotonic() + 30,
-        )
-        repo.execute_memory_deletion(
-            memory_domain_id="u_local",
-            selection=selection,
-            fact_id=saved["target"]["memory_id"],
-            additional=(),
-            expected_records=lambda: iter(preview),
-            deadline_monotonic=monotonic() + 30,
-        )
-
+    from tests.support.memory_workspace import project_memory_session,project_memory
+    workspace_root=f"/tmp/{uuid4().hex}"
+    workspace_id=workspace_context_id(workspace_root)
+    lease,binding=project_memory_session(repo,workspace_root)
+    record=project_memory(repo,binding,'Release checklist','The forked project uses the shared release checklist.')
+    saved=record.value()
+    def cleanup_memory():
+        repo.delete_memory(memory_domain_id='u_local',fact_id=record.fact_id,
+            expected_updated_at=record.updated_at,read_binding=binding,deadline_monotonic=monotonic()+30)
     request.addfinalizer(cleanup_memory)
-    active_turn = rows(
-        repo,
-        "SELECT id FROM pulsara_v3.turns WHERE session_id=%s "
-        "ORDER BY accepted_at DESC LIMIT 1",
-        (lease.guard.session_id,),
-    )[0]["id"]
-    anchor = final(repo, lease.guard, str(active_turn), "Memory saved.")
+    _,_,anchor=turn(repo,lease.guard,'Memory saved.',finish=True)
     memory_before = rows(repo, "SELECT * FROM pulsara_v3.memory_facts ORDER BY id")
     created = fork(repo, lease.guard.session_id, anchor)
     assert created.created, created.public_code
@@ -1139,8 +1114,7 @@ def test_fork_reuses_canonical_workspace_and_does_not_reown_shared_memory(
         fact_id=saved["target"]["memory_id"],
         deadline_monotonic=monotonic() + 30,
     )
-    assert detail["fact"]["fact_id"] == saved["target"]["memory_id"]
-    assert set(detail) == {"fact", "user_edited_at", "relations", "next_cursor"}
+    assert detail == saved
     assert_session_aggregate_deleted(repo, lease.guard)
     assert rows(repo, "SELECT * FROM pulsara_v3.memory_facts ORDER BY id") == memory_before
     assert rows(repo, "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s", (created.child_session_id,))[0]["workspace_id"] == workspace_id
@@ -1320,7 +1294,7 @@ def test_image_snapshot_adoption_and_fork_keep_child_readable_after_old_owner_de
     assert hydrated.items[0].item_kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT
     assert hydrated.items[1].source_entry_id == child_carrier.retained_entry_ids[0]
     assert hydrated.items[1].content == content.parts
-    lowered = lower_canonical_item(hydrated.items[1]).fixed_message
+    lowered = lower_canonical_item(hydrated.items[1]).message
     assert lowered is not None
     assert tuple(part for part in lowered.content if isinstance(part, LLMImagePart)) == (image, image)
 
@@ -1413,7 +1387,6 @@ def test_fork_plan_history_retains_origin_and_attribution_without_live_authority
         selected_arguments={
             "question": "Proceed?",
             "options": [],
-            "allow_free_text": True,
         },
         workflow_id=workflow,
         expected_workflow_revision=1,

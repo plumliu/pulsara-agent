@@ -57,7 +57,7 @@ def test_capture_cursor_does_not_copy_retained_output(monkeypatch) -> None:
     assert selected.text == body.text == "新🙂\n"
 
 
-def test_exact_delta_body_stays_complete_after_earlier_output_was_evicted() -> None:
+def test_exact_delta_body_stays_complete_after_earlier_output_was_spooled() -> None:
     owner = TerminalOutputOwner(
         owner_epoch=OWNER, process_id=PROCESS, maximum_bytes=100
     )
@@ -101,7 +101,7 @@ def _launch_interactive(registry: ProcessRegistry, path):
     return state
 
 
-def test_submit_returns_only_output_after_input_cut(tmp_path) -> None:
+def test_write_returns_all_unaccepted_output_including_before_input(tmp_path) -> None:
     registry = ProcessRegistry()
     try:
         state = _launch_interactive(registry, tmp_path)
@@ -115,9 +115,9 @@ def test_submit_returns_only_output_after_input_cut(tmp_path) -> None:
         )
         assert result.status.value == "success"
         assert result.exit_code == 0
-        assert result.output == "REPLY:héllo\n"
+        assert result.output == "READY\nREPLY:héllo\n"
         assert result.output_body_candidate.text == result.output
-        assert result.output_disposition is TerminalOutputReadDisposition.EXACT_DELTA
+        assert result.output_disposition is TerminalOutputReadDisposition.CURRENT_SNAPSHOT
         assert registry.poll(
             state.process_id,
             since_cursor=result.output_cursor,

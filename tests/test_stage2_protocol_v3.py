@@ -1016,7 +1016,6 @@ def test_pr04_cancel_queue_command_and_closed_field_matrix():
     assert accepted.command_outcome.public_code == 'PROMPT_CANCELLED'
     assert asyncio.run(server._command(observer, wire.CommandRequest(**valid))).error.stable_code == 'CONTROLLER_REQUIRED'
     for changed, code in [
-        ({'plan_reason': 'must not resend body'}, 'QUEUE_ACTION_INVALID'),
         ({'target_turn_id': 'turn:c3fxjnnljiejzzrzacfi4f3jkq'}, 'QUEUE_ACTION_INVALID'),
         ({'target_queue_item_id': ''}, 'QUEUE_ACTION_INVALID'),
         ({'requested_permission_mode': wire.PERMISSION_MODE_READ_ONLY}, 'PERMISSION_FIELD_NOT_ALLOWED'),

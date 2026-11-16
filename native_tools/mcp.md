@@ -2,7 +2,7 @@
 
 共用规则见[原生工具修订草案索引](../PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 1、2 章；完整保存、原生 12k／NEXT、JS 完整返回和 Cell 图文输出沿[统一交付草案](../PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)，存储沿[数据库 hardcut 草案](../PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md)。发现连接、工具目录及精确详情见[能力查询草案](capabilities.md)第 3 章。
 
-状态：讨论草案，未实施。本文件确定 call_mcp_tool 和 read_mcp_resource 的参数、精简返回值及原生／JS 用法，架构沿[统一 meta 调用草案](../PULSARA_MCP_META_ONLY_CALLING_ARCHITECTURE_DRAFT.zh.md)。ROOT 与子代理统一通过元工具调用远端工具，并可使用资源目录／读取入口；适用 Code Mode 时使用相同固定 API 的 JS 方法。工具调用引用按同 session 共用并在完整查询结果接纳后生效，权限、凭据、Hook、取消及副作用结算复用现有 owner。本轮只改文档。
+状态：当前合同已接入生产代码，正在完成 hardcut 跨层验收；正常使用仍按实施计划停用。本文件确定 call_mcp_tool 和 read_mcp_resource 的参数、精简返回值及原生／JS 用法，架构沿[统一 meta 调用草案](../PULSARA_MCP_META_ONLY_CALLING_ARCHITECTURE_DRAFT.zh.md)。ROOT 与子代理统一通过元工具调用远端工具，并可使用资源目录／读取入口；适用 Code Mode 时使用相同固定 API 的 JS 方法。工具调用引用按同 session 共用并在完整查询结果接纳后生效，权限、凭据、Hook、取消及副作用结算复用现有 owner。
 
 ## 1. call_mcp_tool 的返回类型
 

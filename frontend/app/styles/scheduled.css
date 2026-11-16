@@ -4,7 +4,7 @@
 .scheduled-inner { width: min(1120px, calc(100% - 64px)); margin: 24px auto 36px; }
 .scheduled-view button, .scheduled-dialog button { transition: background .15s ease, color .15s ease, border-color .15s ease; }
 .scheduled-view button:disabled, .scheduled-dialog button:disabled { opacity: .45; cursor: default; }
-:is(.scheduled-view, .scheduled-dialog) :is(button, input, select, textarea):focus-visible { outline: 2px solid var(--amber); outline-offset: 3px; }
+:is(.scheduled-view, .scheduled-dialog) :is(button, input, select, textarea):focus-visible { outline: 2px solid var(--line-strong); outline-offset: 2px; }
 .scheduled-primary, .scheduled-delete-action, .scheduled-page-actions .secondary-action, .scheduled-dialog-actions .secondary-action { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 36px; padding: 8px 14px; border: 1px solid var(--line); border-radius: 9px; font-size: var(--type-control); }
 .scheduled-primary { border-color: var(--ink); background: var(--ink); color: var(--paper-solid); }
 .scheduled-primary:hover:not(:disabled) { background: var(--ink-soft); }
@@ -16,8 +16,10 @@
 .scheduled-collection-title > svg { flex: none; color: var(--amber); }
 .scheduled-session-heading { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0; background: transparent; color: inherit; font: inherit; text-align: left; }
 .scheduled-toolbar-actions { display: flex; flex: none; align-items: center; gap: 8px; }
-/* Reuse the memory page's state control, including its focus-within ring. */
-.scheduled-filter select { font-size: 14px; }
+.scheduled-filter { display: inline-flex; flex: none; flex-wrap: nowrap; align-items: center; gap: 6px; min-height: 34px; padding: 6px 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper-raised); color: var(--ink-soft); white-space: nowrap; }
+.scheduled-filter > svg { display: block; flex: none; color: var(--muted); }
+.scheduled-filter select { appearance: none; -webkit-appearance: none; flex: none; width: auto; min-width: 0; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; color: inherit; font: 14px var(--sans); line-height: 1.3; cursor: pointer; }
+.scheduled-filter:focus-within { border-color: var(--line-strong); background: color-mix(in srgb, var(--paper-deep) 25%, var(--paper-raised)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--ink) 6%, transparent); }
 .scheduled-view .scheduled-filter select:focus-visible { outline: none; }
 .scheduled-icon-button { display: grid; flex: none; place-items: center; width: 34px; height: 34px; padding: 0; border-radius: 8px; color: var(--muted); background: transparent; }
 .scheduled-icon-button:hover:not(:disabled) { color: var(--ink); background: var(--paper-deep); }

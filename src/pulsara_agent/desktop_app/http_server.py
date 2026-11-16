@@ -454,14 +454,10 @@ class LocalHttpServer:
         memory = LocalMemoryController(self.sessions)
         self._app.router.add_get("/api/memories/projects", memory.projects)
         self._app.router.add_get("/api/memories", memory.catalog)
+        self._app.router.add_post("/api/memories", memory.create)
         self._app.router.add_get("/api/memories/{fact_id}", memory.detail)
-        self._app.router.add_patch(
-            "/api/memories/{fact_id}/statement", memory.edit_statement
-        )
-        self._app.router.add_post(
-            "/api/memories/{fact_id}/deletion-preview", memory.deletion
-        )
-        self._app.router.add_delete("/api/memories/{fact_id}", memory.deletion)
+        self._app.router.add_patch("/api/memories/{fact_id}", memory.edit)
+        self._app.router.add_delete("/api/memories/{fact_id}", memory.delete)
         self._app.router.add_get("/healthz", self._health)
         self._app.router.add_get("/", self._index)
         self._app.router.add_get("/assets/{tail:.*}", self._public_file)

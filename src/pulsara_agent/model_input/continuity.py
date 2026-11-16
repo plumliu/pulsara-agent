@@ -9,12 +9,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-import json
+from typing import TYPE_CHECKING, Mapping
 
 from pulsara_agent.llm.input import (
     LLMMessage,
-    LLMTextPart,
-    MessageRole,
     llm_content_identity_value,
     llm_content_logical_bytes,
 )
@@ -30,7 +28,6 @@ from pulsara_agent.llm.request import (
 )
 from pulsara_agent.capability.contracts import (
     FrozenCapabilityDispatchCut,
-    FrozenMcpRouteProjection,
     FrozenNativeToolProjectionSet,
     FrozenToolCapabilityExposurePlan,
     frozen_tool_spec_fingerprint,
@@ -38,14 +35,30 @@ from pulsara_agent.capability.contracts import (
 from pulsara_agent.model_input.contracts import (
     CompiledToolResultDecision,
     ContextSourceKind,
-    ContextTrustClass,
     FrozenCompiledModelInput,
     FrozenCompiledMessagePlacement,
     FrozenModelInputSemanticProjection,
     FrozenToolSpec,
     ModelInputScopeKind,
 )
-from pulsara_agent.primitives.context import canonical_json_bytes, context_fingerprint
+from pulsara_agent.primitives.context import (
+    canonical_json_bytes,
+    context_fingerprint,
+    FrozenJsonObjectFact,
+    freeze_json,
+    thaw_json,
+)
+
+if TYPE_CHECKING:
+    from pulsara_agent.conversation_kernel.capability_composition import (
+        PreparedSkillCatalogSourceSnapshot,
+        PreparedMcpInspectionInput,
+    )
+    from pulsara_agent.conversation_kernel.mcp.contracts import McpCatalogSnapshot
+    from pulsara_agent.conversation_kernel.memory.contracts import (
+        MemoryObservationState,
+    )
+    from pulsara_agent.capability.types import MinimalSkillRef
 from pulsara_agent.primitives.model_call import ModelCallPurpose
 
 FULL_HISTORY_CONTEXT_BASE_IDENTITY = context_fingerprint(
@@ -104,145 +117,72 @@ class ProcessLocalCanonicalFrontier:
             raise ValueError("canonical provider-input prefix was rewritten")
 
 
-class SourceObservationLifecycle(StrEnum):
-    SNAPSHOT = "SNAPSHOT"
-    CLEARED = "CLEARED"
-    UNAVAILABLE = "UNAVAILABLE"
-    TURN = "TURN"
-    ACTIVATION = "ACTIVATION"
-    CALL = "CALL"
-    ONE_SHOT = "ONE_SHOT"
-
-
-class SourceObservationPresence(StrEnum):
-    VALUE = "VALUE"
-    CLEARED = "CLEARED"
-    UNAVAILABLE = "UNAVAILABLE"
-
-
 @dataclass(frozen=True, slots=True)
-class RuntimeObservation:
-    source_kind: ContextSourceKind
-    trust_class: ContextTrustClass
-    lifecycle: SourceObservationLifecycle
-    presence: SourceObservationPresence
-    body: str = field(repr=False)
+class RuntimeObservationItem:
+    text: str
+    target: FrozenJsonObjectFact | Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
-        if self.source_kind is ContextSourceKind.BASE_SYSTEM:
-            raise ValueError("base system is not a runtime observation")
-        self.body.encode("utf-8")
-        if self.presence is SourceObservationPresence.VALUE and self.lifecycle in {
-            SourceObservationLifecycle.CLEARED,
-            SourceObservationLifecycle.UNAVAILABLE,
-        }:
-            raise ValueError("runtime observation lifecycle/presence differs")
-        if self.presence is SourceObservationPresence.CLEARED and (
-            self.lifecycle is not SourceObservationLifecycle.CLEARED or self.body
+        if not isinstance(self.text, str) or not self.text:
+            raise ValueError("runtime observation text must be non-empty")
+        if self.target is not None and not isinstance(
+            self.target, FrozenJsonObjectFact
         ):
-            raise ValueError("cleared runtime observation must have an empty body")
-        if self.presence is SourceObservationPresence.UNAVAILABLE and (
-            self.lifecycle is not SourceObservationLifecycle.UNAVAILABLE or self.body
-        ):
-            raise ValueError("unavailable runtime observation must have an empty body")
-
-
-@dataclass(frozen=True, slots=True)
-class ProviderRuntimeObservation:
-    """Exact provider-visible projection; internal contract proofs stay local."""
-
-    source_kind: ContextSourceKind
-    presence: SourceObservationPresence
-    body: str = field(repr=False)
-
-    def __post_init__(self) -> None:
-        if self.source_kind is ContextSourceKind.BASE_SYSTEM:
-            raise ValueError("base system is not a runtime observation")
-        self.body.encode("utf-8")
-        if self.presence is not SourceObservationPresence.VALUE and self.body:
-            raise ValueError("non-value runtime observation must have an empty body")
-
-
-def _provider_runtime_observation_message(
-    observation: ProviderRuntimeObservation,
-) -> LLMMessage:
-    payload = {
-        "pulsara_runtime_observation": {
-            "body": observation.body,
-            "presence": observation.presence.value,
-            "source": observation.source_kind.value,
-        }
-    }
-    return LLMMessage.user(canonical_json_bytes(payload).decode("utf-8"))
+            target = freeze_json(self.target)
+            if not isinstance(target, FrozenJsonObjectFact):
+                raise ValueError("runtime observation target must be an object")
+            object.__setattr__(self, "target", target)
 
 
 def encode_runtime_observation(
-    *,
-    source_kind: ContextSourceKind,
-    trust_class: ContextTrustClass,
-    lifecycle: SourceObservationLifecycle,
-    presence: SourceObservationPresence,
-    body: str,
+    *, source_kind: ContextSourceKind, body: tuple[RuntimeObservationItem, ...]
 ) -> LLMMessage:
-    observation = RuntimeObservation(
-        source_kind=source_kind,
-        trust_class=trust_class,
-        lifecycle=lifecycle,
-        presence=presence,
-        body=body,
+    if not body or source_kind in {
+        ContextSourceKind.BASE_SYSTEM,
+        ContextSourceKind.SKILL_CATALOG,
+        ContextSourceKind.COMPACTION_RUNTIME_HANDOFF,
+    }:
+        raise ValueError("runtime observation requires its source and non-empty body")
+    values = tuple(
+        {
+            "text": item.text,
+            **({} if item.target is None else {"target": thaw_json(item.target)}),
+        }
+        for item in body
     )
-    return _provider_runtime_observation_message(
-        ProviderRuntimeObservation(
-            source_kind=observation.source_kind,
-            presence=observation.presence,
-            body=observation.body,
-        )
+    return LLMMessage.user(
+        canonical_json_bytes(
+            {
+                "pulsara_runtime_observation": {
+                    "source": source_kind.value,
+                    "body": values,
+                }
+            }
+        ).decode("utf-8")
     )
-
-
-def decode_runtime_observation(message: LLMMessage) -> ProviderRuntimeObservation:
-    if (
-        message.role is not MessageRole.USER
-        or len(message.content) != 1
-        or not isinstance(message.content[0], LLMTextPart)
-    ):
-        raise ValueError("runtime observation must be one user-role JSON message")
-    try:
-        value = json.loads(message.content[0].text)
-    except (TypeError, json.JSONDecodeError) as exc:
-        raise ValueError("runtime observation JSON is invalid") from exc
-    if not isinstance(value, dict) or set(value) != {"pulsara_runtime_observation"}:
-        raise ValueError("runtime observation top-level contract is invalid")
-    payload = value["pulsara_runtime_observation"]
-    required = {"body", "presence", "source"}
-    if not isinstance(payload, dict) or set(payload) != required:
-        raise ValueError("runtime observation member contract is invalid")
-    if not all(isinstance(payload[name], str) for name in required):
-        raise ValueError("runtime observation members must be strings")
-    result = ProviderRuntimeObservation(
-        source_kind=ContextSourceKind(payload["source"]),
-        presence=SourceObservationPresence(payload["presence"]),
-        body=payload["body"],
-    )
-    if _provider_runtime_observation_message(result) != message:
-        raise ValueError("runtime observation is not canonically encoded")
-    return result
 
 
 @dataclass(frozen=True, slots=True)
-class ProcessLocalSourceHead:
-    source_kind: ContextSourceKind
-    presence: SourceObservationPresence
-    semantic_fingerprint: str
-    installed_observation_fingerprint: str
-    last_emitted_turn_id: str | None
-    last_emitted_model_call_index: int
+class InstalledMcpObservationSnapshot:
+    """Actually announced catalog state with last successful tool facts."""
 
-    def __post_init__(self) -> None:
-        _fingerprint(self.semantic_fingerprint, "source semantic")
-        _fingerprint(self.installed_observation_fingerprint, "source observation")
-        if self.last_emitted_model_call_index < 1:
-            raise ValueError("source-head call index is invalid")
+    catalog_snapshot: McpCatalogSnapshot
+    inspection_inputs: tuple[PreparedMcpInspectionInput, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class InstalledObservationState:
+    """Exactly the domain snapshots represented in this installed context."""
+
+    last_turn_id: str | None = None
+    reread_skills: tuple[MinimalSkillRef, ...] = ()
+    skill_catalog: PreparedSkillCatalogSourceSnapshot | None = field(
+        default=None, repr=False
+    )
+    mcp_catalog: InstalledMcpObservationSnapshot | None = field(
+        default=None, repr=False
+    )
+    memory: MemoryObservationState | None = field(default=None, repr=False)
 
 
 def _message_value(message: LLMMessage) -> object:
@@ -310,7 +250,7 @@ class FrozenProviderInputEpochView:
     wire_input_plan: FrozenProviderWireInputPlan = field(repr=False)
     tool_exposure_plan: FrozenToolCapabilityExposurePlan = field(repr=False)
     canonical_frontier: ProcessLocalCanonicalFrontier
-    source_heads: tuple[ProcessLocalSourceHead, ...]
+    observation_state: InstalledObservationState
     logical_bytes: int
     semantic_prefix_fingerprint: str
     assistant_replay_fragments: tuple[ProviderAssistantReplayFragment, ...] = field(
@@ -360,9 +300,6 @@ class FrozenProviderInputEpochView:
         )
         if self.semantic_prefix_fingerprint != expected:
             raise ValueError("provider-input epoch prefix fingerprint mismatch")
-        kinds = tuple(item.source_kind for item in self.source_heads)
-        if len(kinds) != len(set(kinds)):
-            raise ValueError("provider-input source heads are duplicated")
         fragment_entries = tuple(
             item.assistant_entry_id for item in self.assistant_replay_fragments
         )
@@ -376,10 +313,6 @@ class FrozenProviderInputEpochView:
     @property
     def direct_native_projection_set(self) -> FrozenNativeToolProjectionSet:
         return self.tool_exposure_plan.direct_projection_set
-
-    @property
-    def mcp_route_projection(self) -> FrozenMcpRouteProjection:
-        return self.tool_exposure_plan.mcp_catalog_route_projection
 
 
 @dataclass(frozen=True, slots=True)
@@ -653,7 +586,7 @@ class PreparedProviderInputAppendCandidate:
     wire_input_plan: FrozenProviderWireInputPlan = field(repr=False)
     tool_exposure_plan: FrozenToolCapabilityExposurePlan = field(repr=False)
     resulting_canonical_frontier: ProcessLocalCanonicalFrontier
-    resulting_source_heads: tuple[ProcessLocalSourceHead, ...]
+    resulting_observation_state: InstalledObservationState
     appended_message_count: int
     _preparation_basis: object = field(repr=False, compare=False)
 
@@ -700,16 +633,12 @@ class PreparedProviderInputAppendCandidate:
     def direct_native_projection_set(self) -> FrozenNativeToolProjectionSet:
         return self.tool_exposure_plan.direct_projection_set
 
-    @property
-    def mcp_route_projection(self) -> FrozenMcpRouteProjection:
-        return self.tool_exposure_plan.mcp_catalog_route_projection
-
 
 @dataclass(frozen=True, slots=True)
 class FrozenProviderInputAppendCompileResult:
     compiled_input: FrozenCompiledModelInput = field(repr=False)
     canonical_frontier: ProcessLocalCanonicalFrontier
-    source_heads: tuple[ProcessLocalSourceHead, ...]
+    observation_state: InstalledObservationState
     appended_message_count: int
 
     def __post_init__(self) -> None:
@@ -764,20 +693,17 @@ __all__ = [
     "InstalledEpochRuntimeCohort",
     "NewTriggerAnchor",
     "NoNewTriggerAnchor",
-    "ProviderRuntimeObservation",
     "PreparedProviderInputAppendCandidate",
     "ProcessLocalCanonicalFrontier",
     "ProcessLocalProviderInputInstallPermit",
-    "ProcessLocalSourceHead",
     "ProviderInputAdmissionPredecessorKind",
     "ProviderInputContinuityScope",
     "ProviderInputDispatchAnchor",
     "ProviderInputEpochTransition",
-    "RuntimeObservation",
-    "SourceObservationLifecycle",
-    "SourceObservationPresence",
-    "decode_runtime_observation",
     "encode_runtime_observation",
+    "RuntimeObservationItem",
+    "InstalledObservationState",
+    "InstalledMcpObservationSnapshot",
     "provider_input_logical_bytes",
     "provider_input_dispatch_anchor_value",
     "provider_input_prefix_fingerprint",

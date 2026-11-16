@@ -1,56 +1,42 @@
-"""Host-scoped product tools for the advisory-memory plane."""
+"""Native memory CRUD and complete shared retrieval/observation values."""
 
 from __future__ import annotations
-
-from pulsara_agent.memory.targets import memory_target, parse_memory_target
-
-from pulsara_agent.conversation_kernel.history_search import (
-    PostgresHistoryQuery,
-    FrozenHistoryReadScope,
-)
-from pulsara_agent.conversation_kernel.history_excerpt import HistoryCandidate
-from pulsara_agent.ports.session_content import session_content_range, session_entry_target
-
 import asyncio
 from dataclasses import dataclass, replace
 import json
 import math
 from time import monotonic
-from typing import TYPE_CHECKING, Mapping, Sequence
+from typing import Sequence, TYPE_CHECKING
 
-from pulsara_agent.conversation_kernel.io import KernelSessionIO
+from pulsara_agent.conversation_kernel.io import (
+    KernelSessionIO,
+    PhysicalToolInvocationDisposition,
+)
 from pulsara_agent.conversation_kernel.execution_watchdogs import (
     KernelExecutionDeadlineFactory,
     KernelWatchdogOwner,
 )
-from pulsara_agent.conversation_kernel.memory import (
-    MAXIMUM_MEMORY_QUERY_RESULTS,
-    MemoryQueryResult,
-    PostgresMemoryQuery,
+from pulsara_agent.conversation_kernel.history_search import (
+    PostgresHistoryQuery,
+    FrozenHistoryReadScope,
 )
+from pulsara_agent.conversation_kernel.history_excerpt import HistoryCandidate
 from pulsara_agent.conversation_kernel.memory.recall import (
-    MemoryDenseCandidateDisposition,
+    PostgresMemoryQuery,
+    MemoryQueryResult,
     MemoryRetrievalDisposition,
-    MemorySearchStageResult,
-)
-from pulsara_agent.conversation_kernel.context_sources import (
-    build_memory_context_source,
 )
 from pulsara_agent.conversation_kernel.memory.contracts import (
-    memory_response_preference_item_payload,
+    MemoryFactKind,
+    MemoryObservationState,
+    MemoryObservationText,
+    MemoryObservationCandidate,
     AutomaticMemoryTriggerDisposition,
     FrozenMemoryTriggerPolicy,
-    MemoryFactKind,
-    MemoryRelationKind,
     MemoryUsePolicy,
-    PreparedMemoryBasisReference,
-    memory_basis_context_allowed,
-    memory_context_product_label,
-)
-from pulsara_agent.conversation_kernel.memory.writes import (
-    MemoryRelatedPreview,
-    PreparedMemoryRelationWrite,
-    PreparedRememberWrite,
+    memory_title,
+    memory_statement,
+    memory_timestamp,
 )
 from pulsara_agent.conversation_kernel.memory.hints import (
     CheapMemoryWriteHintMatcher,
@@ -58,24 +44,21 @@ from pulsara_agent.conversation_kernel.memory.hints import (
     TurnMemoryUseOptOut,
     normalize_memory_trigger_text,
 )
-from pulsara_agent.conversation_kernel.repository import ConversationKernelRepository
+from pulsara_agent.conversation_kernel.memory.management import MemoryManagementError
+from pulsara_agent.conversation_kernel.content_parts import ResultPart
 from pulsara_agent.conversation_kernel.tool_contracts import (
-    KernelToolInvocationContext,
     KernelToolResult,
 )
 from pulsara_agent.memory.scope import CTX_GLOBAL, FrozenMemoryReadContextBinding
-from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV3
-from pulsara_agent.model_input.contracts import (
-    ContextSourceAbsentFact,
-    ContextSourceCandidate,
-    ContextSourceAbsenceKind,
-    ContextSourceKind,
+from pulsara_agent.memory.targets import memory_target, parse_memory_target
+from pulsara_agent.ports.session_content import (
+    session_content_range,
+    session_entry_target,
 )
-from pulsara_agent.primitives.context import canonical_json_bytes, freeze_json
-from pulsara_agent.identity import random_id
-from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget, ToolResultPageBoundary
 from pulsara_agent.ports.tool_execution import (
-    ToolOutputSourceFormatHint,
+    ToolBusinessValue,
+    freeze_tool_json_object,
+    thaw_tool_json_object,
 )
 from pulsara_agent.retrieval.config import (
     AdvisoryMemoryFeatureConfig,
@@ -92,25 +75,19 @@ from pulsara_agent.retrieval.rerank.protocol import RerankProvider, RerankPurpos
 from pulsara_agent.settings import LocalSettingsStore, LocalSettingsUnavailable
 
 if TYPE_CHECKING:
+    from pulsara_agent.conversation_kernel.repository import (
+        ConversationKernelRepository,
+    )
     from pulsara_agent.conversation_kernel.memory.embedding_maintainer import (
         MemoryEmbeddingMaintainer,
     )
 
-MEMORY_READ_TOOL_NAMES = frozenset({"search_memory", "get_memory"})
-MEMORY_WRITE_TOOL_NAMES = frozenset({"remember", "mark_memory_relation"})
+MEMORY_READ_TOOL_NAMES = frozenset({"query_memory"})
+MEMORY_WRITE_TOOL_NAMES = frozenset({"remember", "manage_memory"})
 MEMORY_TOOL_NAMES = MEMORY_READ_TOOL_NAMES | MEMORY_WRITE_TOOL_NAMES
 MEMORY_POINT_READ_TIMEOUT_SECONDS = 10.0
 MEMORY_SEARCH_TIMEOUT_SECONDS = 20.0
-MEMORY_AUTO_EMBED_TIMEOUT_SECONDS = 3.0
-MEMORY_EXPLICIT_EMBED_TIMEOUT_SECONDS = 4.0
-MEMORY_EXPLICIT_RERANK_TIMEOUT_SECONDS = 4.0
-MAXIMUM_RERANK_CANDIDATES = 20
-# Product admission boundary for unsolicited recall, not a reranker score scale.
 AUTOMATIC_DECISION_MINIMUM_PROBABILITY = 0.7
-MAXIMUM_RERANK_QUERY_BYTES = 8 * 1024
-MAXIMUM_RERANK_DOCUMENT_BYTES = 8 * 1024
-MAXIMUM_RERANK_REQUEST_BYTES = 192 * 1024
-MAXIMUM_RERANK_TOKEN_FORMULA = 120_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,8 +97,6 @@ class FrozenQueryEmbedding:
 
 
 class KernelMemoryToolPort:
-    """Resolve model-call memory tools into direct writes or bounded reads."""
-
     def __init__(
         self,
         *,
@@ -160,6 +135,7 @@ class KernelMemoryToolPort:
         self._closed = False
         self._embedding_maintainer: MemoryEmbeddingMaintainer | None = None
         self._settings = settings
+        self._installed_observation_reader = lambda: MemoryObservationState()
 
     @property
     def tool_names(self) -> frozenset[str]:
@@ -244,419 +220,6 @@ class KernelMemoryToolPort:
         except Exception:
             return None
 
-    async def invoke(
-        self,
-        *,
-        tool_name: str,
-        arguments: Mapping[str, object],
-        invocation_context: KernelToolInvocationContext,
-    ) -> KernelToolResult:
-        if self._closed:
-            return _json_result("SYSTEM_ERROR", {"error": "memory owner is closed"})
-        if invocation_context.session_id != self._session_id:
-            return _json_result("SYSTEM_ERROR", {"error": "memory session mismatch"})
-        policy = invocation_context.memory_context.memory_use_policy
-        if (tool_name in MEMORY_READ_TOOL_NAMES and not policy.allows_reads) or (
-            tool_name in MEMORY_WRITE_TOOL_NAMES and not policy.allows_writes
-        ):
-            raise RuntimeError("memory tool escaped its frozen user opt-out policy")
-        try:
-            if tool_name == "remember":
-                return await self._remember(arguments, invocation_context)
-            if tool_name == "mark_memory_relation":
-                return self._mark_memory_relation(arguments, invocation_context)
-            if tool_name == "search_memory":
-                return await self._search(arguments, invocation_context)
-            if tool_name == "get_memory":
-                return await self._get(arguments, invocation_context)
-        except ToolResultPageBoundary:
-            raise
-        except (TypeError, ValueError) as exc:
-            # invoke runs after a canonical attempt has been admitted. A bad
-            # basis is a known application rejection, not a preflight
-            # INVALID_ARGUMENTS outcome (which must have no attempt).
-            return _json_result("APPLICATION_ERROR", {"error": str(exc)})
-        raise KeyError(tool_name)
-
-    async def _remember(
-        self,
-        arguments: Mapping[str, object],
-        context: KernelToolInvocationContext,
-    ) -> KernelToolResult:
-        if context.conversation_scope_kind != "ROOT":
-            raise ValueError("only the root Agent may write memory")
-        if "kind_hint" in arguments or arguments.get("kind") is None:
-            raise ValueError("remember requires final kind; kind_hint is not supported")
-        if "cited_tool_result_handles" in arguments:
-            raise ValueError("remember does not accept ToolResult citations")
-        if set(arguments) - {
-            "statement",
-            "context_target",
-            "kind",
-            "based_on",
-        }:
-            raise ValueError("remember contains an unsupported argument")
-        context_target = str(arguments.get("context_target") or "")
-        if context_target == "GLOBAL":
-            context_id = CTX_GLOBAL
-        elif context_target == "CURRENT_PROJECT":
-            context_id = self._read_binding.current_project_context_id
-            if context_id is None:
-                raise ValueError(
-                    "CURRENT_PROJECT memory is unavailable in this transient Host"
-                )
-        else:
-            raise ValueError("context_target must be GLOBAL or CURRENT_PROJECT")
-        basis = arguments.get("based_on", ())
-        if not isinstance(basis, (list, tuple)):
-            raise ValueError("memory basis must be an array of MEMORY targets")
-        basis_ids = tuple(parse_memory_target(value) for value in basis)
-        kind = MemoryFactKind(str(arguments["kind"]))
-        statement = str(arguments.get("statement") or "")
-        basis_refs = await self._resolve_basis(basis_ids, source_context_id=context_id)
-        admitted = PreparedRememberWrite(
-            memory_domain_id=self._read_binding.memory_domain_id,
-            context_id=context_id,
-            kind=kind,
-            statement=statement,
-            basis_refs=basis_refs,
-            related=(),
-            retrieval_summary=freeze_json({"disposition": "NOT_STARTED"}),
-            page_budget=_memory_page_budget(context),
-        )
-        related, retrieval_summary = await self._related_for_remember(
-            admitted.statement, context_id=context_id
-        )
-        mutation = replace(
-            admitted,
-            related=related,
-            retrieval_summary=freeze_json(retrieval_summary),
-        )
-        return KernelToolResult(
-            state="SUCCESS", content=b"{}", memory_mutation=mutation
-        )
-
-    def _mark_memory_relation(
-        self, arguments: Mapping[str, object], context: KernelToolInvocationContext
-    ) -> KernelToolResult:
-        if context.conversation_scope_kind != "ROOT":
-            raise ValueError("only the root Agent may mark memory relations")
-        if set(arguments) != {"source", "target", "relation_kind"}:
-            raise ValueError("memory relation requires source, target and relation_kind")
-        mutation = PreparedMemoryRelationWrite(
-            memory_domain_id=self._read_binding.memory_domain_id,
-            source_memory_id=parse_memory_target(arguments.get("source")),
-            target_memory_id=parse_memory_target(arguments.get("target")),
-            relation_kind=MemoryRelationKind(str(arguments.get("relation_kind") or "")),
-            page_budget=_memory_page_budget(context),
-        )
-        return KernelToolResult(
-            state="SUCCESS", content=b"{}", memory_mutation=mutation
-        )
-
-    async def _related_for_remember(
-        self, statement: str, *, context_id: str
-    ) -> tuple[tuple[MemoryRelatedPreview, ...], Mapping[str, object]]:
-        """Best-effort same-context recall; it never owns the write transaction."""
-
-        deadline = self._deadlines.deadline(
-            KernelWatchdogOwner.MEMORY_EXPLICIT_RECALL_TOTAL
-        )
-        embedding = None
-        dense_status = "NOT_REQUESTED"
-        try:
-            provider = await self._embedding_provider()
-            if provider is not None:
-                embedding = await self._run_remote_exact(
-                    self._frozen_query_embedding(provider, statement),
-                    timeout_seconds=self._remaining_for(
-                        deadline, KernelWatchdogOwner.MEMORY_EXPLICIT_QUERY_EMBEDDING
-                    ),
-                    name="memory-remember-query-embedding",
-                )
-                dense_status = "AVAILABLE" if embedding is not None else "UNAVAILABLE"
-        except Exception:
-            dense_status = "UNAVAILABLE"
-        try:
-            related_search = await self._io.run(
-                self._query.related_candidates,
-                read_binding=self._read_binding,
-                context_id=context_id,
-                query=statement,
-                query_embedding=None if embedding is None else embedding.vector,
-                embedding_contract=None
-                if embedding is None
-                else embedding.connection.embedding_contract,
-                exclude_fact_id=None,
-                limit=20,
-                deadline_monotonic=deadline,
-            )
-            if (
-                embedding is not None
-                and self.embedding_connection() != embedding.connection
-            ):
-                embedding = None
-                dense_status = "UNAVAILABLE"
-                related_search = await self._io.run(
-                    self._query.related_candidates,
-                    read_binding=self._read_binding,
-                    context_id=context_id,
-                    query=statement,
-                    query_embedding=None,
-                    embedding_contract=None,
-                    exclude_fact_id=None,
-                    limit=20,
-                    deadline_monotonic=deadline,
-                )
-        except Exception:
-            return (), {
-                "disposition": "UNAVAILABLE",
-                "dense": dense_status,
-                "rerank": "NOT_APPLICABLE",
-                "bounded_search_not_exhaustive": True,
-            }
-        if (
-            related_search.dense_disposition
-            is MemoryDenseCandidateDisposition.UNAVAILABLE
-        ):
-            dense_status = "UNAVAILABLE"
-        elif (
-            related_search.dense_disposition
-            is MemoryDenseCandidateDisposition.PARTIAL_BOUNDED_SCAN
-        ):
-            dense_status = "PARTIAL"
-        ranked = MemoryQueryResult(
-            disposition=MemoryRetrievalDisposition.COMPLETE,
-            facts=related_search.facts,
-            attempted_stages=(),
-            dense_available=(embedding is not None and dense_status != "UNAVAILABLE"),
-            dense_disposition=related_search.dense_disposition,
-        )
-        ranked = await self._rerank_explicit(
-            statement, ranked, total_deadline=deadline, purpose="related_memory"
-        )
-        related = tuple(
-            MemoryRelatedPreview(
-                memory_id=item.fact_id,
-                kind=MemoryFactKind(item.fact_kind),
-                context_id=item.context_id,
-                recorded_at=item.recorded_at,
-            )
-            for item in ranked.facts[:3]
-        )
-        return related, {
-            "disposition": (
-                "PARTIAL"
-                if dense_status in {"UNAVAILABLE", "PARTIAL"}
-                or ranked.rerank_disposition == "FAILED_FALLBACK"
-                else "COMPLETE"
-            ),
-            "dense": dense_status,
-            "rerank": ranked.rerank_disposition,
-            "bounded_search_not_exhaustive": True,
-        }
-
-    async def _resolve_basis(
-        self, fact_ids: Sequence[str], *, source_context_id: str
-    ) -> tuple[PreparedMemoryBasisReference, ...]:
-        refs: list[PreparedMemoryBasisReference] = []
-        for ordinal, fact_id in enumerate(fact_ids):
-            item = await self._io.run(
-                self._query.get,
-                read_binding=self._read_binding,
-                fact_id=fact_id,
-                deadline_monotonic=self._canonical_deadline(
-                    MEMORY_POINT_READ_TIMEOUT_SECONDS
-                ),
-            )
-            if item is None:
-                raise ValueError(
-                    "based_on memory is absent or outside the visible context"
-                )
-            if not memory_basis_context_allowed(source_context_id, item.context_id):
-                raise ValueError("based_on memory crosses the context hierarchy")
-            refs.append(
-                PreparedMemoryBasisReference(
-                    target_fact_id=item.fact_id,
-                    target_context_id=item.context_id,
-                    ordinal=ordinal,
-                )
-            )
-        return tuple(refs)
-
-    async def _search(
-        self, arguments: Mapping[str, object], context: KernelToolInvocationContext | None = None
-    ) -> KernelToolResult:
-        page_budget = _memory_page_budget(context)
-        total_deadline = self._deadlines.deadline(
-            KernelWatchdogOwner.MEMORY_EXPLICIT_RECALL_TOTAL
-        )
-        query = str(arguments.get("query") or "").strip()
-        if not query or len(query.encode("utf-8")) > 32 * 1024:
-            raise ValueError("memory query must contain 1..32768 UTF-8 bytes")
-        limit = int(arguments.get("limit", 5))
-        if not 1 <= limit <= MAXIMUM_MEMORY_QUERY_RESULTS:
-            raise ValueError("memory search limit is outside 1..50")
-        requested_kind = arguments.get("kind")
-        if requested_kind is not None:
-            MemoryFactKind(str(requested_kind))
-        # Query lexical bounds are an admission fence.  A malformed/overbound
-        # query must not open the optional embedding or rerank transports.
-        embedding = None
-        try:
-            embedding = await self._embedding_provider()
-        except Exception:
-            # Optional remote retrieval must never become the authority for an
-            # otherwise valid sparse memory search.
-            pass
-        query_embedding = None
-        if embedding is not None:
-            try:
-                query_embedding = await self._run_remote_exact(
-                    self._frozen_query_embedding(embedding, query),
-                    timeout_seconds=self._remaining_for(
-                        total_deadline,
-                        KernelWatchdogOwner.MEMORY_EXPLICIT_QUERY_EMBEDDING,
-                    ),
-                    name="memory-explicit-query-embedding",
-                )
-            except Exception:
-                pass
-        result = await self._parallel_recall(
-            query=query,
-            limit=limit,
-            candidate_limit=max(limit, MAXIMUM_RERANK_CANDIDATES),
-            requested_kind=(None if requested_kind is None else str(requested_kind)),
-            query_embedding=query_embedding,
-            automatic=False,
-            deadline_monotonic=total_deadline,
-        )
-        result = await self._rerank_explicit(
-            query, result, total_deadline=total_deadline
-        )
-        result = replace(result, facts=result.facts[:limit])
-        try:
-            relations = await self._io.run(
-                self._query.active_contradictions,
-                read_binding=self._read_binding,
-                fact_ids=tuple(item.fact_id for item in result.facts),
-                deadline_monotonic=total_deadline,
-            )
-            relation_enrichment = "COMPLETE"
-            if len(relations) >= 64:
-                relation_enrichment = "PARTIAL"
-        except Exception:
-            # The ranked canonical facts are still useful advisory results.
-            # A failed optional warning join cannot negate them.
-            relations = ()
-            relation_enrichment = "UNAVAILABLE"
-        original_relation_count = len(relations)
-        relations, ids = _bounded_memory_relations(
-            tuple(item.fact_id for item in result.facts), relations
-        )
-        if len(relations) != original_relation_count:
-            relation_enrichment = "PARTIAL"
-        memories = [
-            {
-                "target": memory_target(item.fact_id),
-                "kind": item.fact_kind,
-                "context_product_label": memory_context_product_label(item.context_id),
-                "current_context": item.context_id != CTX_GLOBAL,
-                "statement": item.statement,
-                "recorded_at": item.recorded_at,
-                "filter_match": _filter_match(item.match_tier),
-            }
-            for item in result.facts
-        ]
-        payload = {
-                "requested_filters": {
-                    "kind": requested_kind,
-                },
-                "retrieval_summary": _retrieval_summary(
-                    result,
-                    relation_check=relation_enrichment,
-                ),
-                "memories": memories,
-                "relation_warnings": [
-                    {
-                        "kind": "ACTIVE_CONTRADICTION",
-                        "source": memory_target(relation.source_fact_id),
-                        "target": memory_target(relation.target_fact_id),
-                    }
-                    for relation in relations
-                ],
-                "advisory": True,
-                "may_be_stale_or_incomplete": True,
-            }
-        native_payload = _memory_search_display(payload, page_budget, ids)
-        return _json_result(
-            "SUCCESS", payload,
-            model_visible_memory_fact_ids=ids,
-            native_payload=native_payload,
-            required_facts={key: native_payload[key] for key in (
-                "requested_filters", "retrieval_summary", "advisory", "may_be_stale_or_incomplete"
-            )},
-        )
-
-    async def _get(
-        self, arguments: Mapping[str, object], context: KernelToolInvocationContext | None = None
-    ) -> KernelToolResult:
-        if context is not None:
-            _memory_page_budget(context)
-        if set(arguments) != {"target"}:
-            raise ValueError("get_memory requires target")
-        memory_id = parse_memory_target(arguments.get("target"))
-        item = await self._io.run(
-            self._query.get,
-            read_binding=self._read_binding,
-            fact_id=memory_id,
-            deadline_monotonic=self._canonical_deadline(
-                MEMORY_POINT_READ_TIMEOUT_SECONDS
-            ),
-        )
-        if item is None:
-            return _json_result("APPLICATION_ERROR", {"error": "memory not found"})
-        relations = await self._io.run(
-            self._query.direct_relations,
-            read_binding=self._read_binding,
-            fact_id=memory_id,
-            deadline_monotonic=self._canonical_deadline(
-                MEMORY_POINT_READ_TIMEOUT_SECONDS
-            ),
-        )
-        payload: dict[str, object] = {
-            "target": memory_target(item.fact_id),
-            "kind": item.fact_kind,
-            "context_product_label": memory_context_product_label(item.context_id),
-            "current_context": item.context_id != CTX_GLOBAL,
-            "lifecycle": item.lifecycle,
-            "statement": item.statement,
-            "recorded_at": item.recorded_at,
-            "relations": [
-                {
-                    "relation_id": relation.relation_id,
-                    "source": memory_target(relation.source_fact_id),
-                    "target": memory_target(relation.target_fact_id),
-                    "kind": relation.relation_kind,
-                    "supersede_mode": relation.supersede_mode,
-                }
-                for relation in relations
-            ],
-            "relation_check": "PARTIAL" if len(relations) >= 100 else "COMPLETE",
-            "advisory": True,
-            "may_be_stale_or_incomplete": True,
-        }
-        if item.user_edited_at is not None:
-            payload["user_edit"] = {
-                "edited_at": item.user_edited_at,
-                "note": "The user edited this memory's text. Existing relations were not re-evaluated.",
-            }
-        return _json_result(
-            "SUCCESS", payload, model_visible_memory_fact_ids=(item.fact_id,),
-            required_facts={key: value for key, value in payload.items()
-                            if key not in {"statement", "relations"}},
-        )
-
     def embedding_connection(self):
         try:
             retrieval = self._settings.read().memory_retrieval
@@ -705,361 +268,11 @@ class KernelMemoryToolPort:
             return None
         return FrozenQueryEmbedding(tuple(vector), connection)
 
-    async def _rerank_explicit(
-        self,
-        query: str,
-        result,
-        *,
-        total_deadline: float,
-        purpose: RerankPurpose = "recall",
-    ):
-        try:
-            retrieval_before = self._settings.read().memory_retrieval
-        except LocalSettingsUnavailable:
-            if purpose == "automatic_recall":
-                return replace(
-                    result,
-                    facts=tuple(
-                        item for item in result.facts
-                        if not isinstance(item, HistoryCandidate)
-                    ),
-                )
-            return result
-        if retrieval_before.ranking_mode == "off":
-            return result
-        decision_admission = (
-            purpose == "automatic_recall"
-            and retrieval_before.ranking_mode == "decision"
-        )
-
-        def fallback(disposition):
-            # A failed/unavailable Decision must not admit unjudged history.
-            # Ordinary memory retains its existing local retrieval fallback.
-            facts = tuple(
-                item
-                for item in result.facts
-                if not decision_admission or not isinstance(item, HistoryCandidate)
-            )
-            return replace(result, facts=facts, rerank_disposition=disposition)
-
-        try:
-            provider = await self._rerank_provider()
-            if (
-                provider is not None
-                and hasattr(provider, "connection")
-                and provider.connection
-                != getattr(retrieval_before, retrieval_before.ranking_mode)
-            ):
-                raise ValueError("rerank configuration changed before admission")
-        except Exception:
-            return fallback("FAILED_FALLBACK")
-        if provider is None or not result.facts:
-            return fallback(result.rerank_disposition)
-        selected = result.facts[:MAXIMUM_RERANK_CANDIDATES]
-        prepared = _prepare_rerank_projection(query, selected)
-        if prepared is None:
-            return fallback("NOT_APPLICABLE")
-        remote_query, documents = prepared
-        try:
-            rows = await self._run_remote_exact(
-                provider.rerank(
-                    remote_query,
-                    documents,
-                    candidate_ids=tuple(str(index) for index in range(len(selected))),
-                    purpose=purpose,
-                ),
-                timeout_seconds=self._remaining_for(
-                    total_deadline,
-                    KernelWatchdogOwner.MEMORY_EXPLICIT_RERANK,
-                ),
-                name="memory-explicit-rerank",
-            )
-            retrieval_after = self._settings.read().memory_retrieval
-            mode = retrieval_before.ranking_mode
-            if retrieval_after.ranking_mode != mode or getattr(
-                retrieval_after, mode
-            ) != getattr(retrieval_before, mode):
-                raise ValueError("rerank configuration changed")
-            rows = sorted(rows, key=lambda item: (-item.score, item.index))
-            indexes = tuple(item.index for item in rows)
-            if (
-                len(indexes) != len(selected)
-                or len(set(indexes)) != len(indexes)
-                or set(indexes) != set(range(len(selected)))
-                or any(not math.isfinite(item.score) for item in rows)
-                or (
-                    decision_admission
-                    and any(not 0 <= item.score <= 1 for item in rows)
-                )
-            ):
-                raise ValueError("rerank response does not cover the exact candidates")
-        except Exception:
-            return fallback("FAILED_FALLBACK")
-        else:
-            # Filter relaxation is a product promise: a relaxed row can never
-            # leapfrog an exact row merely because a remote score is larger.
-            by_tier: dict[int, list] = {}
-            for row in rows:
-                if (
-                    decision_admission
-                    and row.score < AUTOMATIC_DECISION_MINIMUM_PROBABILITY
-                ):
-                    continue
-                item = selected[row.index]
-                by_tier.setdefault(getattr(item, "match_tier", 0), []).append(item)
-            reranked = tuple(item for tier in sorted(by_tier) for item in by_tier[tier])
-            selected_ids = {id(item) for item in selected}
-            ordered = (
-                *reranked,
-                *(
-                    item for item in result.facts
-                    if not decision_admission and id(item) not in selected_ids
-                ),
-            )
-            disposition = "APPLIED"
-        return type(result)(
-            disposition=result.disposition,
-            facts=tuple(ordered),
-            attempted_stages=result.attempted_stages,
-            relaxed_fields=result.relaxed_fields,
-            sparse_available=result.sparse_available,
-            dense_available=result.dense_available,
-            dense_disposition=result.dense_disposition,
-            rerank_disposition=disposition,
-        )
-
-    async def freeze_response_preference_source(
-        self,
-    ) -> ContextSourceCandidate | ContextSourceAbsentFact:
-        """Freeze a bounded, query-independent snapshot of current preferences."""
-
-        try:
-            snapshot = await self._io.run(
-                self._query.response_preference_snapshot,
-                read_binding=self._read_binding,
-                deadline_monotonic=self._canonical_deadline(
-                    MEMORY_POINT_READ_TIMEOUT_SECONDS
-                ),
-            )
-        except Exception:
-            return build_memory_context_source(
-                kind=ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
-                texts=None,
-                absence_kind=ContextSourceAbsenceKind.UNAVAILABLE,
-            )
-        if (
-            not snapshot.facts
-            and not snapshot.selection_incomplete
-            and not snapshot.conflicts_omitted
-        ):
-            return build_memory_context_source(
-                kind=ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
-                texts=None,
-                absence_kind=ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-            )
-        items = tuple(memory_response_preference_item_payload(
-            memory_id=item.fact_id, context_id=item.context_id,
-            statement=item.statement, recorded_at=item.recorded_at,
-        ) for item in snapshot.facts)
-        payload = {"advisory": True, "items": items}
-        warnings = []
-        if snapshot.selection_incomplete:
-            warnings.append("Some preferences were omitted due to selection limits.")
-        if snapshot.conflicts_omitted:
-            warnings.append("Conflicting preferences were omitted.")
-        if warnings:
-            payload["warnings"] = warnings
-        body = canonical_json_bytes(payload)
-        if len(body) > 16 * 1024:
-            return build_memory_context_source(
-                kind=ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
-                texts=None,
-                absence_kind=ContextSourceAbsenceKind.UNAVAILABLE,
-            )
-        return build_memory_context_source(
-            kind=ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
-            texts=(body.decode("utf-8"),),
-            memory_fact_ids=tuple(item.fact_id for item in snapshot.facts),
-            domain_identity={
-                "items": tuple(
-                    (item.fact_id, item.fact_semantic_digest) for item in snapshot.facts
-                ),
-                "selection_incomplete": snapshot.selection_incomplete,
-                "conflicts_omitted": snapshot.conflicts_omitted,
-            },
-        )
-
-    async def freeze_automatic_recall_source(self, query: str, *, canonical_facts=None):
-        normalized = " ".join(query.split())
-        if (
-            self.classify_automatic_trigger(normalized)
-            is not AutomaticMemoryTriggerDisposition.ELIGIBLE
-        ):
-            return build_memory_context_source(
-                kind=ContextSourceKind.MEMORY_RECALL,
-                texts=None,
-                absence_kind=ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-            )
-        deadline = self._canonical_deadline(MEMORY_SEARCH_TIMEOUT_SECONDS)
-        scope = None
-        try:
-            enabled = self._settings.read().memory_retrieval.history_enabled
-            if enabled and canonical_facts is not None:
-                scope = FrozenHistoryReadScope(
-                    self._session_id,
-                    self._read_binding.memory_domain_id,
-                    session_content_range(canonical_facts),
-                    tuple(
-                        dict.fromkeys(
-                            i.source_entry_id
-                            for i in canonical_facts.canonical_input.items
-                            if i.source_entry_id is not None
-                        )
-                    ),
-                )
-        except Exception:
-            pass
-
-        async def history_route():
-            if scope is None:
-                return ()
-            try:
-                return await self._io.run(
-                    self._history.automatic_candidates,
-                    scope=scope,
-                    query=normalized,
-                    deadline_monotonic=deadline,
-                )
-            except Exception:
-                return ()
-
-        # Local sparse/history start before remote embedding completes. Their IO
-        # remains owned by KernelSessionIO and all tasks settle on cancellation.
-        tasks = [
-            asyncio.create_task(
-                self._io.run(
-                    self._query.sparse_candidates,
-                    read_binding=self._read_binding,
-                    query=normalized,
-                    kind_filter=None,
-                    limit=20,
-                    automatic=True,
-                    deadline_monotonic=deadline,
-                )
-            ),
-            asyncio.create_task(history_route()),
-            asyncio.create_task(self._automatic_query_embedding(normalized)),
-        ]
-        try:
-            sparse, history, vector = await asyncio.gather(
-                *tasks, return_exceptions=True
-            )
-        finally:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-        sparse_ok = not isinstance(sparse, BaseException)
-        sparse = () if not sparse_ok else sparse
-        history = () if isinstance(history, BaseException) else history
-        # Each post-retrieval operation keeps its existing watchdog budget.
-        # A failed sibling must not consume admission time for successful
-        # candidates' canonical checks (or the optional ranking request).
-        dense = ()
-        if (
-            not isinstance(vector, BaseException)
-            and vector is not None
-            and self.embedding_connection() == vector.connection
-        ):
-            try:
-                dense = (
-                    await self._io.run(
-                        self._query.dense_candidates,
-                        read_binding=self._read_binding,
-                        vector=vector.vector,
-                        embedding_contract=vector.connection.embedding_contract,
-                        kind_filter=None,
-                        limit=20,
-                        purpose=DenseRecallPurpose.AUTOMATIC_ROOT,
-                        automatic=True,
-                        deadline_monotonic=self._canonical_deadline(MEMORY_SEARCH_TIMEOUT_SECONDS),
-                    )
-                ).facts
-            except Exception:
-                pass
-        try:
-            memory = await self._io.run(
-                self._query.canonical_refetch,
-                read_binding=self._read_binding,
-                ranked=self._query.fuse_candidates(sparse, dense),
-                automatic=True,
-                deadline_monotonic=self._canonical_deadline(MEMORY_SEARCH_TIMEOUT_SECONDS),
-            )
-        except Exception:
-            memory = ()
-        memory = tuple(
-            item for item in memory if _sensitive_profile_is_eligible(item, normalized)
-        )
-        # Independent history projection is all-or-nothing, before pool quotas.
-        history = tuple(
-            item for item in history if _rerank_document_projection(item) is not None
-        )
-        pool = _elastic_candidates(memory, history, 15, 5)
-        result = MemoryQueryResult(
-            disposition=MemoryRetrievalDisposition.COMPLETE
-            if pool
-            else MemoryRetrievalDisposition.NO_MATCH,
-            facts=pool,
-            attempted_stages=(),
-            sparse_available=sparse_ok,
-            dense_available=bool(dense),
-        )
-        result = await self._rerank_explicit(
-            normalized, result,
-            total_deadline=self._deadlines.deadline(KernelWatchdogOwner.MEMORY_EXPLICIT_RERANK),
-            purpose="automatic_recall",
-        )
-        selected = (
-            result.facts[:5]
-            if result.rerank_disposition == "APPLIED"
-            else _elastic_candidates(
-                tuple(
-                    item for item in result.facts if not isinstance(item, HistoryCandidate)
-                ),
-                tuple(
-                    item for item in result.facts if isinstance(item, HistoryCandidate)
-                ),
-                4,
-                1,
-            )
-        )
-        selected_history = tuple(
-            item for item in selected if isinstance(item, HistoryCandidate)
-        )
-        if scope is not None and selected_history:
-            try:
-                valid = await self._io.run(
-                    self._history.canonical_refetch,
-                    scope=scope,
-                    candidates=selected_history,
-                    deadline_monotonic=self._canonical_deadline(MEMORY_SEARCH_TIMEOUT_SECONDS),
-                )
-            except Exception:
-                valid = ()
-            selected = tuple(
-                item
-                for item in selected
-                if not isinstance(item, HistoryCandidate) or item in valid
-            )
-        return await self._automatic_recall_source(
-            replace(result, facts=selected), normalized
-        )
-
-    async def _automatic_query_embedding(
-        self, normalized: str
+    async def _query_embedding(
+        self, normalized: str, *, automatic: bool
     ) -> FrozenQueryEmbedding | None:
         embedding = None
-        if self._feature_config.automatic_dense:
+        if not automatic or self._feature_config.automatic_dense:
             try:
                 embedding = await self._embedding_provider()
             except Exception:
@@ -1072,160 +285,14 @@ class KernelMemoryToolPort:
                     self._frozen_query_embedding(embedding, normalized),
                     timeout_seconds=self._deadlines.policy.seconds_for(
                         KernelWatchdogOwner.MEMORY_AUTO_QUERY_EMBEDDING
+                        if automatic
+                        else KernelWatchdogOwner.MEMORY_EXPLICIT_QUERY_EMBEDDING
                     ),
                     name="memory-automatic-query-embedding",
                 )
             except Exception:
                 pass
         return None
-
-    async def _automatic_recall_source(
-        self,
-        result: MemoryQueryResult,
-        normalized: str,
-    ) -> ContextSourceCandidate | ContextSourceAbsentFact:
-        history = tuple(
-            item for item in result.facts if isinstance(item, HistoryCandidate)
-        )
-        filtered_facts = tuple(
-            item
-            for item in result.facts
-            if not isinstance(item, HistoryCandidate)
-            and _sensitive_profile_is_eligible(item, normalized)
-        )
-        if not filtered_facts and not history:
-            absence = (
-                ContextSourceAbsenceKind.UNAVAILABLE
-                if result.disposition.value == "UNAVAILABLE"
-                else ContextSourceAbsenceKind.EXPLICIT_EMPTY
-            )
-            return build_memory_context_source(
-                kind=ContextSourceKind.MEMORY_RECALL,
-                texts=None,
-                absence_kind=absence,
-            )
-        try:
-            relations = await self._io.run(
-                self._query.active_contradictions,
-                read_binding=self._read_binding,
-                fact_ids=tuple(item.fact_id for item in filtered_facts),
-                deadline_monotonic=self._canonical_deadline(
-                    MEMORY_SEARCH_TIMEOUT_SECONDS
-                ),
-            )
-        except Exception:
-            # Contradiction read failure invalidates only the memory source.
-            # Already selected history remains available, with no final refill.
-            if not history:
-                return build_memory_context_source(
-                    kind=ContextSourceKind.MEMORY_RECALL,
-                    texts=None,
-                    absence_kind=ContextSourceAbsenceKind.UNAVAILABLE,
-                )
-            filtered_facts = ()
-            relations = ()
-
-        def item_payload(item):
-            return {
-                "target": memory_target(item.fact_id),
-                "kind": item.fact_kind,
-                "scope": "shared across conversations" if item.context_id == CTX_GLOBAL else "current project",
-                "statement": item.statement,
-                "recorded_at": item.recorded_at,
-            }
-
-        membership = tuple(
-            sorted((item.fact_id, item.fact_semantic_digest) for item in filtered_facts)
-        )
-        presentation = filtered_facts
-        relation_check = "PARTIAL" if len(relations) >= 64 else "COMPLETE"
-        original_relation_count = len(relations)
-        relations, exposed_ids = _bounded_memory_relations(
-            tuple(item.fact_id for item in presentation), relations
-        )
-        if len(relations) != original_relation_count:
-            relation_check = "PARTIAL"
-        warning_identity = tuple(
-            sorted(
-                (relation.source_fact_id, relation.target_fact_id)
-                for relation in relations
-            )
-        )
-
-        def history_model_item(item):
-            # Targets are model-facing read addresses, not rerank document text.
-            return {
-                **item.projection(),
-                "target": session_entry_target(item.session_id, item.q1_entry_id),
-                "messages": [
-                    {
-                        "target": session_entry_target(item.session_id, message["entry_id"]),
-                        **{key: message[key] for key in ("role", "label", "at", "text")},
-                    }
-                    for message in item.messages
-                ],
-            }
-
-        full_items = tuple(
-            history_model_item(item)
-            if isinstance(item, HistoryCandidate)
-            else {"source": "memory", **item_payload(item)}
-            for item in result.facts
-            if isinstance(item, HistoryCandidate) or item in presentation
-        )
-        compact_items = full_items[: min(3, len(full_items))]
-        ref_items = tuple(
-            memory_target(item.fact_id)
-            for item in presentation[:3]
-        )
-        relation_warnings = tuple(
-            {
-                "kind": "ACTIVE_CONTRADICTION",
-                "source": memory_target(relation.source_fact_id),
-                "target": memory_target(relation.target_fact_id),
-            }
-            for relation in relations
-        )
-
-        def render(items, *, references=False):
-            payload = {"advisory": True, "relation_check": relation_check}
-            if references:
-                if ref_items:
-                    payload["memory_refs"] = list(ref_items)
-                    payload["read_memory_with"] = "get_memory"
-                omitted_history = history
-                if len(presentation) > len(ref_items):
-                    payload["selected_memories_omitted"] = len(presentation) - len(ref_items)
-            else:
-                payload["items"] = [
-                    {k: v for k, v in item.items() if k != "historical_advisory"}
-                    for item in items
-                ]
-                shown_history = sum(item.get("source") == "session_history" for item in items)
-                omitted_history = history[shown_history:]
-                shown_memories = sum(item.get("source") == "memory" for item in items)
-                if len(presentation) > shown_memories:
-                    payload["selected_memories_omitted"] = len(presentation) - shown_memories
-            if omitted_history:
-                payload["omitted_conversations"] = [
-                    {"target": session_entry_target(item.session_id, item.q1_entry_id),
-                     "read_with": "read_session_content"} for item in omitted_history
-                ]
-            if relation_warnings:
-                payload["relation_warnings"] = relation_warnings
-            return canonical_json_bytes(payload).decode("utf-8")
-
-        return build_memory_context_source(
-            kind=ContextSourceKind.MEMORY_RECALL,
-            texts=(render(full_items), render(compact_items), render(ref_items, references=True)),
-            memory_fact_ids=exposed_ids,
-            domain_identity={
-                "membership": membership,
-                "order": tuple(item.fact_id for item in presentation),
-                "history": tuple(item.document for item in history),
-                "warnings": warning_identity,
-            },
-        )
 
     @property
     def physical_close_complete(self) -> bool:
@@ -1268,171 +335,6 @@ class KernelMemoryToolPort:
         finally:
             self._remote_tasks.discard(task)
 
-    async def _parallel_recall(
-        self,
-        *,
-        query: str,
-        limit: int,
-        candidate_limit: int,
-        requested_kind: str | None,
-        query_embedding: FrozenQueryEmbedding | None,
-        automatic: bool,
-        deadline_monotonic: float,
-    ) -> MemoryQueryResult:
-        """Run sparse and dense reads independently, then canonical-refetch.
-
-        No PostgreSQL transaction spans the two channels or any remote call.
-        KernelSessionIO retains physical ownership of both channel reads.
-        ``limit`` controls filter relaxation; ``candidate_limit`` preserves the
-        explicit Top-20 rerank pool independently of the final result count.
-        """
-
-        if (
-            query_embedding is not None
-            and self.embedding_connection() != query_embedding.connection
-        ):
-            query_embedding = None
-        stages = self._query.filter_stages(self._read_binding, requested_kind)
-        gathered = []
-        seen: set[str] = set()
-        attempted: list[MemorySearchStageResult] = []
-        relaxed: list[str] = []
-        sparse_ok = True
-        dense_ok = query_embedding is not None
-        dense_dispositions: list[MemoryDenseCandidateDisposition] = []
-        for ordinal, (kind_filter, label, relaxed_field) in enumerate(stages):
-            if monotonic() >= deadline_monotonic:
-                break
-            if relaxed_field is not None:
-                relaxed.append(relaxed_field)
-            sparse_operation = self._io.run(
-                self._query.sparse_candidates,
-                read_binding=self._read_binding,
-                query=query,
-                kind_filter=kind_filter,
-                limit=20 if automatic else 40,
-                automatic=automatic,
-                deadline_monotonic=deadline_monotonic,
-            )
-            dense_operation = (
-                None
-                if query_embedding is None
-                else self._io.run(
-                    self._query.dense_candidates,
-                    read_binding=self._read_binding,
-                    vector=query_embedding.vector,
-                    embedding_contract=query_embedding.connection.embedding_contract,
-                    kind_filter=kind_filter,
-                    limit=20 if automatic else 30,
-                    purpose=(
-                        DenseRecallPurpose.AUTOMATIC_ROOT
-                        if automatic
-                        else DenseRecallPurpose.EXPLICIT_SEARCH
-                    ),
-                    automatic=automatic,
-                    deadline_monotonic=deadline_monotonic,
-                )
-            )
-            operations = (
-                (sparse_operation,)
-                if dense_operation is None
-                else (sparse_operation, dense_operation)
-            )
-            outcomes = await asyncio.gather(*operations, return_exceptions=True)
-            sparse_outcome = outcomes[0]
-            if isinstance(sparse_outcome, BaseException):
-                sparse_ok = False
-                sparse = ()
-            else:
-                sparse = sparse_outcome
-            dense = ()
-            if dense_operation is not None:
-                dense_outcome = outcomes[1]
-                if isinstance(dense_outcome, BaseException):
-                    dense_ok = False
-                    dense_dispositions.append(
-                        MemoryDenseCandidateDisposition.UNAVAILABLE
-                    )
-                else:
-                    dense = dense_outcome.facts
-                    dense_dispositions.append(dense_outcome.disposition)
-            prior_count = len(gathered)
-            for item in self._query.fuse_candidates(sparse, dense):
-                if item.fact_id in seen:
-                    continue
-                seen.add(item.fact_id)
-                gathered.append(
-                    type(item)(
-                        **{
-                            field: getattr(item, field)
-                            for field in (
-                                "fact_id",
-                                "memory_domain_id",
-                                "context_id",
-                                "fact_kind",
-                                "lifecycle",
-                                "statement",
-                                "recorded_at",
-                                "fact_semantic_digest",
-                                "sparse_rank",
-                                "dense_rank",
-                                "fused_score",
-                            )
-                        },
-                        match_tier=ordinal,
-                    )
-                )
-            attempted.append(
-                _memory_search_stage_result(
-                    ordinal,
-                    label,
-                    new_results=len(gathered) - prior_count,
-                )
-            )
-            if len(gathered) >= min(limit, 3):
-                break
-        final = await self._io.run(
-            self._query.canonical_refetch,
-            read_binding=self._read_binding,
-            ranked=gathered[:candidate_limit],
-            automatic=automatic,
-            deadline_monotonic=deadline_monotonic,
-        )
-        if (
-            query_embedding is not None
-            and self.embedding_connection() != query_embedding.connection
-        ):
-            return await self._parallel_recall(
-                query=query,
-                limit=limit,
-                candidate_limit=candidate_limit,
-                requested_kind=requested_kind,
-                query_embedding=None,
-                automatic=automatic,
-                deadline_monotonic=deadline_monotonic,
-            )
-        if final:
-            disposition = (
-                MemoryRetrievalDisposition.COMPLETE
-                if sparse_ok and (query_embedding is None or dense_ok)
-                else MemoryRetrievalDisposition.PARTIAL
-            )
-        elif not sparse_ok and query_embedding is not None and not dense_ok:
-            disposition = MemoryRetrievalDisposition.UNAVAILABLE
-        else:
-            disposition = MemoryRetrievalDisposition.NO_MATCH
-        return MemoryQueryResult(
-            disposition=disposition,
-            facts=final,
-            attempted_stages=tuple(attempted),
-            relaxed_fields=tuple(dict.fromkeys(relaxed)),
-            sparse_available=sparse_ok,
-            dense_available=dense_ok,
-            dense_disposition=_aggregate_dense_dispositions(
-                query_embedding is not None, dense_dispositions
-            ),
-        )
-
     def _canonical_deadline(self, maximum_seconds: float) -> float:
         return min(
             monotonic() + maximum_seconds,
@@ -1448,290 +350,673 @@ class KernelMemoryToolPort:
             raise TimeoutError(f"{owner.value} deadline expired")
         return remaining
 
-
-def _filter_match(tier: int) -> str:
-    return {
-        0: "EXACT",
-        1: "KIND_RELAXED",
-    }.get(tier, "KIND_RELAXED")
-
-
-def _memory_search_stage_result(
-    ordinal: int, label: str, *, new_results: int
-) -> MemorySearchStageResult:
-    return MemorySearchStageResult(
-        ordinal=ordinal,
-        context_coverage="ALL_READABLE",
-        kind=("REQUESTED" if label == "EXACT" else "ANY"),
-        new_results=new_results,
-    )
-
-
-def _aggregate_dense_dispositions(
-    requested: bool,
-    values: Sequence[MemoryDenseCandidateDisposition],
-) -> MemoryDenseCandidateDisposition:
-    if not requested:
-        return MemoryDenseCandidateDisposition.NOT_REQUESTED
-    successful = tuple(
-        value
-        for value in values
-        if value is not MemoryDenseCandidateDisposition.UNAVAILABLE
-    )
-    if not successful:
-        return MemoryDenseCandidateDisposition.UNAVAILABLE
-    for disposition in (
-        MemoryDenseCandidateDisposition.PARTIAL_BOUNDED_SCAN,
-        MemoryDenseCandidateDisposition.BOUNDED_TOP_K,
-        MemoryDenseCandidateDisposition.EXHAUSTED_VISIBLE_SET,
-        MemoryDenseCandidateDisposition.NO_ELIGIBLE_MATCH,
+    async def _rerank_explicit(
+        self,
+        query: str,
+        result,
+        *,
+        total_deadline: float,
+        purpose: RerankPurpose = "recall",
     ):
-        if disposition in successful:
-            return disposition
-    return MemoryDenseCandidateDisposition.UNAVAILABLE
+        try:
+            retrieval_before = self._settings.read().memory_retrieval
+        except LocalSettingsUnavailable:
+            if purpose == "automatic_recall":
+                return replace(
+                    result,
+                    facts=tuple(
+                        item
+                        for item in result.facts
+                        if not isinstance(item, HistoryCandidate)
+                    ),
+                )
+            return result
+        if retrieval_before.ranking_mode == "off":
+            return result
+        decision_admission = (
+            purpose == "automatic_recall"
+            and retrieval_before.ranking_mode == "decision"
+        )
+
+        def fallback(disposition):
+            # A failed/unavailable Decision must not admit unjudged history.
+            # Ordinary memory retains its existing local retrieval fallback.
+            facts = tuple(
+                item
+                for item in result.facts
+                if not decision_admission or not isinstance(item, HistoryCandidate)
+            )
+            return replace(result, facts=facts, rerank_disposition=disposition)
+
+        try:
+            provider = await self._rerank_provider()
+            if (
+                provider is not None
+                and hasattr(provider, "connection")
+                and provider.connection
+                != getattr(retrieval_before, retrieval_before.ranking_mode)
+            ):
+                raise ValueError("rerank configuration changed before admission")
+        except Exception:
+            return fallback("FAILED_FALLBACK")
+        if provider is None or not result.facts:
+            return fallback(result.rerank_disposition)
+        selected = result.facts
+        remote_query, documents = query, tuple(_rerank_text(item) for item in selected)
+        try:
+            rows = await self._run_remote_exact(
+                provider.rerank(
+                    remote_query,
+                    documents,
+                    candidate_ids=tuple(str(index) for index in range(len(selected))),
+                    purpose=purpose,
+                ),
+                timeout_seconds=self._remaining_for(
+                    total_deadline,
+                    KernelWatchdogOwner.MEMORY_EXPLICIT_RERANK,
+                ),
+                name="memory-explicit-rerank",
+            )
+            retrieval_after = self._settings.read().memory_retrieval
+            mode = retrieval_before.ranking_mode
+            if retrieval_after.ranking_mode != mode or getattr(
+                retrieval_after, mode
+            ) != getattr(retrieval_before, mode):
+                raise ValueError("rerank configuration changed")
+            rows = sorted(rows, key=lambda item: (-item.score, item.index))
+            indexes = tuple(item.index for item in rows)
+            if (
+                len(indexes) != len(selected)
+                or len(set(indexes)) != len(indexes)
+                or set(indexes) != set(range(len(selected)))
+                or any(not math.isfinite(item.score) for item in rows)
+                or (
+                    decision_admission
+                    and any(not 0 <= item.score <= 1 for item in rows)
+                )
+            ):
+                raise ValueError("rerank response does not cover the exact candidates")
+        except Exception:
+            return fallback("FAILED_FALLBACK")
+        else:
+            ordered = tuple(
+                selected[row.index]
+                for row in rows
+                if not decision_admission
+                or row.score >= AUTOMATIC_DECISION_MINIMUM_PROBABILITY
+            )
+            disposition = "APPLIED"
+        return replace(result, facts=tuple(ordered), rerank_disposition=disposition)
+
+    def bind_installed_observation_reader(self, reader):
+        self._installed_observation_reader = reader
+
+    def _context_id(self, value):
+        if value == "GLOBAL":
+            return CTX_GLOBAL
+        if (
+            value == "CURRENT_PROJECT"
+            and self._read_binding.current_project_context_id is not None
+        ):
+            return self._read_binding.current_project_context_id
+        raise ValueError(
+            "当前会话只可保存到可读的全局或当前项目范围；快速会话仅可用GLOBAL。"
+        )
+
+    async def invoke(self, *, tool_name, arguments, invocation_context):
+        if self._closed or invocation_context.session_id != self._session_id:
+            return _result("SYSTEM_ERROR", "记忆服务当前不可用。")
+        if invocation_context.conversation_scope_kind != "ROOT":
+            return _result("PERMISSION_DENIED", "只有ROOT可以调用记忆工具。")
+        policy = invocation_context.memory_context.memory_use_policy
+        if (tool_name in MEMORY_READ_TOOL_NAMES and not policy.allows_reads) or (
+            tool_name in MEMORY_WRITE_TOOL_NAMES and not policy.allows_writes
+        ):
+            return _result("PERMISSION_DENIED", "本次用户输入已停用相应记忆操作。")
+        try:
+            if tool_name == "remember":
+                return await self._remember(arguments)
+            if tool_name == "query_memory":
+                return await self._query_memory(arguments)
+            if tool_name == "manage_memory":
+                return await self._manage_memory(arguments)
+        except (ValueError, TypeError, MemoryManagementError) as exc:
+            return _result("APPLICATION_ERROR", str(exc))
+        except asyncio.CancelledError:
+            return _result("CANCELLED", "记忆操作已取消。")
+        except Exception as exc:
+            return _result(
+                "SYSTEM_ERROR",
+                "记忆操作未能确认完成："
+                + str(exc)
+                + "；请先查询当前记忆后再决定，不要自动重复写入。",
+            )
+        raise KeyError(tool_name)
+
+    async def _mutation(self, operation, **arguments):
+        outcome = await self._io.run_tool_invocation(
+            operation,
+            deadline_monotonic=self._canonical_deadline(MEMORY_SEARCH_TIMEOUT_SECONDS),
+            **arguments,
+        )
+        if outcome.disposition is PhysicalToolInvocationDisposition.RAISED:
+            raise outcome.error
+        return outcome
+
+    @staticmethod
+    def _physical_result(result, outcome):
+        return replace(
+            result,
+            physical_timing=outcome.timing.value,
+            caller_cancelled_while_running=outcome.caller_cancelled,
+        )
+
+    async def _remember(self, arguments):
+        if set(arguments) - {"context_kind", "kind", "title", "statement"} or not {
+            "context_kind",
+            "kind",
+            "title",
+        } <= set(arguments):
+            raise ValueError("remember只接受context_kind、kind、title和statement。")
+        kind = MemoryFactKind(arguments["kind"])
+        if (
+            kind is not MemoryFactKind.RESPONSE_PREFERENCE
+            and "statement" not in arguments
+        ):
+            raise ValueError("普通记忆须提供statement。")
+        title = memory_title(arguments["title"])
+        statement = memory_statement(kind, arguments.get("statement", ""))
+        outcome = await self._mutation(
+            self._repository.create_memory,
+            memory_domain_id=self._read_binding.memory_domain_id,
+            context_id=self._context_id(arguments["context_kind"]),
+            kind=kind,
+            title=title,
+            statement=statement,
+            read_binding=self._read_binding,
+        )
+        record = outcome.value
+        self.offer_embedding_wake()
+        parts = [ResultPart("text", "已保存记忆。")]
+        try:
+            candidates = await self._search_memories(record.retrieval_text, limit=4)
+            related = [item for item in candidates if item.fact_id != record.fact_id][
+                :3
+            ]
+            parts.extend(ResultPart("object", item.value()) for item in related)
+        except asyncio.CancelledError:
+            parts.append(ResultPart("text", "记忆已保存，相关记忆推荐已取消。"))
+        except Exception as exc:
+            parts.append(
+                ResultPart("text", "记忆已保存，相关记忆推荐未完成：" + str(exc))
+            )
+        return self._physical_result(
+            _result(
+                "SUCCESS",
+                parts,
+                {
+                    "target": memory_target(record.fact_id),
+                    "meta": {"updated_at": record.updated_at},
+                },
+            ),
+            outcome,
+        )
+
+    async def _query_memory(self, arguments):
+        if "target" in arguments:
+            if set(arguments) != {"target"}:
+                raise ValueError("Target精确查询只接受target。")
+            identity = parse_memory_target(arguments["target"])
+            item = await self._io.run(
+                self._query.get,
+                read_binding=self._read_binding,
+                fact_id=identity,
+                deadline_monotonic=self._canonical_deadline(
+                    MEMORY_POINT_READ_TIMEOUT_SECONDS
+                ),
+            )
+            if item is None:
+                return _result(
+                    "APPLICATION_ERROR", "这条记忆已不存在或不在当前可读范围。"
+                )
+            items = (item,)
+        else:
+            if (
+                set(arguments) - {"query", "limit"}
+                or "query" not in arguments
+                or not isinstance(arguments["query"], str)
+                or not arguments["query"].strip()
+            ):
+                raise ValueError("关键词查询须提供非空query和可选limit。")
+            limit = arguments.get("limit", 5)
+            if type(limit) is not int or limit < 1:
+                raise ValueError("limit须为正整数。")
+            items = await self._search_memories(arguments["query"].strip(), limit=limit)
+        return _result(
+            "SUCCESS",
+            [ResultPart("object", item.value()) for item in items]
+            or [ResultPart("text", "未找到相关记忆。")],
+        )
+
+    async def _manage_memory(self, arguments):
+        if not {"target", "action"} <= set(arguments):
+            raise ValueError("manage_memory须提供target和action。")
+        identity = parse_memory_target(arguments["target"])
+        action = arguments["action"]
+        if action == "delete":
+            if set(arguments) != {"target", "action"}:
+                raise ValueError("delete只接受target和action。")
+        elif action == "edit":
+            if set(arguments) - {
+                "target",
+                "action",
+                "statement",
+                "context_kind",
+            } or not ({"statement", "context_kind"} & set(arguments)):
+                raise ValueError("edit至少提供statement或context_kind。")
+            if "statement" in arguments and not isinstance(arguments["statement"], str):
+                raise TypeError("statement须为字符串。")
+        else:
+            raise ValueError("action须为edit或delete。")
+        timestamps = await self._io.run(
+            self._repository.read_memory_result_timestamps,
+            session_id=self._session_id,
+            fact_ids=(identity,),
+            deadline_monotonic=self._canonical_deadline(
+                MEMORY_POINT_READ_TIMEOUT_SECONDS
+            ),
+        )
+        state = self._installed_observation_reader()
+        for item in (*(state.preferences or ()), *state.recall):
+            if (
+                item.get("target", {}).get("kind") == "MEMORY"
+                and item["target"]["memory_id"] == identity
+            ):
+                stamp = memory_timestamp(item["updated_at"])
+                if identity not in timestamps or timestamps[identity] < stamp:
+                    timestamps[identity] = stamp
+        if identity not in timestamps:
+            return _result(
+                "APPLICATION_ERROR", "请先用query_memory查询该记忆，再决定是否操作。"
+            )
+        common = dict(
+            memory_domain_id=self._read_binding.memory_domain_id,
+            fact_id=identity,
+            expected_updated_at=timestamps[identity],
+            read_binding=self._read_binding,
+        )
+        if action == "delete":
+            outcome = await self._mutation(self._repository.delete_memory, **common)
+            return self._physical_result(_result("SUCCESS", "已删除记忆。"), outcome)
+        kwargs = {}
+        if "statement" in arguments:
+            kwargs["statement"] = arguments["statement"]
+        if "context_kind" in arguments:
+            kwargs["context_id"] = self._context_id(arguments["context_kind"])
+        outcome = await self._mutation(
+            self._repository.update_memory, **common, **kwargs
+        )
+        mutation = outcome.value
+        if mutation.changed:
+            self.offer_embedding_wake()
+        return self._physical_result(
+            _result(
+                "SUCCESS",
+                "已修改记忆。" if mutation.changed else "记忆未发生变化。",
+                {
+                    "target": memory_target(identity),
+                    "meta": {"updated_at": mutation.record.updated_at},
+                },
+            ),
+            outcome,
+        )
+
+    async def _search_memories(self, query, *, limit):
+        deadline = self._canonical_deadline(MEMORY_SEARCH_TIMEOUT_SECONDS)
+        vector = await self._query_embedding(query, automatic=False)
+        count = max(limit, 20)
+        sparse = await self._io.run(
+            self._query.sparse_candidates,
+            read_binding=self._read_binding,
+            query=query,
+            limit=count,
+            automatic=False,
+            deadline_monotonic=deadline,
+        )
+        dense = ()
+        if vector is not None and self.embedding_connection() == vector.connection:
+            try:
+                dense = (
+                    await self._io.run(
+                        self._query.dense_candidates,
+                        read_binding=self._read_binding,
+                        vector=vector.vector,
+                        embedding_contract=vector.connection.embedding_contract,
+                        limit=count,
+                        purpose=DenseRecallPurpose.EXPLICIT_SEARCH,
+                        automatic=False,
+                        deadline_monotonic=deadline,
+                    )
+                ).facts
+            except Exception:
+                pass
+        candidates = self._query.fuse_candidates(sparse, dense)[:count]
+        candidates = await self._io.run(
+            self._query.canonical_refetch,
+            read_binding=self._read_binding,
+            ranked=candidates,
+            deadline_monotonic=deadline,
+        )
+        ranked = await self._rerank_explicit(
+            query,
+            MemoryQueryResult(MemoryRetrievalDisposition.COMPLETE, candidates),
+            total_deadline=deadline,
+        )
+        # One final lightweight read after any remote ranking; changed records
+        # are omitted without looping or refilling the selected business scope.
+        return await self._io.run(
+            self._query.canonical_refetch,
+            read_binding=self._read_binding,
+            ranked=ranked.facts[:limit],
+            deadline_monotonic=deadline,
+        )
+
+    async def _mixed_candidates(self, query, canonical_facts):
+        scope = None
+        if (
+            self._settings.read().memory_retrieval.history_enabled
+            and canonical_facts is not None
+        ):
+            scope = FrozenHistoryReadScope(
+                self._session_id,
+                self._read_binding.memory_domain_id,
+                session_content_range(canonical_facts),
+                tuple(
+                    dict.fromkeys(
+                        item.source_entry_id
+                        for item in canonical_facts.canonical_input.items
+                        if item.source_entry_id is not None
+                    )
+                ),
+            )
+        deadline = self._canonical_deadline(MEMORY_SEARCH_TIMEOUT_SECONDS)
+        operations = [
+            self._io.run(
+                self._query.sparse_candidates,
+                read_binding=self._read_binding,
+                query=query,
+                limit=20,
+                automatic=True,
+                deadline_monotonic=deadline,
+            ),
+            self._query_embedding(query, automatic=True),
+        ]
+        if scope is not None:
+            operations.append(
+                self._io.run(
+                    self._history.automatic_candidates,
+                    scope=scope,
+                    query=query,
+                    deadline_monotonic=deadline,
+                )
+            )
+        tasks = tuple(asyncio.create_task(operation) for operation in operations)
+        try:
+            outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            pending = tuple(task for task in tasks if not task.done())
+            for task in pending:
+                task.cancel()
+            if pending:
+                await _join_remote_tasks(pending)
+        sparse, vector = outcomes[:2]
+        if isinstance(sparse, BaseException):
+            raise sparse
+        history = () if scope is None else outcomes[2]
+        if isinstance(history, BaseException):
+            raise history
+        dense = ()
+        if (
+            not isinstance(vector, BaseException)
+            and vector is not None
+            and self.embedding_connection() == vector.connection
+        ):
+            try:
+                dense = (
+                    await self._io.run(
+                        self._query.dense_candidates,
+                        read_binding=self._read_binding,
+                        vector=vector.vector,
+                        embedding_contract=vector.connection.embedding_contract,
+                        limit=20,
+                        purpose=DenseRecallPurpose.AUTOMATIC_ROOT,
+                        automatic=True,
+                        deadline_monotonic=self._canonical_deadline(
+                            MEMORY_SEARCH_TIMEOUT_SECONDS
+                        ),
+                    )
+                ).facts
+            except Exception:
+                pass
+        memory = await self._io.run(
+            self._query.canonical_refetch,
+            read_binding=self._read_binding,
+            ranked=self._query.fuse_candidates(sparse, dense),
+            automatic=True,
+            deadline_monotonic=self._canonical_deadline(MEMORY_SEARCH_TIMEOUT_SECONDS),
+        )
+        memory = tuple(
+            item for item in memory if _sensitive_profile_is_eligible(item, query)
+        )
+        pool = _elastic_candidates(memory, history, 15, 5)
+        ranked = await self._rerank_explicit(
+            query,
+            MemoryQueryResult(MemoryRetrievalDisposition.COMPLETE, pool),
+            total_deadline=self._canonical_deadline(MEMORY_SEARCH_TIMEOUT_SECONDS),
+            purpose="automatic_recall",
+        )
+        selected = (
+            ranked.facts[:5]
+            if ranked.rerank_disposition == "APPLIED"
+            else _elastic_candidates(
+                tuple(
+                    item
+                    for item in ranked.facts
+                    if not isinstance(item, HistoryCandidate)
+                ),
+                tuple(
+                    item for item in ranked.facts if isinstance(item, HistoryCandidate)
+                ),
+                4,
+                1,
+            )
+        )
+        chosen_memory = tuple(
+            item for item in selected if not isinstance(item, HistoryCandidate)
+        )
+        valid_memory = await self._io.run(
+            self._query.canonical_refetch,
+            read_binding=self._read_binding,
+            ranked=chosen_memory,
+            automatic=True,
+            deadline_monotonic=self._canonical_deadline(MEMORY_SEARCH_TIMEOUT_SECONDS),
+        )
+        chosen_history = tuple(
+            item for item in selected if isinstance(item, HistoryCandidate)
+        )
+        valid_history = (
+            ()
+            if scope is None or not chosen_history
+            else await self._io.run(
+                self._history.canonical_refetch,
+                scope=scope,
+                candidates=chosen_history,
+                deadline_monotonic=self._canonical_deadline(
+                    MEMORY_SEARCH_TIMEOUT_SECONDS
+                ),
+            )
+        )
+        return tuple(
+            _history_value(item) if isinstance(item, HistoryCandidate) else item.value()
+            for item in selected
+            if (isinstance(item, HistoryCandidate) and item in valid_history)
+            or (not isinstance(item, HistoryCandidate) and item in valid_memory)
+        )
+
+    async def prepare_memory_observation(
+        self, query, *, previous_state, canonical_facts=None, trigger_policy=None
+    ):
+        trigger_policy = trigger_policy or self.classify_memory_trigger(query)
+        if not trigger_policy.memory_use.allows_reads:
+            return MemoryObservationCandidate((), previous_state)
+        try:
+            preferences = tuple(
+                freeze_tool_json_object(item.value())
+                for item in await self._io.run(
+                    self._query.response_preference_snapshot,
+                    read_binding=self._read_binding,
+                    deadline_monotonic=self._canonical_deadline(
+                        MEMORY_POINT_READ_TIMEOUT_SECONDS
+                    ),
+                )
+            )
+            old_memories = tuple(
+                item
+                for item in previous_state.recall
+                if item.get("target", {}).get("kind") == "MEMORY"
+            )
+            current = await self._io.run(
+                self._query.current_records,
+                read_binding=self._read_binding,
+                fact_ids=tuple(item["target"]["memory_id"] for item in old_memories),
+                deadline_monotonic=self._canonical_deadline(
+                    MEMORY_POINT_READ_TIMEOUT_SECONDS
+                ),
+            )
+            selected = (
+                ()
+                if trigger_policy.automatic_recall
+                is not AutomaticMemoryTriggerDisposition.ELIGIBLE
+                else await self._mixed_candidates(query, canonical_facts)
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return MemoryObservationCandidate(
+                (MemoryObservationText("本次记忆信息暂不可用：" + str(exc)),), None
+            )
+        notices = []
+        invalid = set()
+        for item in old_memories:
+            identity = item["target"]["memory_id"]
+            now = current.get(identity)
+            reason = (
+                "该记忆已删除。"
+                if now is None
+                else "该记忆已不可用。"
+                if not self._read_binding.can_read(now.context_id)
+                else "该记忆已修改，先前内容已失效。"
+                if freeze_tool_json_object(now.value()) != item
+                else None
+            )
+            if reason:
+                invalid.add(identity)
+                notices.append(
+                    {"target": item["target"], "title": item["title"], "notice": reason}
+                )
+        valid = tuple(
+            item
+            for item in previous_state.recall
+            if item.get("target", {}).get("kind") != "MEMORY"
+            or item["target"]["memory_id"] not in invalid
+        )
+        added = []
+        for value in selected:
+            value = freeze_tool_json_object(value)
+            if value not in valid and value not in added:
+                added.append(value)
+        transmitted = None
+        append = False
+        if previous_state.preferences != preferences:
+            prior = previous_state.preferences
+            if prior is not None:
+                prior_ids = [item["target"]["memory_id"] for item in prior]
+                unchanged = [
+                    item
+                    for item in preferences
+                    if item["target"]["memory_id"] in prior_ids
+                ]
+                append = tuple(unchanged) == prior
+            transmitted = (
+                tuple(item for item in preferences if item not in (prior or ()))
+                if append
+                else preferences
+            )
+        body = render_memory_observation(
+            transmitted, append, tuple(added), tuple(notices)
+        )
+        return MemoryObservationCandidate(
+            () if body is None else (MemoryObservationText(body),),
+            MemoryObservationState(preferences, (*valid, *added)),
+        )
 
 
-def _retrieval_summary(
-    result: MemoryQueryResult,
-    *,
-    relation_check: str,
-) -> dict[str, object]:
-    status = {
-        MemoryRetrievalDisposition.COMPLETE: "COMPLETE",
-        MemoryRetrievalDisposition.PARTIAL: "PARTIAL",
-        MemoryRetrievalDisposition.UNAVAILABLE: "UNAVAILABLE",
-        MemoryRetrievalDisposition.NO_MATCH: "COMPLETE",
-    }[result.disposition]
-    if not result.facts:
-        match = "NONE"
-    elif any(item.match_tier > 0 for item in result.facts):
-        match = "INCLUDES_RELAXED"
-    else:
-        match = "EXACT"
+def _result(state, content, fields=None):
+    parts = (
+        (ResultPart("text", content),) if isinstance(content, str) else tuple(content)
+    )
+    return KernelToolResult(state=state, content=ToolBusinessValue(fields or {}, parts))
 
-    relaxed = set(result.relaxed_fields)
-    expanded_filters = [
-        field for field, present in (("KIND", "kind" in relaxed),) if present
-    ]
 
-    if result.rerank_disposition == "APPLIED":
-        ranking = "RERANKED"
-    elif result.sparse_available and result.dense_available:
-        ranking = "HYBRID"
-    elif result.dense_available:
-        ranking = "VECTOR_ONLY"
-    elif result.sparse_available:
-        ranking = "SPARSE_ONLY"
-    else:
-        ranking = "UNAVAILABLE"
+def _rerank_text(item):
+    return (
+        json.dumps(item.projection(), ensure_ascii=False)
+        if isinstance(item, HistoryCandidate)
+        else item.retrieval_text
+    )
 
-    if relation_check not in {"COMPLETE", "PARTIAL", "UNAVAILABLE"}:
-        raise ValueError("memory relation check disposition is invalid")
+
+def _history_value(item):
     return {
-        "status": status,
-        "match": match,
-        "expanded_filters": expanded_filters,
-        "ranking": ranking,
-        "relation_check": relation_check,
+        **item.projection(),
+        "target": session_entry_target(item.q1_entry_id),
+        "messages": [
+            {
+                "target": session_entry_target(message["entry_id"]),
+                **{key: message[key] for key in ("role", "label", "at", "text")},
+            }
+            for message in item.messages
+        ],
     }
 
 
-def _bounded_memory_relations(fact_ids, relations):
-    """Keep warnings only while the closed ToolResult exposure header fits."""
+def render_memory_observation(preferences, append, recall, notices):
+    chunks = []
 
-    exposed = list(dict.fromkeys(str(value) for value in fact_ids))
-    selected = []
-    for relation in relations:
-        additions = tuple(
-            value
-            for value in (
-                relation.source_fact_id,
-                relation.target_fact_id,
-            )
-            if value not in exposed
-        )
-        if len(exposed) + len(additions) > 50:
-            continue
-        exposed.extend(additions)
-        selected.append(relation)
-    return tuple(selected), tuple(exposed)
-
-
-def _memory_page_budget(context: KernelToolInvocationContext | None) -> ToolResultPageBudget:
-    if context is None:
-        return ToolResultPageBudget(tool_call_id=random_id("call"))
-    budget = getattr(context, "page_budget", None)
-    if budget is None:
-        raise ToolResultPageBoundary("memory invocation has no allocated result budget")
-    return budget
-
-
-def _memory_search_display(payload, budget, visible_ids):
-    """Keep the selected top-k fixed; only its native presentation may shrink."""
-
-    def fits(value, *, include_read=True):
-        return budget.fits(
-            canonical_json_bytes(value).decode("utf-8"),
-            model_visible_memory_fact_ids=visible_ids,
-            include_read=include_read,
+    def emit(label, key, value):
+        payload = [
+            thaw_tool_json_object(freeze_tool_json_object(item)) for item in value
+        ]
+        text = json.dumps(payload, ensure_ascii=False, indent=2)
+        chunks.append(
+            label
+            + "\n"
+            + key
+            + ":\n"
+            + "\n".join("  " + line for line in text.splitlines())
         )
 
-    if fits(payload, include_read=False):
-        return payload
-    memories = payload["memories"]
-    warnings = payload["relation_warnings"]
-
-    def build(count, chars, warning_count):
-        items = []
-        for item in memories[:count]:
-            statement = item["statement"]
-            items.append({
-                **{key: value for key, value in item.items() if key != "statement"},
-                "statement_excerpt": statement[:chars],
-                "statement_truncated": len(statement) > chars,
-                "inspect": {"tool": "get_memory", "arguments": {"target": item["target"]}},
-            })
-        value = {
-            **payload,
-            "memories": items,
-            "displayed_memories": count,
-            "omitted_memories": len(memories) - count,
-            "relation_warnings": warnings[:warning_count],
-            "omitted_relation_warnings": len(warnings) - warning_count,
-        }
-        if warning_count < len(warnings):
-            value["retrieval_summary"] = {**payload["retrieval_summary"], "relation_check": "PARTIAL"}
-        return value
-
-    minimum_count = 1 if memories else 0
-    for count in range(len(memories), minimum_count - 1, -1):
-        winner = build(count, 0, 0)
-        if fits(winner):
-            break
-    else:
-        raise ToolResultPageBoundary("one memory reference and result metadata cannot fit the result budget")
-    warning_count = 0
-    for index in range(1, len(warnings) + 1):
-        candidate = build(count, 0, index)
-        if not fits(candidate):
-            break
-        warning_count, winner = index, candidate
-    low, high = 0, max((len(item["statement"]) for item in memories[:count]), default=0)
-    while low <= high:
-        chars = (low + high) // 2
-        candidate = build(count, chars, warning_count)
-        if fits(candidate):
-            winner, low = candidate, chars + 1
-        else:
-            high = chars - 1
-    return winner
-
-
-def _json_result(
-    state: str,
-    payload: Mapping[str, object],
-    *,
-    model_visible_memory_fact_ids: tuple[str, ...] = (),
-    native_payload: Mapping[str, object] | None = None,
-    required_facts: Mapping[str, object] | None = None,
-) -> KernelToolResult:
-    encoded = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return KernelToolResult(
-        state=state,
-        content=encoded,
-        native_output=None if native_payload is None else canonical_json_bytes(native_payload),
-        required_facts=required_facts or {},
-        public_format=ToolOutputSourceFormatHint.JSON,
-        model_visible_memory_fact_ids=model_visible_memory_fact_ids,
-    )
-
-
-def _prepare_rerank_projection(query: str, facts) -> tuple[str, tuple[str, ...]] | None:
-    estimator = PulsaraHeuristicTokenEstimatorV3()
-    query_bytes = query.encode("utf-8")
-    query_tokens = estimator.estimate_text(query)
-    if (
-        not query_bytes
-        or len(query_bytes) > MAXIMUM_RERANK_QUERY_BYTES
-        or query_tokens > 4_000
-    ):
-        return None
-    documents: list[str] = []
-    document_token_ceilings: list[int] = []
-    for fact in facts:
-        projected = _rerank_document_projection(fact)
-        if projected is None:
-            return None
-        projected_text = projected.decode("utf-8")
-        token_ceiling = estimator.estimate_text(projected_text)
-        if token_ceiling > 4_000:
-            return None
-        documents.append(projected_text)
-        document_token_ceilings.append(token_ceiling)
-    encoded = canonical_json_bytes(
-        {"model": "qwen3-rerank", "query": query, "documents": documents}
-    )
-    if (
-        len(encoded) > MAXIMUM_RERANK_REQUEST_BYTES
-        or query_tokens * len(documents) + sum(document_token_ceilings)
-        > MAXIMUM_RERANK_TOKEN_FORMULA
-    ):
-        return None
-    return query, tuple(documents)
-
-
-def _rerank_document_projection(fact) -> bytes | None:
-    if isinstance(fact, HistoryCandidate):
-        encoded = canonical_json_bytes(fact.projection())
-        return (
-            encoded
-            if len(encoded) <= MAXIMUM_RERANK_DOCUMENT_BYTES
-            and PulsaraHeuristicTokenEstimatorV3().estimate_text(
-                encoded.decode("utf-8")
-            )
-            <= 4000
-            else None
+    if preferences is not None:
+        emit(
+            "新增回答偏好" if append else "当前完整回答偏好",
+            "response_preferences",
+            preferences,
         )
-    document = {
-        "kind": fact.fact_kind,
-        "context_product_label": memory_context_product_label(fact.context_id),
-        "statement": fact.statement,
-        "recorded_at": fact.recorded_at,
-    }
-    encoded = canonical_json_bytes(document)
-    if len(encoded) <= MAXIMUM_RERANK_DOCUMENT_BYTES:
-        return encoded
-
-    # Bound the serialized JSON, including escaping and metadata. Slice only
-    # statement characters so metadata, JSON syntax and UTF-8 remain intact.
-    document["statement_truncated"] = True
-    marker = "\n...[memory statement truncated]...\n"
-
-    def encode(kept: int) -> bytes:
-        head = (kept + 1) // 2
-        tail = kept // 2
-        document["statement"] = (
-            fact.statement[:head] + marker + (fact.statement[-tail:] if tail else "")
-        )
-        return canonical_json_bytes(document)
-
-    best = encode(0)
-    if len(best) > MAXIMUM_RERANK_DOCUMENT_BYTES:
-        return None
-    low, high = 0, len(fact.statement)
-    while low < high:
-        kept = (low + high + 1) // 2
-        encoded = encode(kept)
-        if len(encoded) <= MAXIMUM_RERANK_DOCUMENT_BYTES:
-            low, best = kept, encoded
-        else:
-            high = kept - 1
-    return best
+    if recall:
+        emit("新增召回内容", "recall", recall)
+    if notices:
+        emit("先前召回记忆的变化", "notices", notices)
+    return "\n\n".join(chunks) if chunks else None
 
 
 _SENSITIVE_PROFILE_RELEVANCE: tuple[tuple[frozenset[str], frozenset[str]], ...] = (
@@ -1886,7 +1171,7 @@ _SENSITIVE_PROFILE_RELEVANCE: tuple[tuple[frozenset[str], frozenset[str]], ...] 
 def _sensitive_profile_is_eligible(item, query: str) -> bool:
     if item.fact_kind != MemoryFactKind.USER_PROFILE.value:
         return True
-    statement = item.statement.casefold()
+    statement = item.retrieval_text.casefold()
     lowered_query = query.casefold()
     matched_sensitive_category = False
     for sensitive_markers, relevance_markers in _SENSITIVE_PROFILE_RELEVANCE:
@@ -1896,14 +1181,6 @@ def _sensitive_profile_is_eligible(item, query: str) -> bool:
         if any(marker in lowered_query for marker in relevance_markers):
             return True
     return not matched_sensitive_category
-
-
-__all__ = [
-    "KernelMemoryToolPort",
-    "MEMORY_READ_TOOL_NAMES",
-    "MEMORY_TOOL_NAMES",
-    "MEMORY_WRITE_TOOL_NAMES",
-]
 
 
 async def _join_remote_tasks(tasks) -> asyncio.CancelledError | None:

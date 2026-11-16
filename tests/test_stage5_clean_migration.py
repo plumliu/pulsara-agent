@@ -477,27 +477,23 @@ def test_compatible_vector_and_unrelated_native_extension_are_preserved() -> Non
     with _empty_database() as database:
         with psycopg.connect(database.admin_dsn) as connection:
             connection.execute("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public")
-            # PostgreSQL's SQL-only intagg contrib wraps built-in array functions;
-            # it is independent from Pulsara's required vector/search extensions.
-            connection.execute("CREATE EXTENSION IF NOT EXISTS intagg WITH SCHEMA public")
+            # The bundled PostgreSQL language extension is independent of
+            # Pulsara's required vector/search extensions.
+            connection.execute("CREATE EXTENSION IF NOT EXISTS plpgsql")
             before = connection.execute(
                 "SELECT extname, oid, extversion FROM pg_catalog.pg_extension "
-                "WHERE extname IN ('vector', 'intagg') ORDER BY extname"
+                "WHERE extname IN ('vector', 'plpgsql') ORDER BY extname"
             ).fetchall()
-            assert [row[0] for row in before] == ["intagg", "vector"]
-            assert connection.execute(
-                "SELECT public.int_array_aggregate(value) FROM (VALUES (1), (2)) AS items(value)"
-            ).fetchone() == ([1, 2],)
+            assert [row[0] for row in before] == ["plpgsql", "vector"]
+            connection.execute("DO $$ BEGIN ASSERT 1 + 1 = 2; END $$ LANGUAGE plpgsql")
             connection.commit()
         _runner(database).migrate(deadline_monotonic=monotonic() + 60)
         with psycopg.connect(database.admin_dsn) as connection:
             assert connection.execute(
                 "SELECT extname, oid, extversion FROM pg_catalog.pg_extension "
-                "WHERE extname IN ('vector', 'intagg') ORDER BY extname"
+                "WHERE extname IN ('vector', 'plpgsql') ORDER BY extname"
             ).fetchall() == before
-            assert connection.execute(
-                "SELECT public.int_array_aggregate(value) FROM (VALUES (1), (2)) AS items(value)"
-            ).fetchone() == ([1, 2],)
+            connection.execute("DO $$ BEGIN ASSERT 1 + 1 = 2; END $$ LANGUAGE plpgsql")
 
 
 def test_vector_wrong_schema_too_old_and_incompatible_shape_fail_closed() -> None:

@@ -8,6 +8,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from threading import Lock
 from typing import TYPE_CHECKING, Mapping
+from yaml import YAMLError
 
 if TYPE_CHECKING:
     from pulsara_agent.conversation_kernel.mcp.oauth import McpOAuthManager
@@ -98,6 +99,7 @@ class McpMutationOutcome:
     config: McpServerConfig | None
     applied: bool
     cleanup_attention: bool = False
+    cleanup_error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,7 +128,7 @@ class PreparedLocalMcpMutation:
     requires_destination_confirmation: bool
 
     def __post_init__(self):
-        if self.action not in {"ADD_LOCAL_MCP", "UPDATE_LOCAL_MCP", "REMOVE_LOCAL_MCP"}:
+        if self.action not in {"ADD_LOCAL_MCP", "UPDATE_MCP_CONNECTION", "REMOVE_LOCAL_MCP"}:
             raise ValueError("invalid local MCP management action")
         if (self.action == "REMOVE_LOCAL_MCP") != (self.entry is None):
             raise ValueError("local MCP mutation entry does not match its action")
@@ -455,7 +457,11 @@ class LocalMcpManagementService:
         self, workspace_root: Path | None = None
     ) -> tuple[McpServerDeclaration, ...]:
         """Read the sole config parser without loading settings or resolving secrets."""
-        raw = _load_raw(self.path(LocalMcpTarget("inventory", workspace_root)))
+        path = self.path(LocalMcpTarget("inventory", workspace_root))
+        try:
+            raw = _load_raw(path)
+        except YAMLError as error:
+            raise ValueError(f"{path}: {error}") from error
         declarations = []
         for server_id, entry in sorted(raw.items()):
             target = LocalMcpTarget(server_id, workspace_root)
@@ -491,7 +497,7 @@ class LocalMcpManagementService:
 
     def _prepare_mutation(self, action, target, entry, expected):
         action = CapabilityManagementAction(action)
-        if action not in {"ADD_LOCAL_MCP", "UPDATE_LOCAL_MCP", "REMOVE_LOCAL_MCP"}:
+        if action not in {"ADD_LOCAL_MCP", "UPDATE_MCP_CONNECTION", "REMOVE_LOCAL_MCP"}:
             raise ValueError("unsupported local MCP management action")
         if action == "REMOVE_LOCAL_MCP":
             if entry is not None:
@@ -954,6 +960,7 @@ class LocalMcpManagementService:
                             await self.settings.replace_mcp_authorization(
                                 target.owner, None, expected=old
                             )
-            except Exception:
+            except Exception as error:
                 attention = True
-            return McpMutationOutcome(candidate, True, attention)
+                cleanup_error = str(error)
+            return McpMutationOutcome(candidate, True, attention, cleanup_error if attention else None)

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from hashlib import sha256
 import re
 
 from pulsara_agent.llm.explicit_references import explicit_reference_excluded_ranges
@@ -28,15 +27,12 @@ from pulsara_agent.capability.plugin_skill_contracts import (
 from pulsara_agent.capability.provider import SkillProjectionOutput
 from pulsara_agent.capability.render import (
     SkillProjectionOverbound,
-    active_projection_overbound_diagnostic,
     catalog_projection_overbound_diagnostic,
-    render_active_skill_prompt,
     render_catalog_prompt,
 )
 from pulsara_agent.capability.types import (
-    ActiveSkillInjection,
+    ActiveSkillSelection,
     ActiveSkillProjectionUnavailableReason,
-    ActiveSkillReason,
     BundledSkillOrigin,
     ConflictingSkillCandidateIssue,
     ConflictingSkillCandidateRef,
@@ -63,10 +59,7 @@ from pulsara_agent.capability.types import (
 _EXPLICIT_SLASH = re.compile(
     r"(?<![\w/@.$:<\\-])/([a-z0-9]+(?:-[a-z0-9]+)*)(?![\w/\\-]|\.\w)"
 )
-_EXPLICIT_PREFIX = re.compile(
-    r"(?<![A-Za-z0-9_-])skill:([a-z0-9]+(?:-[a-z0-9]+)*)(?![A-Za-z0-9_-])",
-    flags=re.IGNORECASE,
-)
+
 
 
 class EffectiveSkillCatalogDisposition(StrEnum):
@@ -79,6 +72,7 @@ class CompleteEffectiveSkillCatalogInspection:
     root_policy: PreparedLooseSkillRootPolicy = field(repr=False)
     winners: tuple[SkillManifest, ...]
     candidate_issues: tuple[SkillCandidateIssue, ...]
+    readable_skills: tuple[SkillManifest, ...]
     disposition: EffectiveSkillCatalogDisposition = field(
         default=EffectiveSkillCatalogDisposition.COMPLETE, init=False
     )
@@ -296,6 +290,7 @@ class SkillCatalogResolver:
             root_policy=loose.root_policy,
             winners=ordered_winners,
             candidate_issues=tuple(sorted(issues, key=skill_candidate_issue_sort_key)),
+            readable_skills=tuple((*loose.candidates, *plugin.candidates, *bundled.candidates)),
         )
 
 
@@ -315,6 +310,7 @@ class SkillCatalogCapabilityProvider:
                 catalog_unavailable_causes=inspection.unavailable_causes,
                 active_unavailable_reason=(
                     ActiveSkillProjectionUnavailableReason.ACTIVE_SELECTION_UNAVAILABLE
+                    if _explicit_skill_names(context.user_input) else None
                 ),
             )
         skills_by_name = {skill.name: skill for skill in inspection.winners}
@@ -322,25 +318,12 @@ class SkillCatalogCapabilityProvider:
         active, active_diagnostics, active_unavailable = _active_injections(
             skills_by_name,
             user_input=context.user_input,
-            active_skill_names=context.active_skill_names,
         )
         diagnostics.extend(active_diagnostics)
-        catalog_prompt = render_catalog_prompt(catalog_entries)
-        active_prompt = None
-        if active_unavailable is None:
-            try:
-                active_prompt = render_active_skill_prompt(active)
-            except SkillProjectionOverbound as exc:
-                if not isinstance(exc.reason, ActiveSkillProjectionUnavailableReason):
-                    raise RuntimeError("active renderer emitted a catalog outcome") from exc
-                active_unavailable = exc.reason
-                diagnostics.append(active_projection_overbound_diagnostic())
         return SkillProjectionOutput(
             catalog_entries=catalog_entries,
-            active_injections=active if active_unavailable is None else (),
+            active_skills=active if active_unavailable is None else (),
             diagnostics=tuple(diagnostics),
-            catalog_prompt=catalog_prompt,
-            active_skill_prompt=active_prompt,
             active_unavailable_reason=active_unavailable,
         )
 
@@ -464,51 +447,13 @@ def _catalog_entry(skill: SkillManifest) -> ResolvedSkillCatalogEntry:
 
 
 def _active_injections(
-    skills_by_name: dict[str, SkillManifest],
-    *,
-    user_input: tuple[str, ...],
-    active_skill_names: frozenset[str],
-) -> tuple[
-    tuple[ActiveSkillInjection, ...],
-    tuple[SkillDiagnostic, ...],
-    ActiveSkillProjectionUnavailableReason | None,
-]:
-    explicit = tuple(name for name in _explicit_skill_names(user_input) if name in skills_by_name)
-    selected = tuple(sorted(set(active_skill_names) | set(explicit)))
-    if any(name not in skills_by_name for name in selected):
-        return (
-            (),
-            (
-                SkillDiagnostic(
-                    SkillDiagnosticSeverity.WARNING,
-                    SkillDiagnosticCode.ACTIVE_SKILL_NOT_FOUND,
-                    SKILL_DIAGNOSTIC_MESSAGES[SkillDiagnosticCode.ACTIVE_SKILL_NOT_FOUND],
-                ),
-            ),
-            ActiveSkillProjectionUnavailableReason.ACTIVE_SELECTION_UNAVAILABLE,
-        )
-    injections: list[ActiveSkillInjection] = []
-    for name in selected:
-        skill = skills_by_name[name]
-        injections.append(
-            ActiveSkillInjection(
-                name=skill.name,
-                path=skill.path,
-                base_dir=skill.base_dir,
-                skill_path=skill.skill_path,
-                body=skill.body,
-                reason=(
-                    ActiveSkillReason.HOST_COMMAND
-                    if name in active_skill_names
-                    else ActiveSkillReason.EXPLICIT_USER_MENTION
-                ),
-                origin=skill.origin,
-                manifest_semantic_fingerprint=skill.manifest_semantic_fingerprint,
-                body_digest="sha256:" + sha256(skill.body.encode("utf-8")).hexdigest(),
-                raw_document_digest=skill.raw_document_digest,
-            )
-        )
-    return tuple(injections), (), None
+    skills_by_name: dict[str, SkillManifest], *, user_input: tuple[str, ...],
+) -> tuple[tuple[ActiveSkillSelection, ...], tuple[SkillDiagnostic, ...], ActiveSkillProjectionUnavailableReason | None]:
+    selected = _explicit_skill_names(user_input)
+    active = tuple(ActiveSkillSelection(name, skills_by_name[name].skill_path, skills_by_name[name].origin)
+                   for name in selected if name in skills_by_name)
+    return active, (), None
+
 
 
 def _explicit_skill_names(user_input: str | tuple[str, ...]) -> tuple[str, ...]:
@@ -519,7 +464,6 @@ def _explicit_skill_names(user_input: str | tuple[str, ...]) -> tuple[str, ...]:
         return not any(start <= match.start() < end for start, end in excluded)
     values = {
         *(match.group(1) for match in _EXPLICIT_SLASH.finditer(user_input) if allowed(match)),
-        *(match.group(1).lower() for match in _EXPLICIT_PREFIX.finditer(user_input) if allowed(match)),
     }
     return tuple(sorted(values))
 

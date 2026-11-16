@@ -1,83 +1,31 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { decodeMemoryStream, LocalMemoryApi, MemoryApiError, type MemoryFact, type MemoryRecord } from '../../frontend/lib/memory-api';
-
+import { LocalMemoryApi, MemoryApiError, type MemoryRecord } from '../../frontend/lib/memory-api';
+const record: MemoryRecord = { target: { kind: 'MEMORY', memory_id: 'memory:aaaaaaaaaaaaaaaaaaaaaaaaaa' }, context_kind: 'GLOBAL', kind: 'FACT', title: '项目版本', statement: 'Python 3.12', recorded_at: '2026-11-16T01:00:00.123456Z', updated_at: '2026-11-16T01:00:00.123457Z' };
 afterEach(() => vi.unstubAllGlobals());
-
-const header = { type: 'HEADER', root: 'fact:你好', view: 'global', workspace_id: null, disposition: 'READY' };
-const end = { type: 'END', counts: { HEADER: 1 } };
-const line = (value: unknown) => `${JSON.stringify(value)}\n`;
-
-function response(text: string) {
-  const bytes = new TextEncoder().encode(text);
-  return new Response(new ReadableStream({
-    start(controller) {
-      // Split even multibyte characters and JSON tokens across physical chunks.
-      for (const byte of bytes) controller.enqueue(new Uint8Array([byte]));
-      controller.close();
-    },
-  }));
-}
-
-describe('memory confirmation stream', () => {
-  it('requires and preserves the complete ordered confirmation', async () => {
-    expect(await decodeMemoryStream(response(line(header) + line(end)))).toEqual([header, end]);
-  });
-
-  it.each([
-    line(header),
-    line(header) + JSON.stringify(end),
-    line(header) + line({ type: 'END', counts: { HEADER: 2 } }),
-    line(header) + line(end) + line(header),
-    line(end),
-    line(header) + line({ type: 'UNKNOWN' }) + line(end),
-  ])('rejects incomplete or inconsistent product records', async (text) => {
-    await expect(decodeMemoryStream(response(text))).rejects.toThrow();
-  });
-
-  it('keeps the server error code so an unrelated 404 cannot masquerade as an absent memory', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({error: {
-      code: 'LOCAL_RESOURCE_NOT_FOUND', message: '请求的本地资源已失效。',
-    }}), {status: 404, headers: {'Content-Type': 'application/json'}})));
-    await expect(new LocalMemoryApi().delete(header.root, [header, end] as MemoryRecord[])).rejects.toMatchObject({
-      status: 404, code: 'LOCAL_RESOURCE_NOT_FOUND', message: '请求的本地资源已失效。',
-    });
-  });
-
-  it('requires the complete deletion result for the requested memory before reporting success', async () => {
-    const confirmation = [header, end] as MemoryRecord[];
-    const resultHeader = {type: 'HEADER', root: header.root, view: 'global', workspace_id: null, result: 'DELETED'};
-    const fetcher = vi.fn();
-    vi.stubGlobal('fetch', fetcher);
+describe('current memory API', () => {
+  it('sends the exact displayed microsecond timestamp and selected scope when editing', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ record, changed: false }), { status: 200 })); vi.stubGlobal('fetch', fetch);
     const api = new LocalMemoryApi();
-    for (const returnedHeader of [header, {...resultHeader, root: 'another-memory'}]) {
-      fetcher.mockResolvedValueOnce(new Response(line(returnedHeader) + line(end), {headers: {'Content-Type': 'application/x-ndjson'}}));
-      await expect(api.delete(header.root, confirmation)).rejects.toThrow('记忆操作结果无法确认');
-    }
-    fetcher.mockResolvedValueOnce(new Response(line(resultHeader) + line(end), {headers: {'Content-Type': 'application/x-ndjson'}}));
-    expect(await api.delete(header.root, confirmation)).toEqual([resultHeader, end]);
-  });
-});
-
-describe('memory text edit', () => {
-  it('sends only the statement, selected scope and exact observed version', async () => {
-    const fact: MemoryFact = {
-      fact_id: 'memory:one', context_id: 'ctx:global', kind: 'FACT',
-      statement: 'initial', lifecycle: 'ACTIVE', recorded_at: '2026-09-05T00:00:00Z',
-      updated_at: '2026-09-05T00:01:00+00:00',
-    };
-    const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({ fact: { ...fact, statement: 'new text' }, changed: true, user_edited_at: fact.updated_at }), { status: 200 }));
-    vi.stubGlobal('fetch', fetcher);
-    const api = new LocalMemoryApi();
-    expect((await api.editStatement({ view: 'global', workspace_id: null }, fact, 'new text')).changed).toBe(true);
-    expect(fetcher).toHaveBeenCalledOnce();
-    const [path, init] = fetcher.mock.calls[0];
-    expect(path).toBe('/api/memories/memory%3Aone/statement');
+    const selection = { view: 'global' as const, workspace_id: null };
+    await api.edit(selection, record, { statement: 'new body' });
+    const [path, init] = fetch.mock.calls[0];
+    expect(path).toBe('/api/memories/memory%3Aaaaaaaaaaaaaaaaaaaaaaaaaaa');
     expect(init.method).toBe('PATCH');
-    expect(JSON.parse(init.body)).toEqual({
-      view: 'global', workspace_id: null, statement: 'new text',
-      expected_updated_at: fact.updated_at,
-    });
-    fetcher.mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: '记忆已变化' } }), { status: 409 }));
-    await expect(api.editStatement({ view: 'global', workspace_id: null }, fact, 'newer')).rejects.toEqual(new MemoryApiError('记忆已变化', 409));
+    expect(JSON.parse(init.body)).toEqual({ ...selection, statement: 'new body', expected_updated_at: record.updated_at });
+  });
+  it('creates independent records and deletes one exact displayed target', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify(record), { status: 201 })); vi.stubGlobal('fetch', fetch);
+    const api = new LocalMemoryApi(); const selection = { view: 'global' as const, workspace_id: null };
+    await api.create(selection, { kind: 'FACT', title: record.title, statement: record.statement });
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ ...selection, kind: 'FACT', title: record.title, statement: record.statement });
+    fetch.mockResolvedValueOnce(new Response('{}', { status: 200 }));
+    await api.delete(selection, record);
+    expect(fetch.mock.calls[1][1].method).toBe('DELETE');
+    expect(JSON.parse(fetch.mock.calls[1][1].body)).toEqual({ ...selection, expected_updated_at: record.updated_at });
+  });
+  it('reports a conflict and never retries an edit automatically', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { code: 'MEMORY_CHANGED', message: '记忆已变化' } }), { status: 409 })); vi.stubGlobal('fetch', fetch);
+    await expect(new LocalMemoryApi().edit({ view: 'global', workspace_id: null }, record, { statement: 'new' })).rejects.toBeInstanceOf(MemoryApiError);
+    expect(fetch).toHaveBeenCalledOnce();
   });
 });

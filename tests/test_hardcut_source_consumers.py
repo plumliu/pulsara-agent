@@ -78,4 +78,5 @@ def test_code_mode_save_failure_preserves_known_value_without_result_identity(mo
     assert result.value == known
     assert result.error_code == reason.value
     assert "不应重做业务操作" in result.error_message
-    assert result.result_id is None and result.result_entry_id is None and result.read is None
+    assert result.has_result
+    assert result.result_id is None and result.result_entry_id is None

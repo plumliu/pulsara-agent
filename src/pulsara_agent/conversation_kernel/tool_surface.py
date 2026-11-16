@@ -13,7 +13,6 @@ from typing import Callable
 
 from pulsara_agent.capability.contracts import (
     FrozenToolCapabilityExposurePlan,
-    PreparedUnavailableDirectMcpGate,
 )
 from pulsara_agent.model_input.contracts import (
     FrozenModelToolSurface,
@@ -27,7 +26,7 @@ from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 _MCP_STANDARD_TOOL_NAMES = frozenset(
     {
         "read_mcp_resource",
-        "use_new_mcp_tool",
+        "call_mcp_tool",
     }
 )
 _TERMINAL_TOOL_NAMES = frozenset(
@@ -123,8 +122,7 @@ class PreparedToolExecutionBinding:
     tool_name: str
     descriptor_fingerprint: str
     executor_binding_fingerprint: str
-    execution_policy: ToolExecutionPolicy
-    current_mcp_spec: FrozenToolSpec | None = field(default=None, repr=False)
+    execution_policy: BuiltinExecutionPolicyRef
 
     def __post_init__(self) -> None:
         if not all(
@@ -135,25 +133,13 @@ class PreparedToolExecutionBinding:
             )
         ):
             raise ValueError("prepared tool execution binding is incomplete")
-        if isinstance(self.execution_policy, BuiltinExecutionPolicyRef):
-            if self.current_mcp_spec is not None:
-                raise ValueError("builtin binding cannot carry an MCP contract")
-            if self.execution_policy.tool_name != self.tool_name:
-                raise ValueError("builtin policy does not join tool binding")
-        elif isinstance(self.execution_policy, McpToolExecutionPolicyFact):
-            if (
-                self.execution_policy.provider_tool_name != self.tool_name
-                or (self.current_mcp_spec is not None and self.current_mcp_spec.name != self.tool_name)
-                or self.execution_policy.tool_semantic_fingerprint
-                != (self.current_mcp_spec.descriptor_fingerprint
-                    if self.current_mcp_spec is not None else self.descriptor_fingerprint)
-            ):
-                raise ValueError("MCP policy does not join tool binding")
-        else:
-            raise TypeError("tool execution policy union is open")
+        if not isinstance(self.execution_policy, BuiltinExecutionPolicyRef):
+            raise TypeError("native tool bindings require a builtin policy")
+        if self.execution_policy.tool_name != self.tool_name:
+            raise ValueError("builtin policy does not join tool binding")
 
 
-DirectToolAccessLeaf = PreparedToolExecutionBinding | PreparedUnavailableDirectMcpGate
+DirectToolAccessLeaf = PreparedToolExecutionBinding
 
 
 def tool_observation_origin_for_binding(
@@ -162,10 +148,7 @@ def tool_observation_origin_for_binding(
     """Freeze observation origin from the exact advertised executor binding."""
 
     tool_name = binding.tool_name
-    if (
-        isinstance(binding.execution_policy, McpToolExecutionPolicyFact)
-        or tool_name in _MCP_STANDARD_TOOL_NAMES
-    ):
+    if tool_name in _MCP_STANDARD_TOOL_NAMES:
         return ToolObservationOrigin.MCP_REMOTE
     if tool_name in _TERMINAL_TOOL_NAMES:
         return ToolObservationOrigin.TERMINAL_PROCESS
@@ -234,10 +217,11 @@ class PreparedKernelToolSurface:
 
 
 CODE_MODE_SHARED_TOOL_NAMES = frozenset({
-    "read_file", "write_file", "edit_file", "find_files", "search_content",
+    "read_file", "write_file", "edit_file", "find_files", "search_file_content",
     "exec_process", "query_processes", "manage_process",
     "search_sessions", "search_session_content", "read_session_content",
-    "query_capabilities", "use_new_mcp_tool", "read_mcp_resource",
+    "query_capabilities", "call_mcp_tool", "read_mcp_resource",
+    "view_image", "read_video_frames", "read_transcript",
     "run_agent", "query_agents", "send_agent_message",
     "wait_agent", "stop_agent", "decide",
 })

@@ -376,6 +376,13 @@ CREATE TABLE pulsara_v3.transcript_entries (
         'ASSISTANT_TOOL_REQUEST', 'TOOL_RESULT', 'TERMINAL_OBSERVATION',
         'PLAN_CONTINUATION'
     )),
+    source_cell_id text CHECK (source_cell_id ~ '^cell:[a-z2-7]{25}[aeimquy4]$'),
+    source_record_sequence bigint CHECK (source_record_sequence >= 1),
+    cell_output_kind text CHECK (cell_output_kind IN ('log','return','diagnostic','tool_result')),
+    CHECK ((entry_kind='TERMINAL_OBSERVATION' AND source_cell_id IS NOT NULL
+            AND source_record_sequence IS NOT NULL AND cell_output_kind IS NOT NULL)
+        OR (entry_kind<>'TERMINAL_OBSERVATION' AND source_cell_id IS NULL
+            AND source_record_sequence IS NULL AND cell_output_kind IS NULL)),
     context_binding_revision_id text,
     provider_input_through_sequence bigint,
     source_plan_workflow_id text,
@@ -716,11 +723,12 @@ CREATE TABLE pulsara_v3.tool_results (
         'BODY_PUBLICATION_FAILED','BODY_PUBLICATION_UNCONFIRMED'
     )),
     public_fields json NOT NULL DEFAULT '{}'::json CHECK (json_typeof(public_fields)='object'),
+    source_result_entry_id text,
+    native_projection json,
+    CHECK (native_projection IS NULL OR source_result_entry_id IS NOT NULL),
+    FOREIGN KEY (session_id,source_result_entry_id)
+        REFERENCES pulsara_v3.tool_results(session_id,result_entry_id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     result_facts jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(result_facts)='object'),
-    model_visible_memory_fact_ids text[] NOT NULL DEFAULT '{}'::text[] CHECK (
-        cardinality(model_visible_memory_fact_ids) <= 50
-        AND octet_length(array_to_json(model_visible_memory_fact_ids)::text) <= 8192
-    ),
     accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     UNIQUE (session_id, id),
     UNIQUE (session_id, tool_call_entry_id, tool_call_id),
@@ -1099,7 +1107,6 @@ CREATE TABLE pulsara_v3.plan_workflows (
         'ACTIVE', 'APPROVED', 'CANCELLED', 'FORCE_EXITED', 'EXITED'
     )),
     entered_by text NOT NULL CHECK (entered_by IN ('USER', 'AGENT')),
-    entry_reason text NOT NULL CHECK (octet_length(entry_reason) <= 4096),
     entry_command_id text,
     entry_turn_id text,
     entry_assistant_entry_id text,
@@ -1155,6 +1162,10 @@ CREATE TABLE pulsara_v3.plan_interactions (
         request_semantic_digest ~ '^sha256:[0-9a-f]{64}$'
     ),
     control_tool_result_id text,
+    plan_file_path text CHECK (plan_file_path IS NULL OR btrim(plan_file_path)<>''),
+    plan_file_error text CHECK (plan_file_error IS NULL OR btrim(plan_file_error)<>''),
+    CHECK (num_nonnulls(plan_file_path,plan_file_error)<=1),
+    CHECK (kind='DRAFT_REVIEW' OR num_nonnulls(plan_file_path,plan_file_error)=0),
     resolution_command_id text,
     response_semantic_digest text CHECK (
         response_semantic_digest ~ '^sha256:[0-9a-f]{64}$'
@@ -1651,7 +1662,6 @@ BEGIN
             OLD.workspace_id IS DISTINCT FROM NEW.workspace_id OR
             OLD.workflow_ordinal IS DISTINCT FROM NEW.workflow_ordinal OR
             OLD.entered_by IS DISTINCT FROM NEW.entered_by OR
-            OLD.entry_reason IS DISTINCT FROM NEW.entry_reason OR
             OLD.entry_command_id IS DISTINCT FROM NEW.entry_command_id OR
             OLD.entry_turn_id IS DISTINCT FROM NEW.entry_turn_id OR
             OLD.entry_assistant_entry_id IS DISTINCT FROM NEW.entry_assistant_entry_id OR
@@ -1719,6 +1729,8 @@ BEGIN
             OLD.assistant_entry_id IS DISTINCT FROM NEW.assistant_entry_id OR
             OLD.tool_call_id IS DISTINCT FROM NEW.tool_call_id OR
             OLD.request_semantic_digest IS DISTINCT FROM NEW.request_semantic_digest OR
+            OLD.plan_file_path IS DISTINCT FROM NEW.plan_file_path OR
+            OLD.plan_file_error IS DISTINCT FROM NEW.plan_file_error OR
             (OLD.control_tool_result_id IS DISTINCT FROM NEW.control_tool_result_id
                 AND NOT (
                     OLD.status = 'OPEN'
@@ -2274,7 +2286,8 @@ BEGIN
     IF (NEW.type='tool_call' AND parent_kind<>'ASSISTANT_TOOL_REQUEST')
         OR (NEW.type='data' AND parent_kind NOT IN ('ASSISTANT_MESSAGE','ASSISTANT_TOOL_REQUEST'))
         OR (NEW.type='annotation' AND parent_kind NOT IN ('USER_MESSAGE','USER_STEER','QUEUE'))
-        OR (NEW.type IN ('image','target','object') AND parent_kind NOT IN ('USER_MESSAGE','USER_STEER','TOOL_RESULT','QUEUE')) THEN
+        OR (NEW.type='image' AND parent_kind NOT IN ('USER_MESSAGE','USER_STEER','TOOL_RESULT','TERMINAL_OBSERVATION','QUEUE'))
+        OR (NEW.type IN ('target','object') AND parent_kind NOT IN ('USER_MESSAGE','USER_STEER','TOOL_RESULT','QUEUE')) THEN
         RAISE EXCEPTION 'content type is not admitted by its source owner' USING ERRCODE='23514';
     END IF;
     IF NEW.blob_id IS NOT NULL THEN
@@ -2353,3 +2366,75 @@ $$;
 CREATE TRIGGER trg_pulsara_v3_queue_material_metadata BEFORE INSERT OR UPDATE ON pulsara_v3.prompt_queue_items
 FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_queue_material_metadata();
 REVOKE ALL ON FUNCTION pulsara_v3.enforce_queue_material_metadata() FROM PUBLIC;
+
+-- A result has one accepted native observation projection, without a page body.
+CREATE FUNCTION pulsara_v3.seal_native_tool_projection()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    keys text[];
+    point json;
+    point_name text;
+    item record;
+    start_segment numeric;
+    start_offset numeric;
+    end_segment numeric;
+    end_offset numeric;
+BEGIN
+    IF TG_OP='UPDATE' AND (OLD.native_projection IS NOT NULL
+        OR NEW.native_projection IS NULL OR NEW.source_result_entry_id IS NULL
+        OR (OLD.source_result_entry_id IS NOT NULL AND OLD.source_result_entry_id IS DISTINCT FROM NEW.source_result_entry_id)) THEN
+        RAISE EXCEPTION 'native result projection is accepted once' USING ERRCODE='23514';
+    END IF;
+    IF NEW.native_projection IS NULL THEN RETURN NEW; END IF;
+    IF json_typeof(NEW.native_projection)<>'object' THEN
+        RAISE EXCEPTION 'native result projection must be an object' USING ERRCODE='23514';
+    END IF;
+    SELECT array_agg(key ORDER BY key) INTO keys FROM json_object_keys(NEW.native_projection) key;
+    IF keys IS DISTINCT FROM ARRAY['end','image_errors','next','page_error','start'] THEN
+        RAISE EXCEPTION 'native result projection has invalid fields' USING ERRCODE='23514';
+    END IF;
+    FOREACH point_name IN ARRAY ARRAY['start','end'] LOOP
+        point := NEW.native_projection->point_name;
+        IF json_typeof(point)<>'array' OR json_array_length(point)<>2
+            OR json_typeof(point->0)<>'number' OR json_typeof(point->1)<>'number'
+            OR (point->>0)!~'^[0-9]+$' OR (point->>1)!~'^[0-9]+$' THEN
+            RAISE EXCEPTION 'native projection position must be two nonnegative integers' USING ERRCODE='23514';
+        END IF;
+    END LOOP;
+    start_segment := (NEW.native_projection->'start'->>0)::numeric;
+    start_offset := (NEW.native_projection->'start'->>1)::numeric;
+    end_segment := (NEW.native_projection->'end'->>0)::numeric;
+    end_offset := (NEW.native_projection->'end'->>1)::numeric;
+    IF json_typeof(NEW.native_projection->'page_error')='null' THEN
+        IF ROW(end_segment,end_offset)<=ROW(start_segment,start_offset) THEN
+            RAISE EXCEPTION 'a normal native range must advance' USING ERRCODE='23514';
+        END IF;
+    ELSIF json_typeof(NEW.native_projection->'page_error')<>'string'
+        OR ROW(end_segment,end_offset) IS DISTINCT FROM ROW(start_segment,start_offset) THEN
+        RAISE EXCEPTION 'native page failure cannot mark content read' USING ERRCODE='23514';
+    END IF;
+    IF json_typeof(NEW.native_projection->'image_errors')<>'object' THEN
+        RAISE EXCEPTION 'native image outcomes must be keyed by segment' USING ERRCODE='23514';
+    END IF;
+    FOR item IN SELECT * FROM json_each(NEW.native_projection->'image_errors') LOOP
+        IF item.key!~'^[0-9]+$' OR json_typeof(item.value)<>'string' THEN
+            RAISE EXCEPTION 'invalid native image outcome' USING ERRCODE='23514';
+        END IF;
+    END LOOP;
+    IF json_typeof(NEW.native_projection->'next')<>'null' THEN
+        IF json_typeof(NEW.native_projection->'next')<>'object'
+            OR NEW.native_projection->'next'->>'kind' IS DISTINCT FROM 'NEXT'
+            OR json_typeof(NEW.native_projection->'next'->'token') IS DISTINCT FROM 'string' THEN
+            RAISE EXCEPTION 'invalid native NEXT target' USING ERRCODE='23514';
+        END IF;
+        SELECT array_agg(key ORDER BY key) INTO keys FROM json_object_keys(NEW.native_projection->'next') key;
+        IF keys IS DISTINCT FROM ARRAY['kind','token'] THEN
+            RAISE EXCEPTION 'invalid native NEXT fields' USING ERRCODE='23514';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER trg_pulsara_v3_native_tool_projection BEFORE INSERT OR UPDATE ON pulsara_v3.tool_results
+FOR EACH ROW EXECUTE FUNCTION pulsara_v3.seal_native_tool_projection();
+REVOKE ALL ON FUNCTION pulsara_v3.seal_native_tool_projection() FROM PUBLIC;

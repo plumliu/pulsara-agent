@@ -16,10 +16,6 @@ MEMORY_KIND_PRODUCT_DEFINITIONS = (
         "FACT",
         "attributed declarative context, including uncertain information",
     ),
-    (
-        "DECISION",
-        "source-supported choices, inclinations, plans, goals, commitments or adopted high-level methods",
-    ),
 )
 
 MEMORY_CONTEXT_PRODUCT_GUIDE = (
@@ -28,9 +24,7 @@ MEMORY_CONTEXT_PRODUCT_GUIDE = (
     "and conditions in statement."
 )
 
-MEMORY_COHESIVE_UNIT_GUIDE = (
-    "One self-contained idea, readable and deletable as a whole; split unrelated claims."
-)
+MEMORY_COHESIVE_UNIT_GUIDE = "One self-contained idea, readable and deletable as a whole; split unrelated claims."
 
 MEMORY_RETRIEVAL_AUTHORING_GUIDE = (
     "Keep relevant subject, attribution, project, time, conditions, quantities, "

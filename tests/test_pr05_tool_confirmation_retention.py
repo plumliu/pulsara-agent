@@ -545,7 +545,7 @@ def test_r07_r14_cancel_real_mcp_tool_waiter_joins_and_releases(
     from tests.test_round6_mcp_production import (
         McpHostSupervisor, DirectKernelToolPort, DefaultToolDispatchAuthorizationPolicy,
         ModelInputScopeKind, prepare_test_direct_tool_surface, _config,
-        _seal_mcp_test_port, _enabled_memory_context,
+        _seal_mcp_test_port, _enabled_memory_context, _meta_arguments,
     )
     import pulsara_agent.conversation_kernel.interaction as interaction_module
 
@@ -577,19 +577,18 @@ def test_r07_r14_cancel_real_mcp_tool_waiter_joins_and_releases(
         await supervisor.wait_initial_readiness()
         port.prepare_tool_surface_safe_point()
         surface = prepare_test_direct_tool_surface(port, conversation_scope_kind=ModelInputScopeKind.ROOT)
-        effect = next(item for item in surface.model_surface.tool_specs if item.name.endswith("fixture_effect"))
         borrow = port.borrow_tool_surface(surface)
         permission = build_run_permission_snapshot(snapshot_id='permission:lsf3jcj5tfegppf2erwmuymj4e',
             requested_mode=PermissionMode.ASK_PERMISSIONS, effective_mode=PermissionMode.ASK_PERMISSIONS,
             admission_source=RunPermissionAdmissionSource.USER_SUBMISSION)
         waiter = submission = None
         try:
-            await port.authorize(tool_name=effect.name, arguments={"value": "must-not-execute"},
+            await port.authorize(tool_name="call_mcp_tool", arguments=await _meta_arguments(port,borrow,"fixture_effect",{"value":"must-not-execute"}),
                 tool_call_id="call:cancel", turn_id='turn:bjo672se4p33odo75fvtqi452q', assistant_entry_id='entry:fzz4xmltqd5ttmzc3n22eqjjdu',
                 permission_snapshot=permission, surface_borrow=borrow, memory_context=_enabled_memory_context())
             prepared = port.prepare_permission_request(tool_call_id="call:cancel", turn_id='turn:bjo672se4p33odo75fvtqi452q', surface_borrow=borrow)
             waiter = asyncio.create_task(port.request_confirmation(prepared_request=prepared,
-                tool_name=effect.name, assistant_entry_id='entry:fzz4xmltqd5ttmzc3n22eqjjdu', permission_snapshot=permission))
+                tool_name="call_mcp_tool", assistant_entry_id='entry:fzz4xmltqd5ttmzc3n22eqjjdu', permission_snapshot=permission))
             await asyncio.sleep(0)
             pending = owner._pending
             permit = next(iter(port._mcp_dispatch_permits.values()))

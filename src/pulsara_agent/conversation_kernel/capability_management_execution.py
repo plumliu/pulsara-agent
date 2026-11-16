@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from pulsara_agent.ports.tool_execution import ToolBusinessValue
 
 from pulsara_agent.capability.local_skill_management import (
     InstallLooseLocalSkillRequest,
@@ -18,7 +19,6 @@ from pulsara_agent.capability.local_skill_management import (
 from pulsara_agent.capability.local_skill_publisher import (
     LocalSkillInstallScope,
     LocalSkillInstallDisposition,
-    LocalSkillCleanupLocationStatus,
 )
 from pulsara_agent.capability.local_skill_removal import LocalSkillRemovalDisposition
 from pulsara_agent.capability.inspection_presentation import diagnostic_payload
@@ -54,7 +54,6 @@ from pulsara_agent.plugins.contracts import (
     ExternalProcessAcceptance,
     InstallLocalPluginRequest,
     PluginInstanceState,
-    PluginInstallDisposition, PluginEnablementDisposition, PluginRemovalDisposition,
     PluginScopeKind,
     PreparedPluginInstanceObservation,
     RemoveLocalPluginRequest,
@@ -70,12 +69,14 @@ from pulsara_agent.plugins.mcp_connection import (
     connection_editor_definition,
 )
 from pulsara_agent.primitives.context import freeze_json, thaw_json
-from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget, ToolResultPageBoundary
-from .tool_result_display import require_native_result_minimum
 from pulsara_agent.public_projection import public_record
 from pulsara_agent.capability.public_projection import (
-    public_connection_editor, public_diagnostic, public_mcp_config,
-    public_overlay, public_owner, public_target,
+    public_connection_editor,
+    public_diagnostic,
+    public_mcp_config,
+    public_overlay,
+    public_owner,
+    public_target,
 )
 from pulsara_agent.plugins.public_projection import project_hook_public
 
@@ -124,20 +125,14 @@ class CapabilityManagementCall:
         self.subject: tuple[str, str, str, str] | None = None
         self._state = "prepared"
         self._submission: AcceptedCapabilityFormSubmission | None = None
+        self._result_facts = {}
 
     def form(self, reason: str) -> PendingCapabilityForm:
         if self._state != "prepared":
             raise RuntimeError("capability call was already transferred")
         self._state = "form"
         prepared = self.prepared
-        fields = {
-            **thaw_json(prepared.intent.fields),
-            **(
-                thaw_json(prepared.intent.target)
-                if prepared.intent.target is not None
-                else {}
-            ),
-        }
+        fields = self.service.native_fields(prepared.intent)
         editor = {}
         plugin = prepared.plugin
         if plugin is None and "server_id" in fields:
@@ -149,11 +144,20 @@ class CapabilityManagementCall:
             for server in plugin.summary.mcp.mcp_servers:
                 config = self.service._connection(plugin, server)
                 if server.kind.value == "stdio":
-                    overlay = next((item for item in plugin.mcp_connection_overlays
-                                    if item.local_server_id == server.local_server_id), None)
+                    overlay = next(
+                        (
+                            item
+                            for item in plugin.mcp_connection_overlays
+                            if item.local_server_id == server.local_server_id
+                        ),
+                        None,
+                    )
                     _, public_config = connection_editor_definition(
-                        server, overlay,
-                        owner=plugin_connection_owner(plugin.identity, server.local_server_id),
+                        server,
+                        overlay,
+                        owner=plugin_connection_owner(
+                            plugin.identity, server.local_server_id
+                        ),
                     )
                 else:
                     public_config = config_to_entry(config)
@@ -219,16 +223,24 @@ class CapabilityManagementCall:
         scrub = self._public_scrub(prepared)
         children = {
             "prefill": _public_management_fields(public["prefill"], scrub),
-            "expected_current": _public_management_fields(public["expected_current"], scrub),
+            "expected_current": _public_management_fields(
+                public["expected_current"], scrub
+            ),
             "effects": public["effects"],
         }
         if "plugin" in public:
             children["plugin"] = _public_form_plugin(public["plugin"], scrub)
         if "connection" in public:
-            children["connection"] = public_connection_editor(public["connection"], scrub)
+            children["connection"] = public_connection_editor(
+                public["connection"], scrub
+            )
         if "credential_owner" in public:
-            children["credential_owner"] = public_owner(public["credential_owner"], scrub)
-        public = public_record(public, scrub, fixed=("action", "scope"), children=children)
+            children["credential_owner"] = public_owner(
+                public["credential_owner"], scrub
+            )
+        public = public_record(
+            public, scrub, fixed=("action", "scope"), children=children
+        )
         return PendingCapabilityForm(
             freeze_json(public),
             "请检查并确认这次能力配置；密钥只交给本机配置服务，不会发送给模型。",
@@ -238,7 +250,10 @@ class CapabilityManagementCall:
     def _public_scrub(self, prepared):
         scrub = self.service.plugins._credential_boundary.capture_scrub_set()
         for candidate in (prepared, self.prepared):
-            for observed in (candidate.scrub_set, getattr(candidate.plugin, "scrub_set", None)):
+            for observed in (
+                candidate.scrub_set,
+                getattr(candidate.plugin, "scrub_set", None),
+            ):
                 if observed is not None:
                     for secret in observed.values:
                         scrub.observe(secret)
@@ -275,10 +290,10 @@ class CapabilityManagementCall:
                 "Plugin review acceptance belongs only to Plugin enablement"
             )
         editable = (
-            {"config"}
-            if action in {Action.ADD_LOCAL_MCP, Action.UPDATE_LOCAL_MCP}
-            else {"overlay"}
-            if action is Action.CONFIGURE_PLUGIN_MCP_CONNECTION
+            {"overlay"}
+            if action is Action.UPDATE_MCP_CONNECTION and prepared.plugin is not None
+            else {"config"}
+            if action in {Action.ADD_LOCAL_MCP, Action.UPDATE_MCP_CONNECTION}
             else set()
         )
         if (set(body) & {"config", "overlay"}) - editable:
@@ -286,20 +301,31 @@ class CapabilityManagementCall:
         changes = parse_mcp_secret_changes(body.get("secret_changes", []))
         if changes and not editable:
             raise ValueError("this operation cannot write credentials")
-        arguments = {
-            **prepared.intent.to_dict(),
-            **{key: body[key] for key in editable if key in body},
-        }
+        arguments = prepared.intent.to_dict()
+        if "overlay" in editable:
+            if "overlay" in body:
+                arguments["config"] = body["overlay"]
+            elif "config" in thaw_json(prepared.intent.fields):
+                from pulsara_agent.plugins.mcp_connection import overlay_to_dict
+
+                arguments["config"] = (
+                    overlay_to_dict(prepared.plugin_overlay)
+                    if prepared.plugin_overlay
+                    else None
+                )
+        else:
+            arguments.update({key: body[key] for key in editable if key in body})
         # Browser cannot replace guards, target, action, scope or source. The
         # original prepared observation remains the authority for this editor.
-        arguments.update(
-            {
-                key: value
-                for key, value in thaw_json(prepared.expected_current).items()
-                if key.startswith("expected_")
-            }
-        )
-        candidate = await self.service.prepare(arguments)
+        if prepared.plugin is not None or prepared.plugin_instance is not None:
+            observed = _plugin_observation(prepared, self._root())
+            store = self.service.plugins._store()
+            current = await asyncio.to_thread(
+                store.read_state, store.layout(observed.identity)
+            )
+            if current != observed.current:
+                raise McpManagementConflict("Plugin changed while the form was open")
+        candidate = await self.service.prepare(arguments, native_config=True)
         self._same_target(candidate)
         if "connection_configuration" in candidate.user_inputs:
             raise ValueError("connection configuration is required")
@@ -325,7 +351,7 @@ class CapabilityManagementCall:
                 transient_secrets=changes,
             )
             current_config = self.service.mcp.inspect(target)
-        elif action is Action.CONFIGURE_PLUGIN_MCP_CONNECTION:
+        elif action is Action.UPDATE_MCP_CONNECTION:
             plugin = candidate.plugin
             assert plugin is not None
             server_id = arguments["target"]["server_id"]
@@ -338,11 +364,7 @@ class CapabilityManagementCall:
                 if item.local_server_id == server_id
             )
             current_config = self.service._connection(plugin, server)
-            overlay = (
-                overlay_from_dict(arguments["overlay"])
-                if arguments["overlay"] is not None
-                else None
-            )
+            overlay = candidate.plugin_overlay
             overlays = tuple(
                 item
                 for item in plugin.mcp_connection_overlays
@@ -428,66 +450,26 @@ class CapabilityManagementCall:
             else None
         )
 
-    def _require_result_budget(self, prepared, fields, root, budget, scrub):
-        """Admit the same compact control contract used after settlement.
+    async def execute(self, *, cell_cancel_event: asyncio.Event | None = None):
+        native = await self._execute_native(cell_cancel_event=cell_cancel_event)
+        outcome = management_outcome(
+            self.prepared, native, result_facts=self._result_facts
+        )
+        from pulsara_agent.conversation_kernel.content_parts import ResultPart
 
-        Only real prepared targets and existing guards enter this witness.
-        Future package IDs and staging names remain in C, at their native
-        allocation boundary. Closed outcome scalars use their longest legal
-        value; this quote is not published as an observed result.
-        """
-        action = prepared.intent.action
-        target = thaw_json(prepared.intent.target) if prepared.intent.target is not None else None
-        current = {}
-        if action is Action.INSTALL_LOOSE_SKILL:
-            destination = self.service.skills.loose_skill_install_destination(
-                InstallLooseLocalSkillRequest(Path(fields["source_path"]),
-                    LocalSkillInstallScope(prepared.resolved_scope.value.lower()), root,
-                    fields.get("name"), fields.get("description")), prepared.skill_validation)
-            if destination is not None:
-                target = {"kind": "SKILL", "skill_path": str(destination / "SKILL.md")}
-            current = {"operation_status": max(LocalSkillInstallDisposition, key=lambda item: len(item.value)).value,
-                       "prior_operation_status": max(LocalSkillInstallDisposition, key=lambda item: len(item.value)).value,
-                       "cleanup_attention": False,
-                       "cleanup_location_status": max(LocalSkillCleanupLocationStatus, key=lambda item: len(item.value)).value}
-        elif action is Action.REMOVE_LOOSE_SKILL:
-            current = {"operation_status": max(LocalSkillRemovalDisposition, key=lambda item: len(item.value)).value,
-                       "cleanup_attention": False}
-        elif action in {Action.SET_LOOSE_SKILL_ENABLED, Action.SET_HOOK_SOURCE_ENABLED}:
-            current = {"enabled": fields["enabled"]}
-        elif action is Action.REVOKE_HOOK_TRUST:
-            current = {"trust_revoked": True}
-        elif action in {Action.AUTHORIZE_MCP, Action.CLEAR_MCP_AUTHORIZATION}:
-            current = {"authorized": action is Action.AUTHORIZE_MCP}
-        elif action in {Action.ADD_LOCAL_MCP, Action.UPDATE_LOCAL_MCP, Action.REMOVE_LOCAL_MCP,
-                        Action.CONFIGURE_PLUGIN_MCP_CONNECTION}:
-            current = {"cleanup_attention": False}
-        elif action in {Action.INSTALL_PLUGIN, Action.SET_PLUGIN_ENABLED, Action.REMOVE_PLUGIN}:
-            disposition = (PluginInstallDisposition if action is Action.INSTALL_PLUGIN else
-                           PluginEnablementDisposition if action is Action.SET_PLUGIN_ENABLED else PluginRemovalDisposition)
-            current = {"operation_status": max(disposition, key=lambda item: len(item.value)).value,
-                       "cleanup_attention": False}
-            if action is Action.INSTALL_PLUGIN:
-                expected = thaw_json(prepared.expected_current)
-                target = {"kind": "PLUGIN", "scope": prepared.resolved_scope.value, "plugin_id": expected["plugin_id"]}
-                current["prior_operation_status"] = max(disposition, key=lambda item: len(item.value)).value
-            if action is Action.SET_PLUGIN_ENABLED:
-                current.update(intended_enabled=fields["enabled"], desired_enabled=fields["enabled"])
-        expected = thaw_json(prepared.expected_current)
-        for name in ("expected_package_install_id", "expected_identity"):
-            if name in expected:
-                current[name] = expected[name]
-        if prepared.plugin is not None:
-            current.setdefault("expected_package_install_id", prepared.plugin.package_install_id)
-        witness = {"status": "CANCELLED", "action": action.value,
-                   "adoption": "NOT_APPLICABLE", "current": current}
-        if target is not None:
-            witness["target"] = target
-        public = _public_management_result(witness, scrub)
-        require_native_result_minimum(budget, required_facts=capability_management_required_facts(public))
+        scrub = self._public_scrub(self.prepared)
+        return replace(
+            outcome,
+            business_value=replace(
+                outcome.business_value,
+                content=tuple(
+                    ResultPart("text", scrub.scrub_text(part.value))
+                    for part in outcome.business_value.content
+                ),
+            ),
+        )
 
-    async def execute(self, *, page_budget: ToolResultPageBudget,
-                      cell_cancel_event: asyncio.Event | None = None):
+    async def _execute_native(self, *, cell_cancel_event=None):
         state = self._state
         if state not in {"prepared", "submitted"}:
             raise RuntimeError(
@@ -499,36 +481,29 @@ class CapabilityManagementCall:
         prepared = self.prepared
         if state == "submitted":
             assert values is not None
-            prepared = await self.service.prepare(thaw_json(values.public_fields))
+            prepared = await self.service.prepare(
+                thaw_json(values.public_fields), native_config=True
+            )
             self._same_target(prepared)
         elif prepared.user_inputs:
             raise ValueError("capability call requires user input")
         changes = values.secret_changes if values else ()
         retained = values.retain_credentials_confirmed if values else False
-        fields = {
-            **thaw_json(prepared.intent.fields),
-            **(
-                thaw_json(prepared.intent.target)
-                if prepared.intent.target is not None
-                else {}
-            ),
-        }
+        fields = self.service.native_fields(prepared.intent)
         action = prepared.intent.action
         root = self._root()
         service = self.service
         scrub = self._public_scrub(prepared)
         for change in changes:
             scrub.observe(change.value)
-        try:
-            self._require_result_budget(prepared, fields, root, page_budget, scrub)
-        except ToolResultPageBoundary:
-            return capability_budget_rejection(action=action.value)
         if action in {
             Action.INSTALL_LOOSE_SKILL,
             Action.SET_LOOSE_SKILL_ENABLED,
             Action.REMOVE_LOOSE_SKILL,
         }:
-            return _public_management_result(await self._skill(prepared, fields, root), self._public_scrub(prepared))
+            return _public_management_result(
+                await self._skill(prepared, fields, root), self._public_scrub(prepared)
+            )
         if action in {
             Action.TRUST_HOOK_SOURCE,
             Action.REVOKE_HOOK_TRUST,
@@ -543,7 +518,7 @@ class CapabilityManagementCall:
                 outcome = await service.mcp.create(
                     mutation.target, thaw_json(mutation.entry), secrets=changes
                 )
-            elif action is Action.UPDATE_LOCAL_MCP:
+            elif action is Action.UPDATE_MCP_CONNECTION:
                 outcome = await service.mcp.update(
                     mutation.target,
                     thaw_json(mutation.entry),
@@ -553,16 +528,22 @@ class CapabilityManagementCall:
                 )
             else:
                 outcome = await service.mcp.execute_prepared_mutation(mutation)
-            return _public_management_result(self._result(
-                prepared,
-                "APPLIED",
-                {
-                    "config_path": str(service.mcp.path(mutation.target)),
-                    "cleanup_attention": outcome.cleanup_attention,
-                },
-            ), self._public_scrub(prepared))
+            return _public_management_result(
+                self._result(
+                    prepared,
+                    "APPLIED",
+                    {
+                        "config_path": str(service.mcp.path(mutation.target)),
+                        "cleanup_attention": outcome.cleanup_attention,
+                        "cleanup_error": getattr(outcome, "cleanup_error", None),
+                    },
+                ),
+                self._public_scrub(prepared),
+            )
         if action in {Action.AUTHORIZE_MCP, Action.CLEAR_MCP_AUTHORIZATION}:
-            return await self._authorization(prepared, cell_cancel_event=cell_cancel_event)
+            return await self._authorization(
+                prepared, cell_cancel_event=cell_cancel_event
+            )
         observed = _plugin_observation(prepared, root)
         scope = PluginScopeKind(prepared.resolved_scope.value)
         if action is Action.INSTALL_PLUGIN:
@@ -622,7 +603,7 @@ class CapabilityManagementCall:
                 connections=service.mcp,
             )
             applied = isinstance(outcome, RemovedPluginOutcome)
-        elif action is Action.CONFIGURE_PLUGIN_MCP_CONNECTION:
+        elif action is Action.UPDATE_MCP_CONNECTION:
             previous = thaw_json(prepared.expected_current)["expected_overlay"]
             outcome = await service.plugins.replace_plugin_mcp_connection_overlay(
                 ReplacePluginMcpConnectionRequest(
@@ -630,9 +611,7 @@ class CapabilityManagementCall:
                     fields["server_id"],
                     prepared.plugin.package_install_id,
                     overlay_from_dict(previous) if previous is not None else None,
-                    overlay_from_dict(fields["overlay"])
-                    if fields["overlay"] is not None
-                    else None,
+                    prepared.plugin_overlay,
                     service.deadline(),
                     changes,
                     retained,
@@ -641,17 +620,24 @@ class CapabilityManagementCall:
                 connections=service.mcp,
             )
             return self._public_plugin_result(
-                prepared, outcome, self._result(
+                prepared,
+                outcome,
+                self._result(
                     prepared,
                     "APPLIED",
                     {
-                        "overlay": fields["overlay"],
+                        "restored_defaults": "config" in fields
+                        and fields["config"] is None,
                         "cleanup_attention": outcome.cleanup_attention,
+                        "cleanup_error": getattr(outcome, "cleanup_error", None),
                     },
                 ),
             )
         else:
             raise ValueError("unsupported capability operation")
+        source = getattr(outcome, "prior", outcome)
+        if isinstance(source, SuccessfulPluginInstallOutcome):
+            applied = True
         disposition = outcome.disposition.value
         result = self._result(
             prepared,
@@ -667,13 +653,13 @@ class CapabilityManagementCall:
                 "cleanup_attention": getattr(outcome, "cleanup_attention", False),
             },
         )
-        if isinstance(outcome, SuccessfulPluginInstallOutcome):
+        if isinstance(source, SuccessfulPluginInstallOutcome):
             result["target"] = {
                 "kind": "PLUGIN",
-                "scope": outcome.identity.scope.value,
-                "plugin_id": outcome.identity.plugin_id,
+                "plugin_path": str(source.package_root.parent),
             }
-            result["current"]["package_root"] = str(outcome.package_root)
+        if source is not outcome:
+            result["current"]["cleanup_attention"] = True
         source = getattr(outcome, "prior", outcome)
         diagnostics = list(getattr(source, "diagnostics", ()))
         if source is not outcome:
@@ -681,14 +667,6 @@ class CapabilityManagementCall:
             diagnostics.append(outcome.diagnostic)
         if diagnostics:
             result["diagnostics"] = [diagnostic_payload(item) for item in diagnostics]
-        for name in (
-            "package_install_id", "attempted_package_install_id",
-            "expected_package_install_id", "observed_package_install_id",
-            "prior_package_install_id", "last_known_cut", "intended_enabled",
-            "desired_enabled",
-        ):
-            if hasattr(source, name):
-                result["current"][name] = getattr(source, name)
         return self._public_plugin_result(prepared, outcome, result)
 
     def _public_plugin_result(self, prepared, outcome, result):
@@ -704,7 +682,9 @@ class CapabilityManagementCall:
         service = self.service
         scope = LocalSkillInstallScope(prepared.resolved_scope.value.lower())
         action = prepared.intent.action
-        candidate = await service.prepare(prepared.intent.to_dict())
+        candidate = await service.prepare(
+            prepared.intent.to_dict(), native_config=prepared.native_config
+        )
         self._same_target(candidate)
         if action is Action.INSTALL_LOOSE_SKILL:
             cancellation = EventLocalSkillCancellationProbe()
@@ -755,6 +735,13 @@ class CapabilityManagementCall:
                     else None,
                 },
             )
+            result["diagnostics"] = [
+                diagnostic_payload(item) for item in outcome.diagnostics
+            ]
+            if outcome.publish_unavailable_reason is not None:
+                result["message"] = (
+                    f"安装发布未完成：{ {'UNSUPPORTED_EXCLUSIVE_PRIMITIVE': '当前位置不支持排他发布', 'ROOT_BINDING_RACED': '目标目录在发布期间发生变化', 'PUBLISH_IO_FAILURE': '发布文件时发生 I/O 错误'}[outcome.publish_unavailable_reason.value] }；源：{outcome.source_path}。"
+                )
             if applied and outcome.destination_path is not None:
                 result["target"] = {
                     "kind": "SKILL",
@@ -891,14 +878,7 @@ class CapabilityManagementCall:
 
     async def _authorization(self, prepared, *, cell_cancel_event=None):
         service = self.service
-        fields = {
-            **thaw_json(prepared.intent.fields),
-            **(
-                thaw_json(prepared.intent.target)
-                if prepared.intent.target is not None
-                else {}
-            ),
-        }
+        fields = self.service.native_fields(prepared.intent)
         if prepared.plugin is None:
             target = LocalMcpTarget(fields["server_id"], self._root())
             owner = target.owner
@@ -933,7 +913,6 @@ class CapabilityManagementCall:
                 return {
                     "status": "CANCELLED",
                     "message": "Cell 已停止等待登录",
-                    "adoption": "NOT_APPLICABLE",
                 }
             manager = await service.mcp.prepare_oauth()
             flow = await manager.begin(owner, current)
@@ -950,7 +929,6 @@ class CapabilityManagementCall:
                         return {
                             "status": "CANCELLED",
                             "message": "Cell 已停止等待登录",
-                            "adoption": "NOT_APPLICABLE",
                         }
                     await asyncio.shield(flow.task)
                 finally:
@@ -964,7 +942,8 @@ class CapabilityManagementCall:
         if prepared.intent.action is Action.AUTHORIZE_MCP:
             # Existing committed tool settlement carries the exact credential owner
             # to the desktop; no separate durable authorization notification.
-            result["authorization"] = {
+            self._result_facts["authorization"] = {
+                "scope": prepared.resolved_scope.value,
                 "owner": asdict(owner),
                 "config_identity": flow.config.resolved_config_identity,
                 "display_identity": config_guard(flow.config),
@@ -979,69 +958,25 @@ class CapabilityManagementCall:
     def _result(prepared, status, current):
         return {
             "status": status,
-            "action": prepared.intent.action.value,
             **(
                 {"target": thaw_json(prepared.intent.target)}
-                if prepared.intent.target is not None
+                if prepared.intent.action
+                not in {Action.INSTALL_LOOSE_SKILL, Action.INSTALL_PLUGIN}
                 else {}
             ),
             "current": current,
-            "adoption": "NOT_APPLICABLE",
         }
-
-
-def capability_management_required_facts(value: Mapping[str, object]) -> dict[str, object]:
-    """Preserve settled control facts from the already scrubbed public result.
-
-    Configuration, review bodies and diagnostics remain in the same result's
-    complete body. Their omission must never hide an applied mutation, adoption
-    failure, actionable target, cleanup state, or package concurrency guard.
-    """
-    facts = {name: value[name] for name in ("status", "action", "target", "adoption", "error", "physical_outcome", "retry_performed") if name in value}
-    current = value.get("current")
-    if isinstance(current, Mapping):
-        facts["current"] = {
-            name: current[name] for name in (
-                "operation_status", "prior_operation_status", "cleanup_attention",
-                "cleanup_location_status", "intended_enabled",
-                "desired_enabled", "enabled", "authorized", "trust_revoked",
-                "expected_package_install_id", "expected_identity",
-            ) if name in current
-        }
-    return facts
-
-
-def capability_budget_rejection(*, action: str) -> dict[str, object]:
-    """An observed pre-effect rejection, never an uncertain physical failure."""
-    return {"status": "REJECTED", "action": action, "adoption": "NOT_APPLICABLE",
-            "error": "OUTPUT_PAGE_BOUNDARY", "physical_outcome": "NO_EFFECT",
-            "retry_performed": False,
-            "message": "The minimum control receipt cannot fit; the operation was not started."}
-
-
-def require_capability_reload_budget(page_budget: ToolResultPageBudget) -> None:
-    # Counts and source details are C, not indispensable adoption facts. These
-    # are the longest members of the existing closed reload status vocabularies.
-    require_native_result_minimum(page_budget, required_facts={
-        "status": "RELOADED", "plugin_view": "UNAVAILABLE", "skill_producer": "UNAVAILABLE",
-        "mcp": "BOUND_EXCEEDED", "same_epoch_prefix": "UNCHANGED",
-        "interruption": "CANCELLED", "local_hooks": "RELOADED",
-    })
-
-
-def capability_reload_required_facts(value: Mapping[str, object]) -> dict[str, object]:
-    """Keep adoption/epoch status while large source reports remain readable."""
-    facts = {name: value[name] for name in (
-        "status", "plugin_view", "skill_producer", "mcp",
-        "same_epoch_prefix", "interruption", "local_hooks",
-    ) if name in value}
-    return facts
 
 
 def _public_management_fields(value, scrub):
     children = {}
-    for name in ("expected_package_install_id", "package_install_id", "attempted_package_install_id",
-                 "observed_package_install_id", "prior_package_install_id"):
+    for name in (
+        "expected_package_install_id",
+        "package_install_id",
+        "attempted_package_install_id",
+        "observed_package_install_id",
+        "prior_package_install_id",
+    ):
         if name in value:
             children[name] = public_package_id(value[name], scrub)
     for name in ("overlay", "expected_overlay"):
@@ -1053,18 +988,36 @@ def _public_management_fields(value, scrub):
         children["target"] = public_target(value["target"], scrub)
     if "hook_source" in value:
         children["hook_source"] = project_hook_public(value["hook_source"], scrub)
-    return public_record(value, scrub,
-        fixed=("action", "scope", "source_kind", "source_format", "operation_status", "prior_operation_status", "last_known_cut", "cleanup_location_status"),
-        children=children)
+    return public_record(
+        value,
+        scrub,
+        fixed=(
+            "action",
+            "scope",
+            "source_kind",
+            "source_format",
+            "operation_status",
+            "prior_operation_status",
+            "last_known_cut",
+            "cleanup_location_status",
+        ),
+        children=children,
+    )
 
 
 def _public_form_plugin(value, scrub):
-    return public_record(value, scrub, children={
-        "package_install_id": public_package_id(value["package_install_id"], scrub),
-        "skills": [public_record(item, scrub) for item in value["skills"]],
-        "hooks": [public_record(item, scrub, fixed=("event",)) for item in value["hooks"]],
-        "mcp": [public_connection_editor(item, scrub) for item in value["mcp"]],
-    })
+    return public_record(
+        value,
+        scrub,
+        children={
+            "package_install_id": public_package_id(value["package_install_id"], scrub),
+            "skills": [public_record(item, scrub) for item in value["skills"]],
+            "hooks": [
+                public_record(item, scrub, fixed=("event",)) for item in value["hooks"]
+            ],
+            "mcp": [public_connection_editor(item, scrub) for item in value["mcp"]],
+        },
+    )
 
 
 def _public_management_result(value, scrub):
@@ -1074,14 +1027,10 @@ def _public_management_result(value, scrub):
     if "current" in value:
         children["current"] = _public_management_fields(value["current"], scrub)
     if "diagnostics" in value:
-        children["diagnostics"] = [public_diagnostic(item, scrub) for item in value["diagnostics"]]
-    if "authorization" in value:
-        authorization = value["authorization"]
-        children["authorization"] = public_record(authorization, scrub, children={
-            "owner": public_owner(authorization["owner"], scrub),
-            "package_install_id": public_package_id(authorization["package_install_id"], scrub),
-        })
-    return public_record(value, scrub, fixed=("status", "action", "adoption"), children=children)
+        children["diagnostics"] = [
+            public_diagnostic(item, scrub) for item in value["diagnostics"]
+        ]
+    return public_record(value, scrub, fixed=("status",), children=children)
 
 
 async def _settled_call(function, *args, _cancellation=None, **kwargs):
@@ -1095,3 +1044,114 @@ async def _settled_call(function, *args, _cancellation=None, **kwargs):
                 _cancellation.cancel()
             if work.done():
                 return work.result()
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityManagementOutcome:
+    state: str
+    business_value: ToolBusinessValue
+    changed: bool
+    result_facts: Mapping[str, object]
+
+
+def management_outcome(prepared, native, *, result_facts=None):
+    """Project known owner facts once; no management envelope becomes body."""
+    from pulsara_agent.conversation_kernel.content_parts import ResultPart
+
+    action = prepared.intent.action
+    current = native.get("current", {})
+    changed = native.get("status") == "APPLIED"
+    cleanup = bool(current.get("cleanup_attention"))
+    cancelled = (
+        native.get("status") == "CANCELLED"
+        or current.get("operation_status") == "CANCELLED"
+    )
+    state = (
+        "CANCELLED"
+        if cancelled
+        else "SUCCESS"
+        if changed and not cleanup
+        else "APPLICATION_ERROR"
+    )
+    target = native.get("target")
+    fields = {} if target is None else {"target": target}
+    original = thaw_json(prepared.intent.target)
+    name = (
+        Path(target["skill_path"]).parent.name
+        if target and target["kind"] == "SKILL"
+        else Path(target["plugin_path"]).name
+        if target and target["kind"] == "PLUGIN"
+        else original.get(
+            "server_id", original.get("config_path", original.get("path", ""))
+        )
+    )
+    enabled = thaw_json(prepared.intent.fields).get("enabled")
+    messages = {
+        Action.INSTALL_LOOSE_SKILL: f"已安装技能 {name}。",
+        Action.SET_LOOSE_SKILL_ENABLED: f"已{'启用' if enabled else '停用'}技能 {name}。",
+        Action.REMOVE_LOOSE_SKILL: f"已删除技能副本 {name}。",
+        Action.TRUST_HOOK_SOURCE: f"已信任 Hook 来源 {name}。",
+        Action.REVOKE_HOOK_TRUST: f"已撤销 Hook 来源 {name} 的信任。",
+        Action.SET_HOOK_SOURCE_ENABLED: f"已{'启用' if enabled else '停用'} Hook 来源 {name}。",
+        Action.ADD_LOCAL_MCP: f"已添加 MCP 连接 {name}。",
+        Action.UPDATE_MCP_CONNECTION: f"已{'恢复' if current.get('restored_defaults') else '更新'} MCP 连接 {name}{'的默认配置' if current.get('restored_defaults') else ''}。",
+        Action.REMOVE_LOCAL_MCP: f"已删除 MCP 连接 {name}。",
+        Action.AUTHORIZE_MCP: f"已完成 MCP 连接 {name} 的登录。",
+        Action.CLEAR_MCP_AUTHORIZATION: f"已清除 MCP 连接 {name} 的本地 OAuth 授权。",
+        Action.INSTALL_PLUGIN: f"已安装插件 {name}。",
+        Action.SET_PLUGIN_ENABLED: f"已{'启用' if enabled else '停用'}插件 {name}。",
+        Action.REMOVE_PLUGIN: f"已删除插件 {name}。",
+    }
+    parts = []
+    if changed:
+        parts.append(ResultPart("text", messages[action]))
+    elif cancelled:
+        parts.append(ResultPart("text", native.get("message") or "本次操作已取消。"))
+    else:
+        reason = {
+            "DESTINATION_EXISTS": "目标已存在，未覆盖原副本。",
+            "ALREADY_PRESENT": "目标已存在，未替换原插件。",
+            "STALE": "对象或配置已变化，本次修改未提交。",
+            "NOT_FOUND": "目标已不存在。",
+            "ACK_UNKNOWN": "无法确认操作是否已完成，请检查目标后再决定下一步。",
+            "SOURCE_UNAVAILABLE": "源目录不存在或无法读取。",
+            "SOURCE_RACED": "安装源在读取期间发生变化。",
+            "STAGING_UNAVAILABLE": "无法准备安装暂存目录。",
+            "CLEANUP_UNAVAILABLE": "安装暂存清理失败。",
+        }.get(current.get("operation_status"))
+        if current.get("prior_operation_status") == "ACK_UNKNOWN":
+            reason = (
+                "无法确认安装是否已完成，且安装暂存清理失败；请检查目标后再决定下一步。"
+            )
+        parts.append(
+            ResultPart(
+                "text", native.get("message") or reason or f"未能完成对 {name} 的操作。"
+            )
+        )
+    for diagnostic in native.get("diagnostics", ()):
+        message = diagnostic.get("message")
+        if message:
+            parts.append(
+                ResultPart(
+                    "text",
+                    f"{diagnostic['path']}: {message}"
+                    if diagnostic.get("path")
+                    else message,
+                )
+            )
+    if cleanup:
+        location = current.get("staging_path") or current.get("config_path") or name
+        parts.append(
+            ResultPart(
+                "text",
+                f"{location} 的后续清理未完成"
+                + (
+                    f"：{current['cleanup_error']}"
+                    if current.get("cleanup_error")
+                    else "。"
+                ),
+            )
+        )
+    return CapabilityManagementOutcome(
+        state, ToolBusinessValue(fields, tuple(parts)), changed, result_facts or {}
+    )

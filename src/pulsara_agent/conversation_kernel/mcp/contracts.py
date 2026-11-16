@@ -6,9 +6,8 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Mapping
 
-from pulsara_agent.capability.contracts import McpProviderNameCollisionFact
 from pulsara_agent.identity import require_id
-from pulsara_agent.mcp_config import McpRuntimeSourceIdentity
+from pulsara_agent.mcp_config import McpRuntimeSourceIdentity, McpServerDeclaration
 from pulsara_agent.model_input.contracts import FrozenToolSpec, ModelInputScopeKind
 from pulsara_agent.primitives.context import FrozenJsonObjectFact, context_fingerprint
 
@@ -21,9 +20,6 @@ MAXIMUM_DISCOVERY_PAGES_PER_METHOD = 20
 MAXIMUM_DISCOVERY_ITEMS_PER_SERVER = 2_000
 MAXIMUM_MCP_REMOTE_BODY_BYTES = 16 * 1024 * 1024
 MAXIMUM_MCP_INSTRUCTIONS_BYTES = 8 * 1024
-MAXIMUM_MCP_CATALOG_FULL_BYTES = 32 * 1024
-MAXIMUM_MCP_CATALOG_COMPACT_BYTES = 8 * 1024
-MAXIMUM_MCP_CATALOG_REF_BYTES = 2 * 1024
 MAXIMUM_MCP_CATALOG_RESULT_BYTES = 64 * 1024
 MAXIMUM_MCP_HOST_IN_FLIGHT = 16
 
@@ -262,6 +258,13 @@ class McpServerCatalogEntry:
     tool_surface_semantic_fingerprint: str | None
     catalog_semantic_fingerprint: str
     scope_subagents: bool
+    connection_target: Mapping[str, object] | None = field(default=None, hash=False)
+    configuration: McpServerDeclaration | None = field(default=None, repr=False, hash=False)
+
+    def __post_init__(self) -> None:
+        if self.connection_target is not None:
+            from pulsara_agent.ports.tool_execution import freeze_tool_json_object
+            object.__setattr__(self, "connection_target", freeze_tool_json_object(self.connection_target))
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,7 +274,6 @@ class McpCatalogSnapshot:
     servers: tuple[McpServerCatalogEntry, ...]
     semantic_fingerprint: str
     presentation_fingerprint: str
-    provider_name_collision_facts: tuple[McpProviderNameCollisionFact, ...] = ()
 
     def __post_init__(self) -> None:
         require_id(self.owner_epoch, "epoch")
@@ -283,17 +285,10 @@ class McpCatalogSnapshot:
         if scope is ModelInputScopeKind.ROOT:
             return self
         servers = tuple(item for item in self.servers if item.scope_subagents)
-        server_ids = {item.server_id for item in servers}
-        collisions = tuple(
-            item
-            for item in self.provider_name_collision_facts
-            if all(member.server_id in server_ids for member in item.members)
-        )
         semantic = context_fingerprint(
             "mcp-catalog-scope:v2-provider-collisions",
             {
                 "servers": tuple(_catalog_semantic_payload(item) for item in servers),
-                "provider_name_collisions": _collision_payload(collisions),
             },
         )
         presentation = context_fingerprint(
@@ -306,7 +301,6 @@ class McpCatalogSnapshot:
             servers=servers,
             semantic_fingerprint=semantic,
             presentation_fingerprint=presentation,
-            provider_name_collision_facts=collisions,
         )
 
 
@@ -363,23 +357,12 @@ def build_catalog_snapshot(
     owner_epoch: str,
     catalog_revision: int,
     entries: tuple[McpServerCatalogEntry, ...],
-    provider_name_collision_facts: tuple[McpProviderNameCollisionFact, ...] = (),
 ) -> McpCatalogSnapshot:
     ordered = tuple(sorted(entries, key=lambda item: item.server_id))
-    collision_names = tuple(
-        item.provider_name for item in provider_name_collision_facts
-    )
-    if collision_names != tuple(sorted(collision_names)) or len(
-        collision_names
-    ) != len(set(collision_names)):
-        raise ValueError("MCP catalog collision facts are not sorted and unique")
     semantic = context_fingerprint(
         "mcp-catalog-semantic:v2-provider-collisions",
         {
             "servers": tuple(_catalog_semantic_payload(item) for item in ordered),
-            "provider_name_collisions": _collision_payload(
-                provider_name_collision_facts
-            ),
         },
     )
     presentation = context_fingerprint(
@@ -399,27 +382,9 @@ def build_catalog_snapshot(
         servers=ordered,
         semantic_fingerprint=semantic,
         presentation_fingerprint=presentation,
-        provider_name_collision_facts=provider_name_collision_facts,
     )
 
 
-def _collision_payload(
-    facts: tuple[McpProviderNameCollisionFact, ...],
-) -> tuple[Mapping[str, object], ...]:
-    return tuple(
-        {
-            "provider_name": fact.provider_name,
-            "members": tuple(
-                (
-                    member.server_id,
-                    member.remote_tool_name,
-                    member.discovered_tool_identity,
-                )
-                for member in fact.members
-            ),
-        }
-        for fact in facts
-    )
 
 
 def _catalog_semantic_payload(item: McpServerCatalogEntry) -> Mapping[str, object]:

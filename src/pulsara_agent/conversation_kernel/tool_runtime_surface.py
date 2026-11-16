@@ -9,10 +9,6 @@ from pulsara_agent.capability.builtin_catalog import (
     execution_catalog_entry,
     builtin_tool_descriptor,
 )
-from pulsara_agent.capability.mcp_compatibility import (
-    NativeMcpCompatibility,
-    native_mcp_compatibility,
-)
 from pulsara_agent.capability.contracts import (
     CapabilityKind,
     FrozenCapabilityDispatchCut,
@@ -20,7 +16,6 @@ from pulsara_agent.capability.contracts import (
     CapabilitySourceRefreshMode,
     CapabilitySourceSnapshotDisposition,
     FrozenToolCapabilityExposurePlan,
-    ToolCapabilityRouteKind,
     ToolCapabilityOrigin,
     capability_identity,
     capability_source_ref,
@@ -49,10 +44,8 @@ from pulsara_agent.conversation_kernel.tool_surface import (
     CodeModeToolDirectory,
     BuiltinExecutionPolicyRef,
     DirectToolAccessLeaf,
-    McpToolExecutionPolicyFact,
     PreparedKernelToolSurface,
     PreparedToolExecutionBinding,
-    PreparedUnavailableDirectMcpGate,
     ProcessLocalToolSurfaceAccess,
     ProcessLocalToolSurfaceBorrow,
 )
@@ -146,8 +139,8 @@ class _ToolSurfaceOperations:
                     if item.tool_name
                     not in {
                         *MEDIA_TOOL_NAMES, "open_in_pulsara", "search_sessions", "search_session_content",
-                        "read_session_content", "query_schedules", "manage_schedule", "search_memory", "get_memory",
-                        "remember", "mark_memory_relation", "enter_plan", "ask_plan_question",
+                        "read_session_content", "query_schedules", "manage_schedule", "query_memory",
+                        "remember", "manage_memory", "enter_plan", "ask_plan_question",
                         "exit_plan", "reload_capabilities", "manage_capability",
                         "run_agent", "stop_agent",
                         "exec_cell", "query_cells", "manage_cell",
@@ -358,14 +351,6 @@ class _ToolSurfaceOperations:
                     executor_binding_fingerprint=production_builtin_executor_binding_identity_fingerprint(owner),
                     execution_policy=BuiltinExecutionPolicyRef(tool_name=spec.name,
                         catalog_entry_fingerprint=entry.entry_fingerprint)))
-            # MCP discovery/authorization remains owned by the prepared capability cut.
-            # Never enumerate the supervisor's entire inventory to build a Cell catalog.
-            for spec in prepared.model_surface.tool_specs:
-                binding = prepared.binding(spec.name)
-                if (isinstance(binding, PreparedToolExecutionBinding)
-                    and isinstance(binding.execution_policy, McpToolExecutionPolicyFact)):
-                    specs.append(spec)
-                    bindings.append(binding)
             return CodeModeToolDirectory(tuple(specs), tuple(bindings), prepared.access)
 
 
@@ -398,18 +383,6 @@ class _ToolSurfaceOperations:
             builtin_by_name = {
                 item.tool_name: item for item in self._sealed_builtin_bindings
             }
-            current_mcp = self._mcp_current
-            mcp_binding_by_name = (
-                {}
-                if current_mcp is None
-                else {item.tool_name: item for item in current_mcp.execution_bindings}
-            )
-            mcp_executor_by_name = {} if current_mcp is None else current_mcp.executors
-            route_by_name = {item.version.provider_name: item for item in plan.mcp_catalog_route_projection.routes}
-            version_by_name = {
-                item.provider_name: item
-                for item in plan.direct_projection_set.tool_versions
-            }
             leaves: list[DirectToolAccessLeaf] = []
             for spec in surface.tool_specs:
                 builtin_binding = builtin_by_name.get(spec.name)
@@ -435,43 +408,7 @@ class _ToolSurfaceOperations:
                         )
                     )
                     continue
-                version = version_by_name.get(spec.name)
-                mcp_binding = mcp_binding_by_name.get(spec.name)
-                mcp_executor = mcp_executor_by_name.get(spec.name)
-                route = route_by_name.get(spec.name)
-                if (
-                    version is not None
-                    and mcp_binding is not None
-                    and mcp_executor is not None
-                    and route is not None
-                    and route.route is ToolCapabilityRouteKind.DIRECT
-                    and route.version == _mcp_executor_capability_version(mcp_executor)
-                    and mcp_binding.descriptor_fingerprint == mcp_executor.semantic.descriptor_fingerprint
-                    and native_mcp_compatibility(spec, mcp_executor.semantic.provider_spec()) is NativeMcpCompatibility.COMPATIBLE
-                    and mcp_executor.policy is mcp_binding.execution_policy
-                ):
-                    leaves.append(replace(mcp_binding,
-                        descriptor_fingerprint=spec.descriptor_fingerprint,
-                        current_mcp_spec=mcp_executor.semantic.provider_spec()))
-                    continue
-                if version is None:
-                    raise RuntimeError("planned MCP version is absent")
-                if route is None:
-                    raise RuntimeError("planned native MCP route is absent")
-                reason = (route.public_reason_code.value
-                          if route.route is ToolCapabilityRouteKind.UNAVAILABLE else
-                          "NATIVE_CONTRACT_REQUIRES_META" if mcp_binding is not None
-                          else "MCP_DIRECT_CURRENTLY_UNAVAILABLE")
-                leaves.append(
-                    PreparedUnavailableDirectMcpGate(
-                        capability_identity=(version.identity),
-                        tool_semantic_fingerprint=spec.descriptor_fingerprint,
-                        provider_tool_name=spec.name,
-                        unavailable_reason_code=reason,
-                        target=route.target,
-                        supervisor_authority_identity=self._mcp_supervisor,
-                    )
-                )
+                raise RuntimeError("provider tools may contain only sealed Pulsara builtins")
             frozen_leaves = tuple(leaves)
             access = ProcessLocalToolSurfaceAccess(
                 owner_epoch=self._surface_owner_epoch,
@@ -664,7 +601,6 @@ class _ToolSurfaceOperations:
                 raise RuntimeError("tool surface borrow is not registry-current")
             generation = self._surface_borrows.pop(borrow.borrow_id, None)
             self._surface_borrow_owners.pop(borrow.borrow_id, None)
-            self._installed_epoch_by_borrow.pop(borrow.borrow_id, None)
             if generation is not None and generation != self._surface_generation:
                 if generation not in self._surface_borrows.values():
                     for key in tuple(self._prepared_surfaces):

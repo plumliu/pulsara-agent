@@ -8,7 +8,6 @@ from typing import Mapping
 from jsonschema import ValidationError
 from .capability_management_execution import CapabilityManagementCall
 from pulsara_agent.capability.builtin_catalog import execution_catalog_entry
-from pulsara_agent.capability.contracts import ToolCapabilityRouteKind
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.ports.terminal import (
     parse_exec_process_input,
@@ -48,9 +47,6 @@ from pulsara_agent.conversation_kernel.tool_policy import (
 )
 from pulsara_agent.conversation_kernel.tool_surface import (
     McpEffectKind,
-    McpToolExecutionPolicyFact,
-    PreparedToolExecutionBinding,
-    PreparedUnavailableDirectMcpGate,
     ProcessLocalToolSurfaceBorrow,
     execution_policy_fingerprint,
 )
@@ -65,14 +61,13 @@ from .mcp.supervisor import (
     McpSnapshotStale,
 )
 from .mcp.schema import McpSchemaEvaluationFailure, validate_mcp_arguments
-from .mcp.meta import McpToolRefConsumerKind, NewMcpToolRef
+from .mcp.meta import NewMcpToolRef, executor_reference_basis
 from .tool_runtime_surface import _mcp_executor_capability_version
 from .tool_runtime_schema import (
     _tool_argument_error_message,
     _validate_builtin_call_schema as _validate_builtin_call_schema,
     _json_schema_value as _json_schema_value,
 )
-from .tool_runtime_results import _mcp_unavailable_direct_message
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,28 +114,12 @@ class _ToolAuthorizationOperations:
             return KernelToolAuthorization(KernelToolAuthorizationKind.PERMISSION_DENIED,
                 "media:root-direct-only", "Media tools require a direct ROOT call")
         try:
-            binding = self._validate_surface_borrow(surface_borrow, tool_name)
+            self._validate_surface_borrow(surface_borrow, tool_name)
         except (RuntimeError, KeyError):
             return KernelToolAuthorization(
                 KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
                 "tool-surface:revoked",
                 f"tool unavailable: {tool_name}",
-            )
-        if isinstance(binding, PreparedUnavailableDirectMcpGate):
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
-                f"mcp-direct:{binding.unavailable_reason_code}",
-                _mcp_unavailable_direct_message(binding.unavailable_reason_code, binding.target, binding.tool_name),
-            )
-        if isinstance(binding.execution_policy, McpToolExecutionPolicyFact):
-            return self._authorize_mcp(
-                binding=binding,
-                arguments=arguments,
-                tool_call_id=tool_call_id,
-                turn_id=turn_id,
-                assistant_entry_id=assistant_entry_id,
-                permission_snapshot=permission_snapshot,
-                surface_borrow=surface_borrow,
             )
         tool = self._tools.get(tool_name)
         subagent = self._subagent is not None and tool_name in self._subagent.tool_names
@@ -154,11 +133,11 @@ class _ToolAuthorizationOperations:
             )
         if memory and (
             (
-                tool_name in {"remember", "mark_memory_relation"}
+                tool_name in {"remember", "manage_memory"}
                 and not memory_context.memory_use_policy.allows_writes
             )
             or (
-                tool_name not in {"remember", "mark_memory_relation"}
+                tool_name not in {"remember", "manage_memory"}
                 and not memory_context.memory_use_policy.allows_reads
             )
         ):
@@ -214,16 +193,10 @@ class _ToolAuthorizationOperations:
                     parse_manage_process_input(arguments)
                 elif tool_name == "query_processes":
                     parse_query_processes_input(arguments)
-                else:
+                elif tool_name in {"query_cells", "manage_cell"}:
                     from pulsara_agent.code_mode.targets import parse_cell_target
-                    from pulsara_agent.identity import require_id
                     if "target" in arguments:
                         parse_cell_target(arguments["target"])
-                    if "cursor" in arguments:
-                        require_id(arguments["cursor"], "cell")
-                    for field in ("yield_time_ms", "max_items", "offset_chars", "max_chars"):
-                        if field in arguments and type(arguments[field]) is not int:
-                            raise ValueError(f"{field} must be an integer")
             except ValueError as exc:
                 return KernelToolAuthorization(
                     KernelToolAuthorizationKind.INVALID_ARGUMENTS,
@@ -292,7 +265,7 @@ class _ToolAuthorizationOperations:
                     "todo-run:inactive",
                     "todo scope is no longer active",
                 )
-        if tool_name == "use_new_mcp_tool":
+        if tool_name == "call_mcp_tool":
             return self._authorize_meta_mcp(
                 arguments=arguments,
                 tool_call_id=tool_call_id,
@@ -388,6 +361,12 @@ class _ToolAuthorizationOperations:
         if decision.kind is not ToolDispatchDecisionKind.ALLOW:
             raise RuntimeError("permission decision vocabulary is invalid")
         if tool_name in {"read_mcp_resource"}:
+            if arguments.get("target", {}).get("kind") == "MCP_CONNECTION":
+                return KernelToolAuthorization(
+                    KernelToolAuthorizationKind.ALLOW,
+                    decision.reference,
+                    decision.public_message,
+                )
             generation = surface_borrow.prepared.access.surface_generation
             runtime, _current_generation = self._current_mcp_runtime_for_borrow(surface_borrow)
             if runtime is None:
@@ -432,59 +411,23 @@ class _ToolAuthorizationOperations:
         )
 
 
-    def _resolve_meta_ref_executor(
-        self,
-        *,
-        ref: NewMcpToolRef,
-        surface_borrow: ProcessLocalToolSurfaceBorrow,
-    ) -> tuple[McpBoundToolExecutor, int]:
-        if ref.consumer_kind is McpToolRefConsumerKind.CODE_CELL:
-            runtime, generation = self._current_mcp_runtime_for_borrow(surface_borrow)
-            if runtime is None:
-                raise LookupError("MCP_TOOL_REF_RUNTIME_UNAVAILABLE")
-            specs = runtime.root_tool_specs if ref.conversation_scope_kind is ModelInputScopeKind.ROOT else runtime.subagent_tool_specs
-            executors = [runtime.executors[item.provider_tool_name] for item in specs
-                         if item.provider_tool_name in runtime.executors]
-            matches = [item for item in executors
-                       if _mcp_executor_capability_version(item).identity == ref.capability_identity
-                       and _mcp_executor_capability_version(item).semantic_fingerprint == ref.tool_semantic_fingerprint
-                       and execution_policy_fingerprint(item.policy) == ref.mcp_execution_policy_fingerprint
-                       and item.runtime_generation_id == ref.runtime_generation]
-            if len(matches) != 1:
-                raise LookupError("MCP_TOOL_REF_BINDING_STALE")
-            return matches[0], surface_borrow.prepared.access.surface_generation
-        plan = surface_borrow.prepared.capability_exposure_plan
-        if plan is None:
-            raise LookupError("MCP_TOOL_REF_ROUTE_UNAVAILABLE")
-        matches = tuple(
-            item
-            for item in plan.mcp_catalog_route_projection.routes
-            if item.route_fingerprint == ref.tool_route_fingerprint
-            and item.version.identity == ref.capability_identity
-            and item.version.semantic_fingerprint == ref.tool_semantic_fingerprint
+    def _resolve_meta_ref_executor(self, *, ref: NewMcpToolRef,
+                                   surface_borrow: ProcessLocalToolSurfaceBorrow) -> tuple[McpBoundToolExecutor, int]:
+        runtime, generation = self._current_mcp_runtime_for_borrow(surface_borrow)
+        self._mcp_meta_refs.resolve_callable(
+            ref.opaque_token, **self._mcp_ref_consumer_for_borrow(surface_borrow)
         )
-        if len(matches) != 1:
-            raise LookupError("MCP_TOOL_REF_STALE_OR_FOREIGN")
-        route = matches[0]
-        if route.route is not ToolCapabilityRouteKind.NEW_MCP_META_ONLY:
-            raise LookupError("MCP_TOOL_REF_NOT_META_CALLABLE")
-        generation = surface_borrow.prepared.access.surface_generation
-        runtime = self._mcp_runtime_by_surface_generation.get(generation)
         if runtime is None:
-            raise LookupError("MCP_TOOL_REF_RUNTIME_UNAVAILABLE")
-        executor = runtime.executors.get(route.version.provider_name)
+            raise LookupError("MCP connection or current directory is unavailable")
+        specs = runtime.root_tool_specs if ref.conversation_scope_kind is ModelInputScopeKind.ROOT else runtime.subagent_tool_specs
+        executor = next((runtime.executors.get((item.server_id, item.remote_tool_name)) for item in specs
+            if (item.server_id, item.remote_tool_name) in runtime.executors
+            and _mcp_executor_capability_version(runtime.executors[(item.server_id, item.remote_tool_name)]).identity == ref.capability_identity), None)
         if executor is None:
-            raise LookupError("MCP_TOOL_REF_EXECUTOR_UNAVAILABLE")
-        version = _mcp_executor_capability_version(executor)
-        if (
-            version != route.version
-            or executor.runtime_generation_id != ref.runtime_generation
-            or execution_policy_fingerprint(executor.policy)
-            != ref.mcp_execution_policy_fingerprint
-        ):
-            raise LookupError("MCP_TOOL_REF_BINDING_STALE")
+            raise LookupError("MCP tool is unavailable in the current directory")
+        if executor_reference_basis(executor) != ref.binding:
+            raise LookupError("MCP tool definition, target or execution conditions changed; query its current details")
         return executor, generation
-
 
     def _authorize_meta_mcp(
         self,
@@ -594,122 +537,6 @@ class _ToolAuthorizationOperations:
         return KernelToolAuthorization(
             KernelToolAuthorizationKind.ALLOW,
             f"mcp-policy:{execution_policy_fingerprint(executor.policy)}",
-        )
-
-
-    def _authorize_mcp(
-        self,
-        *,
-        binding: PreparedToolExecutionBinding,
-        arguments: Mapping[str, object],
-        tool_call_id: str,
-        turn_id: str,
-        assistant_entry_id: str,
-        permission_snapshot: FrozenRunPermissionSnapshot,
-        surface_borrow: ProcessLocalToolSurfaceBorrow,
-    ) -> KernelToolAuthorization:
-        policy = binding.execution_policy
-        if not isinstance(policy, McpToolExecutionPolicyFact):
-            raise TypeError("dynamic MCP policy union is invalid")
-        semantic = next(
-            item
-            for item in surface_borrow.tool_specs
-            if item.name == binding.tool_name
-        )
-        schema = thaw_json(semantic.parameters)
-        if not isinstance(schema, dict):
-            raise RuntimeError("MCP schema did not thaw to an object")
-        try:
-            validate_mcp_arguments(schema, dict(arguments))
-            if binding.current_mcp_spec is not None:
-                validate_mcp_arguments(thaw_json(binding.current_mcp_spec.parameters), dict(arguments))
-        except McpSchemaEvaluationFailure as exc:
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
-                f"mcp-descriptor:{binding.descriptor_fingerprint}",
-                str(exc),
-            )
-        except ValidationError as exc:
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.INVALID_ARGUMENTS,
-                f"mcp-descriptor:{binding.descriptor_fingerprint}",
-                f"invalid MCP tool arguments: {_tool_argument_error_message(exc)}",
-            )
-        runtime, _current_generation = self._current_mcp_runtime_for_borrow(surface_borrow)
-        generation = surface_borrow.prepared.access.surface_generation
-        if runtime is None:
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
-                "mcp-runtime:retired",
-                "MCP tool generation is no longer available",
-            )
-        executor = runtime.executors.get(binding.tool_name)
-        if executor is None:
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
-                "mcp-runtime:binding-missing",
-                "MCP tool binding is unavailable",
-            )
-        if surface_borrow.code_cell_id is not None:
-            scoped = runtime.root_tool_specs if surface_borrow.prepared.access.conversation_scope_kind is ModelInputScopeKind.ROOT else runtime.subagent_tool_specs
-            if executor.semantic not in scoped or executor.semantic.provider_spec() != semantic:
-                return KernelToolAuthorization(KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
-                    "mcp-runtime:binding-stale", "MCP_SNAPSHOT_STALE: inspect the current tool before retrying")
-            policy = executor.policy
-        elif (executor.policy is not policy or (binding.current_mcp_spec is not None
-                and executor.semantic.provider_spec() != binding.current_mcp_spec)):
-            return KernelToolAuthorization(KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
-                "mcp-runtime:binding-stale", "MCP_SNAPSHOT_STALE: inspect the current tool before retrying")
-        mode = permission_snapshot.effective_mode
-        if (
-            policy.effect_kind is McpEffectKind.EXTERNAL_EFFECT
-            and mode is PermissionMode.READ_ONLY
-        ):
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.PERMISSION_DENIED,
-                f"mcp-policy:{execution_policy_fingerprint(policy)}",
-                "external MCP effects are denied in read-only mode",
-            )
-        key = (generation, tool_call_id)
-        if (
-            key in self._mcp_dispatch_permits
-            or key in self._mcp_confirmation_admissions
-        ):
-            raise RuntimeError("MCP tool call was authorized twice")
-        if policy.effect_kind is McpEffectKind.EXTERNAL_EFFECT and mode in {
-            PermissionMode.ASK_PERMISSIONS,
-            PermissionMode.ACCEPT_EDITS,
-        }:
-            self._mcp_confirmation_admissions[key] = _PendingMcpConfirmationAdmission(
-                generation=generation,
-                executor=executor,
-                scope_kind=(surface_borrow.prepared.access.conversation_scope_kind),
-                turn_id=turn_id,
-                tool_call_id=tool_call_id,
-            )
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.REQUIRE_CONFIRMATION,
-                f"mcp-policy:{execution_policy_fingerprint(policy)}",
-                f"Allow external MCP action {binding.tool_name}?",
-            )
-        try:
-            permit = executor.admit(
-                session_id=self._session_id,
-                scope_kind=surface_borrow.prepared.access.conversation_scope_kind,
-                turn_id=turn_id,
-                tool_call_id=tool_call_id,
-            )
-        except McpSnapshotStale:
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
-                "mcp-runtime:snapshot-stale",
-                "MCP_SNAPSHOT_STALE",
-            )
-        self._mcp_dispatch_permits[key] = permit
-        self._mcp_dispatch_resources[key] = executor
-        return KernelToolAuthorization(
-            KernelToolAuthorizationKind.ALLOW,
-            f"mcp-policy:{execution_policy_fingerprint(policy)}",
         )
 
 

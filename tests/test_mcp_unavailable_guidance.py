@@ -1,203 +1,36 @@
-from pulsara_agent.identity import derive_id
-"""Unavailable-tool guidance after real SDK catalog refreshes."""
+"""Tool inspection preserves actual schemas rather than exposing source internals."""
 
 import asyncio
-import json
-from types import SimpleNamespace
 
 from mcp.server.lowlevel import Server
-from mcp.server.subscriptions import InMemorySubscriptionBus, ListenHandler, ToolsListChanged
 import mcp_types as types
-import pytest
 
-from pulsara_agent.capability.contracts import PreparedUnavailableDirectMcpGate
-from pulsara_agent.primitives.context import canonical_json_bytes
-from tests import test_mcp_schema_validation as fixture
-from tests import test_round6_mcp_production as production
 from tests.test_mcp_catalog_subscriptions import _sdk_http, _supervisor
-
-
-@pytest.mark.parametrize("change", ["schema", "removed"])
-def test_public_guidance_distinguishes_schema_change_and_missing_connection_tool(tmp_path, change):
-    async def scenario():
-        bus = InMemorySubscriptionBus()
-        handler = ListenHandler(bus)
-        revision = 1
-
-        async def tools(_ctx, _params):
-            return types.ListToolsResult(tools=(
-                [] if change == "removed" and revision == 2 else [types.Tool(
-                    name="editable_tool",
-                    input_schema={
-                        "type": "object",
-                        "properties": {"value": {"type": "string" if revision == 1 else "integer"}},
-                    },
-                )]
-            ))
-
-        server = Server(
-            "guidance-catalog", on_list_tools=tools,
-            on_subscriptions_listen=handler,
-        )
-        async with _sdk_http(server) as endpoint:
-            supervisor = _supervisor(tmp_path, endpoint)
-            port = fixture._port(tmp_path, supervisor)
-            borrows = []
-            try:
-                await supervisor.start()
-                await supervisor.wait_initial_readiness()
-                port.prepare_tool_surface_safe_point()
-                cold = production.prepare_test_direct_tool_surface(port)
-                borrows.append(port.borrow_tool_surface(cold))
-                retained_plan = cold.capability_exposure_plan
-                frozen_native_tools = tuple(
-                    canonical_json_bytes(item.wire_tool)
-                    for item in retained_plan.direct_projection_set.projections
-                )
-                name = "mcp__catalog__editable_tool"
-                assert name in {item.name for item in cold.model_surface.tool_specs}
-
-                async def refresh():
-                    await bus.publish(ToolsListChanged())
-                    async with asyncio.timeout(5):
-                        while "catalog" not in supervisor._pending:
-                            await asyncio.sleep(0.01)
-                    port.prepare_tool_surface_safe_point()
-
-                revision = 2
-                await refresh()
-                # Rebind the existing epoch's exact immutable native plan to
-                # the newly discovered physical runtime. No cold adoption or
-                # new provider roots are requested by this operation.
-                current = port.prepare_planned_tool_surface(
-                    plan=retained_plan,
-                    builtin=port.sealed_builtin_capability_snapshot(
-                        conversation_scope_kind=production.ModelInputScopeKind.ROOT,
-                        effective_permission_mode=production.PermissionMode.BYPASS_PERMISSIONS,
-                    ),
-                )
-                borrow = port.borrow_tool_surface(current)
-                borrows.append(borrow)
-                gate = borrow.execution_binding(name)
-                assert isinstance(gate, PreparedUnavailableDirectMcpGate)
-                assert gate.unavailable_reason_code == (
-                    "NATIVE_CONTRACT_REQUIRES_META"
-                    if change == "schema" else "MCP_DIRECT_CURRENTLY_UNAVAILABLE"
-                )
-                assert current.model_surface is cold.model_surface
-                assert current.capability_exposure_plan.direct_projection_set is retained_plan.direct_projection_set
-                assert tuple(
-                    canonical_json_bytes(item.wire_tool)
-                    for item in current.capability_exposure_plan.direct_projection_set.projections
-                ) == frozen_native_tools
-
-                permission = production.build_run_permission_snapshot(
-                    snapshot_id="permission:xe33u4flpejjy72jmvg5arcvtu",
-                    requested_mode=production.PermissionMode.BYPASS_PERMISSIONS,
-                    effective_mode=production.PermissionMode.BYPASS_PERMISSIONS,
-                    admission_source=production.RunPermissionAdmissionSource.USER_SUBMISSION,
-                )
-                prepared = port.prepare_resolved_invocation(
-                    tool_name=name, arguments={"value": "old schema"}, surface_borrow=borrow,
-                )
-                authorization = await port.authorize(
-                    tool_name=name, arguments={"value": "old schema"},
-                    tool_call_id="call:unavailable", turn_id="turn:fugd2z4wkqsu77svw4oie5ktvy",
-                    assistant_entry_id="entry:5qidalqvkujk5ykzzzfpwie2qy",
-                    permission_snapshot=permission, surface_borrow=borrow,
-                    memory_context=production._enabled_memory_context(),
-                )
-                assert prepared.authorization.kind is production.KernelToolAuthorizationKind.TOOL_UNAVAILABLE
-                assert authorization.kind is production.KernelToolAuthorizationKind.TOOL_UNAVAILABLE
-                message = authorization.public_message
-                assert prepared.authorization.public_message == message
-                assert "not dispatched" in message
-                if change == "schema":
-                    assert "direct tool entry has been replaced" in message
-                    assert "query_capabilities" in message and "use_new_mcp_tool" in message
-                    assert "input_schema" in message and "invocation.mode" in message
-                    assert "invocation.target" in message
-                    assert "cold context" not in message
-                    assert "same-schema reconnect" not in message
-                    assert "server connection is currently unavailable" not in message
-                else:
-                    assert "tool is not currently available" in message
-                    assert "query_capabilities" in message
-                    assert "new cold context" not in message
-                inspect_target = json.JSONDecoder().raw_decode(message.split("target=", 1)[1])[0]
-                assert inspect_target == {"kind": "MCP_TOOL", "server_id": "catalog", "tool_name": name}
-
-                inspected = port._inspect_mcp_tool_result(
-                    target={"kind": "MCP_TOOL", "server_id": "catalog", "tool_name": name},
-                    invocation_context=SimpleNamespace(surface_borrow=borrow),
-                )
-                inspection = json.loads(inspected.content)
-                assert inspection["invocation"]["mode"] == "UNAVAILABLE"
-                assert inspection["diagnostics"][0]["code"] == gate.unavailable_reason_code
-                diagnostic = inspection["diagnostics"][0]["message"]
-                server_target = json.JSONDecoder().raw_decode(diagnostic.split("target=", 1)[1])[0]
-                assert server_target == {"kind": "MCP_SERVER", "runtime_server_id": derive_id("mcp-server", "runtime-target", "catalog")}
-                assert "not dispatched" not in diagnostic
-                assert "MCP_TOOL" not in diagnostic
-                if change == "schema":
-                    assert "previous entry can no longer be used" in diagnostic
-
-                if change == "removed":
-                    revision = 1
-                    await refresh()
-                    restored = port.prepare_planned_tool_surface(
-                        plan=retained_plan,
-                        builtin=port.sealed_builtin_capability_snapshot(
-                            conversation_scope_kind=production.ModelInputScopeKind.ROOT,
-                        effective_permission_mode=production.PermissionMode.BYPASS_PERMISSIONS,
-                            ),
-                    )
-                    restored_borrow = port.borrow_tool_surface(restored)
-                    borrows.append(restored_borrow)
-                    assert not isinstance(restored_borrow.execution_binding(name), PreparedUnavailableDirectMcpGate)
-                    assert restored.model_surface is cold.model_surface
-            finally:
-                for borrow in reversed(borrows):
-                    borrow.close()
-                supervisor.stop_admission()
-                close = asyncio.create_task(supervisor.aclose())
-                await port.aclose(timeout_seconds=5)
-                await close
-
-    asyncio.run(scenario())
+from tests.test_mcp_schema_validation import _port
+from tests.test_mcp_meta_only_integration import invoke
 
 
 def test_real_mcp_tool_query_preserves_package_named_schema_fields(tmp_path):
     async def scenario():
-        schema = {"type": "object", "properties": {
-            "package_install_id": {"type": "string", "default": "ordinary"},
-            "options": {"const": {"package_install_id": "literal-value"}},
-        }}
-        async def tools(_ctx, _params):
-            return types.ListToolsResult(tools=[types.Tool(name="inspect", input_schema=schema)])
-        server = Server("schema-catalog", on_list_tools=tools)
-        async with _sdk_http(server) as endpoint:
-            supervisor = _supervisor(tmp_path, endpoint)
-            port = fixture._port(tmp_path, supervisor)
-            borrow = None
+        schema={'type':'object','properties':{
+            'package_install_id':{'type':'string','default':'ordinary'},
+            'options':{'const':{'package_install_id':'literal-value'}}}}
+        async def listing(_ctx,_params):
+            return types.ListToolsResult(tools=[types.Tool(name='inspect',input_schema=schema)])
+        async with _sdk_http(Server('schema-catalog',on_list_tools=listing)) as endpoint:
+            supervisor=_supervisor(tmp_path,endpoint)
+            port=_port(tmp_path,supervisor)
             try:
                 await supervisor.start()
                 await supervisor.wait_initial_readiness()
                 port.prepare_tool_surface_safe_point()
-                surface = production.prepare_test_direct_tool_surface(port)
-                borrow = port.borrow_tool_surface(surface)
-                name = next(spec.name for spec in surface.model_surface.tool_specs if spec.name.endswith("inspect"))
-                target = {"kind": "MCP_TOOL", "server_id": "catalog", "tool_name": name}
-                from pulsara_agent.identity import random_id
-                from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
-                result = await port._query_capabilities_result(tool_name="query_capabilities", arguments={"target": target}, invocation_context=SimpleNamespace(surface_borrow=borrow, page_budget=ToolResultPageBudget(tool_call_id=random_id("call"))))
-                assert result.state == "SUCCESS"
-                assert json.loads(result.content)["input_schema"] == schema
+                result=await invoke(port,'query_capabilities',{'kind':'MCP',
+                    'target':{'kind':'MCP_TOOL','server_id':'catalog','remote_tool_name':'inspect'}})
+                assert result['meta']['status']=='SUCCESS'
+                assert result['content'][0]['value']['input_schema']==schema
             finally:
-                if borrow is not None:
-                    borrow.close()
                 supervisor.stop_admission()
-                close = asyncio.create_task(supervisor.aclose())
-                await port.aclose(timeout_seconds=5)
-                await close
+                closing=asyncio.create_task(supervisor.aclose())
+                await port.aclose(timeout_seconds=10)
+                await closing
     asyncio.run(scenario())

@@ -31,7 +31,7 @@ from pulsara_agent.model_input.contracts import (
 )
 from tests.support.images import bound_test_image
 from tests.support.round3 import new_test_provider_input_continuity_owner
-from tests.test_round3_structured_model_input_compiler import (
+from tests.support.model_input import (
     _snapshot,
     _sources,
     _prepared_request,
@@ -41,8 +41,8 @@ from tests.test_round3_structured_model_input_compiler import (
 
 def _group(turn, start=1, image=False, *, include_context=True):
     contents = [
-        (LLMTextPart("initial context"),),
         (LLMTextPart("instruction"),),
+        (LLMTextPart("initial context"),),
         (LLMTextPart("dependency A"),),
         (LLMTextPart("dependency C"),),
     ]
@@ -62,8 +62,8 @@ def _group(turn, start=1, image=False, *, include_context=True):
             zip(
                 contents,
                 (
-                    Origin.AGENT_MATERIAL,
                     Origin.AGENT_INSTRUCTION,
+                    Origin.AGENT_MATERIAL,
                     Origin.AGENT_MATERIAL,
                     Origin.AGENT_MATERIAL,
                 ),
@@ -73,10 +73,8 @@ def _group(turn, start=1, image=False, *, include_context=True):
     )
     if include_context:
         return items
-    return tuple(
-        replace(item, source_entry_sequence=item.source_entry_sequence - 1)
-        for item in items[1:]
-    )
+    return tuple(replace(item,source_entry_sequence=start+ordinal)
+        for ordinal,item in enumerate(item for index,item in enumerate(items) if index!=1))
 
 
 def _snapshot_for(items, instruction):
@@ -118,8 +116,8 @@ def test_started_group_distinguishes_instruction_suffix_end_and_predecessor():
     items = _group(derive_id("turn", "agent-input-test", "candidate"), 11, image=True)
     group = StartedTurnInputGroup(
         session_id="session:336wrfwkamrr3up6kjtsgvgcte",
-        turn_id=items[1].source_turn_id,
-        instruction_entry_id=items[1].source_entry_id,
+        turn_id=items[0].source_turn_id,
+        instruction_entry_id=items[0].source_entry_id,
         ordered_items=items,
         predecessor_through_sequence=10,
         initial_context_binding_revision_id=derive_id("binding", "agent-input-test"),
@@ -127,10 +125,12 @@ def test_started_group_distinguishes_instruction_suffix_end_and_predecessor():
         initial_context_snapshot_id=None,
         initial_source_through_sequence=10,
     )
-    assert group.ordered_items[1].source_entry_sequence == 12
+    assert group.ordered_items[0].source_entry_sequence == 11
     assert group.provider_input_through_sequence == 14
     assert group.ordered_items == items
     assert group.initial_revision_ordinal == 0
+    with pytest.raises(ValueError, match="exact-join"):
+        replace(group, instruction_entry_id=items[1].source_entry_id)
     inherited = replace(
         group,
         initial_base_kind=ContextBindingBaseKind.SNAPSHOT,
@@ -147,7 +147,7 @@ def test_started_group_distinguishes_instruction_suffix_end_and_predecessor():
 
 def test_agent_group_has_independent_ordered_user_messages_and_instruction_compaction():
     items = _group(derive_id("turn", "agent-input-test", "compile"), image=True)
-    snapshot = _snapshot_for(items, items[1])
+    snapshot = _snapshot_for(items, items[0])
     compiled = StructuredModelInputCompiler().compile(
         _prepared_request(snapshot, _sources())
     )
@@ -159,7 +159,7 @@ def test_agent_group_has_independent_ordered_user_messages_and_instruction_compa
         if isinstance(part, LLMTextPart)
         and part.text in {"initial context", "instruction", "dependency A", "dependency C"}
     ]
-    assert texts == ["initial context", "instruction", "dependency A", "dependency C"]
+    assert texts == ["instruction","initial context","dependency A","dependency C"]
     assert (
         sum(
             isinstance(part, LLMImagePart)
@@ -177,7 +177,7 @@ def test_agent_group_has_independent_ordered_user_messages_and_instruction_compa
         target_branch=CompactionTargetBranch.ACTIVE_INSTALLATION,
         source_through_sequence=3,
     )
-    assert active == items[1].source_entry_id
+    assert active == items[0].source_entry_id
     original = next(item for item in snapshot.items if item.source_entry_id == active)
     assert original.input_origin is Origin.AGENT_INSTRUCTION
     assert original.content == (LLMTextPart("instruction"),)
@@ -190,7 +190,7 @@ def test_reused_agent_appends_instruction_and_materials_within_same_epoch():
     _, installed = _compile_and_install_append(
         compiler=compiler,
         owner=owner,
-        request=_prepared_request(_snapshot_for(first, first[1]), _sources()),
+        request=_prepared_request(_snapshot_for(first, first[0]), _sources()),
     )
     second = _group(
         derive_id("turn", "agent-input-test", "second"), 5, include_context=False
@@ -228,7 +228,7 @@ def test_live_cell_changes_do_not_change_environment_facts(tmp_path):
     )
     from pulsara_agent.conversation_kernel.host import KernelHostSession
     from pulsara_agent.model_input.contracts import ContextSourceKind
-    from tests.test_round3_structured_model_input_compiler import (
+    from tests.support.model_input import (
         _Capability,
         _collect_context_sources,
         _canonical_facts,
@@ -254,7 +254,7 @@ def test_live_cell_changes_do_not_change_environment_facts(tmp_path):
         )
         return next(
             candidate for candidate in sources.candidates
-            if candidate.source_kind is ContextSourceKind.RUNTIME_ENVIRONMENT
+            if candidate.source_kind is ContextSourceKind.TURN_CONTEXT
         )
 
     async def scenario():
@@ -268,13 +268,11 @@ def test_live_cell_changes_do_not_change_environment_facts(tmp_path):
 
         session = SimpleNamespace(_code_mode=host)
         before = environment()
-        expected = {
-            "workspace_kind": "project",
-            "workspace_root": str(tmp_path.resolve()),
-            "timezone": "UTC+00:00",
-            "utc_offset_minutes": 0,
-        }
-        assert all(json.loads(variant.text) == expected for variant in before.variants)
+        observation=json.loads(before.text)['pulsara_runtime_observation']
+        assert observation['source']=='TURN_CONTEXT'
+        text='\n'.join(item['text'] for item in observation['body'])
+        assert str(tmp_path.resolve()) in text and 'project' in text and 'UTC 偏移：+00:00' in text
+        assert '2026-10-29' in text
         try:
             cell_id = await host.start(
                 source="console.log('keep'); await tools.read_file({});",
@@ -307,17 +305,16 @@ def test_live_cell_changes_do_not_change_environment_facts(tmp_path):
 def test_environment_fact_changes_are_appended_without_rebuilding_prefix():
     import json
 
-    from pulsara_agent.model_input.continuity import decode_runtime_observation
     from pulsara_agent.model_input.contracts import ContextSourceKind
-    from tests.test_round3_structured_model_input_compiler import _candidate
+    from tests.support.model_input import _candidate
 
-    kind = ContextSourceKind.RUNTIME_ENVIRONMENT
-    previous_body = '{"workspace_kind":"project","workspace_root":"/workspace","timezone":"UTC","utc_offset_minutes":0}'
-    current_body = '{"workspace_kind":"project","workspace_root":"/workspace","timezone":"UTC+01:00","utc_offset_minutes":60}'
-    first_source = _candidate(kind, (previous_body, previous_body))
-    next_source = _candidate(kind, (current_body, current_body))
+    kind = ContextSourceKind.TURN_CONTEXT
+    previous_body = "工作区类型：project；根路径：/workspace；时区：UTC；UTC 偏移：+00:00。"
+    current_body = "工作区类型：project；根路径：/workspace；时区：UTC+01:00；UTC 偏移：+01:00。"
+    first_source = _candidate(kind, previous_body)
+    next_source = _candidate(kind, current_body)
     items = _group(derive_id("turn", "environment-facts-prefix-test"))
-    snapshot = _snapshot_for(items, items[1])
+    snapshot = _snapshot_for(items, items[0])
     compiler = StructuredModelInputCompiler()
     owner = new_test_provider_input_continuity_owner()
     _, first = _compile_and_install_append(
@@ -338,11 +335,11 @@ def test_environment_fact_changes_are_appended_without_rebuilding_prefix():
     assert second.tools == first.tools
     assert second.messages[:len(first.messages)] == first.messages
     appended = [
-        decode_runtime_observation(message)
+        json.loads(message.content[0].text)["pulsara_runtime_observation"]
         for message in second.messages[len(first.messages):]
         if message.role is MessageRole.USER and message.content
         and isinstance(message.content[0], LLMTextPart)
         and "pulsara_runtime_observation" in message.content[0].text
     ]
-    environment = next(item for item in appended if item.source_kind is kind)
-    assert json.loads(environment.body) == json.loads(current_body)
+    environment = next(item for item in appended if item["source"]==kind.value)
+    assert environment["body"]==[{"text":current_body}]

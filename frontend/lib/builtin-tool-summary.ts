@@ -33,222 +33,101 @@ const labels: Record<string, [title: string, pending: string, completed: string]
 };
 
 function object(value: unknown): Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? value as Record<string, unknown> : {};
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
-function parse(text?: string): Record<string, unknown> {
-  try { return object(JSON.parse(text ?? '')); } catch { return {}; }
+function argumentsValue(value?: string): Record<string, unknown> {
+  try { return object(JSON.parse(value ?? '')); } catch { return {}; }
 }
-function text(value: unknown): string {
-  return typeof value === 'string' ? value : '';
-}
-function number(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
-}
-function count(value: unknown): number | undefined {
-  return Array.isArray(value) ? value.length : undefined;
-}
+const text = (value: unknown) => typeof value === 'string' ? value : '';
+const number = (value: unknown) => typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 function compact(value: string): string {
   const line = value.replace(/\s+/g, ' ').trim();
   return line.length > 120 ? `${line.slice(0, 120)}…` : line;
 }
-
-
 const processActions: Record<string, string> = {
-  poll: '查看命令状态', wait: '等待命令结束',
-  write: '向命令输入内容', submit: '向命令提交输入', close_stdin: '结束命令输入', kill: '停止命令',
+  poll: '查看命令状态', wait: '等待命令结束', write: '向命令输入内容',
+  submit: '向命令提交输入', close_stdin: '结束命令输入', kill: '停止命令',
 };
-
-function runningProcessDetail(name: string, action: string): string {
-  if (name === 'exec_process') return '命令仍在后台运行';
-  return ({
-    poll: '命令仍在运行',
-    wait: '等待结束，命令仍在运行',
-    write: '已发送输入 · 命令仍在运行',
-    submit: '已发送输入 · 命令仍在运行',
-    close_stdin: '已结束输入 · 命令仍在运行',
-    kill: '已请求停止，命令仍在运行',
-  } as Record<string, string>)[action] ?? '命令仍在运行';
+function processDetail(name: string, action: string, meta: Record<string, unknown>): string | undefined {
+  if (meta.process_status === 'RUNNING') {
+    if (name === 'exec_process') return '命令仍在后台运行';
+    return ({poll:'命令仍在运行',wait:'等待结束，命令仍在运行',write:'已发送输入 · 命令仍在运行',
+      submit:'已发送输入 · 命令仍在运行',close_stdin:'已结束输入 · 命令仍在运行',kill:'已请求停止，命令仍在运行'} as Record<string,string>)[action] ?? '命令仍在运行';
+  }
+  if (meta.process_status === 'EXITED') {
+    const code=number(meta.exit_code);
+    if (code !== undefined) return code === 0 ? '命令执行完成' : `命令未成功，退出码 ${code}`;
+  }
+  return undefined;
 }
-
-function failure(trace: ToolTrace, result: Record<string, unknown>): string {
-  const errors: Record<string, string> = {
-    FILE_NOT_FOUND: '未找到文件',
-    FILE_ALREADY_EXISTS: '文件已存在，未覆盖原文件',
-    CONTENT_REVISION_MISMATCH: '文件已变化，本次修改未应用',
-    READ_OBSERVATION_REQUIRED: '尚未读取文件，本次修改未应用',
-    READ_OUTPUT_TOO_LARGE: '文件内容超出单次读取范围',
-    SEARCH_ROOT_TOO_BROAD: '搜索范围过大，本次搜索未执行',
-    UNSUPPORTED_BINARY_FILE: '该文件不是可读取的文本文件',
-    UNSUPPORTED_TEXT_ENCODING: '暂不支持该文件的文字编码',
-    NOT_A_REGULAR_FILE: '所选路径不是普通文件',
-    NO_OP: '内容没有变化，无需修改',
-    MODEL_IMAGE_INPUT_UNSUPPORTED: '当前模型不支持查看图片',
-    IMAGE_REFERENCE_UNAVAILABLE: '这张历史图片无法读取',
-    IMAGE_RESOURCE_EXCEEDED: '图片超出可读取的大小或资源限制',
-    IMAGE_PATH_NOT_REGULAR: '所选路径不是图片文件',
-    IMAGE_READ_FAILED: '无法读取图片文件',
-    IMAGE_DECODE_FAILED: '图片无法解码，文件可能已损坏',
-    IMAGE_FORMAT_UNSUPPORTED: '暂不支持这种图片格式',
-    IMAGE_VALIDATION_DEADLINE_EXPIRED: '图片检查超时',
-    VISUALIZATION_PATH_INVALID: '可视化文件路径无效',
-  };
-  const states: Record<string, string> = {
-    PERMISSION_DENIED: '未获授权，未执行操作', INVALID_ARGUMENTS: '参数不正确，未执行操作',
-    TOOL_UNAVAILABLE: '工具当前不可用', RESOURCE_EXHAUSTED: '资源不足，操作未完成',
-    SYSTEM_ERROR: '本地服务出错，操作未完成',
-  };
-  if (trace.toolName === 'exec_process' || trace.toolName === 'manage_process') {
-    const process = result;
-    const status = text(process.status).toLowerCase();
-    if (process.timed_out === true || process.status === 'timeout') return '命令已超时';
-    if (status === 'killed') return '命令已停止';
-    if (status === 'blocked') return result.reason === 'PROCESS_CAPACITY_EXHAUSTED' ? '执行容量已满，命令未启动' : '命令未获准执行';
-    if (status === 'running') return runningProcessDetail(trace.toolName, text(parse(trace.argumentsJson).action));
-    const exitCode = number(process.exit_code);
-    if (exitCode === -1) return status === 'error' ? '命令执行失败' : '命令退出状态尚未确定';
-    if (exitCode !== undefined) return `命令未成功，退出码 ${exitCode}`;
-  }
-  if (trace.toolName === 'manage_capability') {
-    if (result.status === 'CONFLICT') return '配置已变化，本次变更未应用';
-    if (result.status === 'REJECTED') return '配置变更未被接受';
-  }
-  return errors[text(result.error)] ?? states[trace.resultState ?? ''] ?? '操作失败';
+function cellDetail(meta: Record<string, unknown>): string | undefined {
+  return ({queued:'脚本等待执行',running:'脚本仍在运行',completed:'脚本执行完成',
+    failed:'脚本执行失败',terminated:'脚本已停止'} as Record<string,string>)[text(meta.cell_status)];
 }
-
-export function builtinToolSummary(trace: ToolTrace): { title: string; subtitle: string } | undefined {
-  if (trace.toolName === 'open_in_pulsara' && trace.status === 'completed') {
-    const result = { ...parse(trace.resultText), ...trace.resultFacts };
-    const accepted = count(result.targets) ?? 0, rejected = count(result.errors) ?? 0;
-    return { title: accepted ? '请求展示' : '目标未通过检查', subtitle: accepted ? `${accepted} 个目标${rejected ? `，${rejected} 项未通过检查` : ''}` : `${rejected} 项未通过检查` };
-  }
-
-  const name = trace.toolName ?? '';
-  const label = labels[name];
+export function builtinToolSummary(trace: ToolTrace): {title:string;subtitle:string} | undefined {
+  const name=trace.toolName ?? '';
+  const label=labels[name];
   if (!label) return undefined;
-  const args = parse(trace.argumentsJson);
-  const result = { ...parse(trace.resultText), ...trace.resultFacts };
-  const action = text(args.action);
-  const title = (name === 'read_file' && object(args.target).kind === 'SESSION_ENTRY' ? '读取内容'
+  const args=argumentsValue(trace.argumentsJson), value=trace.businessValue;
+  const meta=object(value?.meta), action=text(args.action), targetValue=object(value?.target);
+  const content=value?.content ?? [];
+  const title=(name === 'read_file' && object(args.target).kind === 'NEXT' ? '读取内容'
     : name === 'manage_process' ? processActions[action]
-    : name === 'manage_cell' ? ({ wait: '等待脚本结束', stop: '停止脚本' } as Record<string, string>)[action]
-    : name === 'query_capabilities' && Object.hasOwn(args, 'target') ? '查看能力详情' : undefined) ?? label[0];
-  let target = '';
-  if (['read_file', 'view_image', 'edit_file', 'write_file', 'search_content', 'find_files'].includes(name)) {
-    target = text(record(result.target).path) || text(record(args.target).path);
-    if (name === 'view_image' && record(args.target).kind === 'IMAGE_REF') target = '对话中已保存的图片';
-    if (name === 'search_content' || name === 'find_files') target = [text(name === 'find_files' ? args.glob : args.pattern), target].filter(Boolean).join(' · ');
-  } else if (name === 'exec_process') target = trace.command ?? text(args.command);
-  else if (name === 'search_memory') target = text(args.query);
-
-  let detail = label[1];
-  if (name === 'mark_memory_relation' && trace.status === 'running') {
-    detail = args.relation_kind === 'SUPERSEDES' ? '正在标记取代关系'
-      : args.relation_kind === 'CONTRADICTS' ? '正在标记冲突关系' : detail;
-  }
-  if (trace.status === 'cancelled') detail = trace.resultState || trace.resultText !== undefined
-    ? '操作已取消' : '未记录到操作结果';
-  else if (trace.status === 'failed') detail = failure(trace, result);
+    : name === 'manage_cell' ? ({wait:'等待脚本结束',stop:'停止脚本'} as Record<string,string>)[action]
+    : name === 'query_capabilities' && Object.hasOwn(args,'target') ? '查看能力详情' : undefined) ?? label[0];
+  let target='';
+  if (['read_file','view_image','edit_file','write_file','search_content','find_files'].includes(name)) {
+    target=text(targetValue.path) || text(object(args.target).path);
+    if (name === 'view_image' && (targetValue.kind === 'IMAGE_REF' || object(args.target).kind === 'IMAGE_REF')) target='对话中已保存的图片';
+    if (name === 'search_content' || name === 'find_files') target=[text(name === 'find_files' ? args.glob : args.pattern),target].filter(Boolean).join(' · ');
+  } else if (name === 'exec_process') target=trace.command ?? text(args.command);
+  else if (name === 'search_memory') target=text(args.query);
+  let detail=label[1];
+  if (trace.status === 'cancelled') detail=trace.resultState || value ? '操作已取消' : '未记录到操作结果';
+  else if (trace.status === 'failed') detail=(name === 'exec_process' || name === 'manage_process' ? processDetail(name,action,meta) : undefined) ?? '操作失败';
   else if (trace.status === 'completed') {
-    detail = label[2];
-    const status = text(result.status).toLowerCase();
-    switch (name) {
+    detail=label[2];
+    switch(name) {
       case 'read_file': {
-        if (object(args.target).kind === 'SESSION_ENTRY') {
-          detail = `已读取保留的输出${result.next ? '，还有后续内容' : '，已到末尾'}`;
-          if (result.source_coverage === 'RETAINED_SNAPSHOT') detail += ' · 仅保留了部分原始输出';
-          break;
-        }
-        const total = number(result.total_lines);
-        if (total !== undefined) detail = `已读取文件 · 共 ${total} 行${Boolean(result.next) || (number(object(result.position).line) ?? 1) > 1 || (number(object(result.position).char_offset) ?? 0) > 0 ? '，本次仅返回部分内容' : ''}`;
-        break;
-      }
-      case 'search_content':
-      case 'find_files': {
-        const mode = text(result.output_mode) || text(args.output_mode);
-        if (mode === 'count') {
-          detail = `本次列出 ${count(result.counts) ?? 0} 个文件的匹配行数`;
-        } else {
-          const files = name === 'find_files' || mode === 'files_only';
-          detail = `本次找到 ${count(files ? result.targets : result.matches) ?? 0} ${files ? '个文件' : '行匹配'}`;
-        }
-        if (result.next) detail += '，可继续搜索';
-        if (text(result.status).toUpperCase() === 'PARTIAL') detail += ' · 部分范围未完整读取';
+        const total=number(meta.total_lines);
+        if (total !== undefined) detail=`已读取文件 · 共 ${total} 行`;
         break;
       }
       case 'write_file': {
-        const bytes = number(result.bytes_written);
-        if (bytes !== undefined) detail = `已写入 ${bytes} 字节`;
+        const bytes=number(meta.bytes_written);
+        if (bytes !== undefined) detail=`已写入 ${bytes} 字节`;
+        break;
+      }
+      case 'find_files':
+      case 'search_content': {
+        const targets=content.filter(part=>part.type === 'target').length;
+        const records=content.filter(part=>part.type === 'object').length;
+        detail=args.output_mode === 'count' ? `本次列出 ${records} 个文件的匹配行数`
+          : name === 'find_files' || args.output_mode === 'files_only' ? `本次找到 ${targets} 个文件` : `本次找到 ${records} 行匹配`;
         break;
       }
       case 'exec_process':
-      case 'manage_process': {
-        const process = result;
-        const exitCode = number(process.exit_code);
-        // The tool invocation can complete while the managed process keeps running.
-        if (name === 'manage_process') {
-          detail = ({ poll: '已查看命令状态', wait: '已等待命令',
-            write: '已发送输入', submit: '已发送输入', close_stdin: '已结束输入',
-          } as Record<string, string>)[action] ?? detail;
-        }
-        if (Array.isArray(result.processes)) detail = `本次列出 ${result.processes.length} 个命令进程`;
-        else if (process.timed_out === true || process.status === 'timeout') detail = '命令已超时';
-        else if (process.status === 'killed') detail = '命令已停止';
-        else if (process.status === 'blocked') detail = '命令未获准执行';
-        else if (process.status === 'running' || process.yielded_to_background === true) {
-          detail = runningProcessDetail(name, action);
-        }
-        else if (process.status === 'success' && (name === 'exec_process' || action === 'poll' || action === 'wait')) detail = '命令执行完成';
-        else if (exitCode === -1) detail = process.status === 'error' ? '命令执行失败' : '命令退出状态尚未确定';
-        else if (exitCode !== undefined && exitCode !== 0) detail = `命令未成功，退出码 ${exitCode}`;
-        else if (exitCode === 0 && (name === 'exec_process' || action === 'poll' || action === 'wait')) detail = '命令执行完成';
+      case 'manage_process': detail=processDetail(name,action,meta) ?? detail; break;
+      case 'query_processes': {
+        const records=content.filter(part=>part.type === 'object');
+        detail=Object.hasOwn(args,'target') && records.length === 1
+          ? processDetail(name,'',object(records[0].value)) ?? detail
+          : `本次列出 ${records.length} 个命令进程`;
         break;
       }
-      case 'query_processes':
-        detail = Array.isArray(result.processes) ? `本次列出 ${result.processes.length} 个命令进程`
-          : text(record(result.process).status) === 'running' ? '命令仍在运行' : detail;
-        break;
-      case 'exec_cell':
-      case 'manage_cell':
-        detail = ({ queued: '脚本等待执行', running: '脚本仍在运行', completed: '脚本执行完成',
-          failed: '脚本执行失败', terminated: '脚本已停止' } as Record<string, string>)[text(result.state)] ?? detail;
-        break;
       case 'query_cells':
-        if (Array.isArray(result.cells)) detail = `本次列出 ${result.cells.length} 个脚本`;
+        detail=Object.hasOwn(args,'target') ? cellDetail(meta) ?? detail
+          : `本次列出 ${content.filter(part=>part.type === 'object').length} 个脚本`;
         break;
-      case 'todo': {
-        const counts = object(result.counts);
-        if (status === 'cleared') detail = '已清空工作清单';
-        else if (number(counts.total) !== undefined && number(counts.completed) !== undefined) {
-          detail = `工作清单已更新 · ${counts.completed}/${counts.total} 项已完成`;
-        }
-        break;
-      }
-      case 'search_memory':
-        if (Array.isArray(result.memories)) detail = `本次找到 ${result.memories.length} 条相关记忆`;
-        break;
-      case 'mark_memory_relation': {
-        const relation = result.relation_kind === 'SUPERSEDES' ? '取代关系'
-          : result.relation_kind === 'CONTRADICTS' ? '冲突关系' : '记忆关系';
-        if (status === 'saved') detail = `已标记${relation}`;
-        else if (status === 'already_present') detail = `${relation}已存在`;
+      case 'manage_cell': detail=cellDetail(meta) ?? detail; break;
+      case 'mark_memory_relation': detail=args.relation_kind === 'SUPERSEDES' ? '已标记取代关系' : args.relation_kind === 'CONTRADICTS' ? '已标记冲突关系' : '已标记记忆关系'; break;
+      case 'search_memory': detail=`本次找到 ${content.filter(part=>part.type === 'object').length} 条相关记忆`; break;
+      case 'open_in_pulsara': {
+        const accepted=Array.isArray(trace.resultFacts?.presentation_targets) ? trace.resultFacts.presentation_targets.length : 0;
+        detail=accepted ? `已请求展示 ${accepted} 个目标` : '展示请求已处理';
         break;
       }
-      case 'manage_capability':
-        detail = ({ applied: '配置变更已应用', rejected: '配置变更未被接受', conflict: '配置已变化，本次变更未应用',
-          cancelled: '已取消配置变更' } as Record<string, string>)[status] ?? detail;
-        if (status === 'applied' && (result.adoption === 'PARTIAL' || object(result.adoption).status === 'PARTIAL')) {
-          detail = '配置变更已保存，部分配置尚未生效';
-        }
-        break;
-      case 'reload_capabilities':
-        if (status === 'partial') detail = '部分配置未能刷新';
-        break;
     }
   }
-  return { title, subtitle: [detail, compact(target)].filter(Boolean).join(' · ') };
-}
-
-function record(value: unknown): Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  return {title,subtitle:[detail,compact(target)].filter(Boolean).join(' · ')};
 }

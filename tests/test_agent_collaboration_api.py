@@ -4,18 +4,17 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 import asyncio
-import json
 import unittest
 from unittest.mock import patch
 
 from pulsara_agent.identity import random_id
 from tests.test_agent_collaboration_array_contracts import envelope
-from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget, ToolResultPageBoundary
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import (
     agent_target,
     work_target,
     prepared_request,
+    collaboration_output_schema,
     validate_batch_identities,
     validate_agent_request_graph,
     validate_collaboration_parameters,
@@ -24,7 +23,6 @@ from pulsara_agent.conversation_kernel.subagents.collaboration_api import (
     CollaborationToolPort,
 )
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
-from pulsara_agent.conversation_kernel.repository import ConversationKernelConflict
 
 
 class ContractTests(unittest.TestCase):
@@ -67,7 +65,10 @@ class ContractTests(unittest.TestCase):
     def test_existing_per_call_utf8_boundaries_remain_strict(self):
         for name, arguments in [
             ("run_agent", envelope([{"instruction": "x" * 65_537}])[1]),
-            ("run_agent", envelope([{"instruction": "valid", "work_title": "中" * 86}])[1]),
+            (
+                "run_agent",
+                envelope([{"instruction": "valid", "work_title": "中" * 86}])[1],
+            ),
             (
                 "send_agent_message",
                 {"target": agent_target("ROOT"), "message": "x" * 16_385},
@@ -81,7 +82,9 @@ class ContractTests(unittest.TestCase):
 
     def test_prepared_ids_are_exact_and_hook_target_change_rejects_batch(self):
         peers, args = envelope([{"instruction": "research"}, {"instruction": "review"}])
-        args["members"][0]["parameters"]["instruction"] = f"Coordinate with {peers['agents'][0]}"
+        args["members"][0]["parameters"]["instruction"] = (
+            f"Coordinate with {peers['agents'][0]}"
+        )
         validate_batch_identities(args, peers)
         args["members"][1]["parameters"]["target"] = agent_target(random_id("session"))
         with self.assertRaisesRegex(ValueError, "target changed"):
@@ -117,60 +120,59 @@ class ContractTests(unittest.TestCase):
 
 class SummaryRepositoryTests(unittest.TestCase):
     def test_work_directory_never_hydrates_canonical_prompt_or_final(self):
-        from pulsara_agent.conversation_kernel._repository.subagents import _SubagentOperations
+        from pulsara_agent.conversation_kernel._repository.subagents import (
+            _SubagentOperations,
+        )
 
-        agent, work, root = random_id("session"), random_id("queue"), random_id("session")
+        agent, work, root = (
+            random_id("session"),
+            random_id("queue"),
+            random_id("session"),
+        )
+
         class Connection:
             def execute(self, sql, parameters):
-                return SimpleNamespace(fetchone=lambda: {"exists": True},
-                    fetchall=lambda: [{"id": work, "session_id": agent, "work_title": None}])
+                return SimpleNamespace(
+                    fetchone=lambda: {"exists": True},
+                    fetchall=lambda: [
+                        {"id": work, "session_id": agent, "work_title": None}
+                    ],
+                )
+
         @contextmanager
         def connection(**kwargs):
             yield Connection()
+
         repository = _SubagentOperations()
         repository._provider = SimpleNamespace(connection=connection)
-        repository._agent_work_value = lambda *_: self.fail("inventory must not hydrate a Work body")
-        with patch("pulsara_agent.conversation_kernel._repository.subagents.request_execution_from_row",
-                   return_value=SimpleNamespace(status=SimpleNamespace(value="completed"), terminal_reason=None)):
-            rows = repository.list_query_agent_works(root_session_id=root, observer_session_id=root,
-                agent_id=agent, deadline_monotonic=1e20)
-        self.assertEqual(rows, ({"work_id": work, "agent_id": agent, "status": "completed",
-            "terminal_reason": None, "work_title": None, "cursor": work},))
-
-    def test_message_receipt_rejection_precedes_known_agents_and_prompt_writes(self):
-        from datetime import datetime, timezone
-        from pulsara_agent.conversation_kernel._repository.subagents import _SubagentOperations
-
-        agent, work, root = random_id("session"), random_id("queue"), random_id("session")
-        statements = []
-        class Connection:
-            def execute(self, sql, parameters):
-                statements.append(sql)
-                assert sql.startswith("SELECT"), "receipt rejection must precede message SQL effects"
-                if sql.startswith("SELECT * FROM pulsara_v3.prompt_queue_items"):
-                    row = None
-                elif sql.startswith("SELECT coalesce"):
-                    row = {"root_id": root}
-                elif sql.startswith("SELECT workspace_id"):
-                    row = {"workspace_id": random_id("workspace")}
-                else:
-                    row = {"id": work}
-                return SimpleNamespace(fetchone=lambda: row)
-        @contextmanager
-        def transaction(*args, **kwargs):
-            yield Connection()
-        repository = _SubagentOperations()
-        repository._writer_transaction = transaction
-        repository._merge_known_agents = lambda *_args, **_kwargs: self.fail("must not expand known-agent scope before quote")
-        def reject(actual_work):
-            self.assertEqual(actual_work, work)
-            raise ToolResultPageBoundary("no message receipt allowance")
-        with self.assertRaises(ToolResultPageBoundary):
-            repository.enqueue_agent_steer(SimpleNamespace(session_id=agent), target_turn_id=random_id("turn"),
-                queue_item_id=random_id("queue"), source_session_id=root, source_work_id=None,
-                text="must not be sent", occurred_at=datetime.now(timezone.utc), actor_id=root,
-                deadline_monotonic=1e20, result_check=reject)
-        self.assertEqual(len(statements), 5)
+        repository._agent_work_value = lambda *_: self.fail(
+            "inventory must not hydrate a Work body"
+        )
+        with patch(
+            "pulsara_agent.conversation_kernel._repository.subagents.request_execution_from_row",
+            return_value=SimpleNamespace(
+                status=SimpleNamespace(value="completed"), terminal_reason=None
+            ),
+        ):
+            rows = repository.list_query_agent_works(
+                root_session_id=root,
+                observer_session_id=root,
+                agent_id=agent,
+                deadline_monotonic=1e20,
+            )
+        self.assertEqual(
+            rows,
+            (
+                {
+                    "work_id": work,
+                    "agent_id": agent,
+                    "status": "completed",
+                    "terminal_reason": None,
+                    "work_title": None,
+                    "cursor": work,
+                },
+            ),
+        )
 
 
 class RepositoryOwner:
@@ -185,10 +187,25 @@ class RepositoryOwner:
     def query_agent_work(self, *, root_session_id, work_id, deadline_monotonic):
         return self.rows.get(work_id)
 
-    def read_agent_work_graph_facts(self, *, root_session_id, work_id, deadline_monotonic):
+    def read_agent_work_graph_facts(
+        self, *, root_session_id, work_id, deadline_monotonic
+    ):
         row = self.rows.get(work_id)
-        return None if row is None else {key: row[key] for key in
-            ("work_id", "agent_id", "status", "terminal_reason", "work_title") if key in row}
+        return (
+            None
+            if row is None
+            else {
+                key: row[key]
+                for key in (
+                    "work_id",
+                    "agent_id",
+                    "status",
+                    "terminal_reason",
+                    "work_title",
+                )
+                if key in row
+            }
+        )
 
     def list_agent_works(
         self, *, root_session_id, agent_id, cursor=None, limit=20, deadline_monotonic
@@ -218,23 +235,43 @@ class RepositoryOwner:
             queued_count=sum(row["status"] == "queued" for row in rows),
             title="Agent",
             ui_current_work_id=current,
-            ui_current_work_title=None if current is None else self.rows[current]["work_title"],
-            ui_current_work_status=None if current is None else self.rows[current]["status"],
+            ui_current_work_title=None
+            if current is None
+            else self.rows[current]["work_title"],
+            ui_current_work_status=None
+            if current is None
+            else self.rows[current]["status"],
             ui_queued_work_count=sum(row["status"] == "queued" for row in rows),
         )
 
-    def read_agent_wait_states(self, *, root_session_id, agent_ids, bound_work_ids, deadline_monotonic):
+    def read_work_wait_states(self, *, root_session_id, work_ids, deadline_monotonic):
+        return tuple(
+            {key: self.rows[work][key] for key in ("agent_id", "work_id", "status")}
+            for work in work_ids
+            if work in self.rows
+        )
+
+    def read_agent_wait_states(
+        self, *, root_session_id, agent_ids, bound_work_ids, deadline_monotonic
+    ):
         rows = []
         for identity, work_id in zip(agent_ids, bound_work_ids, strict=True):
-            state = self.read_agent_runtime_state(session_id=identity, deadline_monotonic=deadline_monotonic)
+            state = self.read_agent_runtime_state(
+                session_id=identity, deadline_monotonic=deadline_monotonic
+            )
             if state is None or state["root_session_id"] != root_session_id:
                 continue
             work = self.rows.get(work_id)
-            rows.append(dict(agent_id=identity, current_work_id=state["current_work_id"],
-                has_running_turn=state["current_work_id"] is not None,
-                has_pending_work=state["has_pending_work"],
-                bound_work_id=None if work is None else work["work_id"],
-                bound_work_status=None if work is None else work["status"]))
+            rows.append(
+                dict(
+                    agent_id=identity,
+                    current_work_id=state["current_work_id"],
+                    has_running_turn=state["current_work_id"] is not None,
+                    has_pending_work=state["has_pending_work"],
+                    bound_work_id=None if work is None else work["work_id"],
+                    bound_work_status=None if work is None else work["status"],
+                )
+            )
         return tuple(rows)
 
     def _session_rows(
@@ -261,17 +298,30 @@ class RepositoryOwner:
         )
 
     def list_query_agent_sessions(
-        self, *, root_session_id, observer_session_id, cursor=None, limit=50,
-        active_only=False, deadline_monotonic
+        self,
+        *,
+        root_session_id,
+        observer_session_id,
+        cursor=None,
+        limit=50,
+        active_only=False,
+        deadline_monotonic,
     ):
         rows = self._session_rows(
-            root_session_id=root_session_id, cursor=cursor,
-            limit=len(self.agents) or 1, deadline_monotonic=deadline_monotonic,
+            root_session_id=root_session_id,
+            cursor=cursor,
+            limit=len(self.agents) or 1,
+            deadline_monotonic=deadline_monotonic,
         )
         return tuple(
-            row for row in rows
+            row
+            for row in rows
             if self._query_visible(observer_session_id, row["agent_id"])
-            and (not active_only or row["current_work_id"] is not None or row["queued_count"] > 0)
+            and (
+                not active_only
+                or row["current_work_id"] is not None
+                or row["queued_count"] > 0
+            )
         )[:limit]
 
     def list_query_agent_works(self, *, observer_session_id, agent_id, **kwargs):
@@ -281,7 +331,11 @@ class RepositoryOwner:
 
     def query_visible_agent_work(self, *, observer_session_id, **kwargs):
         row = self.query_agent_work(**kwargs)
-        return row if row and self._query_visible(observer_session_id, row["agent_id"]) else None
+        return (
+            row
+            if row and self._query_visible(observer_session_id, row["agent_id"])
+            else None
+        )
 
     def admit_agent_requests(self, guard, *, requests, **kwargs):
         self.admissions.append(requests)
@@ -406,12 +460,17 @@ class InboxWaitTests(unittest.IsolatedAsyncioTestCase):
         self.context.agent_message_cursors = None
 
     async def call(self, name, arguments):
-        return await FacadeTests.call(self, name, arguments)
+        return await self.api._wait_message(arguments, self.context)
 
     async def test_poll_and_existing_messages_do_not_yield_a_slot(self):
-        self.assertEqual(await self.call("wait_message", {"timeout_seconds": 0}), {"state": "timeout"})
+        self.assertEqual(
+            await self.call("wait_message", {"timeout_seconds": 0}),
+            {"state": "timeout"},
+        )
         self.runtime.messages[self.root] = 1
-        self.assertEqual(await self.call("wait_message", {}), {"state": "message_available"})
+        self.assertEqual(
+            await self.call("wait_message", {}), {"state": "message_available"}
+        )
         self.assertEqual(self.runtime.suspensions, 0)
         self.assertEqual(self.runtime.messages, {self.root: 1})
 
@@ -424,17 +483,25 @@ class InboxWaitTests(unittest.IsolatedAsyncioTestCase):
         competitor = random_id("session")
         original_release = slots.release
         released = []
+
         async def competing_release(session_id):
             released.append(session_id)
             await original_release(session_id)
             self.assertTrue(await slots.try_acquire(competitor))
+
         slots.release = competing_release
         self.runtime.suspend_execution = slots.suspend_execution
-        self.assertEqual(await asyncio.wait_for(self.call("wait_message", {"timeout_seconds": 0}), 1),
-                         {"state": "timeout"})
+        self.assertEqual(
+            await asyncio.wait_for(
+                self.call("wait_message", {"timeout_seconds": 0}), 1
+            ),
+            {"state": "timeout"},
+        )
         self.runtime.messages[self.root] = 1
-        self.assertEqual(await asyncio.wait_for(self.call("wait_message", {}), 1),
-                         {"state": "message_available"})
+        self.assertEqual(
+            await asyncio.wait_for(self.call("wait_message", {}), 1),
+            {"state": "message_available"},
+        )
         self.assertEqual(released, [])
         self.assertFalse(await slots.try_acquire(competitor))
         self.assertEqual(await slots.capacity_state(), (1, 1))
@@ -450,7 +517,9 @@ class InboxWaitTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.messages[random_id("session")] = 1
         self.runtime.messages[self.root] = 2
         await self.runtime.changed()
-        self.assertEqual(await asyncio.wait_for(waiter, 1), {"state": "message_available"})
+        self.assertEqual(
+            await asyncio.wait_for(waiter, 1), {"state": "message_available"}
+        )
         self.assertEqual(len(self.runtime.messages), 2)
         self.assertEqual(self.runtime.suspended, 0)
 
@@ -461,9 +530,12 @@ class InboxWaitTests(unittest.IsolatedAsyncioTestCase):
                 await self.runtime.changed()
                 return False
             return True
+
         self.runtime.has_pending_agent_message = query
-        self.assertEqual(await asyncio.wait_for(self.call("wait_message", {}), 1),
-                         {"state": "message_available"})
+        self.assertEqual(
+            await asyncio.wait_for(self.call("wait_message", {}), 1),
+            {"state": "message_available"},
+        )
         self.assertEqual(self.runtime.suspensions, 1)
 
     async def test_cancel_releases_wait_and_does_not_consume_mail(self):
@@ -475,14 +547,20 @@ class InboxWaitTests(unittest.IsolatedAsyncioTestCase):
             await waiter
         self.assertEqual(self.runtime.suspended, 0)
         self.runtime.messages[self.root] = 1
-        self.assertEqual(await self.call("wait_message", {}), {"state": "message_available"})
+        self.assertEqual(
+            await self.call("wait_message", {}), {"state": "message_available"}
+        )
 
     async def test_unrelated_changes_do_not_extend_deadline(self):
-        waiter = asyncio.create_task(self.call("wait_message", {"timeout_seconds": 0.03}))
+        waiter = asyncio.create_task(
+            self.call("wait_message", {"timeout_seconds": 0.03})
+        )
+
         async def notify():
             while not waiter.done():
                 await self.runtime.changed()
                 await asyncio.sleep(0.001)
+
         notifier = asyncio.create_task(notify())
         try:
             self.assertEqual(await asyncio.wait_for(waiter, 1), {"state": "timeout"})
@@ -497,8 +575,6 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
         self.repo = RepositoryOwner(self.root)
         self.runtime = RuntimeOwner(self.repo)
         self.context = SimpleNamespace(
-            page_budget=ToolResultPageBudget(tool_call_id=random_id("call"), result_target={
-                "kind": "SESSION_ENTRY", "session_id": self.root, "entry_id": random_id("entry")}),
             session_id=self.root,
             turn_id=random_id("turn"),
             attempt_id=random_id("attempt"),
@@ -546,529 +622,374 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
         result = await self.api.invoke(
             tool_name=name, arguments=arguments, invocation_context=self.context
         )
-        return result.public_value()
-
-    async def test_page_budget_reduces_whole_work_records_and_next_is_directly_callable(self):
-        agent, first = self.add_work(status="completed", final="\\\"中" * 40_000)
-        _, second = self.add_work(agent=agent, status="completed", final="second final")
-        self.context.page_budget = replace(self.context.page_budget,
-            accepts_provider_body=lambda body, memory: len(json.loads(body).get("works", [])) <= 1)
-        result = await self.api.invoke(tool_name="query_agents", arguments={"target": agent_target(agent)},
-            invocation_context=self.context)
-        page = result.public_value()
-        self.assertTrue(result.page_complete)
-        self.assertEqual([item["target"] for item in page["works"]], [work_target(first)])
-        for field in ("instruction", "final", "diagnostic"):
-            self.assertNotIn(field, page["works"][0])
-        following = await self.call(page["next"]["tool"], page["next"]["arguments"])
-        self.assertEqual([item["target"] for item in following["works"]], [work_target(second)])
-        self.assertIsNone(following["next"])
-        self.assertEqual((await self.call("query_agents", page["works"][0]["inspect"]["arguments"]))["final"], "\\\"中" * 40_000)
-
-    async def test_minimum_page_and_admission_budget_failure_make_no_progress_or_work(self):
-        agent, _ = self.add_work()
-        self.context.page_budget = replace(self.context.page_budget, accepts_provider_body=lambda *_: False)
-        with self.assertRaises(ToolResultPageBoundary):
-            await self.call("query_agents", {"target": agent_target(agent)})
-        before = set(self.repo.rows)
-        rejected = await self.api.invoke(tool_name="run_agent",
-            arguments=envelope([{"instruction": "must not be admitted"}])[1],
-            invocation_context=self.context)
-        self.assertEqual(rejected.state, "APPLICATION_ERROR")
-        self.assertEqual(rejected.public_value()["error"], "RESULT_BUDGET_EXCEEDED")
-        self.assertEqual(set(self.repo.rows), before)
-        self.assertEqual(self.runtime.wakes, 0)
-
-    async def test_stop_preserves_entire_set_and_required_facts_without_work_bodies(self):
-        agent, running = self.add_work()
-        queued = [self.add_work(agent=agent, status="queued")[1] for _ in range(70)]
-        self.repo.rows[running]["instruction"] = "large instruction" * 10_000
-        result = await self.api.invoke(tool_name="stop_agent", arguments={"target": agent_target(agent)},
-            invocation_context=self.context)
         value = result.public_value()
-        self.assertEqual({item["target"]["work_id"] for item in value["works"]}, {running, *queued})
-        self.assertEqual(result.required_facts["affected_count"], 71)
-        self.assertEqual(value["status_counts"], {"stopped": 71})
-        for item in value["works"]:
-            self.assertNotIn("instruction", item)
-            self.assertNotIn("diagnostic", item)
-        self.assertTrue(all(self.repo.rows[identity]["status"] == "stopped" for identity in [running, *queued]))
+        from jsonschema import Draft202012Validator
+        Draft202012Validator(collaboration_output_schema(name)).validate(value)
+        return value
 
-    async def test_wait_modes_do_not_hydrate_or_replay_historical_result_bodies(self):
-        agent, _ = self.add_work(status="completed", final="full query result")
-        def forbidden(**kwargs):
-            raise AssertionError("A wait must not hydrate a complete Work result")
-        self.repo.query_agent_work = forbidden
-        for until in ("idle", "work_end"):
-            waited = await self.call("wait_agent", {"agents": [agent_target(agent)], "until": until})
-            self.assertEqual(waited["state"], "settled")
-            self.assertEqual(waited["observations"], [{"target": agent_target(agent), "condition": "idle"}])
+    @staticmethod
+    def records(value):
+        return [part["value"] for part in value["content"] if part["type"] == "object"]
 
-    async def test_run_receipt_never_leaks_final_from_fast_completed_admission(self):
-        original = self.repo.admit_agent_requests
-        def completes_before_return(*args, **kwargs):
-            rows = original(*args, **kwargs)
-            for row in rows:
-                row.update(status="completed", final="available only by explicit query")
-            return rows
-        self.repo.admit_agent_requests = completes_before_return
-        accepted = await self.call("run_agent", envelope([{"instruction": "quick task"}])[1])
-        self.assertEqual(accepted["details"][0]["status"], "completed")
-        self.assertNotIn("final", accepted)
-        actual = await self.call("query_agents", {"target": accepted["works"][0]})
-        self.assertEqual(actual["final"], "available only by explicit query")
+    async def test_complete_queries_preserve_scope(self):
+        agent = random_id("session")
+        expected = [
+            self.add_work(agent=agent, status="completed", final="x" * 100_000)[1]
+            for _ in range(71)
+        ]
+        result = await self.call("query_agents", {"target": agent_target(agent)})
+        self.assertEqual(
+            [row["target"] for row in self.records(result)],
+            [work_target(work) for work in expected],
+        )
+        detail = await self.call("query_agents", {"target": work_target(expected[0])})
+        self.assertEqual(self.records(detail)[0]["final"], "x" * 100_000)
+        self.context.session_id = random_id("session")
+        self.assertEqual(self.records(await self.call("query_agents", {})), [])
+        with self.assertRaises(ValueError):
+            await self.call("query_agents", {"target": work_target(expected[0])})
 
-    async def test_batch_uses_one_admission_and_rejection_never_wakes_scheduler(self):
-        peers, args = envelope([{"instruction": "a"}, {"instruction": "b"}])
+    async def test_dispatch_preserves_positions_and_new_or_reused_history_selection(
+        self,
+    ):
+        self.context.agent_invocation_snapshot.initial_context_units = (
+            "old",
+            "middle",
+            "latest",
+        )
+        _, arguments = envelope(
+            [
+                {
+                    "instruction": "first",
+                    "materials": [{"kind": "CONTEXT_MATERIAL", "turns": 2}],
+                }
+            ]
+        )
+        first = await self.call("run_agent", arguments)
+        record = self.records(first)[0]
+        self.assertEqual(set(record), {"agent", "work", "work_status"})
+        self.assertEqual(
+            self.repo.admissions[-1][0].initial_context, ("middle", "latest")
+        )
+        _, arguments = envelope(
+            [
+                {
+                    "target": record["agent"],
+                    "instruction": "second",
+                    "materials": [{"kind": "CONTEXT_MATERIAL", "turns": 1}],
+                }
+            ]
+        )
+        second = await self.call("run_agent", arguments)
+        self.assertEqual(self.records(second)[0]["agent"], record["agent"])
+        self.assertNotEqual(self.records(second)[0]["work"], record["work"])
+        self.assertEqual(self.repo.admissions[-1][0].initial_context, ("latest",))
+
+    async def test_atomic_rejection_does_not_wake_or_partially_admit(self):
+        _, args = envelope([{"instruction": "one"}, {"instruction": "two"}])
         self.repo.reject = True
         with self.assertRaises(ValueError):
             await self.call("run_agent", args)
-        self.assertEqual(self.runtime.wakes, 0)
         self.assertEqual(self.repo.rows, {})
+        self.assertEqual(self.runtime.wakes, 0)
         self.repo.reject = False
-        result = await self.call("run_agent", args)
+        accepted = await self.call("run_agent", args)
+        self.assertEqual(len(self.records(accepted)), 2)
         self.assertEqual(len(self.repo.admissions[-1]), 2)
-        self.assertEqual(result["works"][1], peers["works"][1])
-        self.assertEqual(self.runtime.wakes, 1)
 
-    async def test_removed_profile_is_rejected_before_single_or_batch_admission(self):
-        _, arguments = envelope([{"instruction": "a"}, {"instruction": "b"}])
-        members = arguments["members"]
-        for value in ("research_worker", None):
-            with self.subTest(value=value, operation="single"):
-                with self.assertRaisesRegex(ValueError, "unexpected or missing parameter"):
-                    await self.call("run_agent", envelope([{"instruction": "x", "profile": value}])[1])
-            with self.subTest(value=value, operation="batch"):
-                members[1]["parameters"]["profile"] = value
-                with self.assertRaisesRegex(ValueError, "unexpected or missing parameter"):
-                    await self.call("run_agent", {"members": members})
-        self.assertEqual(self.repo.admissions, [])
-        self.assertEqual(self.repo.rows, {})
-        self.assertEqual(self.runtime.wakes, 0)
-
-    async def test_public_agent_work_wait_and_stop_never_expose_profile(self):
-        self.assertNotIn("profile", self.api._public_agent({
-            "agent_id": random_id("session"), "profile": "research_worker",
-            "ui_current_work_id": None, "ui_current_work_title": None,
-            "ui_current_work_status": None, "ui_queued_work_count": 0
-        }))
-        agent, work = self.add_work(status="completed", final="done")
-        self.repo.rows[work]["profile"] = "research_worker"
-        self.assertNotIn("profile", await self.call("query_agents", {"target": work_target(work)}))
-        listed = await self.call("query_agents", {"target": agent_target(agent)})
-        self.assertNotIn("profile", listed["works"][0])
-        agents = await self.call("query_agents", {})
-        self.assertNotIn("profile", agents["agents"][0])
-        waited = await self.call("wait_agent", {"agents": [agent_target(agent)]})
-        self.assertNotIn("profile", waited["observations"][0])
-        stopped = await self.call("stop_agent", {"target": work_target(work)})
-        self.assertNotIn("profile", stopped["works"][0])
-
-    async def test_new_and_reused_agent_work_has_no_profile(self):
-        first = await self.call("run_agent", envelope([{"instruction": "first"}])[1])
-        second = await self.call("run_agent", envelope([{
-            "target": first["agents"][0], "instruction": "continue"
-        }])[1])
-        self.assertEqual(first["agents"][0], second["agents"][0])
-        self.assertNotIn("profile", first)
-        self.assertNotIn("profile", second)
-        listed = await self.call("query_agents", {"target": first["agents"][0]})
-        self.assertEqual(len(listed["works"]), 2)
-        self.assertTrue(all("profile" not in work for work in listed["works"]))
-
-    async def test_code_mode_single_and_batch_reject_removed_profile_before_admission(self):
-        from pulsara_agent.code_mode import CodeModeHost, CodeModeToolResult
-        from tests.test_code_mode_runtime import _finish, _start
-
-        host = CodeModeHost()
-
-        async def invoke(call):
-            try:
-                value = await self.call(call.tool_name, call.arguments)
-            except ValueError as error:
-                return CodeModeToolResult(state="FAILED", error_code="invalid_arguments", error_message=str(error))
-            return CodeModeToolResult(value=value)
-
-        try:
-            page, output = await _finish(host, await _start(host, '''
-                for (const profile of ["research_worker", null]) {
-                  try { await tools.run_agent([{instruction:"single", profile}]); }
-                  catch (error) { console.log({operation:"single", name:error.name}); }
-                  try { await tools.run_agent([{instruction:"valid"},
-                    {instruction:"invalid", profile}]); }
-                  catch (error) { console.log({operation:"batch", name:error.name}); }
-                }
-            ''', invoke, {"run_agent": {}}))
-            self.assertEqual(page.state, "completed")
-            import json
-            self.assertEqual([json.loads(item["text"]) for item in output], [
-                {"operation": operation, "name": "TypeError"}
-                for _ in range(2)
-                for operation in ("single", "batch")
-            ])
-            self.assertEqual(self.repo.admissions, [])
-            self.assertEqual(self.repo.rows, {})
-            self.assertEqual(self.runtime.wakes, 0)
-        finally:
-            await host.aclose()
-
-    async def test_unknown_admission_commit_is_confirmed_without_repeating_submission(
-        self,
-    ):
+    async def test_ack_unknown_confirms_original_submission_without_resubmission(self):
         original = self.repo.admit_agent_requests
         calls = []
 
-        def committed_then_lost(*args, **kwargs):
+        def lost(*args, **kwargs):
             calls.append(None)
             original(*args, **kwargs)
-            raise ConnectionError("commit acknowledgement lost")
+            raise ConnectionError("acknowledgement lost")
 
-        self.repo.admit_agent_requests = committed_then_lost
-        result = await self.call("run_agent", envelope([{"instruction": "submit exactly once"}])[1])
-        self.assertEqual(result["details"][0]["status"], "queued")
+        self.repo.admit_agent_requests = lost
+        accepted = await self.call("run_agent", envelope([{"instruction": "one"}])[1])
+        self.assertEqual(self.records(accepted)[0]["work_status"], "queued")
         self.assertEqual(len(calls), 1)
         self.assertEqual(len(self.repo.rows), 1)
-        self.assertEqual(self.runtime.wakes, 1)
 
-    async def test_handoff_pages_only_active_agents_without_pseudo_agent_rows(self):
-        for _ in range(51):
-            self.add_work(status="queued")
-        index = await self.api.freeze_compaction_handoff()
-        self.assertEqual(len(index), 50)
-        remaining = await self.api.freeze_compaction_handoff(
-            cursor=index[-1]["agent"]["agent_id"]
-        )
-        self.assertEqual(len(remaining), 1)
-        self.assertTrue(all(item["queued_count"] == 1 for item in (*index, *remaining)))
-        self.assertTrue(all(
-            set(item) == {"agent", "current_work", "queued_count"}
-            for item in (*index, *remaining)
-        ))
-        self.assertEqual(
-            [item["agent"]["agent_id"] for item in (*index, *remaining)],
-            sorted(self.repo.agents),
-        )
-
-    async def test_handoff_read_failure_propagates_for_root_and_subagent(self):
-        failure = ConversationKernelConflict("active Agent read failed")
-
-        def fail(**kwargs):
-            raise failure
-
-        self.repo.list_query_agent_sessions = fail
-        with self.assertRaises(ConversationKernelConflict) as caught:
-            await self.api.freeze_compaction_handoff()
-        self.assertIs(caught.exception, failure)
-        self.api.session_id = random_id("session")
-        with self.assertRaises(ConversationKernelConflict) as caught:
-            await self.api.freeze_compaction_handoff()
-        self.assertIs(caught.exception, failure)
-
-    async def test_query_scopes_three_branches_and_keeps_root_alias_out_of_pagination(self):
-        own, own_work = self.add_work()
-        known, known_work = self.add_work(status="completed", final="known final")
-        hidden, hidden_work = self.add_work(status="stopped", final="hidden final")
-        self.repo.known[own] = {known}
-        root_work = await self.call("query_agents", {"target": work_target(known_work)})
-        self.api.session_id = self.context.session_id = own
-        self.context.invocation_source = SimpleNamespace(kind="MODEL_TOOL_CALL")
-        first = await self.call("query_agents", {"max_items": 1})
-        second = await self.call("query_agents", first["next"]["arguments"])
-        for page in (first, second):
-            self.assertEqual(page["root"], agent_target("ROOT"))
-            self.assertEqual(len(page["agents"]), 1)
-        self.assertIsNone(second["next"])
-        self.assertEqual(
-            [page["agents"][0]["agent"]["agent_id"] for page in (first, second)],
-            sorted((own, known)),
-        )
-        for agent, work in ((own, own_work), (known, known_work)):
-            page = await self.call("query_agents", {"target": agent_target(agent)})
-            self.assertEqual(page["works"][0]["target"], work_target(work))
-        self.assertEqual(await self.call("query_agents", {"target": work_target(known_work)}), root_work)
-        for target in (agent_target(hidden), work_target(hidden_work), agent_target("ROOT")):
-            with self.assertRaises(ValueError):
-                await self.call("query_agents", {"target": target})
-        self.assertEqual(self.repo.known[own], {known})
-        self.assertEqual(await self.api.freeze_compaction_handoff(), ({
-            "agent": agent_target(own), "current_work": work_target(own_work), "queued_count": 0,
-        },))
-
-    async def test_query_work_pages_keep_target_and_communication_ignores_known_set(self):
-        own, _ = self.add_work()
-        other, first_work = self.add_work(status="completed", final="first")
-        _, second_work = self.add_work(agent=other, status="completed", final="second")
-        self.api.session_id = self.context.session_id = own
-        with self.assertRaisesRegex(ValueError, "only to ROOT"):
-            await self.call("wait_agent", {"agents": [agent_target(other)]})
-        self.assertNotIn(own, self.repo.known)
-        self.repo.rows[second_work]["status"] = "running"
-        sent = await self.call("send_agent_message", {"target": agent_target(other), "message": "hello"})
-        self.assertEqual(sent["delivery"], "queued")
-        self.repo.known[own] = {other}
-        first = await self.call("query_agents", {"target": agent_target(other), "max_items": 1})
-        second = await self.call("query_agents", {
-            **first["next"]["arguments"],
-        })
-        self.assertEqual(first["works"][0]["target"], work_target(first_work))
-        self.assertEqual(second["works"][0]["target"], work_target(second_work))
-        self.assertIsNone(second["next"])
-        for name, args in (("run_agent", envelope([{"instruction": "forbidden"}])[1]),
-                           ("stop_agent", {"target": agent_target(other)})):
-            with self.assertRaisesRegex(ValueError, "only to ROOT"):
-                await self.call(name, args)
-        self.context.effective_permission_mode = PermissionMode.READ_ONLY
-        with self.assertRaisesRegex(ValueError, "bypass permissions"):
-            await self.call("query_agents", {})
-
-    async def test_cancelled_physical_admission_preserves_the_accepted_result(self):
-        import threading
-
-        entered, release = threading.Event(), threading.Event()
+    async def test_fast_completion_freezes_admission_record_and_detail_is_separate(
+        self,
+    ):
         original = self.repo.admit_agent_requests
 
-        def delayed(*args, **kwargs):
-            entered.set()
-            if not release.wait(2):
-                raise RuntimeError("test failed to release physical operation")
-            return original(*args, **kwargs)
+        def finish(*args, **kwargs):
+            rows = original(*args, **kwargs)
+            for row in rows:
+                row.update(status="completed", final="full report")
+            return rows
 
-        self.repo.admit_agent_requests = delayed
-        task = asyncio.create_task(
-            self.api.invoke(
-                tool_name="run_agent",
-                arguments=envelope([{"instruction": "preserve accepted work"}])[1],
-                invocation_context=self.context,
+        self.repo.admit_agent_requests = finish
+        result = await self.call("run_agent", envelope([{"instruction": "quick"}])[1])
+        record = self.records(result)[0]
+        self.assertEqual(
+            record,
+            {
+                "agent": agent_target(next(iter(self.repo.agents))),
+                "work": work_target(next(iter(self.repo.rows))),
+                "work_status": "completed",
+            },
+        )
+        detail = await self.call("query_agents", {"target": record["work"]})
+        self.assertEqual(self.records(detail)[0]["final"], "full report")
+
+    async def test_message_to_queued_only_recipient_is_error_without_starting_work(
+        self,
+    ):
+        agent, work = self.add_work(status="queued")
+        result = await self.call(
+            "send_agent_message", {"target": agent_target(agent), "message": "hello"}
+        )
+        self.assertEqual(result["meta"]["status"], "ERROR")
+        self.assertEqual(self.repo.rows[work]["status"], "queued")
+        self.repo.rows[work]["status"] = "running"
+        result = await self.call(
+            "send_agent_message",
+            {"target": agent_target(agent), "message": "hello\nworld"},
+        )
+        self.assertEqual(
+            result,
+            {
+                "meta": {"status": "SUCCESS"},
+                "content": [
+                    {"type": "text", "value": "消息已加入接收方当前轮次的输入队列。"}
+                ],
+            },
+        )
+
+    async def test_stop_lists_actual_selected_states_and_all_four_counts(self):
+        agent, work = self.add_work(status="running")
+        _, queued = self.add_work(agent=agent, status="queued")
+        _, historical = self.add_work(agent=agent, status="completed", final="old")
+        result = await self.call("stop_agent", {"target": agent_target(agent)})
+        self.assertEqual(
+            self.records(result),
+            [
+                {"target": work_target(work), "work_status": "stopped"},
+                {"target": work_target(queued), "work_status": "stopped"},
+            ],
+        )
+        self.assertEqual(
+            result["meta"],
+            {
+                "status": "SUCCESS",
+                "queued_work_count": 0,
+                "running_work_count": 0,
+                "completed_work_count": 0,
+                "stopped_work_count": 2,
+            },
+        )
+        terminal = await self.call("stop_agent", {"target": work_target(historical)})
+        self.assertEqual(
+            self.records(terminal),
+            [{"target": work_target(historical), "work_status": "completed"}],
+        )
+        self.assertEqual(terminal["meta"]["completed_work_count"], 1)
+
+    async def test_work_wait_uses_exact_snapshot_order_including_queued_and_historical(
+        self,
+    ):
+        agent, first = self.add_work(status="completed")
+        _, next_work = self.add_work(agent=agent, status="queued")
+        result = await self.call(
+            "wait_agent",
+            {"works": [work_target(next_work), work_target(first)], "settle": "first"},
+        )
+        self.assertEqual(
+            result["meta"], {"status": "SUCCESS", "wait_reason": "condition_met"}
+        )
+        self.assertEqual(
+            [row["work"] for row in self.records(result)],
+            [work_target(next_work), work_target(first)],
+        )
+        self.assertEqual(
+            [row["work_status"] for row in self.records(result)],
+            ["queued", "completed"],
+        )
+        self.runtime.messages[agent] = 5
+        result = await self.call(
+            "wait_agent", {"works": [work_target(next_work)], "timeout_seconds": 0}
+        )
+        self.assertEqual(result["meta"]["wait_reason"], "timeout")
+        self.assertEqual(self.context.agent_message_cursors, {})
+
+    async def test_exact_work_wait_never_follows_successor_or_hydrates_result(self):
+        agent, work = self.add_work(status="running", final="secret")
+        self.repo.query_agent_work = lambda **_: self.fail("wait hydrated a final")
+        waiter = asyncio.create_task(
+            self.call(
+                "wait_agent", {"works": [work_target(work)], "timeout_seconds": 1}
             )
         )
-        while not entered.is_set():
-            await asyncio.sleep(0)
-        task.cancel()
-        await asyncio.sleep(0)
-        release.set()
-        result = await asyncio.wait_for(task, 1)
-        self.assertTrue(result.caller_cancelled_while_running)
-        self.assertEqual(result.public_value()["details"][0]["status"], "queued")
-        self.assertEqual(len(self.repo.rows), 1)
-
-    async def test_queued_agent_message_and_native_wait_do_not_start_work(self):
-        agent, work = self.add_work(status="queued")
-        delivery = await self.call(
-            "send_agent_message", {"target": agent_target(agent), "message": "question"}
-        )
-        self.assertEqual(delivery["delivery"], "not_started")
-        result = await self.call(
-            "wait_agent", {"agents": [agent_target(agent)], "until": "work_end", "timeout_seconds": 0}
-        )
-        self.assertEqual(result["state"], "unavailable")
-        self.assertEqual(result["unavailable_targets"][0]["reason"], "not_started")
-        self.assertEqual(self.repo.rows[work]["status"], "queued")
-        self.assertEqual(self.runtime.wakes, 0)
-
-    async def test_wait_binds_original_work_and_never_follows_next_request(self):
-        agent, original = self.add_work()
-        self.repo.rows[original]["profile"] = "research_worker"
-        waiter = asyncio.create_task(
-            self.call("wait_agent", {"agents": [agent_target(agent)], "until": "work_end"})
-        )
         while not self.runtime.waiters:
             await asyncio.sleep(0)
-        self.repo.rows[original].update(status="completed", final="original final")
-        _, next_work = self.add_work(agent=agent)
+        self.repo.rows[work]["status"] = "completed"
+        self.add_work(agent=agent, status="running")
         await self.runtime.changed()
-        result = await asyncio.wait_for(waiter, 1)
-        self.assertEqual(result["state"], "settled")
-        self.assertEqual(result["observations"][0]["work"], work_target(original))
-        self.assertNotIn("final", result["observations"][0])
-        self.assertNotIn("instruction", result["observations"][0])
-        self.assertEqual(result["observations"][0]["condition"], "work_ended")
-        queried = await self.call("query_agents", {"target": work_target(original)})
-        self.assertEqual(queried["final"], "original final")
-        self.assertNotIn("profile", result["observations"][0])
-        self.assertEqual(self.repo.rows[next_work]["status"], "running")
-
-    async def test_message_wakes_agent_wait_without_copying_body_or_skipping_other_senders(
-        self,
-    ):
-        a, _ = self.add_work()
-        b, _ = self.add_work()
-        self.runtime.messages[a] = 9
-        first = await self.call(
-            "wait_agent",
-            {"agents": [agent_target(a), agent_target(b)], "timeout_seconds": 0},
-        )
-        self.assertEqual(first["state"], "message_available")
-        self.assertEqual(first["message_sources"], [agent_target(a)])
-        self.runtime.messages[b] = 2
-        second = await self.call(
-            "wait_agent",
-            {"agents": [agent_target(a), agent_target(b)], "timeout_seconds": 0},
-        )
-        self.assertEqual(second["message_sources"], [agent_target(b)])
-        third = await self.call(
-            "wait_agent",
-            {"agents": [agent_target(a), agent_target(b)], "timeout_seconds": 0},
-        )
-        self.assertEqual(third["state"], "timeout")
-
-    async def test_one_message_wakes_concurrent_observers_without_consumption(self):
-        agent, _ = self.add_work()
-        arguments = {"agents": [agent_target(agent)], "timeout_seconds": 30}
-        first = asyncio.create_task(self.call("wait_agent", arguments))
-        second = asyncio.create_task(self.call("wait_agent", arguments))
-        while self.runtime.waiters < 2:
-            await asyncio.sleep(0)
-        self.runtime.messages[agent] = 1
-        await self.runtime.changed()
-        results = await asyncio.wait_for(asyncio.gather(first, second), 1)
+        result = await waiter
+        self.assertEqual(result["meta"]["wait_reason"], "condition_met")
         self.assertEqual(
-            [r["state"] for r in results], ["message_available", "message_available"]
+            self.records(result),
+            [
+                {
+                    "agent": agent_target(agent),
+                    "work": work_target(work),
+                    "work_status": "completed",
+                }
+            ],
         )
-        later = await self.call(
-            "wait_agent", {"agents": [agent_target(agent)], "timeout_seconds": 0}
-        )
-        self.assertEqual(later["state"], "timeout")
 
-    async def test_agent_wait_reports_stopped_bound_work_without_calling_it_success(self):
-        agent, work = self.add_work()
-        waiter = asyncio.create_task(self.call("wait_agent", {
-            "agents": [agent_target(agent)], "until": "work_end"}))
-        while not self.runtime.waiters:
-            await asyncio.sleep(0)
-        self.repo.rows[work].update(status="stopped", terminal_reason="DEPENDENCY_NOT_SUCCESSFUL")
-        await self.runtime.changed()
-        result = await asyncio.wait_for(waiter, 1)
-        self.assertEqual(result["state"], "settled")
-        self.assertEqual(result["observations"], [{"target": agent_target(agent),
-            "condition": "work_ended", "work": work_target(work)}])
-        self.assertEqual((await self.call("query_agents", {"target": work_target(work)}))["status"], "stopped")
-        self.assertEqual(self.runtime.suspended, 0)
-
-    async def test_cell_control_interrupts_idle_observation_without_stopping_work(self):
-        agent, work = self.add_work(status="queued")
-        waiter = asyncio.create_task(self.call("wait_agent", {"agents": [agent_target(agent)]}))
-        while not self.runtime.waiters:
-            await asyncio.sleep(0)
-        self.context.cell_cancel_event.set()
-        result = await asyncio.wait_for(waiter, 1)
-        self.assertEqual(result["state"], "interrupted")
-        self.assertEqual(result["pending_targets"], [agent_target(agent)])
-        self.assertEqual(self.repo.rows[work]["status"], "queued")
-        self.assertEqual(self.runtime.suspended, 0)
-
-    async def test_unselected_agent_message_does_not_interrupt_but_cell_stop_does(
-        self,
-    ):
-        selected, work = self.add_work()
-        other, _ = self.add_work()
+    async def test_idle_is_one_current_snapshot_not_accumulated_observations(self):
+        a, wa = self.add_work(status="completed")
+        b, wb = self.add_work(status="running")
         waiter = asyncio.create_task(
             self.call(
                 "wait_agent",
-                {"agents": [agent_target(selected)], "timeout_seconds": 300},
+                {"agents": [agent_target(a), agent_target(b)], "timeout_seconds": 1},
             )
         )
         while not self.runtime.waiters:
             await asyncio.sleep(0)
-        self.runtime.messages[other] = 1
+        self.repo.rows[wa]["status"] = "running"
+        self.repo.rows[wb]["status"] = "completed"
         await self.runtime.changed()
-        await asyncio.sleep(0)
-        self.assertFalse(waiter.done())
-        self.context.cell_cancel_event.set()
-        result = await asyncio.wait_for(waiter, 1)
-        self.assertEqual(result["state"], "interrupted")
-        self.assertEqual(self.repo.rows[work]["status"], "running")
-        self.assertNotIn(other, self.context.agent_message_cursors)
-
-    async def test_code_mode_wait_filters_senders_without_cell_cursors(self):
-        selected, _ = self.add_work()
-        other, _ = self.add_work()
-        self.context.cell_cancel_event = None
-        self.context.agent_message_cursors = None
-        waiter = asyncio.create_task(self.call(
-            "wait_agent", {"agents": [agent_target(selected)], "timeout_seconds": 30}
-        ))
-        while not self.runtime.waiters:
+        while self.runtime.waiters < 2:
             await asyncio.sleep(0)
-        self.runtime.messages[other] = 1
-        await self.runtime.changed()
-        await asyncio.sleep(0)
         self.assertFalse(waiter.done())
-        self.runtime.messages[selected] = 1
+        self.repo.rows[wa]["status"] = "completed"
         await self.runtime.changed()
-        result = await asyncio.wait_for(waiter, 1)
-        self.assertEqual(result["state"], "message_available")
-        self.assertEqual(result["message_sources"], [agent_target(selected)])
+        result = await waiter
+        self.assertEqual(
+            self.records(result),
+            [
+                {"agent": agent_target(a), "is_idle": True},
+                {"agent": agent_target(b), "is_idle": True},
+            ],
+        )
 
-    async def test_work_stop_does_not_cancel_unrelated_queued_work(self):
-        agent, running = self.add_work()
-        _, queued = self.add_work(agent=agent, status="queued")
-        _, completed = self.add_work(agent=agent, status="completed", final="kept")
-        result = await self.call("stop_agent", {"target": work_target(running)})
-        self.assertEqual(result["works"][0]["status"], "stopped")
-        self.assertEqual(self.repo.rows[queued]["status"], "queued")
-        ended = await self.call("stop_agent", {"target": work_target(completed)})
-        self.assertFalse(ended["stopped"])
-        self.assertNotIn("final", ended["works"][0])
-        self.assertEqual((await self.call("query_agents", ended["works"][0]["inspect"]["arguments"]))["final"], "kept")
+    async def test_messages_follow_selected_input_order_and_advance_only_after_js_delivery(
+        self,
+    ):
+        a, _ = self.add_work(status="completed")
+        b, _ = self.add_work(status="running")
+        self.runtime.messages = {b: 3, a: 2}
+        args = {"agents": [agent_target(a), agent_target(b)], "timeout_seconds": 0}
+        result = await self.api.invoke(
+            tool_name="wait_agent", arguments=args, invocation_context=self.context
+        )
+        self.assertEqual(
+            result.public_value()["meta"],
+            {
+                "status": "SUCCESS",
+                "wait_reason": "message_available",
+                "message_sources": [agent_target(a), agent_target(b)],
+            },
+        )
+        self.assertEqual(self.context.agent_message_cursors, {})
+        await result.delivery_succeeded()
+        self.assertEqual(self.context.agent_message_cursors, {a: 2, b: 3})
+        self.assertEqual(self.runtime.messages, {b: 3, a: 2})
+        second = await self.call("wait_agent", args)
+        self.assertEqual(second["meta"]["wait_reason"], "timeout")
 
-    async def test_receipt_arrays_preserve_titles_positions_and_same_agent_fifo(self):
-        refs, first_args = envelope([{'instruction': 'create', 'work_title': '旧标题'}])
-        first = await self.call('run_agent', first_args)
-        self.assertEqual(first['agents'], refs['agents'])
-        self.assertEqual(first['works'], refs['works'])
-        self.assertEqual(first['details'][0]['work_title'], '旧标题')
-        target = first['agents'][0]
-        refs, next_args = envelope([
-            {'target': target, 'instruction': 'second', 'work_title': '重复标题'},
-            {'target': target, 'instruction': 'third', 'work_title': '重复标题'},
-            {'target': target, 'instruction': 'fourth'},
-        ])
-        result = await self.call('run_agent', next_args)
-        self.assertEqual(set(result), {'agents', 'works', 'details'})
-        self.assertEqual(result['agents'], [target] * 3)
-        self.assertEqual(result['works'], refs['works'])
-        self.assertEqual([detail['work_title'] for detail in result['details']], ['重复标题', '重复标题', None])
-        for index, detail in enumerate(result['details']):
-            self.assertEqual(detail['inspect']['arguments']['target'], result['works'][index])
-            queried = await self.call('query_agents', detail['inspect']['arguments'])
-            self.assertEqual(queried['work_title'], detail['work_title'])
-        self.assertEqual(self.repo.rows[first['works'][0]['work_id']]['work_title'], '旧标题')
-        self.assertEqual([row['instruction'] for row in self.repo.rows.values()], ['create', 'second', 'third', 'fourth'])
+    async def test_overlapping_waits_can_report_same_message_and_other_cells_are_independent(
+        self,
+    ):
+        a, _ = self.add_work(status="running")
+        args = {"agents": [agent_target(a)], "timeout_seconds": 0}
+        self.runtime.messages[a] = 7
+        results = await asyncio.gather(
+            *[
+                self.api.invoke(
+                    tool_name="wait_agent",
+                    arguments=args,
+                    invocation_context=self.context,
+                )
+                for _ in range(2)
+            ]
+        )
+        self.assertTrue(
+            all(
+                r.public_value()["meta"]["wait_reason"] == "message_available"
+                for r in results
+            )
+        )
+        for result in results:
+            await result.delivery_succeeded()
+        other = (
+            replace(self.context)
+            if False
+            else SimpleNamespace(**{**vars(self.context), "agent_message_cursors": {}})
+        )
+        result = await self.api.invoke(
+            tool_name="wait_agent", arguments=args, invocation_context=other
+        )
+        self.assertEqual(
+            result.public_value()["meta"]["wait_reason"], "message_available"
+        )
 
-    async def test_root_native_and_child_object_waits_rejected_at_actual_owner(self):
-        agent, work = self.add_work(status='completed')
-        self.context.invocation_source = SimpleNamespace(kind='MODEL_TOOL_CALL')
-        for name, args in [('run_agent', envelope([{'instruction': 'forbidden'}])[1]),
-                           ('wait_agent', {'agents': [agent_target(agent)]})]:
-            with self.assertRaisesRegex(ValueError, 'live Code Mode'):
-                await self.call(name, args)
-        with self.assertRaisesRegex(ValueError, 'native subagent'):
-            await self.call('wait_message', {})
-        self.api.session_id = self.context.session_id = random_id('session')
-        for name, args in [('wait_agent', {'agents': [agent_target(agent)]})]:
-            with self.assertRaisesRegex(ValueError, 'only to ROOT'):
-                await self.call(name, args)
-        self.context.invocation_source = SimpleNamespace(kind='CODE_MODE_CALL')
-        with self.assertRaisesRegex(ValueError, 'native subagent'):
-            await self.call('wait_message', {})
-        self.assertEqual(self.repo.admissions, [])
+    async def test_cancel_takes_priority_and_does_not_read_again_or_stop_targets(self):
+        a, work = self.add_work(status="running")
+        self.runtime.messages[a] = 1
+        self.context.cell_cancel_event.set()
+        self.repo.read_agent_wait_states = lambda **_: self.fail(
+            "cancelled wait re-read states"
+        )
+        result = await self.call(
+            "wait_agent", {"agents": [agent_target(a)], "timeout_seconds": 0}
+        )
+        self.assertEqual(result["meta"]["status"], "CANCELLED")
+        self.assertEqual(self.repo.rows[work]["status"], "running")
+        self.assertEqual(self.context.agent_message_cursors, {})
 
-    async def test_root_alias_and_actual_root_target_are_rejected(self):
-        for target in (agent_target("ROOT"), agent_target(self.root)):
-            with self.assertRaises(ValueError):
-                await self.call("wait_agent", {"agents": [target], "timeout_seconds": 0})
+    async def test_missing_target_is_error_and_stopped_work_is_normal_condition(self):
+        result = await self.call(
+            "wait_agent",
+            {"works": [work_target(random_id("queue"))], "timeout_seconds": 0},
+        )
+        self.assertEqual(result["meta"]["status"], "ERROR")
+        a, work = self.add_work(status="stopped")
+        result = await self.call("wait_agent", {"works": [work_target(work)]})
+        self.assertEqual(
+            result["meta"], {"status": "SUCCESS", "wait_reason": "condition_met"}
+        )
+        self.assertEqual(self.records(result)[0]["work_status"], "stopped")
 
-    async def test_wait_collection_does_not_inherit_dispatch_member_limit(self):
-        agents = [agent_target(self.add_work(status='completed')[0]) for _ in range(17)]
-        result = await self.call('wait_agent', {'agents': agents})
-        self.assertEqual([item['target'] for item in result['observations']], agents)
-        self.assertEqual(result['state'], 'settled')
+    async def test_wait_collection_has_no_dispatch_member_limit(self):
+        works = [self.add_work(status="completed")[1] for _ in range(25)]
+        result = await self.call(
+            "wait_agent", {"works": [work_target(work) for work in works]}
+        )
+        self.assertEqual(len(self.records(result)), 25)
 
-    async def test_title_receipt_budget_rejects_whole_dispatch_before_admission(self):
-        _, args = envelope([{'instruction': 'a', 'work_title': 'final title'}, {'instruction': 'b'}])
-        self.context.page_budget = replace(self.context.page_budget, accepts_provider_body=
-            lambda body, memory: 'final title' not in body)
-        rejected = await self.api.invoke(tool_name='run_agent', arguments=args, invocation_context=self.context)
-        self.assertEqual(rejected.state, 'APPLICATION_ERROR')
-        self.assertEqual(self.repo.admissions, [])
-        self.assertEqual(self.repo.rows, {})
+    async def test_root_native_and_subagent_js_wait_rejected_at_actual_owner(self):
+        self.context.invocation_source = SimpleNamespace(kind="MODEL_TOOL_CALL")
+        with self.assertRaises(ValueError):
+            await self.call(
+                "wait_agent", {"agents": [agent_target(random_id("session"))]}
+            )
+        self.context.invocation_source = SimpleNamespace(kind="CODE_MODE_CALL")
+        self.context.session_id = random_id("session")
+        with self.assertRaises(ValueError):
+            await self.call(
+                "wait_agent", {"agents": [agent_target(random_id("session"))]}
+            )
+
+    async def test_handoff_uses_internal_active_paging_without_pseudo_agent(self):
+        for _ in range(51):
+            self.add_work(status="queued")
+        first = await self.api.freeze_compaction_handoff()
+        second = await self.api.freeze_compaction_handoff(
+            cursor=first[-1]["agent"]["agent_id"]
+        )
+        self.assertEqual(len(first) + len(second), 51)
+        self.assertTrue(
+            all(
+                row["agent"]["agent_id"] in self.repo.agents
+                for row in (*first, *second)
+            )
+        )

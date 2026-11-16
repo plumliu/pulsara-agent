@@ -21,7 +21,7 @@ from pulsara_agent.model_input.contracts import (
     StructuredModelInputCompileError,
 )
 from pulsara_agent.model_input.continuity import NewTriggerAnchor, NoNewTriggerAnchor
-from tests.test_round3_structured_model_input_compiler import (
+from tests.support.model_input import (
     _append_anchor,
     _snapshot,
     _user,

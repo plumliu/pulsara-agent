@@ -2,7 +2,7 @@
 
 共用规则见[工具索引](../PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 1、2 章；完整保存、JS 返回及 Cell 输出沿[统一交付草案](../PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)，存储沿[数据库 hardcut 草案](../PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md)。
 
-状态：合同已确定，未实施。tools.decide 仅供 ROOT 在 bypass-permissions 的 Code Mode 中调用，不提供原生入口或 Subagent JS API。本文件只规定参数与结果修订，其余底层产品语义保持现状。
+状态：当前合同已接入生产代码，正在完成 hardcut 跨层验收；正常使用仍按实施计划停用。tools.decide 仅供 ROOT 在 bypass-permissions 的 Code Mode 中调用，不提供原生入口或 Subagent JS API。本文件规定当前参数与结果合同，其余底层产品语义沿原 owner。
 
 ## 1. tools.decide：逐项判断文本是否满足条件
 
@@ -94,4 +94,4 @@ if (tools.decide.available()) {
 - [脚本 API 目录与说明](../src/pulsara_agent/capability/builtin_catalog.py)
 - [Cell 中冻结的 available()](../src/pulsara_agent/code_mode/node/guest.js)
 
-这些链接用于核对实施接点，不表示当前代码已经符合本草案。
+这些链接用于核对当前生产接点，实际验收状态见实施计划。

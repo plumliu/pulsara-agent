@@ -950,16 +950,12 @@ describe('exact prompt projection', () => {
     expect(messages.find(m => m.id === 'detached')?.traces?.[0]).toMatchObject({ status: 'failed' });
   });
 
-  it('hydrates canonical view_image content into its exact tool trace owner', async () => {
-    const imageBody = JSON.stringify({
-      parts: [
-        { type: 'text', text: 'Image loaded.' },
-        {
-          type: 'image', image_ref: 'image:aaaaaaaaaaaaaaaaaaaaaaaaaa', digest: `sha256:${'a'.repeat(64)}`, encoded_bytes: 3,
-          media_type: 'image/png', width: 2, height: 1,
-        },
-      ],
-    });
+  it('hydrates saved typed view_image content into its exact tool trace owner', async () => {
+    const value = {
+      target: {kind: 'PATH', path: 'picture.png'}, meta: {status: 'SUCCESS'},
+      content: [{type: 'text', value: 'Image loaded.\n'},
+        {type: 'image', value: {kind: 'IMAGE_REF', image_ref: 'image:aaaaaaaaaaaaaaaaaaaaaaaaaa'}}],
+    };
     stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(connectPayload([
       {
         entry_id: 'request', turn_id: 'turn', entry_sequence: '1',
@@ -969,18 +965,16 @@ describe('exact prompt projection', () => {
       {
         entry_id: 'result', turn_id: 'turn', entry_sequence: '2',
         entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
-        content: { ...inlineContent(imageBody), media_type: 'application/vnd.pulsara.prompt+json', codec: 'utf-8' },
+        content: { ...inlineContent(JSON.stringify(value)), media_type: 'application/vnd.pulsara.tool-result+json', codec: 'utf-8' },
         tool_result: { assistant_entry_id: 'request', tool_call_id: 'call', result_state: 'SUCCESS' },
       },
     ])), { status: 200, headers: { 'Content-Type': 'application/json' } })));
 
     const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
     const trace = connection.current().messages.find((message) => message.id === 'request')?.traces?.[0];
-    expect(trace?.resultText).toBe('Image loaded.');
-    expect(trace?.resultContent?.parts[1]).toMatchObject({
-      type: 'image', source: 'canonical', refOrdinal: 0,
-      owner: { kind: 'entry', entryId: 'result' },
-    });
+    expect(trace?.resultEntryId).toBe('result');
+    expect(trace?.businessValue).toEqual(value);
+    expect(trace?.resultText).toContain('Image loaded.\n');
   });
 
   it('keeps an in-flight user steer distinct from an ordinary user turn', async () => {
@@ -2294,8 +2288,7 @@ describe('capability catalog adapter', () => {
             effect: 'READ_ONLY', available_to_subagents: true, parallel_safe: true,
           }],
         }],
-        collisions: [],
-      },
+          },
     }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
 
     const capabilities = await new LocalHttpRuntimeAdapter().inspectCapabilities('session-1');
@@ -2611,7 +2604,6 @@ describe('source text fidelity hard cut', () => {
           ordinal: '9', label: SOURCE_FIDELITY_TEXT,
           description: SOURCE_FIDELITY_TEXT, recommended: true,
         }],
-        allow_free_text: true,
       },
     }];
     stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
@@ -2627,7 +2619,6 @@ describe('source text fidelity hard cut', () => {
         ordinal: 9, label: SOURCE_FIDELITY_TEXT,
         description: SOURCE_FIDELITY_TEXT, recommended: true,
       }],
-      allowFreeText: true,
     });
   });
 
@@ -3391,9 +3382,9 @@ it('refreshes committed native annotations using the referenced tool-call block'
   await connection.close();
 });
 
-it('presents only fresh authenticated complete root results, without history replay or blocking observe', async () => {
+it('presents actual accepted targets from fresh root failures without history replay or blocking observe', async () => {
   const assistant = {entry_id:'open-call',turn_id:'turn-open',entry_sequence:'1',entry_kind:'ASSISTANT',scope_kind:'ROOT',blocks:[{block_id:'b',block_kind:'TOOL_CALL',tool_call_id:'open-1',tool_name:'open_in_pulsara'}]};
-  const result = {entry_id:'open-result',turn_id:'turn-open',entry_sequence:'2',entry_kind:'TOOL_RESULT',scope_kind:'ROOT',content:inlineContent(JSON.stringify({targets:[{target:{kind:'PANEL',name:'capabilities'}}],errors:[{index:1,message:'invalid'}]})),tool_result:{assistant_entry_id:'open-call',tool_call_id:'open-1',result_state:'SUCCESS',source_coverage:'COMPLETE',output_omitted:false}};
+  const result = {entry_id:'open-result',turn_id:'turn-open',entry_sequence:'2',entry_kind:'TOOL_RESULT',scope_kind:'ROOT',tool_result:{assistant_entry_id:'open-call',tool_call_id:'open-1',result_state:'ERROR',result_facts_json:JSON.stringify({presentation_targets:[{target:{kind:'PATH',path:'/project/a.md'}}]})}};
   let committed: unknown[] = [];
   let cut = '9007199254740993';
   let releaseWindow!: () => void;
@@ -3417,22 +3408,22 @@ it('presents only fresh authenticated complete root results, without history rep
   await connection.observe(); // The association read is still pending.
   expect(seen).toHaveLength(1); expect(windows).toEqual([expect.objectContaining({anchor_entry_id:'open-call',maximum_entries:1})]);
   await connection.observe(); expect(seen).toHaveLength(1);
-  releaseWindow(); expect(await reads[0]).toEqual({targets:[{type:'panel',name:'capabilities'}],errors:[{index:1,message:'invalid'}]});
+  releaseWindow(); expect(await reads[0]).toEqual({targets:[{type:'file',path:'/project/a.md'}]});
   cut='9007199254740996'; await connection.snapshot(); expect(seen[0].signal.aborted).toBe(true);
   committed=[{projection_kind:'IMMUTABLE_ENTRY',event_sequence:'9007199254740995',entry:result},{projection_kind:'IMMUTABLE_ENTRY',event_sequence:'9007199254740997',entry:{...result,entry_id:'imported',entry_owner_kind:'IMPORTED_HISTORY'}}];cut='9007199254740997';
   await connection.observe(); expect(seen).toHaveLength(1);
-  cut='9007199254740998';committed=[{projection_kind:'IMMUTABLE_ENTRY',event_sequence:cut,entry:{...result,entry_id:'truncated',tool_result:{...result.tool_result,output_omitted:true}}}];
+  cut='9007199254740998';committed=[{projection_kind:'IMMUTABLE_ENTRY',event_sequence:cut,entry:{...result,entry_id:'truncated',tool_result:{...result.tool_result,result_facts_json:'{}'}}}];
   await connection.observe();expect(seen).toHaveLength(1);
   cut='9007199254740999';committed=[{projection_kind:'IMMUTABLE_ENTRY',event_sequence:cut,entry:{...result,entry_id:'new'}}];
   await connection.observe();expect(seen).toHaveLength(2); await reads[1];
   await connection.close();expect(seen[1].signal.aborted).toBe(true);
 });
 
-it('announces only a fresh, complete, host-owned manage_capability OAuth success', async () => {
+it('announces fresh accepted login facts without reading model content, including a later adoption failure', async () => {
   const authorization = {owner:{kind:'local',scope_key:'user',server_id:'notion',plugin_id:null},config_identity:'config',display_identity:'config',package_install_id:null};
-  const value = {action:'AUTHORIZE_MCP',status:'APPLIED',target:{kind:'MCP_CONNECTION',scope:'USER',source_kind:'LOCAL',server_id:'notion'},current:{authorized:true},authorization};
+  const fact = {...authorization, scope:'USER'};
   const assistant = {entry_id:'auth-call',turn_id:'turn-auth',entry_sequence:'1',entry_kind:'ASSISTANT',scope_kind:'ROOT',blocks:[{block_id:'b',block_kind:'TOOL_CALL',tool_call_id:'auth-1',tool_name:'manage_capability'}]};
-  const result = {entry_id:'auth-result',turn_id:'turn-auth',entry_sequence:'2',entry_kind:'TOOL_RESULT',scope_kind:'ROOT',content:inlineContent(JSON.stringify(value)),tool_result:{assistant_entry_id:'auth-call',tool_call_id:'auth-1',result_state:'SUCCESS',source_coverage:'COMPLETE',output_omitted:false}};
+  const result = {entry_id:'auth-result',turn_id:'turn-auth',entry_sequence:'2',entry_kind:'TOOL_RESULT',scope_kind:'ROOT',tool_result:{assistant_entry_id:'auth-call',tool_call_id:'auth-1',result_state:'SUCCESS',result_facts_json:JSON.stringify({authorization:fact})}};
   let committed: unknown[] = [];
   let cut = '10';
   stubRuntimeFetch(vi.fn(async input => {
@@ -3440,29 +3431,28 @@ it('announces only a fresh, complete, host-owned manage_capability OAuth success
     if (url.endsWith('/connections')) { const payload = connectPayload(); payload.snapshot.snapshot.event_sequence_cut = cut; return new Response(JSON.stringify(payload)); }
     if (url.endsWith('/observe')) return new Response(JSON.stringify({observation:{committed,through_event_sequence:cut}}));
     if (url.endsWith('/history/window')) return new Response(JSON.stringify({session_id:'session-1',entries:[assistant]}));
-    return new Response('{}');
+    throw new Error(`Unexpected OAuth content read: ${url}`);
   }));
   const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
   if (connection instanceof CanonicalHistoryView) throw new Error('expected controller');
   const reads: Promise<unknown>[] = [];
   connection.subscribeMcpAuthorization!(request => reads.push(request.read()));
   committed = [{projection_kind:'IMMUTABLE_ENTRY',event_sequence:cut,entry:result}];
-  await connection.observe(); expect(reads).toHaveLength(0); // bootstrap/history boundary
+  await connection.observe(); expect(reads).toHaveLength(0);
   cut = '11'; committed = [{projection_kind:'IMMUTABLE_ENTRY',event_sequence:cut,entry:result}];
   await connection.observe(); expect(await reads[0]).toEqual({scope:'USER',authorization});
-  await connection.observe(); expect(reads).toHaveLength(1); // no duplicate focus
+  await connection.observe(); expect(reads).toHaveLength(1);
   for (const changed of [
     {...result,entry_owner_kind:'IMPORTED_HISTORY'},
     {...result,scope_kind:'SUBAGENT'},
-    {...result,tool_result:{...result.tool_result,output_omitted:true}},
-    {...result,tool_result:{...result.tool_result,result_state:'ERROR'}},
+    {...result,tool_result:{...result.tool_result,result_facts_json:'{}'}},
   ]) {
     cut = String(Number(cut) + 1); committed = [{projection_kind:'IMMUTABLE_ENTRY',event_sequence:cut,entry:changed}];
     await connection.observe();
   }
   expect(reads).toHaveLength(1);
-  cut = '20'; committed = [{projection_kind:'IMMUTABLE_ENTRY',event_sequence:cut,entry:{...result,entry_id:'rejected-result',content:inlineContent(JSON.stringify({...value,status:'REJECTED'}))}}];
-  await connection.observe(); expect(await reads[1]).toBeUndefined();
+  cut = '20'; committed = [{projection_kind:'IMMUTABLE_ENTRY',event_sequence:cut,entry:{...result,entry_id:'adoption-failure',tool_result:{...result.tool_result,result_state:'ERROR'}}}];
+  await connection.observe(); expect(await reads[1]).toEqual({scope:'USER',authorization});
   await connection.close();
 });
 
@@ -3471,7 +3461,7 @@ it.each([false, true])('sends one typed Plan revision source through the real ad
     active_plan_workflow:{workflow_id:'workflow-1', workflow_revision:'7'},
     open_plan_interaction:{interaction_id:'review:exact', workflow_id:'workflow-1', kind:'DRAFT_REVIEW'},
   }), {resolve_plan_interaction:{command_id:'command:revise', interaction_status:'REVISION_REQUESTED',
-    continuation_turn_id:'turn:revision', draft_decision:'PLAN_DRAFT_REVISE'}}];
+    draft_decision:'PLAN_DRAFT_REVISE'}}];
   const fetcher = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(responses.shift()), {status:200}));
   stubRuntimeFetch(fetcher);
   const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
@@ -3480,7 +3470,7 @@ it.each([false, true])('sends one typed Plan revision source through the real ad
     : {kind:'plan-draft', decision:'revise', revisionPrompt:{parts:[
       {type:'image', source:'local', bytes:Uint8Array.from([0, 255]), declaredMediaType:'image/png'},
     ]}}, 'command:revise');
-  expect(receipt).toMatchObject({commandId:'command:revise', status:'succeeded', planDraftDecision:'revise', planContinuationTurnId:'turn:revision'});
+  expect(receipt).toMatchObject({commandId:'command:revise', status:'succeeded', planDraftDecision:'revise', planContinuationTurnId:undefined});
   const body = JSON.parse(String(fetcher.mock.calls[1][1]?.body));
   expect(body).toMatchObject({command_id:'command:revise', interaction_id:'review:exact', workflow_id:'workflow-1',
     expected_workflow_revision:7, resolution_kind:'draft', draft_decision:'PLAN_DRAFT_REVISE'});
@@ -3684,13 +3674,14 @@ it.each(['controller','observer'] as const)('projects the scoped current retry s
  expect(connection.current().messages).toEqual([]);
 });
 it('keeps each Cell record in the real queue order and projects its source rather than an Agent identity',async()=>{
- const body=(sequence:number,text:string)=>({media_type:'application/vnd.pulsara.terminal-observation+json',inline_content:btoa(JSON.stringify({cell_id:'cell:one',source_turn_id:'turn:source',source_exec_attempt_id:'attempt:cell',record_sequence:sequence,record:{kind:sequence===2?'error':'log',...(sequence===2?{error:{message:text}}:{text})}}))});
- const queue=[{queue_item_id:'queue:b',queue_sequence:'2',status:'PENDING',delivery_mode:'NEW_TURN',input_origin:'CELL_OUTPUT',source_session_id:'session-1',source_turn_id:'turn:source',source_tool_attempt_id:'attempt:cell',content:body(1,'**one**')},{queue_item_id:'queue:c',queue_sequence:'3',status:'PENDING',delivery_mode:'NEW_TURN',input_origin:'CELL_OUTPUT',source_session_id:'session-1',source_turn_id:'turn:source',source_tool_attempt_id:'attempt:cell',content:body(2,'failure')},{queue_item_id:'queue:a',command_id:'command:a',queue_sequence:'1',status:'PENDING',delivery_mode:'NEW_TURN',input_origin:'USER_SUBMISSION',content:inlinePrompt('human')}];
+ const body=(_sequence:number,text:string)=>({media_type:'application/vnd.pulsara.prompt+json',inline_content:btoa(JSON.stringify({parts:[{type:'text',text}]}))});
+ const source=(sequence:number)=>({source_cell_id:'cell:one',source_record_sequence:String(sequence),cell_output_kind:sequence===2?'diagnostic':'log'});
+ const queue=[{queue_item_id:'queue:b',queue_sequence:'2',status:'PENDING',delivery_mode:'NEW_TURN',input_origin:'CELL_OUTPUT',source_session_id:'session-1',source_turn_id:'turn:source',source_tool_attempt_id:'attempt:cell',...source(1),content:body(1,'**one**')},{queue_item_id:'queue:c',queue_sequence:'3',status:'PENDING',delivery_mode:'NEW_TURN',input_origin:'CELL_OUTPUT',source_session_id:'session-1',source_turn_id:'turn:source',source_tool_attempt_id:'attempt:cell',...source(2),content:body(2,'failure')},{queue_item_id:'queue:a',command_id:'command:a',queue_sequence:'1',status:'PENDING',delivery_mode:'NEW_TURN',input_origin:'HUMAN_MESSAGE',content:inlinePrompt('human')}];
  stubRuntimeFetch(vi.fn(async()=>new Response(JSON.stringify(connectPayload([],{prompt_queue:queue,prompt_queue_total_count:'3'},[],{})),{status:200})));
  const connection=await new LocalHttpRuntimeAdapter().connect('session-1');
  expect(connection.current().queuedPrompts.map(item=>item.queueItemId)).toEqual(['queue:a','queue:b','queue:c']);
  expect(connection.current().queuedPrompts[1]).toMatchObject({sourceKind:'cell',sourceExecAttemptId:'attempt:cell',content:{parts:[{type:'text',text:'**one**'}]},cellOutput:{cellId:'cell:one',kind:'log',recordSequence:1}});
- expect(connection.current().queuedPrompts[2]).toMatchObject({sourceKind:'cell',cellOutput:{kind:'error',recordSequence:2}});
+ expect(connection.current().queuedPrompts[2]).toMatchObject({sourceKind:'cell',cellOutput:{kind:'diagnostic',recordSequence:2}});
  expect(connection.current().queuedCount).toBe(3);
 });
 

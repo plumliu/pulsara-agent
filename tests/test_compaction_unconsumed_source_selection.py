@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from pulsara_agent.identity import derive_id
+from pulsara_agent.ports.terminal_observation import CellOutputSource
 from pulsara_agent.conversation_kernel.compaction.planner import (
     unconsumed_request_start_sequence,
 )
@@ -29,7 +30,20 @@ def test_text_supplement_is_n_until_an_assistant_consumes_its_input_cut(origin):
     read = _first_call_read()
     canonical = read.dispatch_read.compile_snapshot.canonical_input
     old, answer, context, instruction, dependency = canonical.items
-    supplement = replace(context, input_origin=origin)
+    supplement = replace(
+        context,
+        input_origin=origin,
+        item_kind=(
+            FrozenProviderInputItemKind.TERMINAL_OBSERVATION
+            if origin is CanonicalInputOriginKind.CELL_OUTPUT
+            else context.item_kind
+        ),
+        cell_output_source=(
+            CellOutputSource(derive_id("cell", "compaction-new-input"), 1, "log")
+            if origin is CanonicalInputOriginKind.CELL_OUTPUT
+            else None
+        ),
+    )
     source = SimpleNamespace(items=(old, answer, supplement, instruction, dependency))
     assert unconsumed_request_start_sequence(source, consumed_through_sequence=2) == 3
     assert (
@@ -50,6 +64,11 @@ def test_new_non_human_request_material_has_the_same_n_boundary(kind):
     item = replace(
         canonical.items[2],
         item_kind=kind,
+        cell_output_source=(
+            CellOutputSource(derive_id("cell", "compaction-new-input"), 1, "log")
+            if kind is FrozenProviderInputItemKind.TERMINAL_OBSERVATION
+            else None
+        ),
         input_origin=(
             CanonicalInputOriginKind.CELL_OUTPUT
             if kind is FrozenProviderInputItemKind.TERMINAL_OBSERVATION

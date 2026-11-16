@@ -7,7 +7,7 @@ from typing import Callable, Iterable
 
 from pulsara_agent.conversation_kernel.current_work_runtime import FrozenTodoSnapshot
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
-from pulsara_agent.primitives.context import canonical_json_bytes, context_fingerprint
+from pulsara_agent.primitives.context import canonical_json_bytes
 
 MAXIMUM_RUNTIME_HANDOFF_PCA_TOKENS = 3_200
 HANDOFF_CONTINUATION = (
@@ -24,7 +24,6 @@ SUBAGENT_HANDOFF_BUDGET_OMISSION = (
     "query_processes or query_agents without a target to "
     "discover currently retained objects."
 )
-_PROJECTION_CONTRACT = "pulsara.compaction-runtime-handoff-projection.v4-active-pca"
 PCA_KEYS = ("terminal_processes", "code_cells", "agents")
 
 
@@ -44,21 +43,11 @@ class FrozenTerminalProcessHandoffFact:
 
 @dataclass(frozen=True, slots=True)
 class FrozenCompactionRuntimeHandoff:
-    full_text: str = field(repr=False)
-    compact_text: str = field(repr=False)
-    source_fingerprint: str
+    text: str = field(repr=False)
 
     def __post_init__(self) -> None:
-        if not self.full_text or self.full_text != self.compact_text:
-            raise ValueError(
-                "runtime handoff representations must be complete and equal"
-            )
-        expected = context_fingerprint(
-            _PROJECTION_CONTRACT,
-            {"full": self.full_text, "compact": self.compact_text},
-        )
-        if self.source_fingerprint != expected:
-            raise ValueError("runtime handoff fingerprint mismatch")
+        if not self.text:
+            raise ValueError("runtime handoff text must be nonempty")
 
 
 def _body(payload: dict[str, object], *, omitted: bool, omission_text: str) -> str:
@@ -77,7 +66,7 @@ class CompactionRuntimeHandoffBuilder:
     """Whole-entry admission; callers can stop lazy inventory reads on overflow.
 
     `measure_pca` receives the complete no-TODO body, including the actual
-    explanation(s). It must quote its encoded runtime observation and framing.
+    explanation(s). It must quote its actual user message and framing.
     """
 
     def __init__(
@@ -154,11 +143,7 @@ class CompactionRuntimeHandoffBuilder:
             "total": len(todo_items),
         }
         text = _body(payload, omitted=self._omitted, omission_text=self._omission_text)
-        return FrozenCompactionRuntimeHandoff(
-            text,
-            text,
-            context_fingerprint(_PROJECTION_CONTRACT, {"full": text, "compact": text}),
-        )
+        return FrozenCompactionRuntimeHandoff(text)
 
 
 def handoff_process_rows(

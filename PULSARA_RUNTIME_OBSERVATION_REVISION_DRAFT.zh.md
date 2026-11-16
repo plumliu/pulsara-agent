@@ -1,6 +1,6 @@
 # Pulsara Runtime Observation 修订草案
 
-状态：讨论草案，主体未实施。当前代码已修复同批用户输入的 Skill 引用收集，并删除旧 16 项激活限制；其余目录、提示与交接修订仍待实施。本文件确定 runtime observation 的公共展示形状、Skill 与 MCP 变化通知，本轮运行信息、规划状态、已批准计划和前轮中断说明的发送与压缩交接，以及 USER_ACTIONS 和 MEMORY_WRITE_HINT 提醒。记忆隐式召回已按[记忆 CRUD 草案第 6 节](PULSARA_MEMORY_CRUD_HARD_CUT_DRAFT.zh.md#6-搜索索引与自动召回)确定业务规则，采用本文件的公共外壳。Hook 附加文字使用[独立消息草案](PULSARA_HOOK_CONTEXT_MESSAGE_REVISION_DRAFT.zh.md)，不再作为本外壳的来源；Plugin 自身变化不单独通知。
+状态：当前公共消息、Skill／MCP 通知、运行信息与 Plan 交接路径已接入生产代码，已完成 hardcut 跨层及真实 provider 验收；正常应用尚未重启。本文件确定 runtime observation 的公共展示形状、Skill 与 MCP 变化通知，本轮运行信息、规划状态、已批准计划和前轮中断说明的发送与压缩交接，以及 USER_ACTIONS 和 MEMORY_WRITE_HINT 提醒。记忆隐式召回已按[记忆 CRUD 草案第 6 节](PULSARA_MEMORY_CRUD_HARD_CUT_DRAFT.zh.md#6-搜索索引与自动召回)确定业务规则，采用本文件的公共外壳。Hook 附加文字使用[独立消息草案](PULSARA_HOOK_CONTEXT_MESSAGE_REVISION_DRAFT.zh.md)，不再作为本外壳的来源；Plugin 自身变化不单独通知。
 
 ## 1. 公共模型展示形状
 
@@ -274,7 +274,7 @@ APPROVED_PLAN 使用本次获批调用中保存的完整 plan，不读取 Markdo
 
 上述发送与交接均不受旧“历史里已有原文就跳过”的分支影响。无论原始 exit_plan 调用是否仍在近期保留窗口，APPROVED_PLAN 都按本节时机提供完整原文；原始调用和结果仍按正常历史规则保留，不为避免文字重合而删除或改写历史交互。
 
-完整计划、提示文字、JSON 转义和实际消息封装按真实发送形状计费，不只计算 plan 裸字符串。现行单 source variant 的 1 MiB 字节上限不能沿用为 APPROVED_PLAN 的封装上限；实施时删除这份计划投影上的旧载体限额检查及同用途拒绝路径，不设替代数值，也不因封装开销截断、摘要化或缩小 exit_plan 原有的 1 MiB UTF-8 计划输入范围。最终完整请求仍遵守实际 provider 输入准入和真实资源边界；真实失败明确报告，不伪装成已完整交付。本项当前只修订文档，生产代码待实施。
+完整计划、提示文字、JSON 转义和实际消息封装按真实发送形状计费，不只计算 plan 裸字符串。APPROVED_PLAN 不采用单 source variant 的 1 MiB 载体字节上限，不设替代数值，也不因封装开销截断、摘要化或缩小 exit_plan 原有的 1 MiB UTF-8 计划输入范围。最终完整请求仍遵守实际 provider 输入准入和真实资源边界；真实失败明确报告，不伪装成已完整交付。
 
 ### 6.2 Turn 边界与触发来源
 

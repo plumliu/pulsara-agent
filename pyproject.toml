@@ -31,6 +31,7 @@ dependencies = [
     "av>=17.0,<18",
     "pysubs2>=1.8,<2",
     "psutil>=7,<8",
+    "bm25s>=0.3.16",
 ]
 
 [project.scripts]

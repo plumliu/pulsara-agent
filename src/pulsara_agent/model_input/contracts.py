@@ -14,12 +14,16 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import StrEnum
 from hashlib import sha256
-from typing import Literal, Mapping, Protocol
+from typing import TYPE_CHECKING, Literal, Mapping, Protocol
+
+if TYPE_CHECKING:
+    from pulsara_agent.conversation_kernel.native_tool_delivery import NativeToolPage
+    from pulsara_agent.model_input.continuity import InstalledObservationState
 
 from pulsara_agent.llm.estimator import FinalWireTokenEstimate
 from pulsara_agent.llm.input import (
-    FrozenPromptContent,
     FrozenPromptPart,
+    LLMContentPart,
     PromptAnnotationPart,
     prompt_provider_parts,
     LLMImagePart,
@@ -27,9 +31,11 @@ from pulsara_agent.llm.input import (
     LLMTextPart,
     MessageRole,
     content_has_image,
-    frozen_tool_result_public_text,
     join_text_content,
     llm_content_identity_value,
+)
+from pulsara_agent.ports.terminal_observation import (
+    CellOutputSource, CellOutputImageReadFailure, cell_output_identity_value,
 )
 from pulsara_agent.ports.tool_output import ToolOutputUnavailableReason
 from pulsara_agent.primitives.context import (
@@ -44,7 +50,6 @@ from pulsara_agent.primitives.model_call import (
 )
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.plan_workflow import (
-    PlanApprovedMaterializationDisposition,
     PlanDraftContentIdentity,
     PlanHandoffKind,
     PlanWorkflowEnteredBy,
@@ -59,12 +64,6 @@ from pulsara_agent.primitives.run_permission import (
 from pulsara_agent.primitives.tool_observation import (
     FrozenToolObservationTimingFact,
     canonical_utc_timestamp,
-)
-from pulsara_agent.primitives.tool_result_projection import (
-    BEST_AVAILABLE_TOOL_RESULT_DELIVERY,
-    FrozenToolResultDeliveryRequirement,
-    ToolResultDeliveryRequirement,
-    ToolResultFullDeliveryReason,
 )
 
 
@@ -94,70 +93,29 @@ class CanonicalInputOriginKind(StrEnum):
 
 class ContextSourceKind(StrEnum):
     BASE_SYSTEM = "BASE_SYSTEM"
-    RUNTIME_ENVIRONMENT = "RUNTIME_ENVIRONMENT"
-    RUNTIME_CLOCK = "RUNTIME_CLOCK"
-    RUN_PERMISSION = "RUN_PERMISSION"
-    PLAN_HANDOFF = "PLAN_HANDOFF"
-    PLAN_WORKFLOW = "PLAN_WORKFLOW"
-    USER_ACTIONS = "USER_ACTIONS"
     SKILL_CATALOG = "SKILL_CATALOG"
-    MCP_CATALOG = "MCP_CATALOG"
+    SKILL_CATALOG_CHANGES = "SKILL_CATALOG_CHANGES"
+    MCP_CATALOG_CHANGES = "MCP_CATALOG_CHANGES"
     ACTIVE_SKILL = "ACTIVE_SKILL"
+    TURN_CONTEXT = "TURN_CONTEXT"
+    PLAN_MODE = "PLAN_MODE"
+    APPROVED_PLAN = "APPROVED_PLAN"
     PREVIOUS_TURN_OUTCOME = "PREVIOUS_TURN_OUTCOME"
-    MEMORY_RESPONSE_PREFERENCE_HEAD = "MEMORY_RESPONSE_PREFERENCE_HEAD"
+    USER_ACTIONS = "USER_ACTIONS"
     MEMORY_RECALL = "MEMORY_RECALL"
     MEMORY_WRITE_HINT = "MEMORY_WRITE_HINT"
-    HOOK_CONTEXT = "HOOK_CONTEXT"
     COMPACTION_RUNTIME_HANDOFF = "COMPACTION_RUNTIME_HANDOFF"
-    RETAINED_SKILL_CONTEXT = "RETAINED_SKILL_CONTEXT"
 
 
 class ContextChannel(StrEnum):
     SYSTEM = "SYSTEM"
+    CONTEXT_MESSAGE = "CONTEXT_MESSAGE"
     RUNTIME_OBSERVATION = "RUNTIME_OBSERVATION"
-
-
-class ContextTrustClass(StrEnum):
-    ROOT_INSTRUCTION = "ROOT_INSTRUCTION"
-    AUTHORIZED_CAPABILITY_CONTEXT = "AUTHORIZED_CAPABILITY_CONTEXT"
-    AUTHORIZED_RUNTIME_GUIDANCE = "AUTHORIZED_RUNTIME_GUIDANCE"
-    TRUSTED_RUNTIME_FACT = "TRUSTED_RUNTIME_FACT"
-    UNTRUSTED_OBSERVATION = "UNTRUSTED_OBSERVATION"
-
-
-class ContextSourceLifecycle(StrEnum):
-    EPOCH_ROOT = "EPOCH_ROOT"
-    SNAPSHOT_ON_CHANGE = "SNAPSHOT_ON_CHANGE"
-    CALL_APPEND = "CALL_APPEND"
-    TURN_APPEND = "TURN_APPEND"
-    TURN_SNAPSHOT = "TURN_SNAPSHOT"
-    ACTIVATION_SNAPSHOT = "ACTIVATION_SNAPSHOT"
-    ONE_SHOT = "ONE_SHOT"
-
-
-class ContextSourceAbsenceKind(StrEnum):
-    NOT_APPLICABLE = "NOT_APPLICABLE"
-    EXPLICIT_EMPTY = "EXPLICIT_EMPTY"
-    UNAVAILABLE = "UNAVAILABLE"
 
 
 class ContextBudgetClass(StrEnum):
     MUST_KEEP = "MUST_KEEP"
-    IMPORTANT = "IMPORTANT"
     OPTIONAL = "OPTIONAL"
-    DEBUG = "DEBUG"
-
-
-class ContextRenderMode(StrEnum):
-    FULL = "FULL"
-    COMPACT = "COMPACT"
-    SUMMARY = "SUMMARY"
-    REF_ONLY = "REF_ONLY"
-    UNAVAILABLE_MINIMAL = "UNAVAILABLE_MINIMAL"
-
-
-class ToolResultProviderRenderMode(StrEnum):
-    FULL = "FULL"
 
 
 class ContextPublicDiagnosticCode(StrEnum):
@@ -181,22 +139,15 @@ class ModelInputCompileFailureKind(StrEnum):
     TOOL_SURFACE_INVALID = "TOOL_SURFACE_INVALID"
     REQUIRED_SOURCE_UNAVAILABLE = "REQUIRED_SOURCE_UNAVAILABLE"
     SOURCE_CONTRACT_INVALID = "SOURCE_CONTRACT_INVALID"
-    SOURCE_PHYSICAL_BOUND_EXCEEDED = "SOURCE_PHYSICAL_BOUND_EXCEEDED"
+    PROVIDER_INPUT_WIRE_BYTES_EXCEEDED = "PROVIDER_INPUT_WIRE_BYTES_EXCEEDED"
     COMPILE_WORKING_SET_EXCEEDED = "COMPILE_WORKING_SET_EXCEEDED"
     PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET = "PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET"
     PREFIX_EPOCH_BUDGET_EXHAUSTED = "PREFIX_EPOCH_BUDGET_EXHAUSTED"
     CANONICAL_PREFIX_CONFLICT = "CANONICAL_PREFIX_CONFLICT"
     CANONICAL_DELTA_NOT_PROVIDER_SAFE = "CANONICAL_DELTA_NOT_PROVIDER_SAFE"
-    STATEFUL_SOURCE_REPLACEMENT_OVER_BUDGET = "STATEFUL_SOURCE_REPLACEMENT_OVER_BUDGET"
     REQUIRED_CONTEXT_EXCEEDS_BUDGET = "REQUIRED_CONTEXT_EXCEEDS_BUDGET"
     TOOL_SCHEMA_EXCEEDS_BUDGET = "TOOL_SCHEMA_EXCEEDS_BUDGET"
     FINAL_INPUT_BINDING_MISMATCH = "FINAL_INPUT_BINDING_MISMATCH"
-    FULL_REQUIRED_TOOL_RESULT_NOT_INLINEABLE = (
-        "FULL_REQUIRED_TOOL_RESULT_NOT_INLINEABLE"
-    )
-    FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET = (
-        "FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET"
-    )
     DEADLINE_EXPIRED = "DEADLINE_EXPIRED"
 
 
@@ -207,41 +158,20 @@ class StructuredModelInputCompileError(ValueError):
 
 
 MAXIMUM_BUILTIN_NATIVE_TOOL_COUNT = 64
-MAXIMUM_MCP_NATIVE_TOOL_COUNT = 128
 
 
 @dataclass(frozen=True, slots=True)
 class StructuredModelInputLimits:
-    maximum_source_candidates: int = 32
-    maximum_variants_per_source: int = 4
-    maximum_single_source_variant_bytes: int = 1 << 20
-    maximum_aggregate_full_source_bytes: int = 2 << 20
-    maximum_aggregate_source_variant_bytes: int = 4 << 20
-    # Composition bound; MCP admission separately excludes builtin tools.
-    maximum_tool_specs: int = (
-        MAXIMUM_BUILTIN_NATIVE_TOOL_COUNT + MAXIMUM_MCP_NATIVE_TOOL_COUNT
-    )
-    maximum_tool_spec_canonical_bytes: int = 1 << 20
+    # Provider tools contain the fixed builtin catalog only.
     maximum_diagnostics: int = 64
     maximum_public_diagnostic_bytes: int = 32 << 10
-    maximum_tool_result_compact_bytes: int = 8 << 10
-    maximum_tool_result_ref_only_bytes: int = 2 << 10
     maximum_decision_samples: int = 64
 
     def __post_init__(self) -> None:
         if (
             min(
-                self.maximum_source_candidates,
-                self.maximum_variants_per_source,
-                self.maximum_single_source_variant_bytes,
-                self.maximum_aggregate_full_source_bytes,
-                self.maximum_aggregate_source_variant_bytes,
-                self.maximum_tool_specs,
-                self.maximum_tool_spec_canonical_bytes,
                 self.maximum_diagnostics,
                 self.maximum_public_diagnostic_bytes,
-                self.maximum_tool_result_compact_bytes,
-                self.maximum_tool_result_ref_only_bytes,
                 self.maximum_decision_samples,
             )
             < 1
@@ -428,119 +358,43 @@ def model_input_compile_binding_fingerprint(
 
 
 @dataclass(frozen=True, slots=True)
-class ContextRenderVariant:
-    mode: ContextRenderMode
-    text: str = field(repr=False)
-    utf8_bytes: int
-    semantic_fingerprint: str
-
-    def __post_init__(self) -> None:
-        encoded = self.text.encode("utf-8")
-        if len(encoded) != self.utf8_bytes:
-            raise ValueError("source variant byte count mismatch")
-        if self.mode is ContextRenderMode.UNAVAILABLE_MINIMAL and self.text:
-            raise ValueError("minimal unavailable source variant must have no body")
-        expected = context_fingerprint(
-            "context-render-variant:v1",
-            {"mode": self.mode.value, "text": self.text},
-        )
-        if self.semantic_fingerprint != expected:
-            raise ValueError("source variant fingerprint mismatch")
-
-
-@dataclass(frozen=True, slots=True)
 class ContextSourceCandidate:
     source_kind: ContextSourceKind
-    source_semantic_fingerprint: str
     channel: ContextChannel
-    trust_class: ContextTrustClass
-    budget_class: ContextBudgetClass
+    text: str = field(repr=False)
     placement_ordinal: int
-    degradation_priority: int
-    variants: tuple[ContextRenderVariant, ...] = field(repr=False)
-    lifecycle: ContextSourceLifecycle = ContextSourceLifecycle.SNAPSHOT_ON_CHANGE
-    domain_semantic_fingerprint: str = ""
-    model_visible_memory_fact_ids: tuple[str, ...] = ()
-    initial_mode: ContextRenderMode = ContextRenderMode.FULL
+    budget_class: ContextBudgetClass = ContextBudgetClass.MUST_KEEP
 
     def __post_init__(self) -> None:
         if (
-            not 0 <= self.placement_ordinal <= 999
-            or not 0 <= self.degradation_priority <= 999
+            not self.text
+            or type(self.placement_ordinal) is not int
+            or self.placement_ordinal < 0
         ):
-            raise ValueError("source candidate ordinal is outside its closed bound")
-        if not self.domain_semantic_fingerprint:
-            object.__setattr__(
-                self, "domain_semantic_fingerprint", self.source_semantic_fingerprint
-            )
-        if not self.domain_semantic_fingerprint.startswith(SHA256_PREFIX):
-            raise ValueError("source domain semantic fingerprint is invalid")
+            raise ValueError("context source requires content and an ordered placement")
+        self.text.encode("utf-8")
+        if (self.source_kind is ContextSourceKind.BASE_SYSTEM) != (
+            self.channel is ContextChannel.SYSTEM
+        ):
+            raise ValueError("only the base instruction belongs in SYSTEM")
         if (
-            len(self.model_visible_memory_fact_ids) > 128
-            or len(set(self.model_visible_memory_fact_ids))
-            != len(self.model_visible_memory_fact_ids)
-            or any(not value for value in self.model_visible_memory_fact_ids)
-            or len(canonical_json_bytes(self.model_visible_memory_fact_ids)) > 16 * 1024
+            self.budget_class is not ContextBudgetClass.MUST_KEEP
+            and self.source_kind is not ContextSourceKind.USER_ACTIONS
         ):
-            raise ValueError("source memory provenance is outside its closed bound")
-        if not self.variants:
-            raise ValueError("source candidate needs at least one variant")
-        modes = tuple(variant.mode for variant in self.variants)
-        order = tuple(ContextRenderMode)
-        positions = tuple(order.index(mode) for mode in modes)
-        if positions != tuple(sorted(set(positions))):
-            raise ValueError("source render variants are duplicated or unordered")
-        if self.initial_mode not in modes:
-            raise ValueError("source initial render mode is not available")
-        if ContextRenderMode.UNAVAILABLE_MINIMAL in modes:
-            if (
-                modes[-1] is not ContextRenderMode.UNAVAILABLE_MINIMAL
-                or self.channel is not ContextChannel.RUNTIME_OBSERVATION
-                or self.source_kind
-                not in {
-                    ContextSourceKind.SKILL_CATALOG,
-                    ContextSourceKind.ACTIVE_SKILL,
-                }
-            ):
-                raise ValueError("minimal unavailable source variant is not closed")
-        if (
-            self.trust_class is ContextTrustClass.ROOT_INSTRUCTION
-            and self.channel is not ContextChannel.SYSTEM
-        ):
-            raise ValueError("root instruction must use SYSTEM channel")
-        if (
-            self.trust_class is ContextTrustClass.AUTHORIZED_CAPABILITY_CONTEXT
-            and self.channel is not ContextChannel.RUNTIME_OBSERVATION
-        ):
-            raise ValueError("capability context must use runtime observation")
-        if (
-            self.trust_class is ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE
-            and self.channel is not ContextChannel.RUNTIME_OBSERVATION
-        ):
-            raise ValueError("runtime guidance must use runtime observation")
-        if (
-            self.trust_class is ContextTrustClass.UNTRUSTED_OBSERVATION
-            and self.channel is ContextChannel.SYSTEM
-        ):
-            raise ValueError("untrusted observation cannot use SYSTEM channel")
-        semantic_payload: dict[str, object] = {
-            "source_kind": self.source_kind.value,
-            "source_instance_id": f"context-source:{self.source_kind.value.lower()}",
-            "channel": self.channel.value,
-            "trust": self.trust_class.value,
-            "budget": self.budget_class.value,
-            "placement": self.placement_ordinal,
-            "degradation": self.degradation_priority,
-            "lifecycle": self.lifecycle.value,
-            "variants": tuple(v.semantic_fingerprint for v in self.variants),
-        }
-        if self.initial_mode is not ContextRenderMode.FULL:
-            semantic_payload["initial_mode"] = self.initial_mode.value
-        expected_semantic = context_fingerprint(
-            "context-source-candidate:v1", semantic_payload
+            raise ValueError("only advisory user actions may be omitted as a source")
+
+    @property
+    def source_semantic_fingerprint(self) -> str:
+        return context_fingerprint(
+            "pulsara.context-source",
+            {
+                "source": self.source_kind.value,
+                "channel": self.channel.value,
+                "text": self.text,
+                "placement": self.placement_ordinal,
+                "budget": self.budget_class.value,
+            },
         )
-        if self.source_semantic_fingerprint != expected_semantic:
-            raise ValueError("source candidate semantic fingerprint mismatch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -555,68 +409,45 @@ class ContextSourceCollectionDiagnostic:
 
 
 @dataclass(frozen=True, slots=True)
-class ContextSourceAbsentFact:
-    source_kind: ContextSourceKind
-    lifecycle: ContextSourceLifecycle
-    absence_kind: ContextSourceAbsenceKind
-    trust_class: ContextTrustClass
-    budget_class: ContextBudgetClass
-    placement_ordinal: int
-    degradation_priority: int
-    domain_semantic_fingerprint: str
-
-    def __post_init__(self) -> None:
-        if not self.domain_semantic_fingerprint.startswith(SHA256_PREFIX):
-            raise ValueError("absent source fingerprint is invalid")
-        if not 0 <= self.placement_ordinal <= 999:
-            raise ValueError("absent source placement is invalid")
-        if not 0 <= self.degradation_priority <= 999:
-            raise ValueError("absent source degradation priority is invalid")
-
-
-@dataclass(frozen=True, slots=True)
 class CollectedContextSources:
     candidates: tuple[ContextSourceCandidate, ...]
-    diagnostics: tuple[ContextSourceCollectionDiagnostic, ...]
-    collection_fingerprint: str
-    absent_facts: tuple[ContextSourceAbsentFact, ...] = ()
+    diagnostics: tuple[ContextSourceCollectionDiagnostic, ...] = ()
+    hook_context: LLMMessage | None = field(default=None, repr=False)
+    observation_state: InstalledObservationState | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         kinds = tuple(item.source_kind for item in self.candidates)
-        absent_kinds = tuple(item.source_kind for item in self.absent_facts)
-        if (
-            len(kinds) != len(set(kinds))
-            or len(absent_kinds) != len(set(absent_kinds))
-            or set(kinds).intersection(absent_kinds)
-        ):
+        if len(kinds) != len(set(kinds)):
             raise ValueError("collected source kinds are duplicated")
-        expected = context_fingerprint(
-            "collected-context-sources:v1",
+        if (
+            self.hook_context is not None
+            and self.hook_context.role is not MessageRole.USER
+        ):
+            raise ValueError("Hook context must use its independent user-role message")
+
+    @property
+    def collection_fingerprint(self) -> str:
+        return context_fingerprint(
+            "pulsara.collected-context-sources",
             {
                 "candidates": tuple(
-                    c.source_semantic_fingerprint for c in self.candidates
+                    item.source_semantic_fingerprint for item in self.candidates
                 ),
+                "hook_context": None
+                if self.hook_context is None
+                else _llm_message_value(self.hook_context),
                 "diagnostics": tuple(
                     (
-                        d.code.value,
-                        d.severity,
-                        None if d.source_kind is None else d.source_kind.value,
+                        item.code.value,
+                        item.severity,
+                        None if item.source_kind is None else item.source_kind.value,
                     )
-                    for d in self.diagnostics
-                ),
-                "absent": tuple(
-                    (
-                        item.source_kind.value,
-                        item.lifecycle.value,
-                        item.absence_kind.value,
-                        item.domain_semantic_fingerprint,
-                    )
-                    for item in self.absent_facts
+                    for item in self.diagnostics
                 ),
             },
         )
-        if self.collection_fingerprint != expected:
-            raise ValueError("source collection fingerprint mismatch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -639,10 +470,15 @@ class ProviderToolResultContextMetadata:
     result_entry_id: str
     result_state: str
     output_unavailability_reason: ToolOutputUnavailableReason | None
-    model_visible_memory_fact_ids: tuple[str, ...]
     timing: FrozenToolObservationTimingFact
+    public_fields: Mapping[str, object] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
+        from pulsara_agent.ports.tool_execution import freeze_tool_json_object
+
+        object.__setattr__(
+            self, "public_fields", freeze_tool_json_object(self.public_fields)
+        )
         if not self.result_id:
             raise ValueError("tool result canonical identity is empty")
         if self.result_state not in {
@@ -660,13 +496,6 @@ class ProviderToolResultContextMetadata:
             raise ValueError("tool result source identity is incomplete")
         if not isinstance(self.timing, FrozenToolObservationTimingFact):
             raise TypeError("tool result timing must be a frozen canonical fact")
-        if (
-            len(self.model_visible_memory_fact_ids) > 50
-            or len(set(self.model_visible_memory_fact_ids))
-            != len(self.model_visible_memory_fact_ids)
-            or any(not value for value in self.model_visible_memory_fact_ids)
-        ):
-            raise ValueError("tool result memory provenance header is invalid")
 
 
 class FrozenProviderInputItemKind(StrEnum):
@@ -707,7 +536,9 @@ def validate_compaction_request_shape(
         FrozenProviderInputItemKind.PLAN_CONTINUATION: {
             CanonicalInputOriginKind.PLAN_CONTINUATION
         },
-        FrozenProviderInputItemKind.TERMINAL_OBSERVATION: {CanonicalInputOriginKind.CELL_OUTPUT},
+        FrozenProviderInputItemKind.TERMINAL_OBSERVATION: {
+            CanonicalInputOriginKind.CELL_OUTPUT
+        },
     }
     allowed = origins.get(item_kind)
     if allowed is None or input_origin not in allowed:
@@ -816,7 +647,7 @@ class FrozenProviderInputItem:
     source_entry_id: str | None
     source_entry_sequence: int | None
     source_turn_id: str | None
-    content: tuple[FrozenPromptPart, ...] | CompactionSnapshotCarrier = field(
+    content: tuple[FrozenPromptPart | CellOutputImageReadFailure, ...] | CompactionSnapshotCarrier = field(
         repr=False
     )
     input_origin: CanonicalInputOriginKind | None = None
@@ -828,20 +659,25 @@ class FrozenProviderInputItem:
         default=None, repr=False
     )
     tool_result_body_text: str | None = field(default=None, repr=False)
-    tool_result_delivery: FrozenToolResultDeliveryRequirement = (
-        BEST_AVAILABLE_TOOL_RESULT_DELIVERY
-    )
     tool_call_ordinal: int | None = None
     tool_call_arguments: FrozenJsonObjectFact | None = field(default=None, repr=False)
     tool_call_name: str | None = None
+    native_page: NativeToolPage | None = field(default=None, repr=False)
+    cell_output_source: CellOutputSource | None = None
 
     def __post_init__(self) -> None:
+        if (self.item_kind is FrozenProviderInputItemKind.TERMINAL_OBSERVATION) != (
+            isinstance(self.cell_output_source, CellOutputSource)
+        ):
+            raise ValueError("Cell output source facts must accompany its observation")
         snapshot_kind = self.item_kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT
         if snapshot_kind:
             if not isinstance(self.content, CompactionSnapshotCarrier):
                 raise TypeError("context snapshot content must be its typed carrier")
         elif not isinstance(self.content, tuple) or any(
-            not isinstance(part, (LLMTextPart, LLMImagePart, PromptAnnotationPart))
+            not isinstance(part, (LLMTextPart, LLMImagePart, PromptAnnotationPart, CellOutputImageReadFailure))
+            or (isinstance(part, CellOutputImageReadFailure)
+                and self.item_kind is not FrozenProviderInputItemKind.TERMINAL_OBSERVATION)
             or (
                 isinstance(part, PromptAnnotationPart)
                 and self.item_kind is not FrozenProviderInputItemKind.USER
@@ -858,15 +694,6 @@ class FrozenProviderInputItem:
             and self.tool_result_body_text is not None
         ):
             raise ValueError("tool result context union is invalid")
-        if not isinstance(
-            self.tool_result_delivery, FrozenToolResultDeliveryRequirement
-        ):
-            raise TypeError("tool result delivery requirement must be frozen")
-        if (
-            not result_kind
-            and self.tool_result_delivery != BEST_AVAILABLE_TOOL_RESULT_DELIVERY
-        ):
-            raise ValueError("non-result item cannot require FULL delivery")
         entry_backed = self.item_kind not in {
             FrozenProviderInputItemKind.CONTEXT_SNAPSHOT,
             FrozenProviderInputItemKind.TOOL_RESULT_CLOSURE,
@@ -882,8 +709,10 @@ class FrozenProviderInputItem:
             FrozenProviderInputItemKind.PLAN_CONTINUATION,
             FrozenProviderInputItemKind.TERMINAL_OBSERVATION,
         }
-        if (self.item_kind is FrozenProviderInputItemKind.TERMINAL_OBSERVATION
-                and self.input_origin is not CanonicalInputOriginKind.CELL_OUTPUT):
+        if (
+            self.item_kind is FrozenProviderInputItemKind.TERMINAL_OBSERVATION
+            and self.input_origin is not CanonicalInputOriginKind.CELL_OUTPUT
+        ):
             raise ValueError("Cell runtime input requires its real origin")
         if (self.input_origin is CanonicalInputOriginKind.SCHEDULED_TASK) != (
             self.scheduled_input is not None
@@ -902,16 +731,20 @@ class FrozenProviderInputItem:
         ):
             raise ValueError("only human USER input can contain annotations")
         images_allowed = (
-            self.item_kind is FrozenProviderInputItemKind.USER
-            and self.input_origin
-            in {
-                CanonicalInputOriginKind.HUMAN_MESSAGE,
-                CanonicalInputOriginKind.HUMAN_STEER,
-                CanonicalInputOriginKind.AGENT_INSTRUCTION,
-                CanonicalInputOriginKind.AGENT_MATERIAL,
-                CanonicalInputOriginKind.AGENT_MESSAGE,
-            }
-        ) or result_kind
+            (
+                self.item_kind is FrozenProviderInputItemKind.USER
+                and self.input_origin
+                in {
+                    CanonicalInputOriginKind.HUMAN_MESSAGE,
+                    CanonicalInputOriginKind.HUMAN_STEER,
+                    CanonicalInputOriginKind.AGENT_INSTRUCTION,
+                    CanonicalInputOriginKind.AGENT_MATERIAL,
+                    CanonicalInputOriginKind.AGENT_MESSAGE,
+                }
+            )
+            or result_kind
+            or self.item_kind is FrozenProviderInputItemKind.TERMINAL_OBSERVATION
+        )
         if not snapshot_kind and content_has_image(self.content) and not images_allowed:
             raise ValueError("provider input origin cannot carry image content")
         if self.source_entry_sequence is not None and self.source_entry_sequence < 0:
@@ -950,16 +783,13 @@ class FrozenProviderInputItem:
             and isinstance(self.content, tuple)
             and content_has_image(self.content)
             and result_kind
-            and (self.tool_call_ordinal is None or self.tool_call_arguments is None
-                or self.tool_call_name not in {"view_image", "read_video_frames"})
+            and (self.tool_call_ordinal is None or not self.tool_call_name)
         ):
             raise ValueError("image ToolResult lacks its frozen call source")
         if self.item_kind is FrozenProviderInputItemKind.TOOL_RESULT:
             assert isinstance(self.content, tuple)
-            expected_body = (
-                frozen_tool_result_public_text(FrozenPromptContent(self.content), tool_name=self.tool_call_name)
-                if content_has_image(self.content)
-                else join_text_content(self.content)
+            expected_body = "".join(
+                part.text for part in self.content if isinstance(part, LLMTextPart)
             )
             if self.tool_result_body_text != expected_body:
                 raise ValueError(
@@ -1252,8 +1082,6 @@ class ApprovedPlanMaterializationFact:
     request_semantic_digest: str
     content_identity: PlanDraftContentIdentity
     exact_plan_utf8: bytes = field(repr=False)
-    disposition: PlanApprovedMaterializationDisposition
-    pinned_canonical_item_fingerprint: str | None
     fact_fingerprint: str
 
     def __post_init__(self) -> None:
@@ -1263,11 +1091,6 @@ class ApprovedPlanMaterializationFact:
             self.content_identity.plan_utf8_digest
         ):
             raise ValueError("approved Plan materialization digest mismatch")
-        pinned = self.disposition is (
-            PlanApprovedMaterializationDisposition.PIN_EXISTING_CANONICAL_BLOCK
-        )
-        if pinned != (self.pinned_canonical_item_fingerprint is not None):
-            raise ValueError("approved Plan materialization disposition is invalid")
         if self.fact_fingerprint != approved_plan_materialization_fingerprint(self):
             raise ValueError("approved Plan materialization fingerprint mismatch")
 
@@ -1296,10 +1119,6 @@ def approved_plan_materialization_fingerprint(
                 "plan_utf8_size": fact.content_identity.plan_utf8_size,
                 "plan_utf8_digest": fact.content_identity.plan_utf8_digest,
             },
-            "disposition": fact.disposition.value,
-            "pinned_canonical_item_fingerprint": (
-                fact.pinned_canonical_item_fingerprint
-            ),
         },
     )
 
@@ -1429,6 +1248,9 @@ class FrozenCanonicalCompileSnapshot:
     )
     previous_turn_outcome_fact: FrozenPreviousTurnOutcomeCompileFact | None
     canonical_read_cut_fingerprint: str
+    plan_mode_original_input: tuple[LLMContentPart, ...] | None = field(
+        default=None, repr=False
+    )
 
     def __post_init__(self) -> None:
         identity = self.canonical_input.identity
@@ -1540,20 +1362,6 @@ class FrozenCanonicalCompileSnapshot:
                     or extracted.exact_plan_utf8 != approved.exact_plan_utf8
                 ):
                     raise ValueError("approved Plan canonical content drifted")
-            pinned = approved.disposition is (
-                PlanApprovedMaterializationDisposition.PIN_EXISTING_CANONICAL_BLOCK
-            )
-            if pinned:
-                if (
-                    len(matching_items) != 1
-                    or approved.pinned_canonical_item_fingerprint
-                    != provider_input_item_fingerprint(matching_items[0])
-                ):
-                    raise ValueError("approved Plan pinned carrier does not exact-join")
-            elif matching_items:
-                raise ValueError(
-                    "approved Plan materialization would duplicate content"
-                )
         previous = self.previous_turn_outcome_fact
         if previous is not None and (
             previous.session_id != identity.session_id
@@ -1576,6 +1384,9 @@ def canonical_compile_snapshot_fingerprint(
             "canonical_input": snapshot.canonical_input.snapshot_fingerprint,
             "context_binding": snapshot.context_binding_fact.fact_fingerprint,
             "run_permission": (snapshot.run_permission_snapshot.snapshot_fingerprint),
+            "plan_mode_original_input": None
+            if snapshot.plan_mode_original_input is None
+            else llm_content_identity_value(snapshot.plan_mode_original_input),
             "plan_workflow": (
                 None
                 if snapshot.plan_workflow_fact is None
@@ -1629,10 +1440,23 @@ def provider_input_item_leaf(item: FrozenProviderInputItem) -> Mapping[str, obje
         "input_origin": (
             None if item.input_origin is None else item.input_origin.value
         ),
+        "cell_output_source": None if item.cell_output_source is None else {
+            "cell_id": item.cell_output_source.cell_id,
+            "record_sequence": item.cell_output_source.record_sequence,
+            "kind": item.cell_output_source.kind,
+        },
         "scheduled_input": None
         if item.scheduled_input is None
         else item.scheduled_input.to_dict(),
-        "content": llm_content_identity_value(content),
+        "content": None
+        if item.item_kind
+        in {
+            FrozenProviderInputItemKind.TOOL_RESULT,
+            FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
+        }
+        else cell_output_identity_value(content)
+        if item.item_kind is FrozenProviderInputItemKind.TERMINAL_OBSERVATION
+        else llm_content_identity_value(content),
         "calls": tuple(
             (call.tool_call_id, call.tool_name, call.arguments)
             for call in item.tool_calls
@@ -1653,26 +1477,20 @@ def provider_input_item_leaf(item: FrozenProviderInputItem) -> Mapping[str, obje
                     if item.tool_result_context.output_unavailability_reason is None
                     else item.tool_result_context.output_unavailability_reason.value
                 ),
-                "model_visible_memory_fact_ids": (
-                    item.tool_result_context.model_visible_memory_fact_ids
-                ),
                 "timing": item.tool_result_context.timing.fact_fingerprint,
             }
         ),
-        "tool_result_body_text": item.tool_result_body_text,
-        "tool_result_delivery": {
-            "requirement": item.tool_result_delivery.requirement.value,
-            "reason": (
-                None
-                if item.tool_result_delivery.reason is None
-                else item.tool_result_delivery.reason.value
-            ),
-        },
+        "tool_result_body_text": None
+        if item.item_kind
+        in {
+            FrozenProviderInputItemKind.TOOL_RESULT,
+            FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
+        }
+        else item.tool_result_body_text,
     }
     if item.tool_call_name == "read_video_frames":
         value["tool_call_name"] = item.tool_call_name
     return value
-
 
 
 def provider_input_item_logical_utf8_bytes(item: FrozenProviderInputItem) -> int:
@@ -1789,60 +1607,22 @@ class CompiledSourceDecision:
     source_kind: ContextSourceKind
     source_instance_fingerprint: str
     channel: ContextChannel
-    selected_mode: ContextRenderMode | None
     included: bool
-    reason_code: str
-
-    def __post_init__(self) -> None:
-        if self.reason_code not in {
-            "SELECTED_FULL",
-            "SELECTED_UNAVAILABLE",
-            "DEGRADED_FOR_BUDGET",
-            "UNAVAILABLE_FOR_BUDGET",
-            "OMITTED_FOR_BUDGET",
-        }:
-            raise ValueError("compiled source decision is invalid")
-        if self.included != (self.selected_mode is not None):
-            raise ValueError("compiled source inclusion union is invalid")
-        if not self.included and (self.reason_code != "OMITTED_FOR_BUDGET"):
-            raise ValueError("omitted source decision is inconsistent")
 
 
 @dataclass(frozen=True, slots=True)
 class CompiledToolResultDecision:
     source_entry_fingerprint: str
     current_turn: bool
-    first_legal_mode: ToolResultProviderRenderMode
-    selected_mode: ToolResultProviderRenderMode
-    delivery_requirement: ToolResultDeliveryRequirement
-    full_delivery_reason: ToolResultFullDeliveryReason | None
-    reason_code: str
+    result_entry_id: str | None = None
+    source_result_entry_id: str | None = None
+    native_projection: FrozenJsonObjectFact | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
-        if self.reason_code not in {
-            "SELECTED_FULL",
-            "FULL_INELIGIBLE_RESULT_BOUND",
-            "DEGRADED_FOR_BUDGET",
-        }:
-            raise ValueError("compiled tool-result decision is invalid")
-        expected_reason = (
-            "SELECTED_FULL"
-            if self.selected_mode is ToolResultProviderRenderMode.FULL
-            else "FULL_INELIGIBLE_RESULT_BOUND"
-            if self.selected_mode is self.first_legal_mode
-            else "DEGRADED_FOR_BUDGET"
-        )
-        if self.reason_code != expected_reason:
-            raise ValueError("compiled tool-result selection reason is inconsistent")
-        required = self.delivery_requirement is (
-            ToolResultDeliveryRequirement.FULL_REQUIRED
-        )
-        if required != (self.full_delivery_reason is not None):
-            raise ValueError("compiled FULL-delivery requirement is inconsistent")
-        if required and self.selected_mode is not ToolResultProviderRenderMode.FULL:
-            raise ValueError("required tool result was not compiled as FULL")
-        if required and self.first_legal_mode is not ToolResultProviderRenderMode.FULL:
-            raise ValueError("required tool result has no legal FULL variant")
+        if (self.native_projection is not None) != (
+            self.result_entry_id is not None and self.source_result_entry_id is not None
+        ):
+            raise ValueError("native result decision owner is incomplete")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1851,20 +1631,14 @@ class ContextCompileReport:
     protected_prefix_message_count: int
     protected_prefix_logical_bytes: int
     protected_prefix_fingerprint: str | None
-    degraded_source_count: int
     omitted_source_count: int
-    degraded_tool_result_count: int
-    omitted_tool_result_body_count: int
     decision_digest: str
 
     def __post_init__(self) -> None:
         numeric = (
             self.protected_prefix_message_count,
             self.protected_prefix_logical_bytes,
-            self.degraded_source_count,
             self.omitted_source_count,
-            self.degraded_tool_result_count,
-            self.omitted_tool_result_body_count,
         )
         if any(value < 0 for value in numeric):
             raise ValueError("compile budget report contains a negative value")
@@ -2080,11 +1854,11 @@ class FrozenModelInputSemanticProjection:
             )
         ):
             raise ValueError("semantic projection placement role drifted")
-        if (
-            len(self.diagnostic_codes)
-            > STRUCTURED_MODEL_INPUT_LIMITS.maximum_diagnostics
-            or len(self.diagnostic_codes) != len(set(self.diagnostic_codes))
-        ):
+        if len(
+            self.diagnostic_codes
+        ) > STRUCTURED_MODEL_INPUT_LIMITS.maximum_diagnostics or len(
+            self.diagnostic_codes
+        ) != len(set(self.diagnostic_codes)):
             raise ValueError("semantic projection diagnostics exceed their bounds")
         for value in (
             self.source_collection_fingerprint,

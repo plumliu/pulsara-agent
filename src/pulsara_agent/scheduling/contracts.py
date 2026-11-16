@@ -61,8 +61,8 @@ def validate_rule(rule: object, timezone_name: str) -> dict:
         value["run_at_utc"] = utc_instant(value["run_at_utc"]).isoformat()
     elif kind == "interval":
         value["anchor_at_utc"] = utc_instant(value["anchor_at_utc"]).isoformat()
-        if type(value["seconds"]) is not int or value["seconds"] <= 0:
-            raise ScheduledTaskError("INVALID_SCHEDULE", "间隔必须为正整数秒。")
+        if type(value["seconds"]) is not int or value["seconds"] < 900:
+            raise ScheduledTaskError("INVALID_SCHEDULE", "固定间隔至少为 15 分钟（900 秒）。")
     else:
         try:
             if (
@@ -97,6 +97,60 @@ def validate_rule(rule: object, timezone_name: str) -> dict:
         ):
             raise ScheduledTaskError("INVALID_SCHEDULE", "每月日期必须为 1–31。")
     return value
+
+
+def public_schedule_rule(rule: dict, timezone_name: str) -> dict:
+    """Project once's one saved instant into its current local clock spelling."""
+    if rule["kind"] == "once":
+        return {"kind": "once", "run_at": utc_instant(rule["run_at_utc"]).astimezone(
+            ZoneInfo(timezone_name)).replace(tzinfo=None).isoformat(timespec="seconds")}
+    return dict(rule)
+
+
+def normalize_schedule_input(rule: object, timezone_name: str, now: datetime, *,
+                             creating: bool, previous_rule: dict | None = None,
+                             previous_timezone: str | None = None) -> dict:
+    """Resolve public defaults once using the accepting transaction's clock.
+
+    dateutil and zoneinfo own calendar/DST behavior. The existing canonical rule
+    retains the sole once instant; no separately mutable local time is stored.
+    """
+    from pulsara_agent.scheduling.requests import schedule_rule_schema
+    from jsonschema import Draft202012Validator
+
+    try:
+        zone = ZoneInfo(timezone_name)
+    except (ValueError, TypeError, ZoneInfoNotFoundError) as exc:
+        raise ScheduledTaskError("INVALID_TIMEZONE", "时区名称无效。") from exc
+    if not Draft202012Validator(schedule_rule_schema(creating=creating)).is_valid(rule):
+        raise ScheduledTaskError("INVALID_SCHEDULE", "时间规则字段无效。")
+    value = dict(rule)
+    kind = value["kind"]
+    if kind == "once":
+        if (previous_rule is not None and previous_rule["kind"] == "once"
+            and timezone_name == previous_timezone
+            and value == public_schedule_rule(previous_rule, previous_timezone)):
+            return dict(previous_rule)
+        raw = value["run_at"]
+        try:
+            local = datetime.fromisoformat(raw)
+            if local.tzinfo is not None or len(raw) != 19 or local.isoformat(timespec="seconds") != raw:
+                raise ValueError()
+            local = local.replace(tzinfo=zone, fold=0)
+            if not tz.datetime_exists(local):
+                raise ValueError()
+        except (TypeError, ValueError) as exc:
+            raise ScheduledTaskError("INVALID_SCHEDULE", "一次性时间须为存在的当地 YYYY-MM-DDTHH:mm:ss 时刻。") from exc
+        instant = local.astimezone(UTC)
+        if instant <= now:
+            raise ScheduledTaskError("INVALID_SCHEDULE", "新的一次性执行时间必须在未来。")
+        value = {"kind": "once", "run_at_utc": instant.isoformat()}
+    elif creating:
+        if kind == "interval":
+            value.setdefault("anchor_at_utc", now.astimezone(UTC).replace(microsecond=0).isoformat())
+        else:
+            value.setdefault("start_date", now.astimezone(zone).date().isoformat())
+    return validate_rule(value, timezone_name)
 
 
 def next_occurrence(rule: dict, timezone_name: str, after: datetime) -> datetime | None:

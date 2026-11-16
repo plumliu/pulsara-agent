@@ -26,7 +26,6 @@ from pulsara_agent.conversation_kernel.blob import (
     MAXIMUM_CONTENT_CHUNK_BYTES,
     PostgresCanonicalBlobStore,
 )
-from pulsara_agent.conversation_kernel.memory import PostgresMemoryQuery
 from tests.support.round3 import new_test_provider_input_continuity_owner
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     CONTEXT_SNAPSHOT_CODEC,
@@ -111,10 +110,9 @@ from pulsara_agent.workspace_identity import HostWorkspaceInput, resolve_workspa
 pytestmark = pytest.mark.postgres
 
 
-
 def _two_connection_resolution_cut():
-    first_id = ModelConnectionId('connection:knlsd5sz5j4bingayjthlnsehu')
-    second_id = ModelConnectionId('connection:ytw3elhyjuqyshh2v6bdqzshli')
+    first_id = ModelConnectionId("connection:knlsd5sz5j4bingayjthlnsehu")
+    second_id = ModelConnectionId("connection:ytw3elhyjuqyshh2v6bdqzshli")
     first = test_model_runtime(connection_id=first_id, model_id="model-first")
     second = test_model_runtime(connection_id=second_id, model_id="model-second")
     first_cut = first.freeze_resolution_snapshot()
@@ -311,7 +309,7 @@ def test_direct_root_retry_confirms_turn_binding_not_later_session_choice(
         repository.accept_root_turn_intent(
             lease.guard,
             intent=intent,
-                model_resolution_snapshot=cut,
+            model_resolution_snapshot=cut,
             deadline_monotonic=monotonic() + 30,
         ).accepted
         == accepted.accepted
@@ -362,7 +360,7 @@ def test_permanently_invalid_queued_binding_rejects_without_turn(
     candidate = repository.prepare_prompt_head_consumption(
         session_id=lease.guard.session_id,
         occurred_at=datetime.now(timezone.utc),
-        actor_id='host:yinyxklzunar54s7objjdbphcy',
+        actor_id="host:yinyxklzunar54s7objjdbphcy",
         deadline_monotonic=monotonic() + 30,
     )
     assert candidate is not None
@@ -435,7 +433,7 @@ def test_lightweight_todo_queued_root_admission_has_exact_confirmation(
         permission_snapshot_id=random_id("permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         model_call_binding=model_call_binding,
-        content=FrozenPromptContent.text('queued TODO run'),
+        content=FrozenPromptContent.text("queued TODO run"),
         occurred_at=datetime.now(timezone.utc),
         actor_id="test",
         deadline_monotonic=monotonic() + 30,
@@ -443,7 +441,7 @@ def test_lightweight_todo_queued_root_admission_has_exact_confirmation(
     candidate = repository.prepare_prompt_head_consumption(
         session_id=session_id,
         occurred_at=datetime.now(timezone.utc),
-        actor_id='host:yinyxklzunar54s7objjdbphcy',
+        actor_id="host:yinyxklzunar54s7objjdbphcy",
         deadline_monotonic=monotonic() + 30,
     )
     assert candidate is not None and candidate.queue_item_id == queue_item_id
@@ -553,7 +551,10 @@ def test_canonical_workspace_is_shared_and_transient_first_label_wins(
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
     )
-    with pytest.raises(ConversationKernelConflict, match="IDENTITY_CONFLICT: workspace canonical metadata differs"):
+    with pytest.raises(
+        ConversationKernelConflict,
+        match="IDENTITY_CONFLICT: workspace canonical metadata differs",
+    ):
         repository.acquire_host_writer(
             intent="NEW",
             session_id=random_id("session"),
@@ -684,7 +685,7 @@ def test_stage2_orphan_blob_gc_deletes_only_unreferenced_content_after_grace(
         deadline_monotonic=monotonic() + 30,
     )
     prompt = FrozenPromptContent.text("referenced" * 20_000)
-    canonical_prompt = freeze_canonical_prompt(prompt)
+    expected_text = prompt.parts[0].text.encode("utf-8")
     entry_id = _name("entry")
     _start_root_turn(
         repository,
@@ -699,8 +700,9 @@ def test_stage2_orphan_blob_gc_deletes_only_unreferenced_content_after_grace(
     )
     with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
         referenced = connection.execute(
-            "SELECT blob_id, content_digest, content_size "
-            "FROM pulsara_v3.transcript_entries WHERE id = %s",
+            "SELECT p.blob_id,b.logical_digest,b.logical_size "
+            "FROM pulsara_v3.content_parts p JOIN pulsara_v3.blobs b ON b.id=p.blob_id "
+            "WHERE p.entry_id = %s AND p.ordinal=0",
             (entry_id,),
         ).fetchone()
         assert referenced is not None and referenced[0] is not None
@@ -735,11 +737,11 @@ def test_stage2_orphan_blob_gc_deletes_only_unreferenced_content_after_grace(
     assert (
         store.read_exact(
             blob_id=referenced_blob_id,
-            expected_digest="sha256:" + sha256(canonical_prompt.body).hexdigest(),
-            expected_size=len(canonical_prompt.body),
+            expected_digest="sha256:" + sha256(expected_text).hexdigest(),
+            expected_size=len(expected_text),
             deadline_monotonic=monotonic() + 30,
         )
-        == canonical_prompt.body
+        == expected_text
     )
 
 
@@ -810,16 +812,31 @@ def test_stage2_schema_and_descriptor_oracles_are_exact(
 ) -> None:
     # The clean-v0 catalog and bounded vocabulary share one closed owner.
     # The known-Agent relation is canonical discovery state, not a delivery receipt.
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 31
-    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 31
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
+    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 29
     assert "agent_known_sessions" in CONVERSATION_KERNEL_RELATIONS
     assert len(COMMITTED_EVENT_DESCRIPTORS) == 24
     assert LIVE_EVENT_TYPES == (
-        "TextStart", "TextDelta", "TextEnd", "ThinkingStart", "ThinkingDelta",
-        "ThinkingEnd", "DataStart", "DataDelta", "DataEnd", "ToolCallStart",
-        "ToolCallDelta", "ToolCallEnd", "ToolResultStart", "ToolResultDelta",
-        "ToolResultEnd", "InteractionOpened", "InteractionReplaced",
-        "InteractionClosed", "TerminalProcessCompleted", "CurrentWorkSnapshotUpdated",
+        "TextStart",
+        "TextDelta",
+        "TextEnd",
+        "ThinkingStart",
+        "ThinkingDelta",
+        "ThinkingEnd",
+        "DataStart",
+        "DataDelta",
+        "DataEnd",
+        "ToolCallStart",
+        "ToolCallDelta",
+        "ToolCallEnd",
+        "ToolResultStart",
+        "ToolResultDelta",
+        "ToolResultEnd",
+        "InteractionOpened",
+        "InteractionReplaced",
+        "InteractionClosed",
+        "TerminalProcessCompleted",
+        "CurrentWorkSnapshotUpdated",
     )
     assert len(SUBJECT_SLOTS) == 8
     assert len(APPEND_GUARDS) == 1
@@ -904,7 +921,10 @@ def test_stage2_snapshot_and_history_page_are_bounded_by_final_wire_bytes(
         deadline_monotonic=monotonic() + 30,
     )
     assert page.entries
-    assert len(wire.ServerFrame(history_page=page).SerializeToString(deterministic=True)) <= 140_000
+    assert (
+        len(wire.ServerFrame(history_page=page).SerializeToString(deterministic=True))
+        <= 140_000
+    )
     assert page.has_more == page.HasField("older_history_cursor")
 
 
@@ -931,7 +951,7 @@ def test_stage2_text_turn_is_canonical_and_sequences_rollback_without_gaps(
         turn_id=turn_id,
         entry_id=_name("entry"),
         context_binding_revision_id=_name("binding"),
-        content=FrozenPromptContent.text('hello'),
+        content=FrozenPromptContent.text("hello"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
     )
@@ -944,7 +964,6 @@ def test_stage2_text_turn_is_canonical_and_sequences_rollback_without_gaps(
             lease.guard,
             cut=cut,
             entry_id=_name("entry"),
-            parent_content=InlineContent.from_bytes(b"bad"),
             blocks=(
                 AssistantTextBlock(
                     duplicate_block_id, InlineContent.from_bytes(b"one")
@@ -961,7 +980,6 @@ def test_stage2_text_turn_is_canonical_and_sequences_rollback_without_gaps(
         lease.guard,
         cut=cut,
         entry_id=_name("entry"),
-        parent_content=InlineContent.from_bytes(b"ok"),
         blocks=(AssistantTextBlock(_name("block"), InlineContent.from_bytes(b"ok")),),
         occurred_at=datetime.now(timezone.utc),
         actor_id="model:test",
@@ -1005,7 +1023,7 @@ def test_stage2_stale_writer_cannot_mutate_after_takeover(
             turn_id=_name("turn"),
             entry_id=_name("entry"),
             context_binding_revision_id=_name("binding"),
-            content=FrozenPromptContent.text('stale'),
+            content=FrozenPromptContent.text("stale"),
             occurred_at=datetime.now(timezone.utc),
             deadline_monotonic=deadline,
         )
@@ -1059,7 +1077,7 @@ def test_stage2_host_takeover_rejects_pending_exact_turn_steer(
         turn_id=turn_id,
         entry_id=_name("entry"),
         context_binding_revision_id=_name("binding"),
-        content=FrozenPromptContent.text('initial'),
+        content=FrozenPromptContent.text("initial"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
     )
@@ -1072,7 +1090,7 @@ def test_stage2_host_takeover_rejects_pending_exact_turn_steer(
         client_submission_id=random_id("command"),
         delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
         target_turn_id=turn_id,
-        content=FrozenPromptContent.text('new direction'),
+        content=FrozenPromptContent.text("new direction"),
         occurred_at=datetime.now(timezone.utc),
         actor_id="user",
         deadline_monotonic=deadline,
@@ -1117,7 +1135,8 @@ def test_stage2_host_takeover_rejects_pending_exact_turn_steer(
 
 @pytest.mark.parametrize("remote_kind", ["process", "mcp-tool"])
 def test_stage2_tool_message_precedes_attempt_and_remote_identity_is_set_once(
-    stage2_migrated_postgres_database, remote_kind,
+    stage2_migrated_postgres_database,
+    remote_kind,
 ) -> None:
     repository = _repository(stage2_migrated_postgres_database)
     deadline = monotonic() + 30
@@ -1139,7 +1158,7 @@ def test_stage2_tool_message_precedes_attempt_and_remote_identity_is_set_once(
         turn_id=turn_id,
         entry_id=_name("entry"),
         context_binding_revision_id=_name("binding"),
-        content=FrozenPromptContent.text('use tool'),
+        content=FrozenPromptContent.text("use tool"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
     )
@@ -1152,7 +1171,6 @@ def test_stage2_tool_message_precedes_attempt_and_remote_identity_is_set_once(
         lease.guard,
         cut=cut,
         entry_id=request_entry_id,
-        parent_content=InlineContent.from_bytes(b"tool request"),
         blocks=(
             AssistantToolCallBlock(
                 block_id=_name("block"),
@@ -1194,16 +1212,34 @@ def test_stage2_tool_message_precedes_attempt_and_remote_identity_is_set_once(
     if remote_kind == "process":
         from pulsara_agent.conversation_kernel.contracts import canonical_digest
         from pulsara_agent.identity import derive_id
-        legacy_payload = {"session_id": session_id, "attempt_id": attempt.attempt_id,
-                          "remote_identity": remote_identity,
-                          "occurred_at": remote_identity_candidate.occurred_at.isoformat(),
-                          "actor_id": "tool-executor"}
+
+        legacy_payload = {
+            "session_id": session_id,
+            "attempt_id": attempt.attempt_id,
+            "remote_identity": remote_identity,
+            "occurred_at": remote_identity_candidate.occurred_at.isoformat(),
+            "actor_id": "tool-executor",
+        }
         assert remote_identity_candidate.candidate_fingerprint == canonical_digest(
-            "pulsara:prepared-tool-remote-identity-publication:v1", legacy_payload)
+            "pulsara:prepared-tool-remote-identity-publication:v1", legacy_payload
+        )
         assert remote_identity_candidate.event.event_id == derive_id(
-            "event", "accepted", session_id, "TOOL_REMOTE_IDENTITY_PUBLISHED",
-            "TOOL_ATTEMPT", attempt.attempt_id, "")
-    assert repository.confirm_tool_remote_identity(lease.guard, candidate=remote_identity_candidate, deadline_monotonic=deadline) is ToolRemoteIdentityConfirmationKind.NONE
+            "event",
+            "accepted",
+            session_id,
+            "TOOL_REMOTE_IDENTITY_PUBLISHED",
+            "TOOL_ATTEMPT",
+            attempt.attempt_id,
+            "",
+        )
+    assert (
+        repository.confirm_tool_remote_identity(
+            lease.guard,
+            candidate=remote_identity_candidate,
+            deadline_monotonic=deadline,
+        )
+        is ToolRemoteIdentityConfirmationKind.NONE
+    )
     repository.publish_tool_remote_identity(
         lease.guard,
         candidate=remote_identity_candidate,
@@ -1226,12 +1262,23 @@ def test_stage2_tool_message_precedes_attempt_and_remote_identity_is_set_once(
     )
     if verification is not None:
         conflicting = build_prepared_tool_remote_identity_publication(
-            session_id=session_id, attempt_id=attempt.attempt_id, remote_identity=remote_identity,
+            session_id=session_id,
+            attempt_id=attempt.attempt_id,
+            remote_identity=remote_identity,
             remote_identity_verification="sha256:" + "b" * 64,
-            occurred_at=remote_identity_candidate.occurred_at, actor_id="tool-executor")
-        assert repository.confirm_tool_remote_identity(lease.guard, candidate=conflicting, deadline_monotonic=deadline) is ToolRemoteIdentityConfirmationKind.CONFLICT
+            occurred_at=remote_identity_candidate.occurred_at,
+            actor_id="tool-executor",
+        )
+        assert (
+            repository.confirm_tool_remote_identity(
+                lease.guard, candidate=conflicting, deadline_monotonic=deadline
+            )
+            is ToolRemoteIdentityConfirmationKind.CONFLICT
+        )
         with pytest.raises(ConversationKernelConflict):
-            repository.publish_tool_remote_identity(lease.guard, candidate=conflicting, deadline_monotonic=deadline)
+            repository.publish_tool_remote_identity(
+                lease.guard, candidate=conflicting, deadline_monotonic=deadline
+            )
     with repository.connection_provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
         deadline_monotonic=deadline,
@@ -1295,7 +1342,7 @@ def test_stage2_human_tool_decision_atomically_installs_exact_effect_boundary(
         turn_id=turn_id,
         entry_id=_name("entry"),
         context_binding_revision_id=_name("binding"),
-        content=FrozenPromptContent.text('use tool'),
+        content=FrozenPromptContent.text("use tool"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
     )
@@ -1308,7 +1355,6 @@ def test_stage2_human_tool_decision_atomically_installs_exact_effect_boundary(
         lease.guard,
         cut=cut,
         entry_id=assistant_entry_id,
-        parent_content=InlineContent.from_bytes(b"tool request"),
         blocks=(
             AssistantToolCallBlock(
                 block_id=_name("block"),
@@ -1343,7 +1389,7 @@ def test_stage2_human_tool_decision_atomically_installs_exact_effect_boundary(
             else None
         ),
         redacted_subject="tool:exec_process",
-        actor_id='attachment:hmfv6qyb4msxxwadjyltzzsdse',
+        actor_id="attachment:hmfv6qyb4msxxwadjyltzzsdse",
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
     )
@@ -1367,7 +1413,7 @@ def test_stage2_human_tool_decision_atomically_installs_exact_effect_boundary(
             else None
         ),
         redacted_subject="tool:exec_process",
-        actor_id='attachment:hmfv6qyb4msxxwadjyltzzsdse',
+        actor_id="attachment:hmfv6qyb4msxxwadjyltzzsdse",
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
     )
@@ -1466,7 +1512,7 @@ def test_stage2_unqualified_product_sql_cannot_resolve_a_product_relation(
 # the Host-owned compaction settlement coverage in the Round 5B suite.
 
 
-def test_stage2_direct_memory_has_no_candidate_or_job_tables(
+def test_stage2_memory_has_exact_canonical_storage_relations(
     stage2_migrated_postgres_database,
 ) -> None:
     """Direct memory owns canonical facts and references, not review jobs."""
@@ -1487,36 +1533,8 @@ def test_stage2_direct_memory_has_no_candidate_or_job_tables(
         }
     assert relations == {
         "memory_facts",
-        "memory_relations",
         "memory_embeddings",
     }
-
-
-def test_stage2_memory_lifecycle_change_has_one_canonical_occurrence(
-    stage2_migrated_postgres_database,
-) -> None:
-    """Round 8 successor: memory lifecycle is relational, not an occurrence."""
-
-    del stage2_migrated_postgres_database
-    assert {item.event_type.value for item in COMMITTED_EVENT_DESCRIPTORS}.isdisjoint(
-        {"MemoryFactAccepted", "MemoryFactLifecycleChanged", "MemoryRelationAccepted"}
-    )
-    assert all("memory" not in slot.lower() for slot in SUBJECT_SLOTS)
-
-
-def test_stage2_postgres_memory_preserves_bounded_direct_and_two_hop_paths(
-    stage2_migrated_postgres_database,
-) -> None:
-    """Round 8 successor: only exact rows and direct relations remain public."""
-
-    del stage2_migrated_postgres_database
-    assert "max_hops" not in PostgresMemoryQuery.search.__code__.co_varnames
-    source = (
-        __import__("pathlib").Path(__file__).resolve().parents[1]
-        / "src/pulsara_agent/conversation_kernel/memory/recall.py"
-    ).read_text(encoding="utf-8")
-    assert "WITH RECURSIVE" not in source
-    assert "max_hops" not in source
 
 
 def test_stage2_prompt_queue_has_stable_fifo_and_frozen_terminal_steer_target(
@@ -1541,7 +1559,7 @@ def test_stage2_prompt_queue_has_stable_fifo_and_frozen_terminal_steer_target(
         turn_id=root_turn,
         entry_id=_name("entry"),
         context_binding_revision_id=_name("binding"),
-        content=FrozenPromptContent.text('first'),
+        content=FrozenPromptContent.text("first"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
     )
@@ -1557,7 +1575,7 @@ def test_stage2_prompt_queue_has_stable_fifo_and_frozen_terminal_steer_target(
             client_submission_id=random_id("command"),
             delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
             target_turn_id=root_turn,
-            content=FrozenPromptContent.text('steer'),
+            content=FrozenPromptContent.text("steer"),
             occurred_at=datetime.now(timezone.utc),
             actor_id="user",
             deadline_monotonic=deadline,
@@ -1573,7 +1591,7 @@ def test_stage2_prompt_queue_has_stable_fifo_and_frozen_terminal_steer_target(
             client_submission_id=random_id("command"),
             delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
             target_turn_id=root_turn,
-            content=FrozenPromptContent.text('second steer'),
+            content=FrozenPromptContent.text("second steer"),
             occurred_at=datetime.now(timezone.utc),
             actor_id="user",
             deadline_monotonic=deadline,
@@ -1589,7 +1607,7 @@ def test_stage2_prompt_queue_has_stable_fifo_and_frozen_terminal_steer_target(
             client_submission_id=random_id("command"),
             delivery_mode=PromptDeliveryMode.NEW_TURN,
             target_turn_id=None,
-            content=FrozenPromptContent.text('next'),
+            content=FrozenPromptContent.text("next"),
             occurred_at=datetime.now(timezone.utc),
             actor_id="user",
             deadline_monotonic=deadline,
@@ -1674,7 +1692,7 @@ def test_stage2_interrupt_turn_immediately_rejects_steer_without_future_turn(
         turn_id=root_turn,
         entry_id=_name("entry"),
         context_binding_revision_id=_name("binding"),
-        content=FrozenPromptContent.text('first'),
+        content=FrozenPromptContent.text("first"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
     )
@@ -1687,7 +1705,7 @@ def test_stage2_interrupt_turn_immediately_rejects_steer_without_future_turn(
         client_submission_id=random_id("command"),
         delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
         target_turn_id=root_turn,
-        content=FrozenPromptContent.text('steer'),
+        content=FrozenPromptContent.text("steer"),
         occurred_at=datetime.now(timezone.utc),
         actor_id="user",
         deadline_monotonic=deadline,
@@ -1751,7 +1769,7 @@ def test_round3_1_future_new_turn_lane_does_not_block_active_steer_cut(
         turn_id=root_turn,
         entry_id=_name("entry"),
         context_binding_revision_id=_name("binding"),
-        content=FrozenPromptContent.text('initial'),
+        content=FrozenPromptContent.text("initial"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
     )
@@ -1765,7 +1783,7 @@ def test_round3_1_future_new_turn_lane_does_not_block_active_steer_cut(
         client_submission_id=random_id("command"),
         delivery_mode=PromptDeliveryMode.NEW_TURN,
         target_turn_id=None,
-        content=FrozenPromptContent.text('next'),
+        content=FrozenPromptContent.text("next"),
         occurred_at=datetime.now(timezone.utc),
         actor_id="user",
         deadline_monotonic=deadline,
@@ -1778,7 +1796,7 @@ def test_round3_1_future_new_turn_lane_does_not_block_active_steer_cut(
         client_submission_id=random_id("command"),
         delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
         target_turn_id=root_turn,
-        content=FrozenPromptContent.text('steer'),
+        content=FrozenPromptContent.text("steer"),
         occurred_at=datetime.now(timezone.utc),
         actor_id="user",
         deadline_monotonic=deadline,
@@ -1821,7 +1839,7 @@ def test_round3_1_prompt_ingress_confirmation_is_semantically_exact_and_stable(
         turn_id=root_turn,
         entry_id=_name("entry"),
         context_binding_revision_id=_name("binding"),
-        content=FrozenPromptContent.text('initial'),
+        content=FrozenPromptContent.text("initial"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
     )
@@ -1923,7 +1941,7 @@ def test_round3_1_steer_consumption_ack_confirmation_is_exact(
         turn_id=turn_id,
         entry_id=_name("entry"),
         context_binding_revision_id=revision_id,
-        content=FrozenPromptContent.text('initial'),
+        content=FrozenPromptContent.text("initial"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
     )
@@ -1935,7 +1953,7 @@ def test_round3_1_steer_consumption_ack_confirmation_is_exact(
         client_submission_id=random_id("command"),
         delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
         target_turn_id=turn_id,
-        content=FrozenPromptContent.text('exact steer'),
+        content=FrozenPromptContent.text("exact steer"),
         occurred_at=datetime.now(timezone.utc),
         actor_id="user",
         deadline_monotonic=deadline,
@@ -2046,7 +2064,7 @@ def test_round3_1_steer_consume_rejects_canonical_base_drift_without_mutation(
         turn_id=turn_id,
         entry_id=_name("entry"),
         context_binding_revision_id=revision_id,
-        content=FrozenPromptContent.text('initial'),
+        content=FrozenPromptContent.text("initial"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
     )
@@ -2058,7 +2076,7 @@ def test_round3_1_steer_consume_rejects_canonical_base_drift_without_mutation(
         client_submission_id=random_id("command"),
         delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
         target_turn_id=turn_id,
-        content=FrozenPromptContent.text('must remain pending'),
+        content=FrozenPromptContent.text("must remain pending"),
         occurred_at=datetime.now(timezone.utc),
         actor_id="user",
         deadline_monotonic=deadline,
@@ -2121,10 +2139,10 @@ def test_round3_1_steer_consume_rejects_canonical_base_drift_without_mutation(
         scope_kind=ModelInputScopeKind.ROOT,
     )
     snapshot_carrier = build_compaction_snapshot_carrier(
-        summary=freeze_compaction_summary_output(
-            "summary", maximum_utf8_bytes=100
+        summary=freeze_compaction_summary_output("summary", maximum_utf8_bytes=100),
+        retained_entry_ids=(
+            compaction_read.dispatch_read.compile_snapshot.canonical_input.identity.initial_entry_id,
         ),
-        retained_entry_ids=(compaction_read.dispatch_read.compile_snapshot.canonical_input.identity.initial_entry_id,),
         continuation_mode=CompactionContinuationMode.RESUME_ACTIVE_TURN,
         active_request_entry_id=compaction_read.dispatch_read.compile_snapshot.canonical_input.identity.initial_entry_id,
     )
@@ -2160,9 +2178,6 @@ def test_round3_1_steer_consume_rejects_canonical_base_drift_without_mutation(
             ),
             snapshot_content=_snapshot_content(snapshot_carrier),
             snapshot_carrier=snapshot_carrier,
-
-
-
             occurred_at=datetime.now(timezone.utc),
             actor_id="runtime:test",
         )
@@ -2222,9 +2237,6 @@ def test_round3_1_steer_consume_rejects_canonical_base_drift_without_mutation(
             ),
             snapshot_content=_snapshot_content(conflicting_carrier),
             snapshot_carrier=conflicting_carrier,
-
-
-
             occurred_at=compaction_candidate.event.occurred_at,
             actor_id="runtime:test",
         )
@@ -2308,7 +2320,7 @@ def test_round5b_first_compaction_can_cut_before_turn_genesis_marker(
             turn_id=turn_id,
             entry_id=_name("entry"),
             context_binding_revision_id=_name("binding"),
-            content=FrozenPromptContent.text(f'prior user {index}'),
+            content=FrozenPromptContent.text(f"prior user {index}"),
             occurred_at=datetime.now(timezone.utc),
             deadline_monotonic=deadline,
         )
@@ -2319,9 +2331,6 @@ def test_round5b_first_compaction_can_cut_before_turn_genesis_marker(
             lease.guard,
             cut=cut,
             entry_id=_name("entry"),
-            parent_content=InlineContent.from_bytes(
-                f"prior assistant {index}".encode()
-            ),
             blocks=(
                 AssistantTextBlock(
                     _name("block"),
@@ -2344,7 +2353,7 @@ def test_round5b_first_compaction_can_cut_before_turn_genesis_marker(
         turn_id=turn_id,
         entry_id=random_id("entry"),
         context_binding_revision_id=revision_id,
-        content=FrozenPromptContent.text('current user'),
+        content=FrozenPromptContent.text("current user"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
     )
@@ -2373,9 +2382,7 @@ def test_round5b_first_compaction_can_cut_before_turn_genesis_marker(
         late_outcomes=canonical.late_outcomes,
     )
     snapshot_carrier = build_compaction_snapshot_carrier(
-        summary=freeze_compaction_summary_output(
-            "summary", maximum_utf8_bytes=100
-        ),
+        summary=freeze_compaction_summary_output("summary", maximum_utf8_bytes=100),
         retained_entry_ids=(),
         continuation_mode=CompactionContinuationMode.RESUME_ACTIVE_TURN,
         active_request_entry_id=canonical.identity.initial_entry_id,
@@ -2399,9 +2406,6 @@ def test_round5b_first_compaction_can_cut_before_turn_genesis_marker(
             source_digest=canonical_compaction_range_digest(lineage, canonical_range),
             snapshot_content=_snapshot_content(snapshot_carrier),
             snapshot_carrier=snapshot_carrier,
-
-
-
             occurred_at=datetime.now(timezone.utc),
             actor_id="runtime:test",
         )
@@ -2449,21 +2453,27 @@ def test_round5b_manual_compaction_command_is_exact_and_ack_confirmable(
         turn_id=turn_id,
         entry_id=_name("entry"),
         context_binding_revision_id=_name("binding"),
-        content=FrozenPromptContent.text('initial'),
+        content=FrozenPromptContent.text("initial"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
     )
     repository.interrupt_turn(
-        lease.guard, turn_id=turn_id, reason="USER_STOP",
-        occurred_at=datetime.now(timezone.utc), actor_id="test",
+        lease.guard,
+        turn_id=turn_id,
+        reason="USER_STOP",
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="test",
         deadline_monotonic=deadline,
     )
     source_cut = repository.prepare_compaction_input_cut(
-        lease.guard, turn_id=turn_id, allow_terminal=True,
+        lease.guard,
+        turn_id=turn_id,
+        allow_terminal=True,
         deadline_monotonic=deadline,
     )
     binding = repository.read_session_model_call_binding(
-        lease.guard, deadline_monotonic=deadline,
+        lease.guard,
+        deadline_monotonic=deadline,
     )
     command_id = _name("command")
     candidate = build_prepared_manual_compaction_command(
@@ -2501,7 +2511,9 @@ def test_round5b_manual_compaction_command_is_exact_and_ack_confirmable(
         command_id=command_id,
         scope_kind=ModelInputScopeKind.ROOT,
         target_turn_id=turn_id,
-        model_call_binding=ModelCallBinding(ModelConnectionId(_name("connection")), None),
+        model_call_binding=ModelCallBinding(
+            ModelConnectionId(_name("connection")), None
+        ),
         source_cut=source_cut,
     )
     assert (
@@ -2538,7 +2550,7 @@ def test_round5b_next_exact_scope_turn_inherits_latest_snapshot_base(
         turn_id=first_turn,
         entry_id=_name("entry"),
         context_binding_revision_id=first_revision,
-        content=FrozenPromptContent.text('old prompt'),
+        content=FrozenPromptContent.text("old prompt"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
     )
@@ -2560,7 +2572,9 @@ def test_round5b_next_exact_scope_turn_inherits_latest_snapshot_base(
     )
     snapshot_carrier = build_compaction_snapshot_carrier(
         summary=freeze_compaction_summary_output("old summary", maximum_utf8_bytes=100),
-        retained_entry_ids=(read.dispatch_read.compile_snapshot.canonical_input.identity.initial_entry_id,),
+        retained_entry_ids=(
+            read.dispatch_read.compile_snapshot.canonical_input.identity.initial_entry_id,
+        ),
         continuation_mode=CompactionContinuationMode.RESUME_ACTIVE_TURN,
         active_request_entry_id=read.dispatch_read.compile_snapshot.canonical_input.identity.initial_entry_id,
     )
@@ -2588,9 +2602,6 @@ def test_round5b_next_exact_scope_turn_inherits_latest_snapshot_base(
             ),
             snapshot_content=_snapshot_content(snapshot_carrier),
             snapshot_carrier=snapshot_carrier,
-
-
-
             occurred_at=datetime.now(timezone.utc),
             actor_id="runtime:test",
         )
@@ -2627,7 +2638,7 @@ def test_round5b_next_exact_scope_turn_inherits_latest_snapshot_base(
         turn_id=second_turn,
         entry_id=_name("entry"),
         context_binding_revision_id=second_revision,
-        content=FrozenPromptContent.text('new prompt'),
+        content=FrozenPromptContent.text("new prompt"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
     )
@@ -2675,7 +2686,7 @@ def test_round3_1_resource_rejection_is_atomic_and_exactly_confirmable(
         turn_id=turn_id,
         entry_id=_name("entry"),
         context_binding_revision_id=_name("binding"),
-        content=FrozenPromptContent.text('initial'),
+        content=FrozenPromptContent.text("initial"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
     )
@@ -2687,7 +2698,7 @@ def test_round3_1_resource_rejection_is_atomic_and_exactly_confirmable(
         client_submission_id=random_id("command"),
         delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
         target_turn_id=turn_id,
-        content=FrozenPromptContent.text('too large for the fixed prefix'),
+        content=FrozenPromptContent.text("too large for the fixed prefix"),
         occurred_at=datetime.now(timezone.utc),
         actor_id="user",
         deadline_monotonic=deadline,
@@ -2758,7 +2769,7 @@ def test_stage2_prompt_cancel_is_single_terminal_cas(
         client_submission_id=random_id("command"),
         delivery_mode=PromptDeliveryMode.NEW_TURN,
         target_turn_id=None,
-        content=FrozenPromptContent.text('cancel me'),
+        content=FrozenPromptContent.text("cancel me"),
         occurred_at=datetime.now(timezone.utc),
         actor_id="user",
         deadline_monotonic=deadline,

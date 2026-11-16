@@ -1,4 +1,4 @@
-"""Code Mode waits distinguish a current Work boundary from Agent idle."""
+"""Exact Work completion differs from Agent idle across queued successors."""
 
 import asyncio
 import json
@@ -9,7 +9,7 @@ import pytest
 
 from pulsara_agent.identity import random_id
 from pulsara_agent.llm.input import PromptContent, MessageRole, text_part_values
-from pulsara_agent.model_input.lowering import decode_tool_result_observation
+from tests.test_agent_code_mode_execution import _native_fields
 from pulsara_agent.primitives.permission import PermissionMode
 from tests.test_agent_session_host import _delegate, _delegation_progress
 from tests.test_agent_code_mode_execution import _formal_cell_rows
@@ -19,9 +19,10 @@ pytestmark = pytest.mark.postgres
 
 
 class UntilModel(_DetachedDraftModel):
-    def __init__(self, until):
+    def __init__(self, branch):
         super().__init__()
-        self.until = until
+        self.branch = branch
+        self.selected_work = None
         self.root_id = None
         self.agent_id = None
         self.first_turn = None
@@ -52,14 +53,15 @@ class UntilModel(_DetachedDraftModel):
                 else:
                     events = _text("ASSIGNMENT_ACCEPTED")
             elif step == 0:
-                arguments = {"agents": [{"kind": "AGENT", "agent_id": self.agent_id}],
-                    "until": self.until, "timeout_seconds": 30}
+                arguments = ({"works":[self.selected_work]} if self.branch=="works" else
+                    {"agents":[{"kind":"AGENT","agent_id":self.agent_id}]})
+                arguments["timeout_seconds"]=30
                 events = _tool_call("exec_cell", random_id("call"), {
-                    "code": "console.log(await tools.wait_agent(" + json.dumps(arguments) + "));"})
+                    "code": "const r=await tools.wait_agent(" + json.dumps(arguments) + ");console.log({reason:r.meta.wait_reason,records:r.content.map(p=>p.value)});"})
             elif step == 1:
                 accepted = next(message for message in reversed(request.compiled_input.messages)
                     if message.role is MessageRole.TOOL_RESULT)
-                body = json.loads(decode_tool_result_observation(text_part_values(accepted.content)[0])["body"])
+                body = _native_fields(text_part_values(accepted.content)[0])
                 self.cell = body["target"]
                 events = _tool_call("manage_cell", random_id("call"), {
                     "action": "wait", "target": self.cell, "yield_time_ms": 30_000})
@@ -82,12 +84,12 @@ class UntilModel(_DetachedDraftModel):
             yield event
 
 
-@pytest.mark.parametrize("until", ["work_end", "idle"])
-def test_real_cell_waits_for_current_work_or_queue_drain(
-    until, tmp_path, monkeypatch, stage2_migrated_postgres_database,
+@pytest.mark.parametrize("branch", ["works", "agents"])
+def test_real_cell_waits_for_exact_work_or_queue_drain(
+    branch, tmp_path, monkeypatch, stage2_migrated_postgres_database,
 ):
     async def scenario():
-        model = UntilModel(until)
+        model = UntilModel(branch)
         monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "home"))
         core, root = await _open_test_session(tmp_path=tmp_path, model=model,
             postgres_dsn=stage2_migrated_postgres_database.runtime_dsn, monkeypatch=monkeypatch)
@@ -106,6 +108,7 @@ def test_real_cell_waits_for_current_work_or_queue_drain(
                     limit=10, deadline_monotonic=monotonic() + 10)
             assigned = await work_rows()
             assert [item["status"] for item in assigned] == ["running", "queued"]
+            model.selected_work={"kind":"WORK","work_id":assigned[0]["work_id"]}
             waiting = asyncio.Event()
             original_suspend = core._agent_runtime.suspend_execution
             @asynccontextmanager
@@ -121,24 +124,21 @@ def test_real_cell_waits_for_current_work_or_queue_drain(
             await asyncio.wait_for(waiting.wait(), 15)
             model.release_first.set()
             await asyncio.wait_for(model.second_started.wait(), 15)
-            if until == "idle":
+            if branch == "agents":
                 assert not observation.done()
                 assert (await work_rows())[1]["status"] == "running"
                 model.release_second.set()
             await asyncio.wait_for(observation, 15)
             records = [record for _, record in await asyncio.to_thread(_formal_cell_rows, root)]
             values = [json.loads(record["text"]) for record in records if record.get("kind") == "log"]
-            result = next(value for value in values if value.get("until") == until)
-            assert result["state"] == "settled" and result["pending_targets"] == []
-            assert not {"bindings", "works"} & result.keys()
-            if until == "work_end":
-                assert result["observations"] == [{"target": {"kind": "AGENT", "agent_id": model.agent_id},
-                    "condition": "work_ended", "work": {"kind": "WORK", "work_id": assigned[0]["work_id"]}}]
+            result=next(value for value in values if value.get("reason")=="condition_met")
+            if branch=="works":
+                assert result["records"]==[{"agent":{"kind":"AGENT","agent_id":model.agent_id},
+                    "work":model.selected_work,"work_status":"completed"}]
                 assert (await work_rows())[1]["status"] == "running"
                 model.release_second.set()
             else:
-                assert result["observations"] == [{"target": {"kind": "AGENT", "agent_id": model.agent_id},
-                    "condition": "idle"}]
+                assert result["records"] == [{"agent":{"kind":"AGENT","agent_id":model.agent_id},"is_idle":True}]
                 assert [item["status"] for item in await work_rows()] == ["completed", "completed"]
                 # Work identity is retained by the caller for exact results.
                 for work, text in zip(assigned, ("FIRST_RESULT", "SECOND_RESULT"), strict=True):

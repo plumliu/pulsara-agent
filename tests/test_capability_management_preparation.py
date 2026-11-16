@@ -1,6 +1,9 @@
+from tests.support.capability_management_targets import (
+    mcp_target,
+    plugin_target,
+    hook_target,
+)
 
-from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
-from pulsara_agent.identity import random_id as _new_management_call_id
 import asyncio
 import json
 from time import monotonic
@@ -19,7 +22,6 @@ from pulsara_agent.hooks.source import LocalHookSourceProvider
 from pulsara_agent.capability.mcp_management import (
     LocalMcpManagementService,
     LocalMcpTarget,
-    McpManagementConflict,
     McpSecretMutation,
     config_guard,
 )
@@ -119,12 +121,7 @@ def test_local_model_preparation_uses_host_workspace_and_never_writes(tmp_path):
                         "endpoint": "https://example.org/mcp",
                     }
                 },
-                "target": {
-                    "kind": "MCP_CONNECTION",
-                    "scope": "WORKSPACE",
-                    "source_kind": "LOCAL",
-                    "server_id": "example",
-                },
+                "target": mcp_target(owner, "example", scope="WORKSPACE"),
             }
         )
         assert result.local_mutation.target.workspace_root == owner.workspace_root
@@ -142,12 +139,7 @@ def test_missing_local_configuration_is_a_form_draft_not_a_fake_endpoint(tmp_pat
         result = await owner.prepare(
             {
                 "action": "ADD_LOCAL_MCP",
-                "target": {
-                    "kind": "MCP_CONNECTION",
-                    "scope": "USER",
-                    "source_kind": "LOCAL",
-                    "server_id": "example",
-                },
+                "target": mcp_target(owner, "example", scope="USER"),
             }
         )
         assert result.user_inputs == ("connection_configuration",)
@@ -188,8 +180,7 @@ def test_model_secret_template_update_requires_confirmation_only_for_new_destina
             arguments = json.loads(
                 json.dumps(
                     {
-                        "action": "UPDATE_LOCAL_MCP",
-                        "expected_identity": config_guard(created.config),
+                        "action": "UPDATE_MCP_CONNECTION",
                         "config": {
                             "transport": {
                                 **original["transport"],
@@ -197,17 +188,9 @@ def test_model_secret_template_update_requires_confirmation_only_for_new_destina
                                 if destination_changed
                                 else "https://old.example/mcp",
                             },
-                            "auth": {
-                                "type": "bearer",
-                                "reference": {"parts": [reference, "x"]},
-                            },
+                            "auth": {"type": "bearer"},
                         },
-                        "target": {
-                            "kind": "MCP_CONNECTION",
-                            "scope": "USER",
-                            "source_kind": "LOCAL",
-                            "server_id": "example",
-                        },
+                        "target": mcp_target(owner, "example", scope="USER"),
                     }
                 )
             )
@@ -216,15 +199,15 @@ def test_model_secret_template_update_requires_confirmation_only_for_new_destina
             if destination_changed:
                 assert prepared.user_inputs == ("credential_destination_confirmation",)
                 with pytest.raises(ValueError, match="requires user input"):
-                    await call.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
+                    await call.execute()
                 assert config_guard(owner.mcp.inspect(target)) == config_guard(
                     created.config
                 )
             else:
                 assert prepared.user_inputs == ()
-                assert (await call.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call"))))["status"] == "APPLIED"
+                assert (await call.execute()).state == "SUCCESS"
                 assert owner.mcp.inspect(target).resolved_headers() == {
-                    "Authorization": "Bearer retained-test-credentialx"
+                    "Authorization": "Bearer retained-test-credential"
                 }
         finally:
             await owner.mcp.aclose()
@@ -246,13 +229,8 @@ def test_edit_draft_freezes_current_guard_and_rejects_explicit_stale_value(tmp_p
             },
         )
         args = {
-            "action": "UPDATE_LOCAL_MCP",
-            "target": {
-                "kind": "MCP_CONNECTION",
-                "scope": "USER",
-                "source_kind": "LOCAL",
-                "server_id": "example",
-            },
+            "action": "UPDATE_MCP_CONNECTION",
+            "target": mcp_target(owner, "example", scope="USER"),
         }
         result = await owner.prepare(args)
         assert thaw_json(result.expected_current)["expected_identity"]
@@ -260,9 +238,9 @@ def test_edit_draft_freezes_current_guard_and_rejects_explicit_stale_value(tmp_p
             thaw_json(result.public_prefill)["config"]["transport"]["endpoint"]
             == "https://example.org/mcp"
         )
-        with pytest.raises(McpManagementConflict):
+        with pytest.raises(ValueError):
             await owner.prepare({**args, "expected_identity": "stale"})
-        with pytest.raises(McpManagementConflict):
+        with pytest.raises(ValueError):
             await owner.prepare(
                 {**args, "target": {**args["target"], "scope": "WORKSPACE"}}
             )
@@ -295,12 +273,7 @@ def test_authorization_requires_saved_oauth_but_never_launches_browser_in_prepar
         result = await owner.prepare(
             {
                 "action": "AUTHORIZE_MCP",
-                "target": {
-                    "kind": "MCP_CONNECTION",
-                    "scope": "USER",
-                    "source_kind": "LOCAL",
-                    "server_id": "example",
-                },
+                "target": mcp_target(owner, "example", scope="USER"),
             }
         )
         assert result.user_inputs == ("browser_authorization",)
@@ -322,7 +295,7 @@ def test_plugin_prepare_freezes_exact_package_and_cannot_select_inherited_instan
         args = {
             "action": "SET_PLUGIN_ENABLED",
             "enabled": True,
-            "target": {"kind": "PLUGIN", "scope": "USER", "plugin_id": "example"},
+            "target": plugin_target(owner, "example", scope="USER"),
         }
         prepared = await owner.prepare(args)
         assert prepared.plugin.package_install_id == installed.package_install_id
@@ -335,16 +308,16 @@ def test_plugin_prepare_freezes_exact_package_and_cannot_select_inherited_instan
         assert thaw_json(prepared.expected_current) == {
             "expected_package_install_id": installed.package_install_id
         }
-        with pytest.raises(McpManagementConflict):
+        with pytest.raises(ValueError):
             await owner.prepare({**args, "expected_package_install_id": "stale"})
-        with pytest.raises(McpManagementConflict):
+        with pytest.raises(ValueError):
             await owner.prepare(
                 {**args, "target": {**args["target"], "scope": "WORKSPACE"}}
             )
         removal = await owner.prepare(
             {
                 "action": "REMOVE_PLUGIN",
-                "target": {"kind": "PLUGIN", "scope": "USER", "plugin_id": "example"},
+                "target": plugin_target(owner, "example", scope="USER"),
             }
         )
         assert removal.effects.destructive and not removal.user_inputs
@@ -366,23 +339,16 @@ def test_plugin_connection_missing_key_is_user_input_not_package_rejection(tmp_p
             auth=BearerSecret(ManagedLocalCredentialReference(binding)),
         )
         args = {
-            "action": "CONFIGURE_PLUGIN_MCP_CONNECTION",
-            "overlay": overlay_to_dict(overlay),
-            "expected_overlay": None,
-            "target": {
-                "kind": "MCP_CONNECTION",
-                "scope": "USER",
-                "source_kind": "PLUGIN",
-                "plugin_id": "example",
-                "server_id": "docs",
-            },
+            "action": "UPDATE_MCP_CONNECTION",
+            "config": {"auth": {"type": "bearer"}},
+            "target": mcp_target(owner, "docs", scope="USER", plugin="example"),
         }
         prepared = await owner.prepare(args)
         assert prepared.user_inputs == ("credential:bearer",)
         assert prepared.effects.outside_workspace_write
         assert thaw_json(prepared.expected_current)["expected_overlay"] is None
         assert prepared.plugin.mcp_connection_overlays == ()
-        with pytest.raises(McpManagementConflict):
+        with pytest.raises(ValueError):
             await owner.prepare({**args, "expected_overlay": overlay_to_dict(overlay)})
         with pytest.raises(ValueError):
             await owner.prepare({**args, "server_id": "foreign"})
@@ -397,14 +363,8 @@ def test_stdio_plugin_connection_draft_keeps_immutable_executable_definition(tmp
         await install_plugin(owner, tmp_path, stdio=True)
         prepared = await owner.prepare(
             {
-                "action": "CONFIGURE_PLUGIN_MCP_CONNECTION",
-                "target": {
-                    "kind": "MCP_CONNECTION",
-                    "scope": "USER",
-                    "source_kind": "PLUGIN",
-                    "plugin_id": "example",
-                    "server_id": "docs",
-                },
+                "action": "UPDATE_MCP_CONNECTION",
+                "target": mcp_target(owner, "docs", scope="USER", plugin="example"),
             }
         )
         assert prepared.user_inputs == ("connection_configuration",)
@@ -419,7 +379,7 @@ def test_stdio_plugin_connection_draft_keeps_immutable_executable_definition(tmp
             {
                 "action": "SET_PLUGIN_ENABLED",
                 "enabled": True,
-                "target": {"kind": "PLUGIN", "scope": "USER", "plugin_id": "example"},
+                "target": plugin_target(owner, "example", scope="USER"),
             }
         )
         assert enabled.effects.process_control
@@ -440,11 +400,7 @@ def test_hook_approval_requires_nonempty_normalized_definitions(tmp_path, config
                 await owner.prepare(
                     {
                         "action": "TRUST_HOOK_SOURCE",
-                        "target": {
-                            "kind": "HOOK_SOURCE",
-                            "scope": "USER",
-                            "source_kind": "LOCAL",
-                        },
+                        "target": hook_target(owner, scope="USER"),
                     }
                 )
         finally:
@@ -467,18 +423,10 @@ def test_plugin_connection_form_keeps_target_and_reprepares_native_overlay(
     async def run():
         owner = preparation(tmp_path)
         await install_plugin(owner, tmp_path)
-        target = {
-            "kind": "MCP_CONNECTION",
-            "scope": "USER",
-            "source_kind": "PLUGIN",
-            "plugin_id": "example",
-            "server_id": "docs",
-        }
+        target = mcp_target(owner, "docs", scope="USER", plugin="example")
         call = CapabilityManagementCall(
             owner,
-            await owner.prepare(
-                {"action": "CONFIGURE_PLUGIN_MCP_CONNECTION", "target": target}
-            ),
+            await owner.prepare({"action": "UPDATE_MCP_CONNECTION", "target": target}),
         )
         form = call.form("configure")
         assert thaw_json(form.public_projection)["prefill"]["target"] == target
@@ -497,11 +445,12 @@ def test_plugin_connection_form_keeps_target_and_reprepares_native_overlay(
         )
         values = await form.prepare_submission({"overlay": overlay})
         assert thaw_json(values.public_fields)["target"] == target
-        assert thaw_json(values.public_fields)["expected_overlay"] is None
+        assert thaw_json(call.prepared.expected_current)["expected_overlay"] is None
         call.accept(AcceptedCapabilityFormSubmission(values))
-        result = await call.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
-        assert result["status"] == "APPLIED" and result["target"] == target
-        assert "scope" not in result and "identity" not in result
+        result = await call.execute()
+        assert result.state == "SUCCESS" and result.business_value.public_fields == {
+            "target": target
+        }
         plugin = await owner._plugin(None, "example")
         assert (
             (not plugin.mcp_connection_overlays)

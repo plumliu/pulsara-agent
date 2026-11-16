@@ -1,10 +1,10 @@
 # Pulsara MCP 统一 Meta 调用架构草案
 
-状态：讨论草案，未实施。本文件记录统一 meta 的架构决定，与 MCP 接入、能力查询、能力管理、统一交付、数据库及原生工具索引共同适用。现阶段只修改文档，不修改生产代码；MCP 变化通知沿[Runtime Observation 修订草案](PULSARA_RUNTIME_OBSERVATION_REVISION_DRAFT.zh.md)第 7 节。
+状态：统一 meta 调用已接入生产代码，已完成 hardcut 跨层及真实 provider 验收；正常应用尚未重启。本文件记录统一 meta 的架构决定，与 MCP 接入、能力查询、能力管理、统一交付、数据库及原生工具索引共同适用。MCP 变化通知沿[Runtime Observation 修订草案](PULSARA_RUNTIME_OBSERVATION_REVISION_DRAFT.zh.md)第 7 节。
 
 ## 1. 目标与范围
 
-模型通过 `call_mcp_tool` 调用所有远端 MCP 工具，原生调用和 Code Mode 使用同一个入口。现有 `use_new_mcp_tool` 改名为 `call_mcp_tool`，参数和已经确定的返回语义保持不变。
+模型通过 `call_mcp_tool` 调用所有远端 MCP 工具，原生调用和 Code Mode 使用同一个入口。调用参数、返回语义及原生／JS 使用方法见 MCP 工具草案。
 
 不再向模型提供 DIRECT／META 两种调用方式。远端 MCP 工具不进入模型请求的原生 `tools` 数组，也不成为 Cell 的独立 `tools[远端工具名]` 方法。`call_mcp_tool` 本身仍是 Pulsara 原生工具，并可通过 JS API 使用。
 

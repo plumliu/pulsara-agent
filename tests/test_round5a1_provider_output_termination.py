@@ -15,7 +15,7 @@ from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog
 from pulsara_agent.conversation_kernel.assistant_settlement import (
     PreparedAssistantMessageSettlement,
 )
-from pulsara_agent.conversation_kernel.contracts import HostWriterGuard, InlineContent
+from pulsara_agent.conversation_kernel.contracts import HostWriterGuard
 from pulsara_agent.conversation_kernel.direct_model import (
     CompletedProviderModelExecution,
 )
@@ -151,7 +151,6 @@ def test_openai_function_tools_share_one_explicit_non_strict_wire_contract() -> 
         assert canonical_schema == thaw_tool_json_object(descriptor.input_schema)
 
 
-
 def test_openai_function_tool_declares_object_root_without_mutating_schema() -> None:
     schema = {
         "oneOf": [
@@ -179,8 +178,6 @@ def test_openai_function_tool_declares_object_root_without_mutating_schema() -> 
     assert chat["parameters"]["properties"]["action"]["enum"] == ["one", "two"]
     assert chat["parameters"]["required"] == ["action"]
     assert "oneOf" not in chat["parameters"]
-
-
 
 
 def test_openai_function_tool_rejects_non_object_argument_root() -> None:
@@ -233,22 +230,29 @@ def test_openai_function_lowering_rejects_intersecting_nested_unions() -> None:
 
 
 def test_assistant_settlement_exact_candidate_carries_scope_and_epoch() -> None:
-    cut = PreparedProviderInputCut('session:336wrfwkamrr3up6kjtsgvgcte', 'turn:klmmazz67vfgsfsvg6ceqgdsfu', "revision:test", 1)
-    content = InlineContent.from_bytes(b"assistant")
+    cut = PreparedProviderInputCut(
+        "session:336wrfwkamrr3up6kjtsgvgcte",
+        "turn:klmmazz67vfgsfsvg6ceqgdsfu",
+        "revision:test",
+        1,
+    )
     occurred_at = datetime(2026, 8, 17, tzinfo=timezone.utc)
-    root = ProviderInputContinuityScope('session:336wrfwkamrr3up6kjtsgvgcte', ModelInputScopeKind.ROOT)
+    root = ProviderInputContinuityScope(
+        "session:336wrfwkamrr3up6kjtsgvgcte", ModelInputScopeKind.ROOT
+    )
     child = ProviderInputContinuityScope(
-        'session:kmz6pl55dsqspcz6dgmhr7sxpy', ModelInputScopeKind.SUBAGENT
+        "session:kmz6pl55dsqspcz6dgmhr7sxpy", ModelInputScopeKind.SUBAGENT
     )
 
     def candidate(
         scope: ProviderInputContinuityScope, nonce: str, revision: int
     ) -> PreparedAssistantMessageSettlement:
         return PreparedAssistantMessageSettlement(
-            guard=HostWriterGuard(scope.session_id, 1, 'host:yinyxklzunar54s7objjdbphcy'),
+            guard=HostWriterGuard(
+                scope.session_id, 1, "host:yinyxklzunar54s7objjdbphcy"
+            ),
             cut=replace(cut, session_id=scope.session_id),
-            entry_id='entry:yizmduice57hcs52bz2usckgc4',
-            parent_content=content,
+            entry_id="entry:yizmduice57hcs52bz2usckgc4",
             blocks=(),
             complete_turn=True,
             occurred_at=occurred_at,
@@ -259,12 +263,12 @@ def test_assistant_settlement_exact_candidate_carries_scope_and_epoch() -> None:
             provider_replay=None,
         )
 
-    baseline = candidate(root, 'epoch:blfvbvu7lgolhbt4rz2pxpnbxm', 1)
-    assert candidate(root, 'epoch:r2tjjdwcpwvkoidgh7sk5cbadu', 1) != baseline
-    assert candidate(root, 'epoch:blfvbvu7lgolhbt4rz2pxpnbxm', 2) != baseline
-    assert candidate(child, 'epoch:blfvbvu7lgolhbt4rz2pxpnbxm', 1) != baseline
+    baseline = candidate(root, "epoch:blfvbvu7lgolhbt4rz2pxpnbxm", 1)
+    assert candidate(root, "epoch:r2tjjdwcpwvkoidgh7sk5cbadu", 1) != baseline
+    assert candidate(root, "epoch:blfvbvu7lgolhbt4rz2pxpnbxm", 2) != baseline
+    assert candidate(child, "epoch:blfvbvu7lgolhbt4rz2pxpnbxm", 1) != baseline
     assert baseline.continuity_scope is root
-    assert baseline.continuity_epoch_nonce == 'epoch:blfvbvu7lgolhbt4rz2pxpnbxm'
+    assert baseline.continuity_epoch_nonce == "epoch:blfvbvu7lgolhbt4rz2pxpnbxm"
     assert baseline.continuity_epoch_revision == 1
 
 
@@ -633,8 +637,13 @@ def test_chat_replay_byte_overflow_is_typed_and_not_retried(
     assert failure.code_hint == "transport_source_payload_limit_exceeded"
     assert failure.retry_summary is not None
     assert failure.retry_summary.final_attempt == 1
-    assert failure.retry_summary.skipped_reason == "transport_source_payload_limit_exceeded"
-    assert failure.retry_summary.final_reason == "transport_source_payload_limit_exceeded"
+    assert (
+        failure.retry_summary.skipped_reason
+        == "transport_source_payload_limit_exceeded"
+    )
+    assert (
+        failure.retry_summary.final_reason == "transport_source_payload_limit_exceeded"
+    )
     assert failure.retry_summary.retry_count == 0
     assert failure.retry_summary.attempts == ()
     assert not failure.retry_summary.exhausted
@@ -723,7 +732,7 @@ def test_chat_tool_response_without_reasoning_carrier_needs_no_replay() -> None:
     )
     assert (
         completion.bind_assistant_entry(
-            assistant_entry_id='entry:qheyerqszsjkbm2bkcamidqnmy',
+            assistant_entry_id="entry:qheyerqszsjkbm2bkcamidqnmy",
             public_projection_fingerprint="sha256:" + "3" * 64,
             has_tool_calls=True,
         )
@@ -2115,14 +2124,21 @@ def test_responses_terminal_elision_preserves_nonempty_message_annotations() -> 
     )
     accumulator.apply(
         _completed_response(
-            [{"type": "message", "role": "assistant",
-              "content": [{"type": "output_text", "text": "done"}]}]
+            [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "done"}],
+                }
+            ]
         )
     )
     terminal = accumulator.finish()
     assert isinstance(terminal, ProviderAdapterTerminal)
     assert terminal.completed_replay_payload is not None
-    assert tuple(thaw_json(item) for item in terminal.completed_replay_payload.ordered_items) == (streamed,)
+    assert tuple(
+        thaw_json(item) for item in terminal.completed_replay_payload.ordered_items
+    ) == (streamed,)
 
 
 def test_responses_terminal_phase_conflict_still_fails_closed() -> None:
@@ -2962,15 +2978,24 @@ def test_responses_late_reasoning_format_survives_terminal_omission() -> None:
         }
     )
 
-    accumulator.apply({
-        "type": "response.completed",
-        "response": {"id": "response:test", "status": "completed",
-                     "output": [{key: value for key, value in done_item.items() if key != "format"}]},
-    })
+    accumulator.apply(
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "response:test",
+                "status": "completed",
+                "output": [
+                    {key: value for key, value in done_item.items() if key != "format"}
+                ],
+            },
+        }
+    )
     terminal = accumulator.finish()
     assert isinstance(terminal, ProviderAdapterTerminal)
     assert terminal.completed_replay_payload is not None
-    assert tuple(thaw_json(item) for item in terminal.completed_replay_payload.ordered_items) == (done_item,)
+    assert tuple(
+        thaw_json(item) for item in terminal.completed_replay_payload.ordered_items
+    ) == (done_item,)
 
 
 @pytest.mark.parametrize("initial_phase", (None, "final_answer", "commentary"))
@@ -3287,7 +3312,7 @@ def test_completed_replay_must_exactly_match_public_projection() -> None:
     )
     with pytest.raises(RuntimeError, match="public projection"):
         completion.bind_assistant_entry(
-            assistant_entry_id='entry:yizmduice57hcs52bz2usckgc4',
+            assistant_entry_id="entry:yizmduice57hcs52bz2usckgc4",
             public_projection_fingerprint="sha256:" + "3" * 64,
             has_tool_calls=False,
         )
@@ -3381,13 +3406,11 @@ def test_responses_accepts_message_before_ordered_function_calls() -> None:
         ),
     )
     fragment = completion.bind_assistant_entry(
-        assistant_entry_id='entry:ravoga4jkj4q6tvxlxo25hlwhi',
+        assistant_entry_id="entry:ravoga4jkj4q6tvxlxo25hlwhi",
         public_projection_fingerprint=projection,
         has_tool_calls=True,
     )
     assert fragment is not None
-
-
 
 
 class _Round5A1SSEHandler(BaseHTTPRequestHandler):

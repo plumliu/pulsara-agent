@@ -400,10 +400,10 @@ def freeze_openai_native_tool_eligibility(
 ) -> FrozenNativeToolWireEligibilitySet:
     """Quote every canonical tool without retaining its complete wire schema.
 
-    The generic capability registry never sees this projection.  It remains a
-    process-local adapter fact and therefore cannot replace the canonical MCP
-    schema or local argument validator.  Full wire values are materialized
-    only after the pure planner selects the bounded DIRECT cohort.
+    The generic capability registry never sees this projection. It remains a
+    process-local adapter fact for the fixed native tool set. Full wire values
+    are materialized when that set is installed; MCP tools use their separate
+    meta invocation and local argument validator.
     """
 
     if wire_api not in {"openai_chat_completions", "openai_responses"}:

@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 from pulsara_agent.capability.types import (
-    ActiveSkillProjectionUnavailableReason,
-    ActiveSkillInjection,
-    ActiveSkillReason,
     ResolvedSkillCatalogEntry,
     SkillDiagnostic,
     SkillDiagnosticCode,
@@ -16,16 +13,10 @@ from pulsara_agent.primitives.context import canonical_json_bytes
 
 
 MAX_SKILL_CATALOG_UTF8_BYTES = 384 * 1024
-MAX_ACTIVE_SKILL_BODY_UTF8_BYTES = 512 * 1024
-
-
-SkillProjectionOverboundReason = (
-    SkillResolutionUnavailableReason | ActiveSkillProjectionUnavailableReason
-)
 
 
 class SkillProjectionOverbound(ValueError):
-    def __init__(self, reason: SkillProjectionOverboundReason) -> None:
+    def __init__(self, reason: SkillResolutionUnavailableReason) -> None:
         super().__init__(reason.value)
         self.reason = reason
 
@@ -50,7 +41,7 @@ def render_catalog_prompt(
                 {
                     "name": item.name,
                     "description": item.description,
-                    "skill_path": item.skill_path,
+                    "target": {"kind": "SKILL", "skill_path": item.skill_path},
                 }
                 for item in ordered
             )
@@ -63,42 +54,6 @@ def render_catalog_prompt(
     return text
 
 
-def render_active_skill_prompt(
-    injections: tuple[ActiveSkillInjection, ...],
-) -> str | None:
-    """Render exact parsed Markdown bodies in one closed JSON carrier."""
-
-    if not injections:
-        return None
-    ordered = tuple(sorted(injections, key=lambda item: item.name))
-    if len({item.name for item in ordered}) != len(ordered):
-        raise ValueError("active Skill names are duplicated")
-    body_bytes = sum(len(item.body.encode("utf-8")) for item in ordered)
-    if body_bytes > MAX_ACTIVE_SKILL_BODY_UTF8_BYTES:
-        raise SkillProjectionOverbound(
-            ActiveSkillProjectionUnavailableReason.ACTIVE_PROJECTION_OVERBOUND
-        )
-    text = canonical_json_bytes(
-        {
-            "skills": tuple(
-                {
-                    "name": item.name,
-                    "skill_path": item.skill_path,
-                    **({"reason": item.reason.value}
-                       if item.reason is ActiveSkillReason.EXPLICIT_USER_MENTION else {}),
-                    "body": item.body,
-                }
-                for item in ordered
-            )
-        }
-    ).decode("utf-8")
-    if len(text.encode("utf-8")) > MAX_ACTIVE_SKILL_BODY_UTF8_BYTES:
-        raise SkillProjectionOverbound(
-            ActiveSkillProjectionUnavailableReason.ACTIVE_PROJECTION_OVERBOUND
-        )
-    return text
-
-
 def catalog_projection_overbound_diagnostic() -> SkillDiagnostic:
     return SkillDiagnostic(
         severity=SkillDiagnosticSeverity.WARNING,
@@ -107,20 +62,11 @@ def catalog_projection_overbound_diagnostic() -> SkillDiagnostic:
     )
 
 
-def active_projection_overbound_diagnostic() -> SkillDiagnostic:
-    return SkillDiagnostic(
-        severity=SkillDiagnosticSeverity.WARNING,
-        code=SkillDiagnosticCode.PROJECTION_OVERBOUND,
-        message="Active Skill projection exceeds its physical bound",
-    )
 
 
 __all__ = [
-    "MAX_ACTIVE_SKILL_BODY_UTF8_BYTES",
     "MAX_SKILL_CATALOG_UTF8_BYTES",
     "SkillProjectionOverbound",
-    "active_projection_overbound_diagnostic",
     "catalog_projection_overbound_diagnostic",
-    "render_active_skill_prompt",
     "render_catalog_prompt",
 ]

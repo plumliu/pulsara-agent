@@ -1,214 +1,255 @@
-"""Query dispatch uses live execution owners without acknowledging their output."""
-from __future__ import annotations
-from tests.support.model_config import scheduled_task_service
+"""Real model query dispatch leaves process and Cell output owners untouched."""
 
 import asyncio
 from types import SimpleNamespace
-
 from pulsara_agent.code_mode import CodeModeHost, CodeModeToolResult
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
-from pulsara_agent.conversation_kernel.tool_surface import BuiltinExecutionPolicyRef
+from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
+from pulsara_agent.conversation_kernel.tool_policy import (
+    DefaultToolDispatchAuthorizationPolicy,
+)
 from pulsara_agent.identity import random_id
-from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
-from pulsara_agent.model_input.contracts import ModelInputScopeKind
-from pulsara_agent.ports.tool_execution import encode_tool_public_json
-from pulsara_agent.primitives.tool_observation import MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
-from pulsara_agent.primitives.tool_result_projection import conservative_tool_result_page_logical_utf8_bytes
+from tests.support.model_config import scheduled_task_service
+from tests.support.round3 import direct_tool_invocation_context
 
 
-def _runtime(host, read_source):
-    port = object.__new__(DirectKernelToolPort)
-    port._closed = False
-    port._session_id = random_id("session")
-    port._code_mode = host
-    port._code_mode_read_source = read_source
-    port._validate_surface_borrow = lambda *args: None
-    borrow = SimpleNamespace(
-        code_cell_id=None,
-        prepared=SimpleNamespace(access=SimpleNamespace(conversation_scope_kind=ModelInputScopeKind.ROOT)),
-        execution_binding=lambda name: SimpleNamespace(tool_name=name, execution_policy=BuiltinExecutionPolicyRef(name, "test-bound-catalog")),
+def runtime(tmp_path, host=None, read_source=None):
+    port = DirectKernelToolPort(
+        scheduled_tasks=scheduled_task_service(),
+        workspace_root=tmp_path,
+        host_owner_id=random_id("host"),
+        session_id=random_id("session"),
+        authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
+        live_bus=LiveAgentEventBus(),
     )
-    call_id, result_entry_id = random_id("call"), random_id("entry")
-    context = SimpleNamespace(
-        session_id=port._session_id, turn_id=random_id("turn"),
-        assistant_entry_id=random_id("entry"), tool_call_id=call_id, attempt_id=random_id("attempt"),
-        result_entry_id=result_entry_id,
-        page_budget=ToolResultPageBudget(call_id, result_target={"kind": "SESSION_ENTRY", "session_id": port._session_id, "entry_id": result_entry_id}),
-        attempt_permission_snapshot_fingerprint="permission", permission_snapshot_fingerprint="permission",
-        conversation_scope_kind="ROOT", surface_borrow=borrow, cell_cancel_event=None, code_cell_id=None,
+    if host is not None:
+        port.bind_subagent_port(
+            SimpleNamespace(tool_names=(), bind_cell_observer=lambda observer: None)
+        )
+        port.bind_code_mode_port(host)
+        port.bind_code_mode_executor(
+            invoke=None, freeze_source=None, read_source=read_source
+        )
+    return port
+
+
+async def dispatch(port, name, arguments):
+    call, attempt, turn, entry = (
+        random_id("call"),
+        random_id("attempt"),
+        random_id("turn"),
+        random_id("entry"),
     )
-    return port, context
-
-
-async def _dispatch(port, context, name, arguments):
-    return await port.invoke(
-        tool_name=name, arguments=arguments, tool_call_id=context.tool_call_id,
-        attempt_id=context.attempt_id, turn_id=context.turn_id,
-        assistant_entry_id=context.assistant_entry_id, invocation_context=context,
+    borrow, context = direct_tool_invocation_context(
+        port,
+        session_id=port._session_id,
+        tool_name=name,
+        tool_call_id=call,
+        attempt_id=attempt,
+        turn_id=turn,
+        assistant_entry_id=entry,
     )
+    try:
+        result = await port.invoke(
+            tool_name=name,
+            arguments=arguments,
+            tool_call_id=call,
+            attempt_id=attempt,
+            turn_id=turn,
+            assistant_entry_id=entry,
+            invocation_context=context,
+        )
+        if name in {"exec_process", "manage_process", "query_processes"}:
+            from pulsara_agent.ports.terminal import terminal_result_schema
+            from tests.support.tool_result_schemas import validate_business_result
+
+            validate_business_result(terminal_result_schema(name), result.content, result.state)
+        return result
+    finally:
+        borrow.close()
 
 
-def test_cell_source_query_dispatch_pages_unicode_without_taking_output_owner():
+def test_complete_cell_source_query_does_not_take_output_owner(tmp_path):
     async def run():
         host = CodeModeHost()
-        frozen_source = "console.log('retained output');\n/*" + "冻结🙂\n" * 15000 + "*/"
-        source_attempt = random_id("attempt")
+        source = "console.log('retained output');\n/*" + "冻结🙂\n" * 15000 + "*/"
+        attempt = random_id("attempt")
         reads = []
+
         async def read_source(**values):
             reads.append(values)
-            return frozen_source
+            return source
+
         async def no_tools(_):
             return CodeModeToolResult(value={})
-        port, context = _runtime(host, read_source)
+
+        port = runtime(tmp_path, host, read_source)
         try:
-            cell_id = await host.start(
-                source=frozen_source, source_exec_attempt_id=source_attempt,
-                turn_id=context.turn_id, snapshot=object(), tool_catalog={"decide": {}}, invoke=no_tools,
+            cell = await host.start(
+                source=source,
+                source_exec_attempt_id=attempt,
+                turn_id=random_id("turn"),
+                snapshot=object(),
+                tool_catalog={"decide": {"parameters": {}}},
+                invoke=no_tools,
                 decision_available=False,
             )
-            async with asyncio.timeout(5):
-                while host.capture_cell(cell_id).state not in {"completed", "failed", "terminated"}:
-                    await asyncio.sleep(.001)
-            lease = await host.lease_output(cell_id)
-            assert lease is not None and lease.record == {"kind": "log", "text": "retained output"}
-            target = {"kind": "CELL", "cell_id": cell_id}
-            inventory = (await _dispatch(port, context, "query_cells", {})).public_value()
-            assert inventory["cells"][0]["target"] == target
-            assert inventory["cells"][0]["has_unread_output"] is True
-            parts, offset = [], 0
-            arguments = {"target": target, "max_chars": 32000}
-            while True:
-                result = await _dispatch(port, context, "query_cells", arguments)
-                assert result.state == "SUCCESS" and result.process_local_settlement is None
-                value = result.public_value()
-                assert value["cell"]["target"] == target
-                assert value["cell"]["has_unread_output"] is True
-                assert result.page_complete is True
-                assert conservative_tool_result_page_logical_utf8_bytes(
-                    tool_call_id=context.tool_call_id,
-                    body=encode_tool_public_json(value).decode(), model_visible_memory_ids=(),
-                ) <= MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
-                page = value["source"]
-                parts.append(page["text"])
-                assert page["returned_chars"] == len(page["text"])
-                assert "has_more" not in page and "next_offset_chars" not in page
-                if value["next"] is None:
-                    break
-                assert value["next"]["tool"] == "query_cells"
-                arguments = value["next"]["arguments"]
-                assert arguments["offset_chars"] > offset
-                offset = arguments["offset_chars"]
-            assert "".join(parts) == frozen_source
-            assert reads and all(values == {"session_id": context.session_id, "attempt_id": source_attempt}
-                                 for values in reads)
-            # Query and state waiting leave the original immutable queue
-            # admission candidate owned until its single FULL acknowledgement.
-            assert await host.lease_output(cell_id) is lease
-            state = await host.wait_state(cell_id, 0)
-            assert state["state"] == "completed"
-            assert not {"output", "has_more"}.intersection(state)
-            assert await host.lease_output(cell_id) is lease
+            await host.wait_state(cell, 30000)
+            lease = await host.lease_output(cell)
+            assert lease.record == {
+                "kind": "log",
+                "values": [{"type": "text", "value": "retained output"}],
+            }
+            target = {"kind": "CELL", "cell_id": cell}
+            inventory = await dispatch(port, "query_cells", {})
+            assert inventory.content.content[0].value["target"] == target
+            detail = await dispatch(port, "query_cells", {"target": target})
+            assert detail.state == "SUCCESS" and detail.process_local_settlement is None
+            assert detail.content.content[0].value == source
+            assert reads == [{"session_id": port._session_id, "attempt_id": attempt}]
+            assert await host.lease_output(cell) is lease
+            assert (await host.wait_state(cell, 0))["state"] == "completed"
+            assert await host.lease_output(cell) is lease
             await host.acknowledge_output(lease)
             async with asyncio.timeout(5):
                 while host.snapshot_cell_index():
-                    await asyncio.sleep(.001)
-            unavailable = await _dispatch(port, context, "query_cells", {"target": target})
-            assert unavailable.state == "APPLICATION_ERROR"
-            assert unavailable.public_value()["error"] == "unavailable"
+                    await asyncio.sleep(0.001)
+            absent = await dispatch(port, "query_cells", {"target": target})
+            assert absent.state == "APPLICATION_ERROR"
         finally:
             await host.aclose()
+            await port.aclose()
+
     asyncio.run(run())
 
 
-def test_source_read_failure_preserves_live_metadata_and_manage_stop_does_not_read_output():
+def test_source_failure_keeps_live_cell_and_stop_does_not_read_output(tmp_path):
     async def run():
         host = CodeModeHost()
         started, finish = asyncio.Event(), asyncio.Event()
+
         async def invoke(_):
             started.set()
             await finish.wait()
             return CodeModeToolResult(value={})
-        async def read_source(**_):
-            raise ValueError("canonical content digest mismatch")
-        port, context = _runtime(host, read_source)
+
+        async def read_source(**values):
+            raise ValueError("canonical content is corrupt")
+
+        port = runtime(tmp_path, host, read_source)
         try:
-            cell_id = await host.start(
-                source="console.log('keep'); await tools.read_file({});",
-                source_exec_attempt_id=random_id("attempt"), turn_id=context.turn_id,
-                snapshot=object(), tool_catalog={"decide": {}, "read_file": {}}, invoke=invoke,
+            cell = await host.start(
+                source="console.log('keep');await tools.read_file({});",
+                source_exec_attempt_id=random_id("attempt"),
+                turn_id=random_id("turn"),
+                snapshot=object(),
+                tool_catalog={
+                    name: {"parameters": {}} for name in ("decide", "read_file")
+                },
+                invoke=invoke,
                 decision_available=False,
             )
             await asyncio.wait_for(started.wait(), 5)
-            target = {"kind": "CELL", "cell_id": cell_id}
-            result = await _dispatch(port, context, "query_cells", {"target": target})
-            assert result.public_value()["source"] == {
-                "status": "UNAVAILABLE", "reason": "canonical content digest mismatch"}
-            assert result.public_value()["cell"]["pending_calls"] == 1
-            stopped = await _dispatch(port, context, "manage_cell", {"action": "stop", "target": target})
-            assert stopped.state == "SUCCESS" and stopped.process_local_settlement is None
-            assert stopped.public_value()["target"] == target
-            assert host.capture_cell(cell_id).has_unread_output is False
-            assert host.pending_output_cells() == ()
+            target = {"kind": "CELL", "cell_id": cell}
+            result = await dispatch(port, "query_cells", {"target": target})
+            assert (
+                result.state == "APPLICATION_ERROR"
+                and result.content.content[0].value == "canonical content is corrupt"
+            )
+            assert host.capture_cell(cell).pending_calls == 1
+            inventory = await dispatch(port, "query_cells", {})
+            assert inventory.content.content[0].value["pending_calls"] == 1
+            stopped = await dispatch(
+                port, "manage_cell", {"action": "stop", "target": target}
+            )
+            assert (
+                stopped.state == "SUCCESS"
+                and stopped.content.public_fields["target"] == target
+            )
+            assert (
+                host.capture_cell(cell).has_unread_output is False
+                and host.pending_output_cells() == ()
+            )
             finish.set()
             async with asyncio.timeout(5):
                 while host.snapshot_cell_index():
-                    await asyncio.sleep(.001)
-            assert host.pending_output_cells() == ()
+                    await asyncio.sleep(0.001)
         finally:
             finish.set()
             await host.aclose()
+            await port.aclose()
+
     asyncio.run(run())
 
 
-def test_process_query_dispatch_reuses_live_owner_without_consuming_logs(tmp_path):
-    from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
-    from pulsara_agent.primitives.permission import PermissionMode
-
+def test_process_query_dispatch_reuses_the_live_owner_without_consuming_logs(tmp_path):
     async def run():
-        session_id, host_id = random_id("session"), random_id("host")
-        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
-            workspace_root=tmp_path, host_owner_id=host_id, session_id=session_id,
-            authorization_policy=SimpleNamespace(), live_bus=LiveAgentEventBus(),
-        )
-        _, context = _runtime(None, None)
-        context.session_id = session_id
-        context.effective_permission_mode = PermissionMode.BYPASS_PERMISSIONS
-        context.permission_confirmation_granted = False
-        context.result_entry_id = random_id("entry")
-        context.host_owner_epoch = host_id
-        context.authorization_reference = "test:query-runtime"
-        port._validate_surface_borrow = lambda *args: None
+        port = runtime(tmp_path)
         try:
-            started = await _dispatch(port, context, "exec_process", {
-                "command": "printf 'kept log'; read query_input", "yield_time_ms": 0,
-            })
-            target = started.public_value()["target"]
-            detail = await _dispatch(port, context, "query_processes", {"target": target})
-            process = detail.public_value()["process"]
-            assert process["target"] == target and process["command"] == "printf 'kept log'; read query_input"
-            assert "output" not in process and "process_id" not in process
-            inventory = (await _dispatch(port, context, "query_processes", {})).public_value()
-            assert inventory["terminal_process_action"] == "list"
-            assert [item["target"] for item in inventory["processes"]] == [target]
-            assert (await _dispatch(port, context, "query_processes", {"target": target})).public_value()["process"]["status"] == "running"
+            started = await dispatch(
+                port,
+                "exec_process",
+                {
+                    "command": "printf 'kept log\\n'; read query_input",
+                    "yield_time_ms": 100,
+                },
+            )
+            target = started.content.public_fields["target"]
+            detail = await dispatch(port, "query_processes", {"target": target})
+            row = detail.content.content[0].value
+            assert (
+                row["target"] == target
+                and row["command"] == "printf 'kept log\\n'; read query_input"
+                and row["process_status"] == "RUNNING"
+            )
+            inventory = await dispatch(port, "query_processes", {})
+            assert [part.value["target"] for part in inventory.content.content] == [
+                target
+            ]
+            pending = port._terminal.wait_process(
+                target["process_id"],
+                timeout_seconds=0,
+                max_output_chars=None,
+                since_cursor=port._terminal.model_observation_cursor(
+                    target["process_id"], owner_host_session_id=port._terminal_owner_id
+                ),
+                owner_host_session_id=port._terminal_owner_id,
+            )
+            assert pending.output == "kept log\n"
         finally:
             await port.aclose()
+
     asyncio.run(run())
 
 
 def test_user_cell_index_remains_available_through_host_and_terminal_gateway(tmp_path):
     from pulsara_agent.conversation_kernel.host import KernelHostSession
-    from pulsara_agent.terminal_protocol.v3_gateway import TerminalKernelProtocolServer, wire
+    from pulsara_agent.terminal_protocol.v3_gateway import (
+        TerminalKernelProtocolServer,
+        wire,
+    )
 
-    index = ({"cell_id": random_id("cell"), "state": "running",
-              "has_unread_output": False, "pending_calls": 1},)
+    index = (
+        {
+            "cell_id": random_id("cell"),
+            "state": "running",
+            "has_unread_output": False,
+            "pending_calls": 1,
+        },
+    )
     cell_owner = SimpleNamespace(snapshot_cell_index=lambda: index)
     session = SimpleNamespace(
         _code_mode=cell_owner,
-        session_id=random_id("session"), host_session_id=random_id("session"),
+        session_id=random_id("session"),
+        host_session_id=random_id("session"),
     )
     session.code_mode_cells = lambda: KernelHostSession.code_mode_cells(session)
-    gateway = TerminalKernelProtocolServer(socket_path=tmp_path / "unused.sock", session_provider=lambda: None)
-    frame = gateway._code_mode_cells(SimpleNamespace(host_session=session), wire.CodeModeCellsRequest(request_id="test"))
+    gateway = TerminalKernelProtocolServer(
+        socket_path=tmp_path / "unused.sock", session_provider=lambda: None
+    )
+    frame = gateway._code_mode_cells(
+        SimpleNamespace(host_session=session),
+        wire.CodeModeCellsRequest(request_id="test"),
+    )
     assert frame.code_mode_cells.cells[0].cell_id == index[0]["cell_id"]
     assert frame.code_mode_cells.cells[0].pending_calls == 1

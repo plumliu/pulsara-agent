@@ -459,7 +459,7 @@ def _verify_runtime_grants(connection: Connection, runtime_role: str) -> None:
             if bool(_cell(allowed_row, 0, "allowed")) != ("UPDATE" in columns.get(column, ())):
                 raise PostgresSchemaError(
                     PostgresSchemaFailureCode.PRIVILEGE_MISSING,
-                    "clean runtime content-owner column grants are not exact",
+                    "clean runtime controlled column grants are not exact",
                 )
     for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE"):
         allowed_row = connection.execute(

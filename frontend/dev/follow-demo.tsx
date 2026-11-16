@@ -42,6 +42,10 @@ function delayedRead(signal: AbortSignal) {
   });
 }
 function Demo() {
+  const cellOutputDemo = new URLSearchParams(location.search).has('cell-output');
+  const cellId = useMemo(()=>randomIdentity('cell'),[]);
+  const sourceAttempt = useMemo(()=>randomIdentity('attempt'),[]);
+
   const [version,setVersion]=useState(1),[running,setRunning]=useState(true),[streaming,setStreaming]=useState(false);
   const [body,setBody]=useState(longThought),[oldBand,setOldBand]=useState(false),[failReads,setFailReads]=useState(false);
   const [queue,setQueue]=useState<QueuedPrompt[]>([]),[notice,setNotice]=useState('先展开末尾思考；启动流式输出后，试着向上阅读。');
@@ -54,18 +58,23 @@ function Demo() {
     return()=>clearInterval(interval);
   },[streaming,running]);
   const currentId=useMemo(()=>randomIdentity('view'),[version]);
-  const current:Message={id:currentId,viewSource:{kind:'draft',identity:{kind:'turn',value:'current'}},role:'assistant',assistantKind:'live',turnId:'current',time:'',status:running?'running':'completed',body:'',
+  const current:Message={id:currentId,viewSource:{kind:'draft',identity:{kind:'turn',value:'current'}},role:'assistant',assistantKind:'live',turnId:'current',time:'',status:cellOutputDemo?'completed':running?'running':'completed',body:'',
     reasoning:[{id:'current-thought',kind:'full',active:running,body}],
     traces:[{id:'current-tool',kind:'mcp',toolName:'mcp__demo__read',title:'读取演示文本',subtitle:'已完成',status:'completed',resultText:longThought}]};
   const [sent,setSent]=useState<Message[]>([]);
-  const messages=oldBand?oldMessages.slice(0,3):[...oldMessages,current,...(!running?[{id:'current-final',role:'assistant',assistantKind:'terminal',turnId:'current',rootFinal:true,time:'',body:'思考已完成。手动打开的过程应继续保持展开；主动阅读和文字选区也应受到保护。'} as Message]:[]),...sent];
+  const messages:Message[]=cellOutputDemo?[
+    {id:"cell-request",role:"user",time:"",body:"请比对两份导出记录，并说明检查结果。"},
+    {id:"cell-output",role:"user",userKind:"steer",inputOrigin:"CELL_OUTPUT",time:"",body:"已比对全部记录。\n\n字段与顺序一致，空结果也保留了列标题。",cellOutput:{cellId,sourceTurnId:"source",sourceExecAttemptId:sourceAttempt,recordSequence:1,kind:"log"},inputSource:{identityKind:"origin",sourceKind:"cell",deliveryMode:"steer",sourceExecAttemptId:sourceAttempt}},
+    {id:"cell-diagnostic",role:"user",userKind:"steer",inputOrigin:"CELL_OUTPUT",time:"",body:"图片引用暂时不可用，其他输出已完整保留。",cellOutput:{cellId,sourceTurnId:"source",sourceExecAttemptId:sourceAttempt,recordSequence:2,kind:"diagnostic"},inputSource:{identityKind:"origin",sourceKind:"cell",deliveryMode:"steer",sourceExecAttemptId:sourceAttempt}},
+    {id:"cell-answer",role:"assistant",assistantKind:"terminal",rootFinal:true,status:"completed",time:"",body:"导出检查已完成：记录内容、字段顺序和空结果列标题均正确。图片读取失败的说明保留在脚本输出中。"}
+  ]:oldBand?oldMessages.slice(0,3):[...oldMessages,current,...(!running?[{id:'current-final',role:'assistant',assistantKind:'terminal',turnId:'current',rootFinal:true,time:'',body:'思考已完成。手动打开的过程应继续保持展开；主动阅读和文字选区也应受到保护。'} as Message]:[]),...sent];
   const read=async(signal:AbortSignal)=>{await delayedRead(signal);if(failReads)throw Error('演示读取失败，请关闭失败开关后重试。');};
   const reset=()=>{setVersion(value=>value+1);setBody(longThought);setRunning(true);setStreaming(false);setOldBand(false);setQueue([]);setSent([]);};
   const props:Props={
-    workspace:{id:'demo-workspace',name:'跟随最新体验',path:'/local-fixture',kind:'project'},
-    session:{id:`follow-demo-${version}`,title:'跟随最新 · 生产组件体验',subtitle:'隔离演示',status:running?'running':'completed',updatedAt:'刚刚',live:true,modelCallBinding:{connection_id:'demo',reasoning:null}},
+    workspace:{id:'demo-workspace',name:cellOutputDemo?'脚本输出':'跟随最新体验',path:'/local-fixture',kind:'project'},
+    session:{id:`follow-demo-${version}`,title:cellOutputDemo?'脚本输出检查':'跟随最新 · 生产组件体验',subtitle:'隔离演示',status:cellOutputDemo?'completed':running?'running':'completed',updatedAt:'刚刚',live:true,modelCallBinding:{connection_id:'demo',reasoning:null}},
     messages,history:{atLatest:!oldBand,hasOlder:false,loading:false,windows:[{id:oldBand?'old':'tail',hasOlder:false,hasNewer:oldBand,loading:false}]},
-    activeTurnId:'current',activePlanMode:false,isRunning:running,inspectorOpen:false,
+    activeTurnId:'current',activePlanMode:false,isRunning:cellOutputDemo?false:running,inspectorOpen:false,
     queuedCount:queue.length,queuedPrompts:queue,localSubmissions:[],queueActions:[],
     onQueueAction:async(item,kind)=>{setQueue(previous=>previous.filter(value=>value.queueItemId!==item.queueItemId));if(kind==='edit')store.restoreIfEmpty(`follow-demo-${version}`,{parts:[{type:'text',text:promptContentTextProjection(item.content)}]});},
     onQueueActionHandled:noop,runtimeStatus:'online',canCreateSession:false,modelConfigurations:[model],modelCallBinding:{connection_id:'demo',reasoning:null},
@@ -83,7 +92,7 @@ function Demo() {
     onReadProcessEnd:async(_entry,signal)=>{await read(signal);},
     onLoadHistory:async()=>setOldBand(false),
     onRetainHistory:interest=>setReaderStatus(interest.followLatest?'允许跟随':'保护阅读'),
-    todo:{id:'demo-todo',items:[{ordinal:0,label:'展开长思考',status:'completed'},{ordinal:1,label:'向上阅读并选择文字',status:'in-progress'},{ordinal:2,label:'回到最新并完成执行',status:'pending'}]},
+    todo:cellOutputDemo?undefined:{id:'demo-todo',items:[{ordinal:0,label:'展开长思考',status:'completed'},{ordinal:1,label:'向上阅读并选择文字',status:'in-progress'},{ordinal:2,label:'回到最新并完成执行',status:'pending'}]},
   };
   return <><aside className="follow-demo-controls">
     <strong>本地体验 · {readerStatus}</strong>

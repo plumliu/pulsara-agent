@@ -519,14 +519,19 @@ def test_host_discards_entire_bad_generation_and_executes_accepted_tool_once(
                     (session.session_id,),
                 ).fetchall() == [("call:reused-by-provider",)]
                 entries = connection.execute(
-                    "SELECT id, inline_content FROM pulsara_v3.transcript_entries WHERE session_id=%s",
+                    "SELECT id FROM pulsara_v3.transcript_entries WHERE session_id=%s",
                     (session.session_id,),
                 ).fetchall()
                 assert abandoned.draft_identity not in {row[0] for row in entries}
-                assert all(
-                    b"DISCARDED_GENERATION" not in bytes(row[1] or b"")
-                    for row in entries
-                )
+                from psycopg.rows import dict_row, tuple_row
+                from pulsara_agent.conversation_kernel.content_parts import read_content_parts
+                connection.row_factory = dict_row
+                try:
+                    parts = tuple(part for row in entries for part in
+                        read_content_parts(connection,session_id=session.session_id,entry_id=row[0]))
+                    assert all("DISCARDED_GENERATION" not in str(part.value) for part in parts)
+                finally:
+                    connection.row_factory = tuple_row
                 replay = connection.execute(
                     "SELECT assistant_entry_id, payload_bytes FROM pulsara_v3.provider_assistant_replay_fragments WHERE session_id=%s",
                     (session.session_id,),

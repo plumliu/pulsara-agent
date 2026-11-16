@@ -375,8 +375,8 @@ export function CapabilityView({
               try {
                 let reviewed = enableCandidate;
                 for (const connection of reviewed.mcpConnections ?? []) {
-                  const policy = connection.config.scope_policy ?? 'ROOT_ONLY';
-                  if (policy === (connection.overlay?.scope_policy ?? 'ROOT_ONLY')) continue;
+                  const policy = connection.config.scope_policy ?? 'ROOT_AND_SUBAGENTS';
+                  if (policy === (connection.overlay?.scope_policy ?? 'ROOT_AND_SUBAGENTS')) continue;
                   const transport = connection.config.transport as Record<string, unknown>;
                   const overlay = {...(connection.overlay ?? {local_server_id: connection.serverId, transport_kind: transport.type,
                     endpoint: null, public_headers: {}, environment: {}, secret_environment: {}, auth: {type: 'none'}}), scope_policy: policy};

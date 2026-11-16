@@ -40,7 +40,7 @@ from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.settings import LocalPostgresConfig, LocalSettingsStore
 from pulsara_agent.workspace_identity import HostWorkspaceInput
 from tests.dogfood.run_compaction_request_start_dogfood import _rows
-from tests.dogfood.run_content_revision_line_edit_dogfood import _tool_trace
+from tests.support.dogfood_results import _tool_trace
 from tests.dogfood.run_model_switch_handover_dogfood import (
     _ReadOnlySettingsStore, _RecordingModelRuntime, _RecordingTransport,
 )

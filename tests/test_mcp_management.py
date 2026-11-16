@@ -116,7 +116,7 @@ def test_preparation_derives_physical_effects_and_does_not_hold_private_values(
             (McpSecretMutation(binding, "preparation-private-token"),),
         )
         edited = await service.prepare_mutation(
-            "UPDATE_LOCAL_MCP", target, {**private_entry, "display_name": "New title"}
+            "UPDATE_MCP_CONNECTION", target, {**private_entry, "display_name": "New title"}
         )
         assert edited.expected == config_guard(created.config)
         assert not edited.effects.outside_workspace_write
@@ -124,7 +124,7 @@ def test_preparation_derives_physical_effects_and_does_not_hold_private_values(
         assert "preparation-private-token" not in repr(edited)
         assert thaw_json(edited.entry)["display_name"] == "New title"
         changed_destination = await service.prepare_mutation(
-            "UPDATE_LOCAL_MCP",
+            "UPDATE_MCP_CONNECTION",
             target,
             {
                 **private_entry,
@@ -139,7 +139,7 @@ def test_preparation_derives_physical_effects_and_does_not_hold_private_values(
         assert removed.effects.outside_workspace_write and removed.entry is None
         with pytest.raises(McpManagementConflict):
             await service.prepare_mutation(
-                "UPDATE_LOCAL_MCP", target, private_entry, expected="stale"
+                "UPDATE_MCP_CONNECTION", target, private_entry, expected="stale"
             )
         with pytest.raises(McpManagementConflict):
             await service.prepare_mutation("ADD_LOCAL_MCP", target, entry)
@@ -559,7 +559,7 @@ def test_secret_template_changes_cannot_bypass_destination_confirmation(
             candidate = _credential_destination_entry(
                 kind, secret_to_dict(new_reference), new_destination
             )
-            prepared = await service.prepare_mutation("UPDATE_LOCAL_MCP", target, candidate)
+            prepared = await service.prepare_mutation("UPDATE_MCP_CONNECTION", target, candidate)
             assert prepared.requires_destination_confirmation
             with pytest.raises(ValueError, match="确认"):
                 await service.update(target, candidate, expected=config_guard(created.config))
@@ -634,7 +634,7 @@ def test_missing_secret_template_can_change_destination_without_retention_confir
             candidate = _credential_destination_entry(
                 kind, secret_to_dict(BoundSecretValue((reference, ":new"))), new_destination
             )
-            prepared = await service.prepare_mutation("UPDATE_LOCAL_MCP", target, candidate)
+            prepared = await service.prepare_mutation("UPDATE_MCP_CONNECTION", target, candidate)
             assert prepared.missing_credentials
             assert not prepared.requires_destination_confirmation
             assert (await service.update(

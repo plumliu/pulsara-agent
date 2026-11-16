@@ -129,16 +129,6 @@ def _observe_sessions(stack, core):
     return observed
 
 
-def _decoded(value):
-    if value is None:
-        return None
-    text = bytes(value).decode("utf-8") if not isinstance(value, str) else value
-    try:
-        return json.loads(text)
-    except ValueError:
-        return text
-
-
 def _works(root):
     agents = root.repository.list_root_agent_session_ids(
         root_session_id=root.session_id, deadline_monotonic=monotonic() + 30
@@ -171,21 +161,21 @@ def _snapshot(root):
                i.source_exec_attempt_id,i.call_sequence,
                COALESCE(i.tool_name,b.tool_name) AS tool_name,
                COALESCE(i.original_arguments,b.tool_arguments) AS arguments,
-               r.result_state,r.attempt_id,r.result_facts,r.output_source_coverage,
-               r.output_unavailability_reason,
-               COALESCE(r.output_body_inline_content,body.body) AS result_body
+               r.result_state,r.attempt_id,r.result_facts,r.id AS result_id,
+               r.output_unavailability_reason
         FROM pulsara_v3.tool_invocations i
-        LEFT JOIN pulsara_v3.assistant_message_blocks b ON b.session_id=i.session_id
-          AND b.assistant_entry_id=i.assistant_entry_id AND b.tool_call_id=i.tool_call_id
+        LEFT JOIN pulsara_v3.content_parts b ON b.session_id=i.session_id
+          AND b.entry_id=i.assistant_entry_id AND b.tool_call_id=i.tool_call_id AND b.type='tool_call'
         LEFT JOIN pulsara_v3.tool_results r ON r.session_id=i.session_id AND r.invocation_id=i.id
-        LEFT JOIN pulsara_v3.blobs body ON body.id=r.output_body_blob_id AND body.workspace_id=r.workspace_id
         WHERE i.session_id=ANY(%s)
         ORDER BY r.accepted_at NULLS LAST,i.session_id,i.call_sequence NULLS FIRST
     """,
         (sessions,),
     )
     for tool in tools:
-        tool["result"] = _decoded(tool.pop("result_body"))
+        tool["result"] = (None if tool["result_id"] is None else
+            root.repository.read_accepted_tool_result_observation(session_id=tool["session_id"],
+                result_id=tool["result_id"],deadline_monotonic=monotonic()+30)["value"])
     sources = []
     for tool in tools:
         if tool["tool_name"] == "exec_cell" and tool["attempt_id"]:
@@ -203,16 +193,20 @@ def _snapshot(root):
     entries = _rows(
         root,
         """
-        SELECT e.session_id,e.id,e.turn_id,e.entry_sequence,e.entry_kind,
-               COALESCE(e.inline_content,b.body) AS content
+        SELECT e.session_id,e.id,e.turn_id,e.entry_sequence,e.entry_kind
         FROM pulsara_v3.transcript_entries e
-        LEFT JOIN pulsara_v3.blobs b ON b.id=e.blob_id AND b.workspace_id=e.workspace_id
         WHERE e.session_id=ANY(%s) ORDER BY e.session_id,e.entry_sequence
     """,
         (sessions,),
     )
-    for entry in entries:
-        entry["content"] = _decoded(entry["content"])
+    from pulsara_agent.conversation_kernel.content_parts import read_content_parts
+    from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
+    from psycopg.rows import dict_row
+    with root.repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row,deadline_monotonic=monotonic()+30) as connection:
+        for entry in entries:
+            entry["content"] = tuple({"type":part.type,"value":part.value}
+                for part in read_content_parts(connection,session_id=entry["session_id"],entry_id=entry["id"]))
     outputs = [
         {"queue_item_id": row["id"], "status": row["status"], "record": record}
         for row, record in _formal_cell_rows(root)

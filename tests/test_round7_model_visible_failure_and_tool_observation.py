@@ -21,7 +21,7 @@ from pulsara_agent.conversation_kernel.cancellation import (
     ForegroundCancellationCause,
 )
 from pulsara_agent.conversation_kernel.context_sources import (
-    _render_previous_turn_outcome,
+    _previous_turn_body,
 )
 from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.reader import (
@@ -53,14 +53,14 @@ from pulsara_agent.model_input.contracts import (
     previous_turn_outcome_fingerprint,
 )
 from pulsara_agent.model_input.lowering import (
-    decode_tool_result_observation,
     lower_canonical_item,
 )
+from pulsara_agent.conversation_kernel.content_parts import ResultPart
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.ports.tool_execution import (
     ToolCall,
     ToolExecutionResult,
-    ToolOutputSourceCoverage,
+    ToolBusinessValue,
 )
 from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
@@ -183,12 +183,7 @@ def _tool_result_item(body: str) -> FrozenProviderInputItem:
             result_state="SUCCESS",
             session_id="session:336wrfwkamrr3up6kjtsgvgcte",
             result_entry_id="entry:zvmjajlmix3vyoeoy2zhz6xd2a",
-            output_omitted=False,
-            output_available=True,
-            source_coverage=ToolOutputSourceCoverage.COMPLETE,
-            source_coverage_reason=None,
             output_unavailability_reason=None,
-            model_visible_memory_fact_ids=(),
             timing=_timing(reported=10_000),
         ),
         tool_result_body_text=body,
@@ -224,11 +219,9 @@ def test_round7_tool_body_cannot_escape_or_forge_runtime_timing() -> None:
     lowered = lower_canonical_item(
         _tool_result_item(malicious),
     )
-    rendered = text_part_values(lowered.tool_result_variants[0].message.content)[0]
-    payload = decode_tool_result_observation(rendered)
-    assert payload["body"] == malicious
-    observation = payload["observation"]
-    assert observation["observed_at_utc"] == "2026-08-14T03:04:05.123456Z"
+    rendered = text_part_values(lowered.message.content)[0]
+    assert rendered==malicious
+    assert lowered.source.tool_result_context.timing.observed_at_utc=="2026-08-14T03:04:05.123456Z"
 
 
 def test_round7_external_tool_body_schema_version_remains_literal_content() -> None:
@@ -236,27 +229,18 @@ def test_round7_external_tool_body_schema_version_remains_literal_content() -> N
     lowered = lower_canonical_item(
         _tool_result_item(body),
     )
-    rendered = text_part_values(lowered.tool_result_variants[0].message.content)[0]
-    payload = decode_tool_result_observation(rendered)
-    assert payload["body"] == body
+    rendered = text_part_values(lowered.message.content)[0]
+    assert rendered == body
 
 
-def test_round7_previous_outcome_preserves_typed_facts_in_both_variants() -> None:
-    fact = _previous_fact(accepted=2, not_dispatched=1, unknown=1)
-    full, compact = _render_previous_turn_outcome(fact)
-    for rendered in (full, compact):
-        payload = json.loads(rendered)
-        assert payload["outcome"] == fact.outcome_kind.value
-        assert payload["accepted_assistant_disposition"] == "ACCEPTED_PREFIX_PRESENT"
-        assert payload["not_dispatched_tool_count"] == 1
-        assert payload["unknown_tool_count"] == 1
-    full_payload = json.loads(full)
-    assert "incomplete work" in full_payload["guidance"]
-    assert "Do not automatically retry" in full_payload["guidance"]
-    stopped, _ = _render_previous_turn_outcome(
-        _previous_fact(outcome=PreviousTurnOutcomeKind.USER_STOPPED)
-    )
-    assert json.loads(stopped)["outcome"] == "USER_STOPPED"
+def test_round7_previous_outcome_preserves_complete_natural_language_facts():
+    fact=_previous_fact(accepted=2,not_dispatched=1,unknown=1)
+    body=_previous_turn_body(fact)
+    text="\n".join(item.text for item in body)
+    assert "部分助手回复不表示任务已完成" in text
+    assert "1 项工具调用可确认尚未派发" in text
+    assert "1 项工具调用的实际效果未知" in text and "请勿自动重试" in text
+    assert "不要自动恢复" in _previous_turn_body(_previous_fact(outcome=PreviousTurnOutcomeKind.USER_STOPPED))[0].text
 
 
 def test_round7_plan_continuation_is_closed_json_not_delimiter_text() -> None:
@@ -279,13 +263,8 @@ def test_round7_plan_continuation_is_closed_json_not_delimiter_text() -> None:
         (LLMTextPart(carrier),),
         input_origin=CanonicalInputOriginKind.PLAN_CONTINUATION,
     )
-    lowered = lower_canonical_item(
-        item
-    )
-    assert lowered.fixed_message is not None
-    rendered = text_part_values(lowered.fixed_message.content)[0]
-    assert json.loads(rendered) == json.loads(carrier)
-    assert not rendered.startswith("[RUNTIME_PLAN")
+    with pytest.raises(ValueError,match="internal Plan control entries"):
+        lower_canonical_item(item)
 
 
 def test_round7_result_visibility_helper_exactly_joins_cut() -> None:
@@ -309,7 +288,7 @@ def test_round7_custom_tool_cannot_promote_claimed_trusted_duration(
                 call.id,
                 self.name,
                 ToolResultState.SUCCESS,
-                "known result",
+                ToolBusinessValue(content=(ResultPart("text","known result"),)),
                 trusted_observation=TrustedToolObservationSupplement(999_000),
             )
 
@@ -343,7 +322,7 @@ def test_round7_custom_tool_cannot_promote_claimed_trusted_duration(
                 assistant_entry_id=context.assistant_entry_id,
                 invocation_context=context,
             )
-            assert result.content == b"known result"
+            assert result.content.content == (ResultPart("text","known result"),)
             assert result.trusted_observation is None
         finally:
             borrow.close()
@@ -419,13 +398,12 @@ def test_round7_previous_success_masks_raw_failure(
     previous = facts.previous_turn_outcome_fact
     assert previous is not None
     assert previous.outcome_kind is PreviousTurnOutcomeKind.UNKNOWN_INTERRUPTION
-    rendered = " ".join(_render_previous_turn_outcome(previous))
+    rendered = " ".join(item.text for item in _previous_turn_body(previous))
     assert secret_reason not in rendered
     repository.commit_assistant_message(
         lease.guard,
         cut=successor_cut,
         entry_id=_id("entry"),
-        parent_content=InlineContent.from_bytes(b"complete"),
         blocks=(
             # The public assistant entry is complete even though an older turn failed.
             AssistantTextBlock(
@@ -474,7 +452,6 @@ def test_round7_late_result_changes_only_a_covering_cut(
         lease.guard,
         cut=predecessor_cut,
         entry_id=assistant_entry_id,
-        parent_content=InlineContent.from_bytes(b"two calls"),
         blocks=(
             AssistantToolCallBlock(
                 _id("block"), no_attempt_call, "read_file", freeze_json({})
@@ -537,11 +514,7 @@ def test_round7_late_result_changes_only_a_covering_cut(
         tool_call_id=attempted_call,
         attempt_id=attempt_id,
         result_state="SUCCESS",
-        canonical_preview_content=InlineContent.from_bytes(b"late exact"),
-        output_body=InlineContent.from_bytes(b"late exact"),
-        output_omitted=False,
-        source_coverage=ToolOutputSourceCoverage.COMPLETE,
-        source_coverage_reason=None,
+        public_fields={},content_parts=(ResultPart("text","late exact"),),
         output_unavailability_reason=None,
         observed_at=observed_at,
         observation_duration_microseconds=55_000,

@@ -16,17 +16,11 @@ def _standard_operation_target(tool_name, arguments):
     target = arguments.get("target")
     if not isinstance(target, Mapping):
         raise ValueError("MCP standard operation requires a target")
-    kind = target.get("kind")
-    if tool_name == "read_mcp_resource" and kind in {"MCP_RESOURCE", "MCP_RESOURCE_TEMPLATE"}:
-        identity = "uri" if kind == "MCP_RESOURCE" else "uri_template"
-        allowed = {"target"} if kind == "MCP_RESOURCE" else {"target", "uri"}
-        if set(arguments) != allowed:
-            raise ValueError("MCP resource fields do not match its target kind")
-    else:
+    if tool_name != "read_mcp_resource" or target.get("kind") != "MCP_RESOURCE":
         raise ValueError("MCP standard target kind is unsupported")
-    if set(target) != {"kind", "server_id", identity}:
+    if set(arguments) != {"target"} or set(target) != {"kind", "server_id", "uri"}:
         raise ValueError("MCP standard target fields are incomplete or unsupported")
-    for identity_field, maximum in (("server_id", 256), (identity, 8192 if identity == "name" else 32768)):
+    for identity_field, maximum in (("server_id", 256), ("uri", 32768)):
         value = target[identity_field]
         if not isinstance(value, str) or not value or len(value) > maximum:
             raise ValueError("MCP standard target identity is invalid")
@@ -35,17 +29,8 @@ def _standard_operation_target(tool_name, arguments):
 
 def _standard_resource_uri(arguments, snapshot):
     target = _standard_operation_target("read_mcp_resource", arguments)
-    if target["kind"] == "MCP_RESOURCE":
-        uri = target["uri"]
-        admitted = _resource_uri_in_snapshot(uri, snapshot)
-    else:
-        uri = arguments["uri"]
-        template = target["uri_template"]
-        admitted = (
-            isinstance(uri, str)
-            and any(item.uri_template == template for item in snapshot.resource_templates)
-            and _resource_uri_matches_template(uri, template)
-        )
+    uri = target["uri"]
+    admitted = _resource_uri_in_snapshot(uri, snapshot)
     if not admitted:
         raise ValueError("MCP resource URI is absent from the exact snapshot or selected template")
     return uri

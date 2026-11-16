@@ -1,565 +1,256 @@
-"""Explicit search ranks its bounded candidate pool before applying the limit."""
-
-from __future__ import annotations
-from pulsara_agent.identity import derive_id
+"""Mixed recall ranks twenty full candidates and selects five canonical values."""
 
 import asyncio
-import json
-from time import monotonic
+from dataclasses import replace
 from types import SimpleNamespace
-
+from time import monotonic
 import pytest
-
+from pulsara_agent.identity import random_id
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.memory.recall import (
-    MemoryDenseCandidateDisposition,
     MemoryQueryRow,
-    MemoryRelatedSearchResult,
+    PostgresMemoryQuery,
 )
 from pulsara_agent.conversation_kernel.memory_tools import KernelMemoryToolPort
+from pulsara_agent.conversation_kernel.history_excerpt import HistoryCandidate
 from pulsara_agent.memory.scope import (
-    CTX_GLOBAL,
     MemoryDomainContext,
     freeze_memory_read_context_binding,
+    CTX_GLOBAL,
 )
-from tests.retrieval_fixtures import save_model
 from pulsara_agent.retrieval.config import EmbeddingBackendConfig
-from pulsara_agent.retrieval.rerank.protocol import RerankResult
-from pulsara_agent.settings import LocalSettingsStore
 
 
-async def _search(
-    tmp_path,
-    monkeypatch,
-    *,
-    limit,
-    mode="success",
-    exact_count=None,
-    automatic=False,
-    rank_automatic=False,
-    related=False,
-    history_count=0,
-    memory_count=40,
-    invalidate_history=False,
-    timed_out_route=None,
-    ranking_mode="rerank",
-    scores=None,
-):
-    io = KernelSessionIO()
-    port = KernelMemoryToolPort(
-        repository=SimpleNamespace(connection_provider=None),
-        session_id='session:sajtkthmd5afsimxzxsl25a67q',
-        read_binding=freeze_memory_read_context_binding(
-            domain=MemoryDomainContext("u_local", "transient"),
-            host_workspace_id='workspace:vxdcqtelc6tinoq2fbwkz4oxe4',
-        ),
-        embedding_config=EmbeddingBackendConfig(),
-        io_owner=io,
-        settings=LocalSettingsStore(tmp_path / "settings.yaml"),
-    )
-    if mode != "unconfigured" and (not automatic or rank_automatic):
-        await save_model(port._settings, ranking_mode, "test-key", activate=True)
-    facts = tuple(
+def records(count):
+    return tuple(
         MemoryQueryRow(
-            fact_id=derive_id("memory", "test-fixture", f"memory:{index}"),
-            memory_domain_id="u_local",
-            context_id=CTX_GLOBAL,
-            fact_kind=(
-                "DECISION"
-                if exact_count is not None and index < exact_count
-                else "FACT"
-            ),
-            lifecycle="ACTIVE",
-            statement=f"Project Orion observation {index}.",
-            recorded_at="2026-01-01T00:00:00Z",
-            fact_semantic_digest="sha256:" + f"{index:064x}",
-            sparse_rank=index + 1,
+            random_id("memory"),
+            "test",
+            CTX_GLOBAL,
+            "FACT",
+            f"title {i}",
+            "字" * 8000,
+            "2026-01-01T00:00:00.123456Z",
+            "2026-01-01T00:00:00.123456Z",
+            sparse_rank=i + 1,
         )
-        for index in range(memory_count)
+        for i in range(count)
     )
-    from pulsara_agent.conversation_kernel.history_excerpt import HistoryCandidate
-    from pulsara_agent.model_input.contracts import ContextBindingBaseKind
 
-    history = tuple(
+
+def histories(count):
+    return tuple(
         HistoryCandidate(
-            session_id=derive_id("session", "test-fixture", f"session:history:{i}"),
-            q1_entry_id=derive_id("entry", "test-fixture", f"entry:q:{i}"),
-            title=f"history {i}",
-            score=float(100 - i),
-            covered_entry_sequence=100,
-            variant="QA",
-            include_tools=False,
-            document={"identity": [i]},
-            messages=(
+            random_id("session"),
+            random_id("entry"),
+            f"history {i}",
+            100 - i,
+            {},
+            (
                 {
-                    "entry_id": derive_id("entry", "test-fixture", f"entry:q:{i}"),
+                    "entry_id": random_id("entry"),
                     "role": "assistant",
-                    "label": "助手回答",
+                    "label": "回答",
                     "at": "2026-01-01",
-                    "text": f"Historical Orion observation {i}",
+                    "text": f"Answer {i}",
                 },
             ),
+            100,
+            "QA",
+            False,
         )
-        for i in range(history_count)
+        for i in range(count)
     )
 
-    def route_result(name, value, kwargs):
-        if timed_out_route == name:
-            from time import sleep
 
-            sleep(max(0, kwargs["deadline_monotonic"] - monotonic()) + 0.01)
-            raise TimeoutError(f"{name} query timed out")
-        return value
-
-    if timed_out_route is not None:
-        monkeypatch.setattr(port, "_canonical_deadline", lambda _: monotonic() + 0.1)
-    port._history.automatic_candidates = lambda **kwargs: route_result(
-        "history", history, kwargs
-    )
-    port._history.canonical_refetch = lambda **kwargs: (
-        () if invalidate_history else kwargs["candidates"]
-    )
-    canonical_facts = SimpleNamespace(
-        context_binding_fact=SimpleNamespace(
-            base_kind=ContextBindingBaseKind.FULL_HISTORY
-        ),
-        canonical_input=SimpleNamespace(items=()),
-    )
-    observed = SimpleNamespace(
-        stages=[], candidates=(), documents=(), relations=(), purpose=None, calls=0
-    )
-
-    def sparse(**kwargs):
-        observed.stages.append(kwargs["kind_filter"])
-        route_result("sparse", None, kwargs)
-        return tuple(
-            fact
-            for fact in facts
-            if kwargs["kind_filter"] is None or fact.fact_kind == kwargs["kind_filter"]
-        )[: kwargs["limit"]]
-
-    def canonical(**kwargs):
-        observed.candidates = tuple(item.fact_id for item in kwargs["ranked"])
-        return tuple(kwargs["ranked"])
-
-    def contradictions(**kwargs):
-        observed.relations = kwargs["fact_ids"]
-        return ()
-
-    async def embedding_provider():
-        return None
-
-    async def rerank(_query, documents, **kwargs):
-        observed.calls += 1
-        observed.purpose = kwargs["purpose"]
-        observed.documents = tuple(json.loads(item) for item in documents)
-        assert len(kwargs["candidate_ids"]) == len(documents)
-        if mode == "failure":
-            raise TimeoutError("test rerank failure")
-        if mode == "malformed":
-            return [RerankResult(0, 1.0)] * len(documents)
-        if mode == "settings_changed":
-            await port._settings.set_retrieval_mode(ranking_mode="off")
-        if scores is not None:
-            return [RerankResult(index, score) for index, score in enumerate(scores)]
-        # Promote an item outside the default result limit to first place.
-        promoted = min(11, len(documents) - 1)
-        indexes = (
-            promoted,
-            *(index for index in range(len(documents)) if index != promoted),
+@pytest.mark.parametrize(
+    "memory_count,history_count,applied,expected_memory,expected_history",
+    [
+        (20, 5, False, 4, 1),
+        (20, 0, False, 5, 0),
+        (0, 8, False, 0, 5),
+        (20, 5, True, 0, 5),
+    ],
+)
+def test_mixed_pool_twenty_then_five_elastic_selection(
+    tmp_path,
+    monkeypatch,
+    memory_count,
+    history_count,
+    applied,
+    expected_memory,
+    expected_history,
+):
+    async def run():
+        io = KernelSessionIO()
+        binding = freeze_memory_read_context_binding(
+            domain=MemoryDomainContext("test", "transient"),
+            host_workspace_id=random_id("workspace"),
         )
-        return [
-            RerankResult(index, 1.0 / rank) for rank, index in enumerate(indexes, 1)
-        ]
-
-    async def rerank_provider():
-        return (
-            None
-            if mode in {"unconfigured", "provider_unavailable"}
-            else SimpleNamespace(rerank=rerank)
-        )
-
-    monkeypatch.setattr(port._query, "sparse_candidates", sparse)
-    monkeypatch.setattr(port._query, "canonical_refetch", canonical)
-    monkeypatch.setattr(port._query, "active_contradictions", contradictions)
-    monkeypatch.setattr(
-        port._query,
-        "related_candidates",
-        lambda **kwargs: MemoryRelatedSearchResult(
-            facts[: kwargs["limit"]], MemoryDenseCandidateDisposition.NOT_REQUESTED
-        ),
-    )
-    monkeypatch.setattr(port, "_embedding_provider", embedding_provider)
-    monkeypatch.setattr(port, "_rerank_provider", rerank_provider)
-    arguments = {"query": "Project Orion observations", "limit": limit}
-    if exact_count is not None:
-        arguments["kind"] = "DECISION"
-    if mode == "projection":
-        arguments["query"] = "x" * (9 * 1024)
-    try:
-        if related:
-            return await port._related_for_remember(
-                arguments["query"], context_id=CTX_GLOBAL
-            ), observed
-        if automatic:
-            source = await port.freeze_automatic_recall_source(
-                arguments["query"], canonical_facts=canonical_facts
+        settings = SimpleNamespace(
+            read=lambda: SimpleNamespace(
+                memory_retrieval=SimpleNamespace(
+                    history_enabled=True, embedding_enabled=False, ranking_mode="off"
+                )
             )
-            return (
-                {"items": []}
-                if not hasattr(source, "variants")
-                else json.loads(source.variants[0].text)
-            ), observed
-        result = await port._search(arguments)
-        assert result.state == "SUCCESS"
-        return json.loads(result.content), observed
-    finally:
+        )
+        port = KernelMemoryToolPort(
+            repository=SimpleNamespace(connection_provider=None),
+            session_id=random_id("session"),
+            read_binding=binding,
+            embedding_config=EmbeddingBackendConfig(),
+            io_owner=io,
+            settings=settings,
+        )
+        memory = records(memory_count)
+        history = histories(history_count)
+        port._query = SimpleNamespace(
+            sparse_candidates=lambda **_: memory,
+            fuse_candidates=PostgresMemoryQuery.fuse_candidates,
+            canonical_refetch=lambda **kw: kw["ranked"],
+        )
+        port._history = SimpleNamespace(
+            automatic_candidates=lambda **_: history,
+            canonical_refetch=lambda **kw: kw["candidates"],
+        )
+
+        async def embedding(*_, **__):
+            return None
+
+        async def rank(query, result, **kwargs):
+            assert len(result.facts) == min(20, memory_count + history_count)
+            assert sum(isinstance(x, HistoryCandidate) for x in result.facts) == min(
+                history_count, 20 - min(memory_count, 15)
+            )
+            assert all(
+                len(x.statement) == 8000
+                for x in result.facts
+                if isinstance(x, MemoryQueryRow)
+            )
+            return replace(
+                result,
+                facts=tuple(reversed(result.facts)) if applied else result.facts,
+                rerank_disposition="APPLIED" if applied else "NOT_APPLIED",
+            )
+
+        port._query_embedding = embedding
+        port._rerank_explicit = rank
+        monkeypatch.setattr(
+            "pulsara_agent.conversation_kernel.memory_tools.session_content_range",
+            lambda _: None,
+        )
+        monkeypatch.setattr(
+            "pulsara_agent.conversation_kernel.memory_tools.FrozenHistoryReadScope",
+            lambda *args: args,
+        )
+        try:
+            values = await port._mixed_candidates(
+                "ordinary project question",
+                SimpleNamespace(canonical_input=SimpleNamespace(items=())),
+            )
+            assert len(values) == 5
+            assert (
+                sum(x["target"]["kind"] == "MEMORY" for x in values) == expected_memory
+            )
+            assert (
+                sum(x["target"]["kind"] == "SESSION_ENTRY" for x in values)
+                == expected_history
+            )
+        finally:
+            await port.aclose()
+            await io.aclose(deadline_monotonic=monotonic() + 5)
+
+    asyncio.run(run())
+
+
+def test_rerank_cancel_waits_for_owned_provider_cleanup(tmp_path):
+    async def run():
+        io = KernelSessionIO()
+        binding = freeze_memory_read_context_binding(
+            domain=MemoryDomainContext("test", "transient"),
+            host_workspace_id=random_id("workspace"),
+        )
+        port = KernelMemoryToolPort(
+            repository=SimpleNamespace(connection_provider=None),
+            session_id=random_id("session"),
+            read_binding=binding,
+            embedding_config=EmbeddingBackendConfig(),
+            io_owner=io,
+            settings=SimpleNamespace(),
+        )
+        started = asyncio.Event()
+        finished = asyncio.Event()
+
+        async def remote():
+            started.set()
+            try:
+                await asyncio.Future()
+            finally:
+                await asyncio.sleep(0)
+                finished.set()
+
+        task = asyncio.create_task(
+            port._run_remote_exact(
+                remote(), timeout_seconds=30, name="memory-cancel-test"
+            )
+        )
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert finished.is_set() and not port._remote_tasks
         await port.aclose()
-        await io.aclose(deadline_monotonic=monotonic() + 10)
+        await io.aclose(deadline_monotonic=monotonic() + 5)
+
+    asyncio.run(run())
 
 
-@pytest.mark.parametrize("limit", (1, 5, 25))
-def test_rerank_can_promote_a_candidate_outside_the_return_limit(
-    tmp_path, monkeypatch, limit
-):
-    body, observed = asyncio.run(_search(tmp_path, monkeypatch, limit=limit))
-    ids = tuple(item["target"]["memory_id"] for item in body["memories"])
-    expected = ('memory:wnc5htbuf7tyr364wwomqvp6wu', *(derive_id("memory", "test-fixture", f"memory:{index}") for index in range(40) if index != 11))
-    assert ids == expected[:limit]
-    assert len(observed.candidates) == max(20, limit)
-    assert len(observed.documents) == 20
-    assert observed.relations == ids
-    assert body["retrieval_summary"]["ranking"] == "RERANKED"
-    assert observed.purpose == "recall"
-
-
-@pytest.mark.parametrize("mode", ("unconfigured", "failure", "malformed", "projection"))
-def test_rerank_fallback_returns_only_the_requested_rrf_prefix(
-    tmp_path, monkeypatch, mode
-):
-    body, observed = asyncio.run(_search(tmp_path, monkeypatch, limit=5, mode=mode))
-    ids = tuple(item["target"]["memory_id"] for item in body["memories"])
-    assert ids == tuple(derive_id("memory", "test-fixture", f"memory:{index}") for index in range(5))
-    assert len(observed.candidates) == 20
-    assert observed.relations == ids
-    assert body["retrieval_summary"]["ranking"] == "SPARSE_ONLY"
-    assert len(observed.documents) == (20 if mode in {"failure", "malformed"} else 0)
-
-
-@pytest.mark.parametrize("exact_count", (2, 3))
-def test_rerank_pool_preserves_requested_kind_priority_and_relaxation_threshold(
-    tmp_path, monkeypatch, exact_count
-):
-    body, observed = asyncio.run(
-        _search(tmp_path, monkeypatch, limit=5, exact_count=exact_count)
-    )
-    if exact_count == 2:
-        assert observed.stages == ["DECISION", None]
-        assert len(observed.documents) == 20
-        assert [item["target"]["memory_id"] for item in body["memories"]] == [
-            'memory:wjqlt4qvqiyumufn5ztzwrzlba',
-            'memory:cw6aa73zp6zcl2gg23ht25tx5e',
-            'memory:wnc5htbuf7tyr364wwomqvp6wu',
-            'memory:terdwxk6s7h3fpqh4gdp6vh4ey',
-            'memory:4mstzwylibbbjah5uvrqv37oia',
-        ]
-        assert [item["filter_match"] for item in body["memories"]] == [
-            "EXACT",
-            "EXACT",
-            "KIND_RELAXED",
-            "KIND_RELAXED",
-            "KIND_RELAXED",
-        ]
-    else:
-        # Enough exact matches stop relaxation even if the rerank pool is small.
-        assert observed.stages == ["DECISION"]
-        assert len(body["memories"]) == 3
-        assert all(item["kind"] == "DECISION" for item in body["memories"])
-    assert body["retrieval_summary"]["ranking"] == "RERANKED"
-
-
-def test_automatic_recall_still_selects_five_rrf_results_without_rerank(
-    tmp_path, monkeypatch
-):
-    body, observed = asyncio.run(
-        _search(tmp_path, monkeypatch, limit=5, automatic=True)
-    )
-    ids = tuple(item["target"]["memory_id"] for item in body["items"])
-    assert ids == tuple(derive_id("memory", "test-fixture", f"memory:{index}") for index in range(5))
-    assert observed.candidates == tuple(derive_id("memory", "test-fixture", f"memory:{index}") for index in range(20))
-    assert observed.documents == ()
-    assert observed.relations == ids
-
-
-@pytest.mark.parametrize("mode", ("success", "failure", "malformed"))
-def test_implicit_recall_ranks_twenty_before_injecting_five(
-    tmp_path, monkeypatch, mode
-):
-    body, observed = asyncio.run(
-        _search(
-            tmp_path,
-            monkeypatch,
-            limit=5,
-            automatic=True,
-            rank_automatic=True,
-            mode=mode,
+def test_optional_dense_failure_keeps_complete_lexical_results(tmp_path):
+    async def run():
+        io = KernelSessionIO()
+        binding = freeze_memory_read_context_binding(
+            domain=MemoryDomainContext("test", "transient"),
+            host_workspace_id=random_id("workspace"),
         )
-    )
-    ids = tuple(item["target"]["memory_id"] for item in body["items"])
-    assert len(observed.candidates) == 20
-    assert len(observed.documents) == 20
-    assert observed.purpose == "automatic_recall"
-    if mode == "success":
-        assert ids == ('memory:wnc5htbuf7tyr364wwomqvp6wu', 'memory:wjqlt4qvqiyumufn5ztzwrzlba', 'memory:cw6aa73zp6zcl2gg23ht25tx5e', 'memory:terdwxk6s7h3fpqh4gdp6vh4ey', 'memory:4mstzwylibbbjah5uvrqv37oia')
-    else:
-        assert ids == tuple(derive_id("memory", "test-fixture", f"memory:{index}") for index in range(5))
-    assert observed.relations == ids
-
-
-def test_remember_related_rerank_uses_relation_inspection_purpose(
-    tmp_path, monkeypatch
-):
-    (related, coverage), observed = asyncio.run(
-        _search(tmp_path, monkeypatch, limit=5, related=True)
-    )
-    assert observed.purpose == "related_memory"
-    assert len(observed.documents) == 20
-    assert tuple(item.memory_id for item in related) == (
-        'memory:wnc5htbuf7tyr364wwomqvp6wu',
-        'memory:wjqlt4qvqiyumufn5ztzwrzlba',
-        'memory:cw6aa73zp6zcl2gg23ht25tx5e',
-    )
-    assert coverage["rerank"] == "APPLIED"
-
-
-@pytest.mark.parametrize(
-    "memory_count,history_count,expected_pool",
-    [(40, 20, (15, 5)), (2, 20, (2, 18)), (40, 2, (18, 2)), (0, 20, (0, 20))],
-)
-def test_mixed_pool_is_elastic_and_one_decision_selects_directly(
-    tmp_path, monkeypatch, memory_count, history_count, expected_pool
-):
-    body, seen = asyncio.run(
-        _search(
-            tmp_path,
-            monkeypatch,
-            limit=5,
-            automatic=True,
-            rank_automatic=True,
-            memory_count=memory_count,
-            history_count=history_count,
+        settings = SimpleNamespace(
+            read=lambda: SimpleNamespace(
+                memory_retrieval=SimpleNamespace(
+                    history_enabled=False, embedding_enabled=False, ranking_mode="off"
+                )
+            )
         )
-    )
-    assert (
-        sum("statement" in x for x in seen.documents),
-        sum(x.get("source") == "session_history" for x in seen.documents),
-    ) == expected_pool
-    assert len(body["items"]) == 5
-    for x in body["items"]:
-        if x.get("source") == "session_history":
-            assert "memory_id" not in x
-            assert x["target"]["kind"] == "SESSION_ENTRY"
-            assert x["target"]["session_id"]
-            assert x["target"]["entry_id"]
-            for message in x["messages"]:
-                assert message["target"]["kind"] == "SESSION_ENTRY"
-                assert message["target"]["session_id"] == x["target"]["session_id"]
-                assert message["target"]["entry_id"]
-    for document in seen.documents:
-        if document.get("source") == "session_history":
-            assert "target" not in document
-            assert all("target" not in message for message in document["messages"])
-
-
-@pytest.mark.parametrize("mode", ["failure", "malformed", "unconfigured"])
-@pytest.mark.parametrize(
-    "memory_count,history_count,expected",
-    [(40, 20, (4, 1)), (2, 20, (2, 3)), (40, 0, (5, 0)), (0, 20, (0, 5))],
-)
-def test_mixed_no_decision_fallback_has_elastic_four_plus_one(
-    tmp_path, monkeypatch, mode, memory_count, history_count, expected
-):
-    body, seen = asyncio.run(
-        _search(
-            tmp_path,
-            monkeypatch,
-            limit=5,
-            automatic=True,
-            rank_automatic=True,
-            mode=mode,
-            memory_count=memory_count,
-            history_count=history_count,
+        port = KernelMemoryToolPort(
+            repository=SimpleNamespace(connection_provider=None),
+            session_id=random_id("session"),
+            read_binding=binding,
+            embedding_config=EmbeddingBackendConfig(),
+            io_owner=io,
+            settings=settings,
         )
-    )
-    assert (
-        sum(x.get("source") == "memory" for x in body["items"]),
-        sum(x.get("source") == "session_history" for x in body["items"]),
-    ) == expected
+        values = records(25)
+        connection = SimpleNamespace(embedding_contract="test")
 
+        async def embedding(*args, **kwargs):
+            return SimpleNamespace(connection=connection, vector=(1.0,))
 
-def test_selected_invalid_history_is_omitted_without_final_refill(
-    tmp_path, monkeypatch
-):
-    body, _ = asyncio.run(
-        _search(
-            tmp_path,
-            monkeypatch,
-            limit=5,
-            automatic=True,
-            rank_automatic=True,
-            memory_count=0,
-            history_count=20,
-            invalidate_history=True,
+        def dense(**kwargs):
+            raise OSError("dense channel unavailable")
+
+        port._query_embedding = embedding
+        port.embedding_connection = lambda: connection
+        port._query = SimpleNamespace(
+            sparse_candidates=lambda **kwargs: values[: kwargs["limit"]],
+            dense_candidates=dense,
+            fuse_candidates=PostgresMemoryQuery.fuse_candidates,
+            canonical_refetch=lambda **kwargs: kwargs["ranked"],
         )
-    )
-    assert body["items"] == []
+        try:
+            found = await port._search_memories("query", limit=23)
+            assert len(found) == 23 and all(
+                len(record.statement) == 8000 for record in found
+            )
+        finally:
+            await port.aclose()
+            await io.aclose(deadline_monotonic=monotonic() + 5)
 
-
-@pytest.mark.parametrize("timed_out_route", ["history", "sparse"])
-@pytest.mark.parametrize("rank_automatic", [False, True])
-def test_automatic_route_timeout_preserves_other_source(
-    tmp_path, monkeypatch, timed_out_route, rank_automatic
-):
-    body, observed = asyncio.run(
-        _search(
-            tmp_path,
-            monkeypatch,
-            limit=5,
-            automatic=True,
-            history_count=1,
-            memory_count=1,
-            timed_out_route=timed_out_route,
-            rank_automatic=rank_automatic,
-        )
-    )
-    assert len(body["items"]) == 1
-    assert len(observed.documents) == int(rank_automatic)
-    if timed_out_route == "history":
-        assert body["items"][0]["target"]["memory_id"] == 'memory:wjqlt4qvqiyumufn5ztzwrzlba'
-        assert observed.candidates == ('memory:wjqlt4qvqiyumufn5ztzwrzlba',)
-    else:
-        assert body["items"][0]["source"] == "session_history"
-
-
-@pytest.mark.parametrize(
-    "scores,expected",
-    [
-        ([0.699, 0.7, 0.95, 0.0, 0.8], ('memory:terdwxk6s7h3fpqh4gdp6vh4ey', 'memory:vsoux3qrotuascpf7m6x65toni', 'memory:cw6aa73zp6zcl2gg23ht25tx5e')),
-        ([0.0, 0.5, 0.699, 0.1, 0.2], ()),
-        ([0.8] * 7, tuple(derive_id("memory", "test-fixture", f"memory:{i}") for i in range(5))),
-    ],
-)
-def test_implicit_decision_admission_filters_before_top_five(
-    tmp_path, monkeypatch, scores, expected
-):
-    body, seen = asyncio.run(
-        _search(
-            tmp_path,
-            monkeypatch,
-            limit=5,
-            automatic=True,
-            rank_automatic=True,
-            ranking_mode="decision",
-            memory_count=len(scores),
-            scores=scores,
-        )
-    )
-    assert tuple(item["target"]["memory_id"] for item in body["items"]) == expected
-    assert seen.purpose == "automatic_recall"
-    assert seen.calls == 1
-    assert len(seen.documents) == len(scores)
-    assert seen.relations == expected
-
-
-def test_implicit_decision_uses_same_threshold_for_memory_and_history(
-    tmp_path, monkeypatch
-):
-    body, seen = asyncio.run(
-        _search(
-            tmp_path,
-            monkeypatch,
-            limit=5,
-            automatic=True,
-            rank_automatic=True,
-            ranking_mode="decision",
-            memory_count=2,
-            history_count=3,
-            scores=[0.699, 0.7, 0.9, 0.699, 0.7],
-        )
-    )
-    assert [item["target"].get("memory_id", item.get("title")) for item in body["items"]] == [
-        "history 0",
-        'memory:cw6aa73zp6zcl2gg23ht25tx5e',
-        "history 2",
-    ]
-    assert len(seen.documents) == 5
-
-
-@pytest.mark.parametrize(
-    "mode",
-    [
-        "failure",
-        "malformed",
-        "provider_unavailable",
-        "bad_probability",
-        "projection",
-        "settings_changed",
-    ],
-)
-@pytest.mark.parametrize("memory_count", [0, 2])
-def test_failed_implicit_decision_does_not_bypass_history_admission(
-    tmp_path, monkeypatch, mode, memory_count
-):
-    body, seen = asyncio.run(
-        _search(
-            tmp_path,
-            monkeypatch,
-            limit=5,
-            automatic=True,
-            rank_automatic=True,
-            ranking_mode="decision",
-            memory_count=memory_count,
-            history_count=3,
-            mode=mode,
-            scores=[1.1] * (memory_count + 3) if mode == "bad_probability" else None,
-        )
-    )
-    assert tuple(item["target"]["memory_id"] for item in body["items"]) == tuple(
-        derive_id("memory", "test-fixture", f"memory:{i}") for i in range(memory_count)
-    )
-    assert seen.relations == tuple(derive_id("memory", "test-fixture", f"memory:{i}") for i in range(memory_count))
-
-
-@pytest.mark.parametrize("related", [False, True])
-def test_explicit_decision_and_related_inspection_do_not_use_implicit_threshold(
-    tmp_path, monkeypatch, related
-):
-    result, seen = asyncio.run(
-        _search(
-            tmp_path,
-            monkeypatch,
-            limit=5,
-            ranking_mode="decision",
-            memory_count=5,
-            scores=[0.2, 0.5, 0.1, 0.3, 0.4],
-            related=related,
-        )
-    )
-    if related:
-        related_items, coverage = result
-        assert tuple(item.memory_id for item in related_items) == (
-            'memory:cw6aa73zp6zcl2gg23ht25tx5e',
-            'memory:vsoux3qrotuascpf7m6x65toni',
-            'memory:4mstzwylibbbjah5uvrqv37oia',
-        )
-        assert coverage["rerank"] == "APPLIED"
-        assert seen.purpose == "related_memory"
-    else:
-        assert tuple(item["target"]["memory_id"] for item in result["memories"]) == (
-            'memory:cw6aa73zp6zcl2gg23ht25tx5e',
-            'memory:vsoux3qrotuascpf7m6x65toni',
-            'memory:4mstzwylibbbjah5uvrqv37oia',
-            'memory:wjqlt4qvqiyumufn5ztzwrzlba',
-            'memory:terdwxk6s7h3fpqh4gdp6vh4ey',
-        )
-        assert seen.purpose == "recall"
+    asyncio.run(run())

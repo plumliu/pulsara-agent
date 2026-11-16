@@ -201,14 +201,14 @@ def test_cold_history_and_explicit_restore_use_real_core_without_read_activation
             assert summary["latest_root_turn"]["status"] == "COMPLETED"
             for entry in snapshot.snapshot.snapshot.entries:
                 reference = await sessions._history_reader(session_id)
-                assert (
-                    reference.resolve_content_reference(
-                        session_id=session_id,
-                        entry_id=entry.entry_id,
-                        deadline_monotonic=monotonic() + 30,
-                    )["session_id"]
-                    == session_id
+                resolved = reference.resolve_content_reference(
+                    session_id=session_id,
+                    entry_id=entry.entry_id,
+                    deadline_monotonic=monotonic() + 30,
                 )
+                assert resolved["content_digest"] == entry.content.digest
+                assert resolved["content_size"] == entry.content.size
+            assert sessions._by_session == {} and not root.exists()
             foreign = LocalSessionController(
                 core=core,
                 memory_domain_id="unrelated",
@@ -315,7 +315,7 @@ def test_running_response_settles_but_accepted_queue_waits_for_directory(
 
 
 @pytest.mark.postgres
-def test_unlaunched_tool_rejected_and_workspace_feedback_appends_at_ordinary_barrier(
+def test_unlaunched_tool_rejected_and_workspace_feedback_waits_for_new_input(
     tmp_path,
     monkeypatch,
     stage2_migrated_postgres_database,
@@ -412,7 +412,14 @@ def test_unlaunched_tool_rejected_and_workspace_feedback_appends_at_ordinary_bar
                 if message.role is MessageRole.TOOL_RESULT
             )
             assert "TOOL_UNAVAILABLE" in str(tool_result.content)
-            assert "USER_ACTIONS" in str(second.messages)
+            assert "USER_ACTIONS" not in str(second.messages)
+            assert session._pending_workspace_recreated is not None
+            follow_up = await session.run_turn(PromptContent.text("Continue after restoring the workspace."))
+            assert follow_up.final_text == "RESTORED_OK"
+            third = model._delegate.requests[-1].compiled_input
+            assert third.messages[: len(second.messages)] == second.messages
+            assert "USER_ACTIONS" in str(third.messages[len(second.messages):])
+            assert str(root) in str(third.messages[len(second.messages):])
             assert session._pending_workspace_recreated is None
         finally:
             await core.close_session(session.host_session_id)

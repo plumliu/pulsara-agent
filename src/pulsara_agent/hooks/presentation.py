@@ -81,7 +81,7 @@ def add_matching_tool_review(
         "read_file": "读取文件",
         "edit_file": "编辑文件",
         "write_file": "写入文件",
-        "search_content": "搜索内容",
+        "search_file_content": "搜索内容",
         "find_files": "查找文件",
         "run_agent": "派发工作",
     }

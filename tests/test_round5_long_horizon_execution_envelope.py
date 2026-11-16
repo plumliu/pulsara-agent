@@ -47,6 +47,7 @@ from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.ports.tool_execution import ToolCall
 from pulsara_agent.terminal_process.models import TerminalResult, TerminalStatus
+from pulsara_agent.identity import random_id
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -731,16 +732,20 @@ def test_round5_terminal_process_actions_have_closed_effect_semantics() -> None:
         "sha256:"
     )
     assert _physical_effect_class("query_processes", {}) == "read_only"
-    for action in ("poll", "wait"):
+    from pulsara_agent.conversation_kernel.tool_execution import _tool_effect_class
+
+    for action in ("wait",):
         assert (
             _physical_effect_class("manage_process", {"action": action})
             == "TERMINAL_OBSERVATION"
         )
-    for action in ("write", "submit", "close_stdin", "kill"):
+        assert _tool_effect_class("manage_process", {"action": action}) == "TERMINAL_OBSERVATION"
+    for action in ("write", "close_stdin", "kill"):
         assert (
             _physical_effect_class("manage_process", {"action": action})
             == "TERMINAL_EFFECT"
         )
+        assert _tool_effect_class("manage_process", {"action": action}) == "TERMINAL_EFFECT"
     assert _physical_effect_class("exec_process", {}) == "TERMINAL_EFFECT"
 
 
@@ -907,7 +912,9 @@ def test_round5_terminal_foreground_decision_can_be_aborted_by_exact_attempt(
     registry.release_owner("round5:host", timeout_seconds=2)
 
 
-def test_round5_killed_terminal_result_is_an_interrupted_tool_result() -> None:
+@pytest.mark.parametrize("cancelled", (False, True))
+def test_round5_killed_terminal_result_reports_actual_tool_cancellation(cancelled) -> None:
+    process_id = random_id("process")
     result = _terminal_execution_result(
         ToolCall("call:user-stop", "exec_process"),
         TerminalResult(
@@ -915,7 +922,13 @@ def test_round5_killed_terminal_result_is_an_interrupted_tool_result() -> None:
             output="partial output",
             exit_code=-15,
             cwd="/tmp",
+            process_id=process_id,
+            cancelled=cancelled,
         ),
     )
 
-    assert result.status is ToolResultState.INTERRUPTED
+    assert result.status is (ToolResultState.INTERRUPTED if cancelled else ToolResultState.SUCCESS)
+    assert result.business_value.public_fields["target"] == {"kind": "PROCESS", "process_id": process_id}
+    assert result.business_value.content[0].value == "partial output"
+    if not cancelled:
+        assert result.business_value.public_fields["meta"] == {"process_status": "EXITED", "exit_code": -15, "cwd": "/tmp"}

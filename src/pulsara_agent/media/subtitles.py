@@ -22,7 +22,6 @@ class SubtitleEntry:
     end: float
     text: str
     position: int
-    text_offset: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,8 +31,6 @@ class SubtitleReadResult:
     language: str | None
     entries: tuple[SubtitleEntry, ...]
     diagnostics: tuple[str, ...] = ()
-    next_position: int | None = None
-    next_text_offset: int = 0
 
 
 def read_subtitles(
@@ -43,9 +40,6 @@ def read_subtitles(
     end: float,
     preferred_language: str | None = None,
     cancelled: CancelCheck = None,
-    after_position: int | None = None,
-    maximum_text_bytes: int | None = None,
-    text_offset: int = 0,
 ) -> SubtitleReadResult:
     diagnostics = []
     with source.open_container() as container:
@@ -71,9 +65,6 @@ def read_subtitles(
                     end,
                     cancelled,
                     tuple(diagnostics),
-                    after_position,
-                    maximum_text_bytes,
-                    text_offset,
                 )
             except MediaError as exc:
                 if exc.code in {
@@ -94,25 +85,19 @@ def _read_track(
     end: float,
     cancelled: CancelCheck,
     diagnostics: tuple[str, ...],
-    after_position: int | None,
-    maximum_text_bytes: int | None,
-    text_offset: int,
 ) -> SubtitleReadResult:
     entries = []
-    used = 0
     with source.open_container() as container:
         stream = container.streams[index]
         position = 0
 
-        def result(next_position=None, next_text_offset=0):
+        def result():
             return SubtitleReadResult(
                 True,
                 index,
                 stream.metadata.get("language"),
                 tuple(entries),
                 diagnostics,
-                next_position,
-                next_text_offset,
             )
 
         # Starting at the original source preserves boundary-spanning cues and
@@ -147,8 +132,6 @@ def _read_track(
             for rect in subset:
                 current = position
                 position += 1
-                if after_position is not None and current < after_position:
-                    continue
                 if not cue_start < end or not cue_end > start:
                     continue
                 if rect.type not in {b"ass", b"text"}:
@@ -165,32 +148,7 @@ def _read_track(
                     raise MediaError(
                         "MEDIA_DECODE_FAILED", "Decoded subtitle is not UTF-8."
                     ) from exc
-                offset = text_offset if current == after_position else 0
-                text = text[offset:]
-                if not text:
-                    continue
-                remaining = (
-                    maximum_text_bytes - used
-                    if maximum_text_bytes is not None
-                    else None
-                )
-                data = text.encode("utf-8")
-                if remaining is not None and len(data) > remaining:
-                    if entries:
-                        return result(current, offset)
-                    fragment = data[: max(0, remaining)].decode(
-                        "utf-8", errors="ignore"
-                    )
-                    if not fragment:
-                        raise MediaError(
-                            "RESOURCE_BOUNDARY",
-                            "Subtitle fragment cannot fit the admitted text byte budget.",
-                        )
-                    entries.append(
-                        SubtitleEntry(cue_start, cue_end, fragment, current, offset)
-                    )
-                    return result(current, offset + len(fragment))
-                entries.append(SubtitleEntry(cue_start, cue_end, text, current, offset))
-                used += len(data)
+                if text:
+                    entries.append(SubtitleEntry(cue_start, cue_end, text, current))
         source.assert_unchanged()
         return result()

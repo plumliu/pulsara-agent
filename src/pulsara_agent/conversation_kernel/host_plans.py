@@ -240,7 +240,6 @@ class _HostPlanOperations:
         self,
         *,
         command_id: str,
-        entry_reason: str,
         resume_permission_mode: PermissionMode,
     ) -> KernelCommandOutcome:
         """Install a user-origin Plan workflow while the ROOT slot is idle."""
@@ -250,7 +249,6 @@ class _HostPlanOperations:
             "pulsara:user-enter-plan:v1",
             {
                 "workflow_id": workflow_id,
-                "entry_reason": entry_reason,
                 "resume_permission_mode": resume_permission_mode.value,
             },
         )
@@ -292,7 +290,6 @@ class _HostPlanOperations:
                 self._lease.guard,
                 command_id=command_id,
                 workflow_id=workflow_id,
-                entry_reason=entry_reason,
                 resume_permission_mode=resume_permission_mode,
                 occurred_at=datetime.now().astimezone(),
                 actor_id=self.host_session_id,
@@ -435,6 +432,33 @@ class _HostPlanOperations:
                 self._queue_wake.set()
                 self._cell_output_wake.set()
 
+    async def _prepare_plan_resolution_page(self, resolution, *, prepared_page=None):
+        from pulsara_agent.conversation_kernel.tool_outputs import (
+            prepare_native_tool_observation, project_native_settlement,
+        )
+        workspace_id = await self._io.run(self.repository.read_session_workspace_id,
+            self._lease.guard, deadline_monotonic=self._canonical_deadline())
+        page = await self._io.run(prepare_native_tool_observation, self.repository, self._lease.guard,
+            workspace_id=workspace_id, result_entry_id=resolution.tool_result_settlement.result_entry_id,
+            prepared_page=prepared_page, deadline_monotonic=self._canonical_deadline())
+        return replace(resolution, tool_result_settlement=project_native_settlement(
+            resolution.tool_result_settlement, page))
+
+    async def _resolve_plan_interaction_timeout(self, opened) -> AcceptedPlanResolution:
+        command_id = derive_id("command", "plan-interaction-timeout", self.session_id, opened.interaction_id)
+        if opened.question is not None:
+            return await self.resolve_plan_question(
+                command_id=command_id, workflow_id=opened.workflow_id,
+                expected_workflow_revision=opened.workflow_revision,
+                interaction_id=opened.interaction_id, answer=None, timed_out=True,
+            )
+        return await self.resolve_plan_draft_review(
+            command_id=command_id, workflow_id=opened.workflow_id,
+            expected_workflow_revision=opened.workflow_revision,
+            interaction_id=opened.interaction_id, decision=PlanDraftDecision.CANCEL,
+            timed_out=True,
+        )
+
     async def resolve_plan_question(
         self,
         *,
@@ -444,6 +468,7 @@ class _HostPlanOperations:
         interaction_id: str,
         answer: PlanQuestionAnswer | None,
         write_expected_writer_generation: int | None = None,
+        timed_out: bool = False,
     ) -> AcceptedPlanResolution:
         self._require_open()
         result_id = derive_id("result", "plan-answer", self.session_id, command_id)
@@ -457,6 +482,7 @@ class _HostPlanOperations:
             expected_workflow_revision=expected_workflow_revision,
             interaction_id=interaction_id,
             answer=answer,
+            timed_out=timed_out,
             result_id=result_id,
             result_entry_id=result_entry_id,
         )
@@ -468,11 +494,13 @@ class _HostPlanOperations:
             expected_workflow_revision=expected_workflow_revision,
             interaction_id=interaction_id,
             answer=answer,
+            timed_out=timed_out,
             result_id=result_id,
             result_entry_id=result_entry_id,
             deadline_monotonic=self._canonical_deadline(),
         )
         if existing is not None:
+            existing = await self._prepare_plan_resolution_page(existing)
             await self._plan_interactions.settle(
                 interaction_id=interaction_id,
                 resolution=existing,
@@ -501,6 +529,7 @@ class _HostPlanOperations:
                     expected_workflow_revision=expected_workflow_revision,
                     interaction_id=interaction_id,
                     answer=answer,
+                    timed_out=timed_out,
                     result_id=result_id,
                     result_entry_id=result_entry_id,
                     occurred_at=occurred_at,
@@ -522,6 +551,7 @@ class _HostPlanOperations:
                         expected_workflow_revision=expected_workflow_revision,
                         interaction_id=interaction_id,
                         answer=answer,
+                        timed_out=timed_out,
                         result_id=result_id,
                         result_entry_id=result_entry_id,
                         provider_input_admission=prepared.admission,
@@ -540,6 +570,7 @@ class _HostPlanOperations:
                         expected_workflow_revision=expected_workflow_revision,
                         interaction_id=interaction_id,
                         answer=answer,
+                        timed_out=timed_out,
                         result_id=result_id,
                         result_entry_id=result_entry_id,
                         provider_input_admission=prepared.admission,
@@ -547,6 +578,9 @@ class _HostPlanOperations:
                         actor_id=self.host_session_id,
                         deadline_monotonic=self._canonical_deadline(),
                     )
+                resolution = await self._prepare_plan_resolution_page(
+                    resolution, prepared_page=prepared.admission.candidate.native_tool_page,
+                )
                 await self._runner.confirm_published_active_root_input(
                     prepared,
                     publication_handle=publication_handle,
@@ -597,6 +631,7 @@ class _HostPlanOperations:
         revision_prompt: PromptContent | None = None,
         source_queue_item_id: str | None = None,
         write_expected_writer_generation: int | None = None,
+        timed_out: bool = False,
     ) -> AcceptedPlanResolution:
         self._require_open()
         if revision_prompt is not None and source_queue_item_id is not None:
@@ -645,6 +680,7 @@ class _HostPlanOperations:
             interaction_id=interaction_id,
             decision=decision,
             canonical_prompt=canonical_prompt,
+            timed_out=timed_out,
             source_queue_item_id=source_queue_item_id,
             continuation_turn_id=continuation_turn_id,
             continuation_entry_id=continuation_entry_id,
@@ -659,12 +695,15 @@ class _HostPlanOperations:
             interaction_id=interaction_id,
             decision=decision,
             canonical_prompt=canonical_prompt,
+            timed_out=timed_out,
             source_queue_item_id=source_queue_item_id,
             continuation_turn_id=continuation_turn_id,
             continuation_entry_id=continuation_entry_id,
             continuation_context_binding_revision_id=continuation_revision_id,
             deadline_monotonic=self._canonical_deadline(),
         )
+        if existing is not None:
+            existing = await self._prepare_plan_resolution_page(existing)
         if (
             existing is None
             and write_expected_writer_generation is not None
@@ -691,6 +730,7 @@ class _HostPlanOperations:
                             interaction_id=interaction_id,
                             decision=decision,
                             canonical_prompt=canonical_prompt,
+                            timed_out=timed_out,
                             source_queue_item_id=source_queue_item_id,
                             continuation_turn_id=continuation_turn_id,
                             continuation_entry_id=continuation_entry_id,
@@ -711,6 +751,7 @@ class _HostPlanOperations:
                             interaction_id=interaction_id,
                             decision=decision,
                             canonical_prompt=canonical_prompt,
+                            timed_out=timed_out,
                             source_queue_item_id=source_queue_item_id,
                             continuation_turn_id=continuation_turn_id,
                             continuation_entry_id=continuation_entry_id,
@@ -721,6 +762,8 @@ class _HostPlanOperations:
                             actor_id=self.host_session_id,
                             deadline_monotonic=self._canonical_deadline(),
                         )
+                if existing is None:
+                    resolution = await self._prepare_plan_resolution_page(resolution)
                 self._queue_wake.set()
                 if source_queue_item_id is not None:
                     self._hook_context.retire_prompt_candidate(

@@ -1,104 +1,149 @@
 """Observable consumer, scope and current-Work contracts for the hard cut."""
+
 from tests.support.model_config import scheduled_task_service
 from dataclasses import replace
 
 import pytest
 
 from pulsara_agent.capability.source_query import parse_query
-from pulsara_agent.capability.contracts import CapabilityKind, CapabilitySourceKind, capability_identity, capability_source_ref
+from pulsara_agent.capability.contracts import (
+    CapabilityKind,
+    CapabilitySourceKind,
+    capability_identity,
+    capability_source_ref,
+)
 
 from pulsara_agent.conversation_kernel.mcp.meta import (
-    McpToolRefConsumerKind,
     ProcessLocalNewMcpToolRefOwner,
 )
 from pulsara_agent.hooks.config_parser import parse_hook_config
 from pulsara_agent.hooks.contracts import HookScopeKind, HookScopePolicy, HookEventType
 from pulsara_agent.mcp_config import McpScopePolicy
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
-from pulsara_agent.plugins.mcp_connection import PluginMcpConnectionOverlay, overlay_from_dict, overlay_to_dict
+from pulsara_agent.plugins.mcp_connection import (
+    PluginMcpConnectionOverlay,
+    overlay_from_dict,
+    overlay_to_dict,
+)
 from tests.test_round9_2_hook_subsystem import _provenance, _view
 
-IDENTITY = capability_identity(kind=CapabilityKind.TOOL, source=capability_source_ref(CapabilitySourceKind.MCP_SERVER, "fixture"), stable_name="tool")
+IDENTITY = capability_identity(
+    kind=CapabilityKind.TOOL,
+    source=capability_source_ref(CapabilitySourceKind.MCP_SERVER, "fixture"),
+    stable_name="tool",
+)
 
 
-def test_full_inspect_delivery_is_consumer_and_session_specific_and_cell_survives_compaction():
+def test_accepted_ref_is_session_scoped_and_reused_without_a_delivery_gate():
+    from pulsara_agent.identity import random_id
+
     owner = ProcessLocalNewMcpToolRefOwner()
-    common = dict(conversation_scope_kind=ModelInputScopeKind.ROOT,
-                  session_id="session:root", continuity_epoch_nonce="epoch:one")
-    facts = dict(capability_identity=IDENTITY, tool_semantic_fingerprint="schema",
-                 mcp_execution_policy_fingerprint="policy", tool_route_fingerprint="route",
-                 runtime_generation=3)
-    model = owner.prepare(**common, **facts, result_entry_id="entry:model")
-    cell_scope = {**common, "continuity_epoch_nonce": "cell:one",
-                  "consumer_kind": McpToolRefConsumerKind.CODE_CELL, "consumer_id": "cell:one"}
-    cell = owner.prepare(**cell_scope, **facts, result_entry_id="entry:cell")
-    assert cell.ref.opaque_token != model.ref.opaque_token
-    for prepared in (model, cell):
-        owner.settle(prepared=prepared, committed=True)
-    with pytest.raises(LookupError, match="DORMANT"):
-        owner.resolve_callable(cell.ref.opaque_token, **cell_scope)
-    assert not owner.install_full_result(**common, result_entry_id="entry:cell")
-    assert owner.install_full_result(**cell_scope, result_entry_id="entry:cell")
+    scope = dict(
+        conversation_scope_kind=ModelInputScopeKind.ROOT,
+        session_id=random_id("session"),
+    )
+    facts = dict(
+        capability_identity=IDENTITY, binding=("tool", "actual schema", "actual policy")
+    )
+    native = owner.prepare(**scope, **facts, result_entry_id=random_id("entry"))
+    cell = owner.prepare(**scope, **facts, result_entry_id=random_id("entry"))
+    assert native.ref is cell.ref
     with pytest.raises(LookupError):
-        owner.resolve_callable(cell.ref.opaque_token, **{**cell_scope, "session_id": "session:other"})
+        owner.resolve_callable(native.ref.opaque_token, **scope)
+    owner.settle(prepared=native, committed=True)
+    assert owner.resolve_callable(cell.ref.opaque_token, **scope) is cell.ref
+    owner.settle(prepared=cell, committed=False)
+    assert owner.resolve_callable(native.ref.opaque_token, **scope) is native.ref
     with pytest.raises(LookupError):
-        owner.resolve_callable(cell.ref.opaque_token, **{**cell_scope, "consumer_id": "cell:other"})
-    owner.retire_scope_except_epoch(conversation_scope_kind=ModelInputScopeKind.ROOT,
-                                   session_id="session:root", continuity_epoch_nonce="epoch:two")
-    assert owner.resolve_callable(cell.ref.opaque_token, **cell_scope) is cell.ref
-    owner.retire_consumer(consumer_kind=McpToolRefConsumerKind.CODE_CELL, consumer_id="cell:one")
-    with pytest.raises(LookupError, match="NOT_FOUND"):
-        owner.resolve_callable(cell.ref.opaque_token, **cell_scope)
+        owner.resolve_callable(
+            native.ref.opaque_token, **{**scope, "session_id": random_id("session")}
+        )
 
 
-def test_repeated_code_inspect_reuses_current_ref_and_prunes_obsolete_facts():
+def test_repeated_accepted_queries_reuse_binding_and_reconcile_actual_changes():
+    from pulsara_agent.identity import random_id
+
     owner = ProcessLocalNewMcpToolRefOwner()
-    scope = dict(conversation_scope_kind=ModelInputScopeKind.ROOT, session_id="session:root",
-                 continuity_epoch_nonce="cell:long", consumer_kind=McpToolRefConsumerKind.CODE_CELL,
-                 consumer_id="cell:long")
-    facts = dict(capability_identity=IDENTITY, tool_semantic_fingerprint="schema",
-                 mcp_execution_policy_fingerprint="policy", tool_route_fingerprint="CODE_CELL", runtime_generation=1)
+    scope = dict(
+        conversation_scope_kind=ModelInputScopeKind.ROOT,
+        session_id=random_id("session"),
+    )
     tokens = set()
-    for i in range(1100):  # More than the existing MODEL bound is not a cell lifetime cap.
-        item = owner.prepare(**scope, **facts, result_entry_id=f"entry:{i}")
+    for _ in range(1100):
+        item = owner.prepare(
+            **scope,
+            capability_identity=IDENTITY,
+            binding=("schema", "policy"),
+            result_entry_id=random_id("entry"),
+        )
         owner.settle(prepared=item, committed=True)
-        owner.install_full_result(**scope, result_entry_id=f"entry:{i}")
         tokens.add(item.ref.opaque_token)
     assert len(tokens) == 1
-    ref = owner.resolve_callable(item.ref.opaque_token, **scope)
-    assert not item.record.committed_result_entry_ids
-    owner.retire_unroutable(**scope, allowed={(IDENTITY, "new-schema", "policy", "CODE_CELL", 2)})
+    owner.reconcile(
+        **scope,
+        server_ids={"fixture"},
+        complete_server_ids={"fixture"},
+        bindings={IDENTITY: ("changed schema", "policy")},
+    )
     with pytest.raises(LookupError):
-        owner.resolve_callable(ref.opaque_token, **scope)
-    current = owner.prepare(**scope, **{**facts, "tool_semantic_fingerprint": "new-schema", "runtime_generation": 2},
-                            result_entry_id="entry:new")
-    assert current.ref.opaque_token != ref.opaque_token
-    owner.retire_consumer(consumer_kind=McpToolRefConsumerKind.CODE_CELL, consumer_id="cell:long")
-    assert not owner._refs and not owner._prepared
+        owner.resolve_callable(item.ref.opaque_token, **scope)
+    current = owner.prepare(
+        **scope,
+        capability_identity=IDENTITY,
+        binding=("changed schema", "policy"),
+        result_entry_id=random_id("entry"),
+    )
+    owner.settle(prepared=current, committed=True)
+    assert current.ref.opaque_token not in tokens
+    assert owner.resolve_callable(current.ref.opaque_token, **scope) is current.ref
+    owner.close()
+    with pytest.raises(LookupError):
+        owner.resolve_callable(current.ref.opaque_token, **scope)
+
 
 def test_hook_scope_selection_is_shared_by_plugin_and_local_sources(tmp_path):
-    parsed = parse_hook_config(b'{"hooks":{"PreToolUse":[{"hooks":['
+    parsed = parse_hook_config(
+        b'{"hooks":{"PreToolUse":[{"hooks":['
         b'{"type":"command","command":"root","scope_policy":"ROOT"},'
         b'{"type":"command","command":"child","scope_policy":"SUBAGENT"},'
         b'{"type":"command","command":"both","scope_policy":"BOTH"}]}]}}',
-        provenance=_provenance(tmp_path))
+        provenance=_provenance(tmp_path),
+    )
     assert not parsed.diagnostics
     view = _view(tmp_path, parsed.definitions)
-    assert [item.command for _, item in view.selected_definitions(HookEventType.PRE_TOOL_USE_EVENT, HookScopeKind.ROOT)] == ["root", "both"]
-    assert [item.command for _, item in view.selected_definitions(HookEventType.PRE_TOOL_USE_EVENT, HookScopeKind.SUBAGENT)] == ["child", "both"]
+    assert [
+        item.command
+        for _, item in view.selected_definitions(
+            HookEventType.PRE_TOOL_USE_EVENT, HookScopeKind.ROOT
+        )
+    ] == ["root", "both"]
+    assert [
+        item.command
+        for _, item in view.selected_definitions(
+            HookEventType.PRE_TOOL_USE_EVENT, HookScopeKind.SUBAGENT
+        )
+    ] == ["child", "both"]
     assert parsed.definitions[2].scope_policy is HookScopePolicy.BOTH
 
 
 def test_plugin_and_manual_mcp_share_typed_scope_policy():
-    overlay = PluginMcpConnectionOverlay("docs", "stdio", scope_policy=McpScopePolicy.ROOT_AND_SUBAGENTS)
+    overlay = PluginMcpConnectionOverlay(
+        "docs", "stdio", scope_policy=McpScopePolicy.ROOT_AND_SUBAGENTS
+    )
     assert overlay_from_dict(overlay_to_dict(overlay)) == overlay
     assert overlay.validation_entry()["scope_policy"] == "ROOT_AND_SUBAGENTS"
-    assert PluginMcpConnectionOverlay("docs", "stdio").scope_policy is McpScopePolicy.ROOT_ONLY
+    assert (
+        PluginMcpConnectionOverlay("docs", "stdio").scope_policy
+        is McpScopePolicy.ROOT_AND_SUBAGENTS
+    )
 
 
-def test_subagent_can_query_shared_sources_without_management_authority(tmp_path):
-    assert parse_query({"kind": "HOOK_SOURCE", "scope": "USER"}, subagent=True)["kind"] == "HOOK_SOURCE"
-    assert parse_query({"kind": "SKILL"}, subagent=True)["kind"] == "SKILL"
+def test_subagent_queries_its_mcp_scope_and_cannot_discover_root_skill_or_hook_sources(tmp_path):
+    from pulsara_agent.capability.source_query import CapabilityQueryError
+    assert parse_query({'kind':'MCP'},subagent=True)=={'kind':'MCP'}
+    for kind in ('HOOK','SKILL','PLUGIN'):
+        with pytest.raises(CapabilityQueryError,match='子代理'):
+            parse_query({'kind':kind},subagent=True)
 
 
 def test_code_mode_uses_catalog_profile_free_run_agent_schema(tmp_path):
@@ -106,164 +151,288 @@ def test_code_mode_uses_catalog_profile_free_run_agent_schema(tmp_path):
     from types import SimpleNamespace
     from jsonschema import Draft202012Validator
     from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
-    from pulsara_agent.conversation_kernel.tool_policy import DefaultToolDispatchAuthorizationPolicy
+    from pulsara_agent.conversation_kernel.tool_policy import (
+        DefaultToolDispatchAuthorizationPolicy,
+    )
     from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
     from pulsara_agent.primitives.context import thaw_json
     from pulsara_agent.primitives.permission import PermissionMode
     from tests.support.round3 import prepare_test_direct_tool_surface
 
     async def run():
-        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(), workspace_root=tmp_path, host_owner_id="schema-host",
-            session_id="session:root", live_bus=LiveAgentEventBus(),
-            authorization_policy=DefaultToolDispatchAuthorizationPolicy())
+        port = DirectKernelToolPort(
+            scheduled_tasks=scheduled_task_service(),
+            workspace_root=tmp_path,
+            host_owner_id="schema-host",
+            session_id="session:root",
+            live_bus=LiveAgentEventBus(),
+            authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
+        )
         port.bind_subagent_port(SimpleNamespace(tool_names=frozenset({"run_agent"})))
         try:
-            surface = prepare_test_direct_tool_surface(port, effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
+            surface = prepare_test_direct_tool_surface(
+                port, effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS
+            )
             from pulsara_agent.capability.builtin_catalog import execution_catalog_entry
             from pulsara_agent.ports.tool_execution import thaw_tool_json_object
-            assert "run_agent" not in {spec.name for spec in surface.model_surface.tool_specs}
-            code = next(spec for spec in port.freeze_code_mode_tool_directory(surface,
-                effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS).tool_specs if spec.name == "run_agent")
-            assert thaw_json(code.parameters) == thaw_tool_json_object(execution_catalog_entry("run_agent").descriptor.input_schema)
+
+            assert "run_agent" not in {
+                spec.name for spec in surface.model_surface.tool_specs
+            }
+            code = next(
+                spec
+                for spec in port.freeze_code_mode_tool_directory(
+                    surface, effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS
+                ).tool_specs
+                if spec.name == "run_agent"
+            )
+            assert thaw_json(code.parameters) == thaw_tool_json_object(
+                execution_catalog_entry("run_agent").descriptor.input_schema
+            )
             schema = thaw_json(code.parameters)
             assert "profile" not in schema["properties"]
             for value in ("research_worker", None):
-                assert not Draft202012Validator(schema).is_valid({"instruction": "work", "profile": value})
+                assert not Draft202012Validator(schema).is_valid(
+                    {"instruction": "work", "profile": value}
+                )
         finally:
             await port.aclose()
+
     asyncio.run(run())
 
 
-def test_code_cell_inspect_executes_actual_mcp_without_provider_install_and_rejects_changed_binding(tmp_path):
+def test_native_mcp_query_is_callable_from_cells_and_changed_binding_does_not_replay_accepted_effect(
+    tmp_path,
+):
     import asyncio
     import json
-    from types import SimpleNamespace
     from mcp.server.lowlevel import Server
-    from mcp.server.subscriptions import InMemorySubscriptionBus, ListenHandler, ToolsListChanged
+    from mcp.server.subscriptions import (
+        InMemorySubscriptionBus,
+        ListenHandler,
+        ToolsListChanged,
+    )
     import mcp_types as types
     from tests.test_mcp_catalog_subscriptions import _sdk_http
-    from pulsara_agent.conversation_kernel.mcp.supervisor import McpHostSupervisor, McpSnapshotStale
-    from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort, _await_mcp_operation
+    from tests.test_mcp_meta_only_integration import invoke
+    from tests.support.round3 import (
+        prepare_test_direct_tool_surface,
+        _UnavailableTestDecisionPort,
+    )
+    from pulsara_agent.conversation_kernel.mcp.supervisor import (
+        McpHostSupervisor,
+        McpSnapshotStale,
+    )
+    from pulsara_agent.conversation_kernel.tool_runtime import (
+        DirectKernelToolPort,
+        _await_mcp_operation,
+    )
+    from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
+    from pulsara_agent.conversation_kernel.tool_policy import (
+        DefaultToolDispatchAuthorizationPolicy,
+    )
     from pulsara_agent.mcp_config import _parse_server
     from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
+    from pulsara_agent.identity import random_id
+    from pulsara_agent.primitives.permission import PermissionMode
 
     async def scenario():
         revision = 1
         bus = InMemorySubscriptionBus()
         received = []
         slow_started, slow_release = asyncio.Event(), asyncio.Event()
-        slow = None
 
         async def tools(_ctx, _params):
-            return types.ListToolsResult(tools=[types.Tool(name="probe", input_schema={
-                "type": "object", "properties": {"value": {"type": "string" if revision == 1 else "integer"}},
-                "required": ["value"], "additionalProperties": False})])
+            return types.ListToolsResult(
+                tools=[
+                    types.Tool(
+                        name="probe",
+                        input_schema={
+                            "type": "object",
+                            "properties": {
+                                "value": {
+                                    "type": "string" if revision == 1 else "integer"
+                                }
+                            },
+                            "required": ["value"],
+                            "additionalProperties": False,
+                        },
+                    )
+                ]
+            )
 
         async def call(_ctx, params):
             received.append(params.arguments)
             if params.arguments.get("value") == "slow":
                 slow_started.set()
                 await slow_release.wait()
-            return types.CallToolResult(content=[types.TextContent(type="text", text=json.dumps(params.arguments))])
+            return types.CallToolResult(
+                content=[
+                    types.TextContent(type="text", text=json.dumps(params.arguments))
+                ]
+            )
 
-        server = Server("code-consumer", on_list_tools=tools, on_call_tool=call,
-                        on_subscriptions_listen=ListenHandler(bus))
+        server = Server(
+            "shared-ref",
+            on_list_tools=tools,
+            on_call_tool=call,
+            on_subscriptions_listen=ListenHandler(bus),
+        )
         async with _sdk_http(server) as endpoint:
-            supervisor = McpHostSupervisor(workspace_root=tmp_path,
-                configs=(_parse_server("catalog", {"catalog_refresh_interval_ms": "DISABLED",
-                    "effect_policy": {"default_effect": "READ_ONLY"}, "transport": {"type": "streamable_http",
-                    "endpoint": endpoint, "allow_http_localhost": True}}),),
-                credential_boundary=ProcessCredentialBoundary())
-            first = second = None
+            supervisor = McpHostSupervisor(
+                workspace_root=tmp_path,
+                configs=(
+                    _parse_server(
+                        "catalog",
+                        {
+                            "catalog_refresh_interval_ms": "DISABLED",
+                            "effect_policy": {"default_effect": "READ_ONLY"},
+                            "transport": {
+                                "type": "streamable_http",
+                                "endpoint": endpoint,
+                                "allow_http_localhost": True,
+                            },
+                        },
+                    ),
+                ),
+                credential_boundary=ProcessCredentialBoundary(),
+            )
+            port = DirectKernelToolPort(
+                scheduled_tasks=scheduled_task_service(),
+                workspace_root=tmp_path,
+                host_owner_id=random_id("host"),
+                session_id=random_id("session"),
+                live_bus=LiveAgentEventBus(),
+                authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
+            )
+            port.bind_mcp_supervisor(supervisor)
+            port.bind_interaction_port(object())
+            port.bind_subagent_port(type("EmptySubagent", (), {"tool_names": ()})())
+            port.bind_memory_port(type("EmptyMemory", (), {"tool_names": ()})())
+            port.bind_decision_port(_UnavailableTestDecisionPort())
+            port.bind_capability_reload_port(object())
+            port.seal_builtin_composition()
+            borrow = slow = None
             try:
                 await supervisor.start()
                 await supervisor.wait_initial_readiness()
-                first = supervisor.install_pending_at_safe_point()
-                # The actual Host MCP runtime is the authority; this cell has no provider epoch.
-                port = object.__new__(DirectKernelToolPort)
-                port._surface_generation = 1
-                port._mcp_runtime_by_surface_generation = {1: first}
-                port._mcp_meta_refs = ProcessLocalNewMcpToolRefOwner()
-                port._mcp_ref_settlements = {}
-                borrow = SimpleNamespace(code_cell_id="cell:actual", tool_specs=(), prepared=SimpleNamespace(
-                    access=SimpleNamespace(surface_generation=1, conversation_scope_kind=ModelInputScopeKind.ROOT,
-                                           session_id="session:root"),
-                    model_surface=SimpleNamespace(tool_specs=())))
-                from pulsara_agent.identity import random_id
-                from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
-                context = SimpleNamespace(surface_borrow=borrow, result_entry_id="entry:first",
-                    page_budget=ToolResultPageBudget(tool_call_id=random_id("call")))
-                target = {"kind": "MCP_TOOL", "server_id": "catalog", "tool_name": "mcp__catalog__probe"}
-                result = port._inspect_mcp_tool_result(target=target, invocation_context=context)
-                body = json.loads(result.content)
-                assert body["invocation"]["mode"] == "META"
-                token = body["invocation"]["target"]["tool_ref"]
-                prepared = result.process_local_settlement.prepared
-                port._mcp_meta_refs.settle(prepared=prepared, committed=True)
+                port.prepare_tool_surface_safe_point()
+                detail = await invoke(
+                    port,
+                    "query_capabilities",
+                    {
+                        "kind": "MCP",
+                        "target": {
+                            "kind": "MCP_TOOL",
+                            "server_id": "catalog",
+                            "remote_tool_name": "probe",
+                        },
+                    },
+                )
+                record = detail["content"][0]["value"]
+                target = record["invocation"]["target"]
+                surface = prepare_test_direct_tool_surface(
+                    port, effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS
+                )
+                directory = port.freeze_code_mode_tool_directory(
+                    surface, effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS
+                )
+                for value in ("one", "two"):
+                    result = await invoke(
+                        port,
+                        "call_mcp_tool",
+                        {"target": target, "arguments": {"value": value}},
+                        cell=random_id("cell"),
+                        directory=directory,
+                    )
+                    assert result["meta"]["status"] == "SUCCESS"
+                    assert json.loads(result["content"][0]["value"]) == {"value": value}
+                borrow = port.borrow_code_mode_surface(
+                    directory, cell_id=random_id("cell")
+                )
                 scope = port._mcp_ref_consumer_for_borrow(borrow)
-                with pytest.raises(LookupError, match="DORMANT"):
-                    port._mcp_meta_refs.resolve_callable(token, **scope)
-                assert port.install_code_cell_tool_result_delivery(result_entry_id="entry:first", cell_id="cell:actual", borrow=borrow)
-                ref = port._mcp_meta_refs.resolve_callable(token, **scope)
-                executor, generation = port._resolve_meta_ref_executor(ref=ref, surface_borrow=borrow)
-                assert generation == 1
-                permit = executor.admit(session_id="session:root", scope_kind=ModelInputScopeKind.ROOT,
-                                        turn_id="turn:actual", tool_call_id="tool:actual")
+                ref = port._mcp_meta_refs.resolve_callable(target["tool_ref"], **scope)
+                executor, _ = port._resolve_meta_ref_executor(
+                    ref=ref, surface_borrow=borrow
+                )
+                permit = executor.admit(
+                    session_id=port._session_id,
+                    scope_kind=ModelInputScopeKind.ROOT,
+                    turn_id=random_id("turn"),
+                    tool_call_id=random_id("call"),
+                )
                 permit.mark_attempt_accepted()
-                known = await executor.invoke(permit, {"value": "actual"}, cell_cancel_event=None)
-                assert known.state == "SUCCESS" and received == [{"value": "actual"}]
-                port._mcp_meta_refs.retire_scope_except_epoch(conversation_scope_kind=ModelInputScopeKind.ROOT,
-                    session_id="session:root", continuity_epoch_nonce="epoch:compacted")
-                assert port._mcp_meta_refs.resolve_callable(token, **scope) is ref
-                slow_permit = executor.admit(session_id="session:root", scope_kind=ModelInputScopeKind.ROOT,
-                    turn_id="turn:actual", tool_call_id="tool:slow")
-                slow_permit.mark_attempt_accepted()
-                cell_stopped = asyncio.Event()
-                operation = asyncio.create_task(executor.invoke(slow_permit, {"value": "slow"}, cell_cancel_event=cell_stopped))
-                slow = asyncio.create_task(_await_mcp_operation(operation, permit=slow_permit))
+                cancelled = asyncio.Event()
+                operation = asyncio.create_task(
+                    executor.invoke(
+                        permit, {"value": "slow"}, cell_cancel_event=cancelled
+                    )
+                )
+                slow = asyncio.create_task(
+                    _await_mcp_operation(operation, permit=permit)
+                )
                 await asyncio.wait_for(slow_started.wait(), 5)
-                cell_stopped.set()
+                cancelled.set()
                 slow.cancel()
                 await asyncio.sleep(0)
                 assert not slow.done()
                 revision = 2
                 await bus.publish(ToolsListChanged())
                 async with asyncio.timeout(5):
-                    while executor.lease._slot.dispatch_fence_state.value != "DIRTY_FENCED":
-                        await asyncio.sleep(.01)
+                    while (
+                        executor.lease._slot.dispatch_fence_state.value
+                        != "DIRTY_FENCED"
+                    ):
+                        await asyncio.sleep(0.01)
                 with pytest.raises(McpSnapshotStale):
-                    executor.admit(session_id="session:root", scope_kind=ModelInputScopeKind.ROOT,
-                                   turn_id="turn:actual", tool_call_id="tool:blocked-after-refresh")
-                # SDK catalog refresh drains accepted calls before changing its schema cache.
+                    executor.admit(
+                        session_id=port._session_id,
+                        scope_kind=ModelInputScopeKind.ROOT,
+                        turn_id=random_id("turn"),
+                        tool_call_id=random_id("call"),
+                    )
                 slow_release.set()
                 known, caller_cancelled = await asyncio.wait_for(slow, 5)
                 assert known.state == "SUCCESS" and caller_cancelled
-                assert slow_permit.state.value == "RELEASED"
+                assert permit.state.value == "RELEASED"
                 async with asyncio.timeout(5):
                     while "catalog" not in supervisor._pending:
-                        await asyncio.sleep(.01)
-                second = supervisor.install_pending_at_safe_point()
-                port._surface_generation = 2
-                port._mcp_runtime_by_surface_generation[2] = second
-                with pytest.raises(LookupError, match="BINDING_STALE"):
-                    port._resolve_meta_ref_executor(ref=ref, surface_borrow=borrow)
-                context.result_entry_id = "entry:second"
-                current = port._inspect_mcp_tool_result(target=target, invocation_context=context)
-                updated = json.loads(current.content)
-                assert updated["input_schema"]["properties"]["value"]["type"] == "integer"
-                assert updated["invocation"]["target"]["tool_ref"] != token
-                port.release_code_cell_mcp_refs("cell:actual")
+                        await asyncio.sleep(0.01)
+                port.prepare_tool_surface_safe_point()
                 with pytest.raises(LookupError):
-                    port._mcp_meta_refs.resolve_callable(token, **scope)
+                    port._resolve_meta_ref_executor(ref=ref, surface_borrow=borrow)
+                updated = await invoke(
+                    port,
+                    "query_capabilities",
+                    {
+                        "kind": "MCP",
+                        "target": {
+                            "kind": "MCP_TOOL",
+                            "server_id": "catalog",
+                            "remote_tool_name": "probe",
+                        },
+                    },
+                )
+                current = updated["content"][0]["value"]
+                assert (
+                    current["input_schema"]["properties"]["value"]["type"] == "integer"
+                )
+                assert current["invocation"]["target"]["tool_ref"] != target["tool_ref"]
+                assert received == [
+                    {"value": "one"},
+                    {"value": "two"},
+                    {"value": "slow"},
+                ]
             finally:
                 slow_release.set()
                 if slow is not None:
                     await asyncio.wait_for(slow, 5)
-                if first is not None:
-                    first.release()
-                if second is not None:
-                    second.release()
-                await supervisor.aclose()
+                if borrow is not None:
+                    borrow.close()
+                supervisor.stop_admission()
+                closing = asyncio.create_task(supervisor.aclose())
+                await port.aclose(timeout_seconds=10)
+                await closing
 
     asyncio.run(scenario())
 
@@ -272,13 +441,21 @@ def test_pretool_hook_deny_wins_and_preserves_ordered_additional_context(tmp_pat
     import json
     from pulsara_agent.hooks.contracts import GateDecision
     from pulsara_agent.hooks.dispatcher import _aggregate
-    from pulsara_agent.hooks.output_parser import parse_handler_output, ValidHandlerContribution
+    from pulsara_agent.hooks.output_parser import (
+        parse_handler_output,
+        ValidHandlerContribution,
+    )
     from tests.test_round9_2_hook_subsystem import _definition, _execution
+
     definition = _definition(tmp_path, HookEventType.PRE_TOOL_USE_EVENT, "review")
 
     def parse(value):
-        execution = _execution(definition,
-            stdout=json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", **value}}).encode())
+        execution = _execution(
+            definition,
+            stdout=json.dumps(
+                {"hookSpecificOutput": {"hookEventName": "PreToolUse", **value}}
+            ).encode(),
+        )
         contribution = parse_handler_output(execution)
         assert isinstance(contribution, ValidHandlerContribution)
         return replace(contribution, scrub_set=execution.scrub_set)
@@ -286,21 +463,42 @@ def test_pretool_hook_deny_wins_and_preserves_ordered_additional_context(tmp_pat
     first = parse({"additionalContext": "Read the project instructions."})
     second = parse({"additionalContext": "Check the execution results."})
     assert isinstance(first, ValidHandlerContribution)
-    proceeding = _aggregate(HookEventType.PRE_TOOL_USE_EVENT, (first, second), continuation_already_used=False)
+    proceeding = _aggregate(
+        HookEventType.PRE_TOOL_USE_EVENT,
+        (first, second),
+        continuation_already_used=False,
+    )
     assert proceeding.decision is GateDecision.PROCEED
     assert [entry.text for entry in proceeding.context_entries] == [
-        "Read the project instructions.", "Check the execution results."
+        "Read the project instructions.",
+        "Check the execution results.",
     ]
-    denied = parse({"permissionDecision": "deny", "permissionDecisionReason": "Execution is blocked."})
-    outcome = _aggregate(HookEventType.PRE_TOOL_USE_EVENT, (first, denied, second), continuation_already_used=False)
+    denied = parse(
+        {
+            "permissionDecision": "deny",
+            "permissionDecisionReason": "Execution is blocked.",
+        }
+    )
+    outcome = _aggregate(
+        HookEventType.PRE_TOOL_USE_EVENT,
+        (first, denied, second),
+        continuation_already_used=False,
+    )
     assert outcome.decision is GateDecision.BLOCK
     assert outcome.reason == "Execution is blocked."
     assert outcome.context_entries == proceeding.context_entries
 
 
-def test_shared_hook_dispatch_exposes_real_subagent_session_and_instruction_origin(tmp_path):
+def test_shared_hook_dispatch_exposes_real_subagent_session_and_instruction_origin(
+    tmp_path,
+):
     import asyncio
-    from pulsara_agent.hooks.contracts import HookDispatchEnvelope, QueuedPromptRef, UserPromptSubmitInput, HookDispatchScopeRef
+    from pulsara_agent.hooks.contracts import (
+        HookDispatchEnvelope,
+        QueuedPromptRef,
+        UserPromptSubmitInput,
+        HookDispatchScopeRef,
+    )
     from pulsara_agent.hooks.dispatcher import KernelHookDispatcher
     from pulsara_agent.hooks.matcher import event_matcher_subject
     from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
@@ -308,18 +506,49 @@ def test_shared_hook_dispatch_exposes_real_subagent_session_and_instruction_orig
     from time import monotonic
 
     async def scenario():
-        definition = replace(_definition(tmp_path, HookEventType.USER_PROMPT_SUBMIT_EVENT, "child"), scope_policy=HookScopePolicy.SUBAGENT)
+        definition = replace(
+            _definition(tmp_path, HookEventType.USER_PROMPT_SUBMIT_EVENT, "child"),
+            scope_policy=HookScopePolicy.SUBAGENT,
+        )
         executor = _ScriptedExecutor({"child": (0, b"work context", b"")})
-        dispatcher = KernelHookDispatcher(initial_view=_view(tmp_path, (definition,)), workspace_root=tmp_path,
-            credential_boundary=ProcessCredentialBoundary(), executor=executor)
+        dispatcher = KernelHookDispatcher(
+            initial_view=_view(tmp_path, (definition,)),
+            workspace_root=tmp_path,
+            credential_boundary=ProcessCredentialBoundary(),
+            executor=executor,
+        )
         try:
-            scope = HookDispatchScopeRef(object(), object(), HookScopeKind.SUBAGENT, "session:actual-child")
-            public = UserPromptSubmitInput(session_id="session:actual-child", cwd=str(tmp_path), model="model:test",
-                session_kind="SUBAGENT", input_origin="AGENT_INSTRUCTION", turn_id="turn:actual-work",
-                prompt="actual instruction", permission_mode="bypassPermissions")
-            outcome = await dispatcher.dispatch(HookDispatchEnvelope(dispatcher.capture_view(), scope, public,
-                QueuedPromptRef(None, "queue:actual-work", "turn:actual-work", "entry:instruction", "revision:work"), monotonic()+10),
-                matcher_subject=event_matcher_subject(HookEventType.USER_PROMPT_SUBMIT_EVENT))
+            scope = HookDispatchScopeRef(
+                object(), object(), HookScopeKind.SUBAGENT, "session:actual-child"
+            )
+            public = UserPromptSubmitInput(
+                session_id="session:actual-child",
+                cwd=str(tmp_path),
+                model="model:test",
+                session_kind="SUBAGENT",
+                input_origin="AGENT_INSTRUCTION",
+                turn_id="turn:actual-work",
+                prompt="actual instruction",
+                permission_mode="bypassPermissions",
+            )
+            outcome = await dispatcher.dispatch(
+                HookDispatchEnvelope(
+                    dispatcher.capture_view(),
+                    scope,
+                    public,
+                    QueuedPromptRef(
+                        None,
+                        "queue:actual-work",
+                        "turn:actual-work",
+                        "entry:instruction",
+                        "revision:work",
+                    ),
+                    monotonic() + 10,
+                ),
+                matcher_subject=event_matcher_subject(
+                    HookEventType.USER_PROMPT_SUBMIT_EVENT
+                ),
+            )
             assert outcome.context_entries
             assert len(executor.calls) == 1
             sent = executor.calls[0].public_stdin
@@ -327,7 +556,7 @@ def test_shared_hook_dispatch_exposes_real_subagent_session_and_instruction_orig
             assert sent["session_kind"] == "SUBAGENT"
             assert sent["input_origin"] == "AGENT_INSTRUCTION"
         finally:
-            await dispatcher.aclose(deadline_monotonic=monotonic()+5)
+            await dispatcher.aclose(deadline_monotonic=monotonic() + 5)
 
     asyncio.run(scenario())
 
@@ -335,16 +564,31 @@ def test_shared_hook_dispatch_exposes_real_subagent_session_and_instruction_orig
 def test_kernel_tool_result_remote_identity_closed_branches():
     from pulsara_agent.conversation_kernel.tool_contracts import KernelToolResult
     from pulsara_agent.identity import derive_id
+    from pulsara_agent.ports.tool_execution import ToolBusinessValue
 
-    process = derive_id('process', 'result-test', 'one')
-    remote = derive_id('mcp-tool', 'remote-tool', 'fixture', '1', 'tool')
-    verification = 'sha256:' + 'a' * 64
-    KernelToolResult(state='SUCCESS', content=b'', remote_identity=process)
-    KernelToolResult(state='SUCCESS', content=b'', remote_identity=remote,
-                     remote_identity_verification=verification)
-    KernelToolResult(state='SUCCESS', content=b'')
-    for identity, verifier in ((None, verification), (process, verification),
-                               (remote, None), (remote, 'sha256:short')):
-        with pytest.raises(ValueError, match='remote identity'):
-            KernelToolResult(state='SUCCESS', content=b'', remote_identity=identity,
-                             remote_identity_verification=verifier)
+    process = derive_id("process", "result-test", "one")
+    remote = derive_id("mcp-tool", "remote-tool", "fixture", "1", "tool")
+    verification = "sha256:" + "a" * 64
+    KernelToolResult(
+        state="SUCCESS", content=ToolBusinessValue(), remote_identity=process
+    )
+    KernelToolResult(
+        state="SUCCESS",
+        content=ToolBusinessValue(),
+        remote_identity=remote,
+        remote_identity_verification=verification,
+    )
+    KernelToolResult(state="SUCCESS", content=ToolBusinessValue())
+    for identity, verifier in (
+        (None, verification),
+        (process, verification),
+        (remote, None),
+        (remote, "sha256:short"),
+    ):
+        with pytest.raises(ValueError, match="remote identity"):
+            KernelToolResult(
+                state="SUCCESS",
+                content=ToolBusinessValue(),
+                remote_identity=identity,
+                remote_identity_verification=verifier,
+            )

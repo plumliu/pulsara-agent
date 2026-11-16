@@ -2,7 +2,6 @@ from __future__ import annotations
 from pulsara_agent.identity import derive_id
 
 import asyncio
-import json
 import os
 from pathlib import Path
 import sys
@@ -17,13 +16,6 @@ from pulsara_agent.conversation_kernel.live import (
     LiveObservationKind,
 )
 from pulsara_agent.conversation_kernel.tool_execution import _ToolResultLiveSink
-from pulsara_agent.conversation_kernel.tool_runtime import (
-    _DirectTerminalProcessTool,
-    _execute_terminal_tool_call,
-)
-from pulsara_agent.message import ToolResultState
-from pulsara_agent.ports.tool_execution import ToolCall
-from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverageReason
 from pulsara_agent.terminal_process.manager import ProcessRegistry
 from pulsara_agent.terminal_process.manager import TerminalManager
@@ -31,7 +23,6 @@ import pulsara_agent.terminal_process.manager as terminal_manager_module
 from pulsara_agent.terminal_process.models import (
     TerminalCwdScope,
     TerminalPhysicalState,
-    TerminalProcessOrigin,
 )
 from pulsara_agent.terminal_process.output import (
     IncrementalTerminalSanitizer,
@@ -126,34 +117,6 @@ def test_round2_cursor_snapshot_and_body_share_the_exact_selected_range() -> Non
     assert candidate.source_coverage.value == "COMPLETE"
 
 
-@pytest.mark.parametrize("foreign", (False, True))
-def test_terminal_cursor_rejection_returns_actionable_tool_error(foreign: bool) -> None:
-    owner = TerminalOutputOwner(owner_epoch='host:umsmaqdnqz3cpmtzml56ydq7ei', process_id='process:72qov6ocdngiw5hv6gjo4g2o7i')
-    other = TerminalOutputOwner(owner_epoch='host:6iyzp7i34pqz7i24elu5kbb5ee', process_id='process:72qov6ocdngiw5hv6gjo4g2o7i')
-    cursor = other.snapshot(maximum_chars=512).output_cursor if foreign else "bad-cursor-token"
-
-    class Manager:
-        def poll_process(self, process_id, *, since_cursor, **kwargs):
-            assert process_id == 'process:72qov6ocdngiw5hv6gjo4g2o7i'
-            return owner.snapshot(maximum_chars=512, since_cursor=since_cursor)
-
-    result = _execute_terminal_tool_call(
-        _DirectTerminalProcessTool(Manager(), 'host:umsmaqdnqz3cpmtzml56ydq7ei'),
-        ToolCall("call:cursor", "manage_process", {
-            "action": "poll", "target": {"kind": "PROCESS", "process_id": 'process:72qov6ocdngiw5hv6gjo4g2o7i'}, "since_cursor": cursor,
-        }),
-        None,
-        TerminalProcessOrigin('turn:nzc36cttgo7xxki7bcjc7ops7a', "ROOT"),
-        'attempt:dvce4jlhrqd3hzcfpszy4gujye',
-        DEFAULT_PERMISSION_MODE,
-        deadline_monotonic=monotonic() + 10,
-    )
-    assert result.status is ToolResultState.ERROR
-    body = json.loads(result.output)
-    assert body["error"] == "INVALID_CURSOR"
-    assert cursor not in body["message"]
-    assert "ValueError" not in result.output
-    assert result.output_body_candidate is None
 
 
 def test_round2_sanitizer_failure_cannot_claim_complete_body(
@@ -180,16 +143,16 @@ def test_round2_sanitizer_failure_cannot_claim_complete_body(
     assert candidate.source_format.value == "TEXT"
 
 
-def test_round2_retention_gap_is_orthogonal_to_response_bound() -> None:
+def test_round2_disk_spill_is_orthogonal_to_ui_response_bound() -> None:
     owner = TerminalOutputOwner(
         owner_epoch='host:umsmaqdnqz3cpmtzml56ydq7ei', process_id='process:72qov6ocdngiw5hv6gjo4g2o7i', maximum_bytes=100
     )
     before = owner.snapshot(maximum_chars=512).output_cursor
     owner.append_raw(("A" * 200 + " TAIL ").encode())
     public = owner.snapshot(maximum_chars=8, since_cursor=before)
-    assert public.disposition is TerminalOutputReadDisposition.GAP
-    assert public.source_coverage is TerminalOutputSourceCoverage.RETAINED_SNAPSHOT
-    assert public.gap_before_output is True
+    assert public.disposition is TerminalOutputReadDisposition.EXACT_DELTA
+    assert public.source_coverage is TerminalOutputSourceCoverage.COMPLETE
+    assert public.gap_before_output is False
     assert public.truncated_by_response_bound is True
     # The end cursor is for future output, not pagination of a truncated tail.
     assert owner.snapshot(maximum_chars=8, since_cursor=public.output_cursor).text == ""
@@ -206,11 +169,12 @@ def test_round2_output_metadata_stays_bounded_after_many_tiny_segments() -> None
     snapshot = owner.snapshot(maximum_chars=512)
     assert owner.retained_utf8_bytes <= 4096
     assert snapshot.through_offset == 200_000
-    assert snapshot.retained_from_offset > 0
+    assert snapshot.retained_from_offset == 0
+    assert owner.body_candidate().text == "x " * 100_000
     assert len(snapshot.output_cursor) < 1024
 
 
-def test_round2_host_aggregate_evicts_finished_output_before_live_output(
+def test_round2_host_aggregate_spills_finished_output_and_keeps_full_text(
     tmp_path: Path,
 ) -> None:
     registry = ProcessRegistry(maximum_host_retained_bytes=160)
@@ -251,6 +215,8 @@ def test_round2_host_aggregate_evicts_finished_output_before_live_output(
     assert yielded is True
     live.output.wait_for_revision(0, 2)
     assert completed.output.retained_utf8_bytes < live.output.retained_utf8_bytes
+    assert completed.output.body_candidate().text == "F" * 120 + "\n"
+    assert live.output.body_candidate().text == "L" * 120 + "\n"
     assert completed.output.retained_utf8_bytes + live.output.retained_utf8_bytes <= 160
     results = registry.release_owner(owner, timeout_seconds=5)
     assert len(results) == 2
@@ -679,8 +645,9 @@ def test_round2_exact_retention_boundary_and_body_coverage() -> None:
     owner.append_raw("🙂".encode())
     retained = owner.body_candidate()
     assert owner.retained_utf8_bytes <= 16 * 1024 * 1024
-    assert retained.source_coverage.value == "RETAINED_SNAPSHOT"
-    assert retained.source_coverage_reason is not None
+    assert retained.source_coverage.value == "COMPLETE"
+    assert retained.source_coverage_reason is None
+    assert retained.text == "a" * (16 * 1024 * 1024) + "🙂"
     assert retained.text.encode("utf-8").decode("utf-8") == retained.text
 
 

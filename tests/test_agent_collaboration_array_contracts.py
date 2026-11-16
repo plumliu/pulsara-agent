@@ -84,8 +84,22 @@ def test_wait_schemas_are_distinct_closed_contracts():
     agents = {"agents": [agent_target(random_id("session"))]}
     works = {"works": [work_target(random_id("queue"))]}
     definitions = {
-        "wait_message": (wait_message_parameters_schema(), [{}, {"timeout_seconds": 0}, {"timeout_seconds": 300}]),
-        "wait_agent": (wait_agent_parameters_schema(), [agents, *[dict(agents, until=until, settle=settle, timeout_seconds=timeout) for until in ("idle", "work_end") for settle in ("all", "first") for timeout in (0, 30, 300)]]),
+        "wait_message": (
+            wait_message_parameters_schema(),
+            [{}, {"timeout_seconds": 0}, {"timeout_seconds": 300}],
+        ),
+        "wait_agent": (
+            wait_agent_parameters_schema(),
+            [
+                agents,
+                *[
+                    dict(branch, settle=settle, timeout_seconds=timeout)
+                    for branch in (agents, works)
+                    for settle in ("all", "first")
+                    for timeout in (0, 30, 300)
+                ],
+            ],
+        ),
     }
     for name, (schema, valid) in definitions.items():
         validator = Draft202012Validator(schema)
@@ -97,12 +111,16 @@ def test_wait_schemas_are_distinct_closed_contracts():
                 validate_collaboration_parameters(name, args)
             assert not validator.is_valid(args)
     for name, args in [
-        ("wait_message", agents), ("wait_message", works), ("wait_message", {"settle": "all"}),
-        ("wait_agent", {}), ("wait_agent", works), ("wait_agent", dict(agents, **works)),
+        ("wait_message", agents),
+        ("wait_message", works),
+        ("wait_message", {"settle": "all"}),
+        ("wait_agent", {}),
+        ("wait_agent", dict(agents, **works)),
         ("wait_agent", {"agents": []}),
         ("wait_agent", {"agents": agents["agents"] * 2}),
         ("wait_agent", dict(agents, settle="any")),
-        ("wait_agent", dict(agents, until="next")), ("wait_agent", dict(agents, until=None)),
+        ("wait_agent", dict(agents, until="next")),
+        ("wait_agent", dict(agents, until=None)),
         ("wait_agent", {"agents": [agent_target("ROOT")]}),
     ]:
         with pytest.raises(ValueError):
@@ -119,7 +137,22 @@ def test_wait_schemas_are_distinct_closed_contracts():
 
 
 @pytest.mark.parametrize("name", ["wait_message", "wait_agent"])
-@pytest.mark.parametrize("timeout", [True, False, None, "30", [], {}, -1, 301, float("nan"), float("inf"), -float("inf")])
+@pytest.mark.parametrize(
+    "timeout",
+    [
+        True,
+        False,
+        None,
+        "30",
+        [],
+        {},
+        -1,
+        301,
+        float("nan"),
+        float("inf"),
+        -float("inf"),
+    ],
+)
 def test_wait_timeout_rejects_invalid_values_at_actual_boundary(name, timeout):
     args = {"timeout_seconds": timeout}
     if name == "wait_agent":
@@ -138,10 +171,10 @@ def test_assignment_schema_is_the_internal_member_definition():
 
 
 def test_agent_wait_schema_defaults_match_observation_contract():
-    properties = wait_agent_parameters_schema()["properties"]
-    assert properties["until"]["default"] == "idle"
-    assert properties["settle"]["default"] == "all"
-    assert properties["timeout_seconds"]["default"] == 30
+    for branch in wait_agent_parameters_schema()["oneOf"]:
+        properties = branch["properties"]
+        assert properties["settle"]["default"] == "all"
+        assert properties["timeout_seconds"]["default"] == 30
 
 
 @pytest.mark.parametrize("until", [None, True, False, 0, "", "next", [], {}])

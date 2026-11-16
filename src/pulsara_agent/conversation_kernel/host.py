@@ -518,7 +518,7 @@ class KernelHostSession(
             deadline_factory=self._deadlines,
         )
         self._presentation_notices: dict[str, list[str]] = {}
-        self._plan_interactions = KernelPlanInteractionCoordinator()
+        self._plan_interactions = KernelPlanInteractionCoordinator(timeout_resolver=self._resolve_plan_interaction_timeout)
         self._plan_continuations = ContinuationAdmissionOwner()
         self._input_continuity = HostProviderInputContinuityOwner(
             root_lease_source=_issue_root_bootstrap_lease_source(writer_lease),
@@ -665,6 +665,8 @@ class KernelHostSession(
 
         self._mcp_supervisor = McpHostSupervisor(
             workspace_root=workspace.workspace_root,
+            pulsara_home=pulsara_home_resolution.path,
+            user_config_path=mcp_management.user_config_path,
             configs=mcp_configs,
             credential_boundary=credential_boundary,
             configuration_change=self._capability_refresh_wake,
@@ -673,13 +675,13 @@ class KernelHostSession(
         self._tools.bind_mcp_supervisor(self._mcp_supervisor)
         from pulsara_agent.code_mode.host import CodeModeHost
         self._code_mode = CodeModeHost()
+        self._code_mode.set_output_preparer(self._prepare_cell_output_content, quote=self._quote_cell_output_content)
         self._tools.bind_code_mode_port(self._code_mode)
         from pulsara_agent.conversation_kernel.decision_tools import KernelDecisionToolPort
         self._decision_tools = KernelDecisionToolPort(
             settings=model_runtime.settings,
             decision_service=self._decision_service,
             deadline_factory=self._deadlines,
-            max_value_bytes=self._code_mode.limits.value_bytes,
         )
         self._tools.bind_decision_port(self._decision_tools)
         self._tools.seal_builtin_composition()
@@ -718,7 +720,6 @@ class KernelHostSession(
             base_system_prompt=(system_prompt if system_prompt is not None else
                 DEFAULT_SUBAGENT_SYSTEM_PROMPT if root_session_id is not None else DEFAULT_SYSTEM_PROMPT),
             display_timezone=display_timezone,
-            mcp_catalog=self._mcp_supervisor,
             hook_context_owner=self._hook_context,
         )
         self._runner = ConversationKernelRunner(
@@ -1034,6 +1035,9 @@ class KernelHostSession(
                 local = await self.reload_hooks(deadline_monotonic=deadline)
                 local_sources = [item for item in local["sources"] if item["source"] != HookSourceKind.PLUGIN.value]
                 result["local_hook_sources"] = local_sources
+                for source in local_sources:
+                    if source.get("scan") != "COMPLETE" or source.get("trust") == "UNAVAILABLE":
+                        result.setdefault("errors", []).append(str(source.get("path") or source.get("config_path") or source.get("source")) + ": " + str(source.get("diagnostics") or "无法完整读取 Hook 来源。"))
                 local_complete = all(item["scan"] == "COMPLETE" and
                                      item["trust"] != "UNAVAILABLE" for item in local_sources)
                 result["local_hooks"] = "RELOADED" if local_complete else "PARTIAL"
@@ -1042,8 +1046,9 @@ class KernelHostSession(
                 # its candidate was admitted; keep the exact completed parts.
                 result["local_hooks"] = "PARTIAL"
                 result["interruption"] = "CANCELLED"
-            except Exception:
+            except Exception as error:
                 result["local_hooks"] = "PARTIAL"
+                result.setdefault("errors", []).append(str(error))
             if result["local_hooks"] != "RELOADED":
                 result["status"] = "PARTIAL"
             return result
@@ -1054,10 +1059,16 @@ class KernelHostSession(
         pending = 0
         if self._capability_change_notifier is not None:
             pending = await self._capability_change_notifier(workspace_root)
-        await self.request_capability_refresh()
+        errors = []
         parts = {}
-        await self._adopt_capabilities_if_requested(outcome_sink=parts)
-        attention = bool(self.capability_refresh_attention)
+        try:
+            await self.request_capability_refresh()
+            await self._adopt_capabilities_if_requested(outcome_sink=parts)
+        except asyncio.CancelledError:
+            errors.append("等待已取消，后续刷新状态未确认。")
+        except Exception as error:
+            errors.append(str(error))
+        attention = bool(self.capability_refresh_attention) or bool(errors)
         return {
             "status": "PARTIAL" if attention else "RELOADED",
             "reloaded_sessions": int(not attention),
@@ -1065,6 +1076,7 @@ class KernelHostSession(
             "attention_sessions": int(attention),
             "parts": parts,
             "attention": self.capability_refresh_attention,
+            "errors": errors,
         }
 
     async def request_capability_refresh(self) -> int:
@@ -2443,17 +2455,11 @@ class KernelHostCore(_HostCoreManagementOperations):
             await self._settle_session_open(settlement)
 
     async def _send_agent_message(self, agent_id: str, message: str, context) -> dict[str, object]:
-        from pulsara_agent.primitives.context import canonical_json_bytes
-        from pulsara_agent.primitives.tool_result_budget import ToolResultPageBoundary
-
         recipient = {"kind": "AGENT", "agent_id": agent_id}
         def accepted_receipt(work_id):
             return {"recipient": recipient,
                 "work": None if work_id is None else {"kind": "WORK", "work_id": work_id},
                 "delivery": "queued", "message": "Message accepted by the active turn."}
-        def check_receipt(work_id):
-            if not context.page_budget.fits(canonical_json_bytes(accepted_receipt(work_id)).decode("utf-8")):
-                raise ToolResultPageBoundary("The agent message receipt does not fit this call's result allowance")
         live = self._live_agent_session(agent_id)
         if live is None:
             repository = await self._ensure_resources()
@@ -2480,7 +2486,6 @@ class KernelHostCore(_HostCoreManagementOperations):
             source_work_id=getattr(context, "work_id", None), text=message,
             occurred_at=datetime.now(timezone.utc), actor_id=context.session_id,
             deadline_monotonic=live._canonical_deadline(),
-            result_check=check_receipt,
         )
         if accepted is None:
             return {"recipient": recipient, "work": None, "delivery": "inactive",

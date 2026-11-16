@@ -198,13 +198,18 @@ def test_second_read_rechecks_current_scope_copy_visibility_corruption_and_delet
         assert query.canonical_refetch(scope=changed,candidates=candidates,deadline_monotonic=deadline())==()
     # Actual canonical byte corruption must not be hidden by the old projection.
     with psycopg.connect(stage2_migrated_postgres_database.admin_dsn,row_factory=dict_row) as admin:
-        saved=admin.execute('SELECT id,inline_content FROM pulsara_v3.assistant_message_blocks WHERE assistant_entry_id=%s',(entries[2],)).fetchone()
-        admin.execute('UPDATE pulsara_v3.assistant_message_blocks SET inline_content=%s WHERE id=%s',(b'corrupt',saved['id']))
+        saved=admin.execute('SELECT id,inline_value FROM pulsara_v3.content_parts WHERE entry_id=%s AND ordinal=0',(entries[2],)).fetchone()
+        # Deliberate admin corruption bypasses the canonical immutability guard.
+        admin.execute('ALTER TABLE pulsara_v3.content_parts DISABLE TRIGGER USER')
+        admin.execute('UPDATE pulsara_v3.content_parts SET inline_value=%s WHERE id=%s',(b'corrupt',saved['id']))
+        admin.execute('ALTER TABLE pulsara_v3.content_parts ENABLE TRIGGER USER')
     try:
         assert query.canonical_refetch(scope=scope,candidates=candidates,deadline_monotonic=deadline())==()
     finally:
         with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as admin:
-            admin.execute('UPDATE pulsara_v3.assistant_message_blocks SET inline_content=%s WHERE id=%s',(saved['inline_content'],saved['id']))
+            admin.execute('ALTER TABLE pulsara_v3.content_parts DISABLE TRIGGER USER')
+            admin.execute('UPDATE pulsara_v3.content_parts SET inline_value=%s WHERE id=%s',(saved['inline_value'],saved['id']))
+            admin.execute('ALTER TABLE pulsara_v3.content_parts ENABLE TRIGGER USER')
     repo.release_host_writer(target.guard,deadline_monotonic=deadline())
     assert repo.delete_session(session_id=sid,memory_domain_id=scope.memory_domain_id,closed_writer=target.guard,required_lifecycle=None,deadline_monotonic=deadline())=='DELETED'
     assert query.canonical_refetch(scope=scope,candidates=candidates,deadline_monotonic=deadline())==()

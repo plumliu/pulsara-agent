@@ -3,11 +3,12 @@
 from __future__ import annotations
 from tests.support.images import bound_test_image
 from pulsara_agent.identity import derive_id
-from pulsara_agent.ports.terminal_observation import CellOutputContent
+from pulsara_agent.ports.terminal_observation import CellOutputContent, CellOutputSource
 
 import ast
 import asyncio
 from datetime import datetime, timezone
+from dataclasses import replace
 import json
 from pathlib import Path
 import sys
@@ -68,16 +69,6 @@ from pulsara_agent.conversation_kernel.compaction.runtime_handoff import (
     FrozenTerminalProcessHandoffFact,
     freeze_compaction_runtime_handoff,
 )
-from pulsara_agent.conversation_kernel.compaction.retained_skill import (
-    FrozenRetainedSkillContextItem,
-    FrozenRetainedSkillContextSelection,
-    _exact_historical_read,
-    _historical_catalog_row,
-    _installed_observation_fingerprint,
-    _installed_retained_items,
-    _was_installed_full,
-    remove_full_tail_duplicates,
-)
 from pulsara_agent.conversation_kernel.vocabulary import (
     APPEND_GUARDS,
     COMMITTED_EVENT_DESCRIPTORS,
@@ -90,7 +81,6 @@ from pulsara_agent.llm.input import (
     LLMImagePart,
     LLMMessage,
     LLMTextPart,
-    frozen_tool_result_public_text,
     join_text_content,
 )
 from pulsara_agent.llm.request import (
@@ -104,33 +94,22 @@ from pulsara_agent.model_input.contracts import (
     ContextBindingBaseKind,
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
-    ContextSourceKind,
-    ContextTrustClass,
     ModelInputScopeKind,
     ProviderToolCall,
     ProviderToolResultContextMetadata,
-    ToolResultProviderRenderMode,
     canonical_model_input_identity_fingerprint,
     canonical_model_input_snapshot_fingerprint,
-    provider_input_item_fingerprint,
     provider_input_item_text,
 )
-from pulsara_agent.model_input.continuity import (
-    ProviderInputContinuityScope,
-    SourceObservationLifecycle,
-    SourceObservationPresence,
-    encode_runtime_observation,
-)
+from pulsara_agent.model_input.continuity import ProviderInputContinuityScope
 from pulsara_agent.model_input.lowering import (
     compaction_snapshot_provider_content,
-    lower_canonical_item,
 )
 from pulsara_agent.model_input.provider_replay import (
     FrozenCanonicalProviderDispatchRead,
     freeze_provider_replay_manifest_cut,
 )
 
-from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
 from pulsara_agent.primitives.context import (
     canonical_json_bytes,
     context_fingerprint,
@@ -357,11 +336,16 @@ def test_round5b_compaction_cut_rebase_only_advances_global_sequence() -> None:
 def test_model_switch_destination_projection_enumerates_every_safe_suffix() -> None:
     def row(sequence, role, text):
         return FrozenProviderInputItem(
-            FrozenProviderInputItemKind.USER if role == "user" else FrozenProviderInputItemKind.ASSISTANT,
-            derive_id("entry", "projection", str(sequence)), sequence,
+            FrozenProviderInputItemKind.USER
+            if role == "user"
+            else FrozenProviderInputItemKind.ASSISTANT,
+            derive_id("entry", "projection", str(sequence)),
+            sequence,
             derive_id("turn", "projection", str((sequence - 1) // 2)),
             (LLMTextPart(text),),
-            input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE if role == "user" else None,
+            input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE
+            if role == "user"
+            else None,
         )
 
     units = tuple(
@@ -369,8 +353,12 @@ def test_model_switch_destination_projection_enumerates_every_safe_suffix() -> N
             derive_id("turn", "projection", str(index)),
             (index * 2 + 1, index * 2 + 2),
             (
-                DestinationDialogueEntry("user", row(index * 2 + 1, "user", f"{age} question")),
-                DestinationDialogueEntry("assistant", row(index * 2 + 2, "assistant", f"{age} answer")),
+                DestinationDialogueEntry(
+                    "user", row(index * 2 + 1, "user", f"{age} question")
+                ),
+                DestinationDialogueEntry(
+                    "assistant", row(index * 2 + 2, "assistant", f"{age} answer")
+                ),
             ),
         )
         for index, age in enumerate(("old", "new"))
@@ -433,18 +421,10 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
                 result_state="SUCCESS",
                 session_id=derive_id("session", "compaction-test"),
                 result_entry_id=entry_id,
-                output_omitted=False,
-                output_available=True,
-                required_facts={},
-                source_coverage=ToolOutputSourceCoverage.COMPLETE,
-                source_coverage_reason=None,
                 output_unavailability_reason=None,
-                model_visible_memory_fact_ids=(),
                 timing=timing,
             ),
-            tool_result_body_text=(
-                frozen_tool_result_public_text(content) if image is not None else body
-            ),
+            tool_result_body_text=(body),
             tool_call_ordinal=call_ordinal if image is not None else None,
             tool_call_name="view_image" if image is not None else None,
             tool_call_arguments=(
@@ -480,11 +460,19 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
             CellOutputContent(
                 cell_id=derive_id("cell", "destination-history", "cell"),
                 source_turn_id="turn:26orapncpvxkk3y5pgostrckxy",
-                source_exec_attempt_id=derive_id("attempt", "destination-history", "exec"),
+                source_exec_attempt_id=derive_id(
+                    "attempt", "destination-history", "exec"
+                ),
                 record_sequence=1,
-                record={"kind": "log", "text": terminal_marker},
+                record={
+                    "kind": "log",
+                    "content": [{"type": "text", "value": terminal_marker}],
+                },
             ).content.parts,
             input_origin=CanonicalInputOriginKind.CELL_OUTPUT,
+            cell_output_source=CellOutputSource(
+                derive_id("cell", "destination-history", "cell"), 1, "log"
+            ),
         ),
         FrozenProviderInputItem(
             FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST,
@@ -623,7 +611,9 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
         text_only_projection,
         text_only_projection.eligible_evidence[0],
     )
-    assert not any(isinstance(part, LLMImagePart) for part in text_only_retained.content)
+    assert not any(
+        isinstance(part, LLMImagePart) for part in text_only_retained.content
+    )
     text_only_text = join_text_content(text_only_retained.content)
     assert text_only_text.count("[历史图片引用；此处未包含图像内容]") == 2
     assert user_reference not in text_only_text
@@ -645,9 +635,9 @@ def test_round5b_first_full_history_adoption_uses_zero_effective_floor() -> None
     def prepare(base_kind: str, context_snapshot_id: str | None) -> object:
         carrier = build_compaction_snapshot_carrier(
             summary=freeze_compaction_summary_output("summary", maximum_utf8_bytes=100),
-            retained_entry_ids=('entry:2b6xhmrsvzz7q4sgugd5cuq34a',),
+            retained_entry_ids=("entry:2b6xhmrsvzz7q4sgugd5cuq34a",),
             continuation_mode=CompactionContinuationMode.RESUME_ACTIVE_TURN,
-            active_request_entry_id='entry:2b6xhmrsvzz7q4sgugd5cuq34a',
+            active_request_entry_id="entry:2b6xhmrsvzz7q4sgugd5cuq34a",
         )
         return build_prepared_compaction_canonical_adoption(
             CompactionCanonicalAdoptionFactoryInput(
@@ -697,7 +687,10 @@ def test_round5b_summary_normalizer_and_snapshot_carrier_are_bounded() -> None:
     assert "<\\/summary>" in summary.body
     assert "analysis" not in summary.body
 
-    retained = (derive_id("entry", "summary-test", "first"), derive_id("entry", "summary-test", "active"))
+    retained = (
+        derive_id("entry", "summary-test", "first"),
+        derive_id("entry", "summary-test", "active"),
+    )
     carrier = build_compaction_snapshot_carrier(
         summary=summary,
         retained_entry_ids=retained,
@@ -705,14 +698,21 @@ def test_round5b_summary_normalizer_and_snapshot_carrier_are_bounded() -> None:
         active_request_entry_id=retained[-1],
     )
     decoded = json.loads(carrier.body)
-    assert set(decoded) == {"continuation", "earlier_context_summary", "retained_entry_ids"}
+    assert set(decoded) == {
+        "continuation",
+        "earlier_context_summary",
+        "retained_entry_ids",
+    }
     assert decoded["retained_entry_ids"] == list(retained)
     assert decoded["continuation"] == {
-        "mode": "RESUME_ACTIVE_TURN", "active_request_entry_id": retained[-1],
+        "mode": "RESUME_ACTIVE_TURN",
+        "active_request_entry_id": retained[-1],
     }
     assert parse_compaction_snapshot_carrier(carrier.body) == carrier
     assert compaction_snapshot_provider_content(carrier) == (
-        LLMTextPart("The following is a summary of earlier history.\n\n" + summary.body),
+        LLMTextPart(
+            "The following is a summary of earlier history.\n\n" + summary.body
+        ),
     )
 
 
@@ -725,10 +725,16 @@ def test_round5b_repeated_compaction_carries_runtime_owned_active_request() -> N
         active_request_entry_id=entry_id,
     )
     snapshot_item = FrozenProviderInputItem(
-        FrozenProviderInputItemKind.CONTEXT_SNAPSHOT, None, 8, None, carrier,
+        FrozenProviderInputItemKind.CONTEXT_SNAPSHOT,
+        None,
+        8,
+        None,
+        carrier,
     )
     original = FrozenProviderInputItem(
-        FrozenProviderInputItemKind.USER, entry_id, 4,
+        FrozenProviderInputItemKind.USER,
+        entry_id,
+        4,
         "turn:lm5ibydqxua377vt3bxuuqgvvu",
         (LLMTextPart("exact active request"),),
         input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
@@ -738,7 +744,9 @@ def test_round5b_repeated_compaction_carries_runtime_owned_active_request() -> N
         canonical_dispatch_read=SimpleNamespace(
             compile_snapshot=SimpleNamespace(
                 canonical_input=SimpleNamespace(
-                    identity=SimpleNamespace(initial_entry_id=entry_id, provider_input_through_sequence=12),
+                    identity=SimpleNamespace(
+                        initial_entry_id=entry_id, provider_input_through_sequence=12
+                    ),
                     items=(snapshot_item, original),
                 )
             )
@@ -751,7 +759,10 @@ def test_round5b_repeated_compaction_carries_runtime_owned_active_request() -> N
     )
     assert mode is CompactionContinuationMode.RESUME_ACTIVE_TURN
     assert active == original.source_entry_id
-    assert source_view.canonical_dispatch_read.compile_snapshot.canonical_input.items[1] is original
+    assert (
+        source_view.canonical_dispatch_read.compile_snapshot.canonical_input.items[1]
+        is original
+    )
 
 
 def test_round5b_non_human_initial_activation_is_mechanically_resumable() -> None:
@@ -835,22 +846,37 @@ def test_round5b_summary_normalizer_rejects_only_empty_or_overbound_text(
         )
 
 
-@pytest.mark.parametrize("source,successor,expected", [(1000, 950, 50), (1900, 1200, 700), (2000, 1999, 1)])
-def test_round5b_reclaim_accepts_any_positive_raw_token_gain(source, successor, expected):
-    assert validate_compaction_reclaim(
-        source_tokens=source, successor_tokens=successor, hard_input_budget_tokens=2000,
-    ) == expected
+@pytest.mark.parametrize(
+    "source,successor,expected", [(1000, 950, 50), (1900, 1200, 700), (2000, 1999, 1)]
+)
+def test_round5b_reclaim_accepts_any_positive_raw_token_gain(
+    source, successor, expected
+):
+    assert (
+        validate_compaction_reclaim(
+            source_tokens=source,
+            successor_tokens=successor,
+            hard_input_budget_tokens=2000,
+        )
+        == expected
+    )
 
 
 @pytest.mark.parametrize("successor", [1000, 1001])
 def test_round5b_reclaim_rejects_no_gain(successor):
     with pytest.raises(CompactionReclaimUnavailable, match="does not reclaim context"):
-        validate_compaction_reclaim(source_tokens=1000, successor_tokens=successor, hard_input_budget_tokens=2000)
+        validate_compaction_reclaim(
+            source_tokens=1000,
+            successor_tokens=successor,
+            hard_input_budget_tokens=2000,
+        )
 
 
 def test_round5b_reclaim_preserves_hard_budget_admission():
     with pytest.raises(CompactionPlanningError, match="hard model budget"):
-        validate_compaction_reclaim(source_tokens=3000, successor_tokens=2001, hard_input_budget_tokens=2000)
+        validate_compaction_reclaim(
+            source_tokens=3000, successor_tokens=2001, hard_input_budget_tokens=2000
+        )
 
 
 def test_round5b_has_no_presummary_successor_lower_bound_gate() -> None:
@@ -944,9 +970,14 @@ def test_round5b_automatic_trigger_uses_final_wire_not_semantic_estimate(
 
 
 def test_round5b_manual_reclaim_accepts_successor_below_hard_budget():
-    assert validate_compaction_reclaim(
-        source_tokens=100_000, successor_tokens=90_001, hard_input_budget_tokens=100_000,
-    ) == 9_999
+    assert (
+        validate_compaction_reclaim(
+            source_tokens=100_000,
+            successor_tokens=90_001,
+            hard_input_budget_tokens=100_000,
+        )
+        == 9_999
+    )
 
 
 def test_round5b_summary_prefix_enumerates_every_finite_safe_boundary() -> None:
@@ -1042,18 +1073,32 @@ def test_compaction_summary_wire_proof_rejects_installed_prefix_truncation() -> 
     predecessor.messages = messages
     view = SimpleNamespace(
         predecessor_epoch_view=predecessor,
-        canonical_dispatch_read=SimpleNamespace(compile_snapshot=SimpleNamespace(canonical_input=SimpleNamespace(identity=identity))),
+        canonical_dispatch_read=SimpleNamespace(
+            compile_snapshot=SimpleNamespace(
+                canonical_input=SimpleNamespace(identity=identity)
+            )
+        ),
         materialized_system_prompt=lambda: "root",
         materialized_messages=lambda: messages,
         source_view_fingerprint="source",
     )
     source_proof = compaction_model_call.CompactionSummarySourceProof(
         source_view=view,
-        source_projection=SimpleNamespace(canonical_input_identity=identity, messages=messages, system_prompt="root", tools=()),
-        prefix_proof=SimpleNamespace(source_view_fingerprint="source", source_through_sequence=3),
-        read_through_sequence=3, retained_entry_ids=(),
-        source_message_indices=(0, 1, 2), reference_message_indices=(),
-        input_mode="APPEND", projection=None,
+        source_projection=SimpleNamespace(
+            canonical_input_identity=identity,
+            messages=messages,
+            system_prompt="root",
+            tools=(),
+        ),
+        prefix_proof=SimpleNamespace(
+            source_view_fingerprint="source", source_through_sequence=3
+        ),
+        read_through_sequence=3,
+        retained_entry_ids=(),
+        source_message_indices=(0, 1, 2),
+        reference_message_indices=(),
+        input_mode="APPEND",
+        projection=None,
         _seal=compaction_model_call._COMPACTION_SUMMARY_SOURCE_SEAL,
     )
     semantic = SimpleNamespace(source_proof=source_proof)
@@ -1194,7 +1239,6 @@ def test_model_switch_wire_transition_requires_hard_fit_and_exact_binding(
         source_candidate=source_candidate,
         successor_wire=below,
         destination_target=destination,
-
         phase="PRE_FULL",
     )
     assert transition.successor_quote.raw_final_wire_estimated_input_tokens == 849
@@ -1210,7 +1254,6 @@ def test_model_switch_wire_transition_requires_hard_fit_and_exact_binding(
             source_candidate=source_candidate,
             successor_wire=below,
             destination_target=destination,
-
             phase="PRE_FULL",
         )
     source_semantic.system_prompt = "source system"
@@ -1248,7 +1291,6 @@ def test_model_switch_wire_transition_requires_hard_fit_and_exact_binding(
             source_candidate=source_candidate,
             successor_wire=below,
             destination_target=destination,
-
             phase="PRE_FULL",
         )
 
@@ -1328,7 +1370,8 @@ def test_compaction_wire_transition_joins_authority_before_numeric_reclaim(
     source_native = ("native",)
     successor_native = ("other-native",) if drift == "native" else source_native
     source_binding = SimpleNamespace(
-        binding_fingerprint="source-binding", tool_surface=SimpleNamespace(tool_specs=()),
+        binding_fingerprint="source-binding",
+        tool_surface=SimpleNamespace(tool_specs=()),
         target_fact=source_target_fact,
         estimator=estimator,
         estimator_fingerprint=estimator_fingerprint,
@@ -1368,7 +1411,10 @@ def test_compaction_wire_transition_joins_authority_before_numeric_reclaim(
         canonical_read=source_read,
         semantic_input=SimpleNamespace(
             canonical_input_identity=source_identity,
-            compile_binding_fingerprint="source-binding", system_prompt="system", messages=(), tools=(),
+            compile_binding_fingerprint="source-binding",
+            system_prompt="system",
+            messages=(),
+            tools=(),
         ),
         prepared_call=SimpleNamespace(
             call=SimpleNamespace(
@@ -1376,7 +1422,7 @@ def test_compaction_wire_transition_joins_authority_before_numeric_reclaim(
                 target=SimpleNamespace(
                     fact=source_target_fact,
                     model_profile=source_profile,
-                )
+                ),
             ),
             compile_binding=source_binding,
         ),
@@ -1393,7 +1439,7 @@ def test_compaction_wire_transition_joins_authority_before_numeric_reclaim(
                 target=SimpleNamespace(
                     fact=successor_target_fact,
                     model_profile=successor_profile,
-                )
+                ),
             ),
             compile_binding=successor_binding,
         ),
@@ -1403,14 +1449,19 @@ def test_compaction_wire_transition_joins_authority_before_numeric_reclaim(
         canonical_dispatch_read=source_read,
         provider_wire_quote=source_quote,
         normal_compile_binding=source_binding,
-        materialized_system_prompt=lambda: "system", materialized_messages=lambda: (),
+        materialized_system_prompt=lambda: "system",
+        materialized_messages=lambda: (),
     )
     successor_wire = SimpleNamespace(
         candidate=successor_candidate,
         quote=successor_quote,
         wire_input_plan=(None if drift in {"hard_tokens", "hard_bytes"} else object()),
     )
-    monkeypatch.setattr(compaction_coordinator, "_compaction_cut_lineage_exactly_joins", lambda **_: drift != "cut")
+    monkeypatch.setattr(
+        compaction_coordinator,
+        "_compaction_cut_lineage_exactly_joins",
+        lambda **_: drift != "cut",
+    )
     if drift == "native":
         monkeypatch.setattr(
             compaction_coordinator,
@@ -1421,9 +1472,6 @@ def test_compaction_wire_transition_joins_authority_before_numeric_reclaim(
             source_view=source_view,
             source_candidate=source_candidate,
             successor_wire=successor_wire,
-
-
-
             phase="PRE_FULL",
         )
         assert transition.reclaim_tokens == 400
@@ -1440,9 +1488,6 @@ def test_compaction_wire_transition_joins_authority_before_numeric_reclaim(
                 source_view=source_view,
                 source_candidate=source_candidate,
                 successor_wire=successor_wire,
-
-
-
                 phase="PRE_FULL",
             )
         return
@@ -1451,9 +1496,6 @@ def test_compaction_wire_transition_joins_authority_before_numeric_reclaim(
             source_view=source_view,
             source_candidate=source_candidate,
             successor_wire=successor_wire,
-
-
-
             phase="PRE_FULL",
         )
 
@@ -1634,8 +1676,6 @@ def test_compaction_cut_lineage_uses_full_history_materialization_floor() -> Non
     )
 
 
-
-
 def test_round5b_empty_session_manual_compaction_never_starts_summary() -> None:
     async def exercise():
         host = _manual_host()
@@ -1726,13 +1766,13 @@ def test_round5b_runtime_handoff_is_ordered_bounded_and_body_free() -> None:
         ),
     )
     assert handoff is not None
-    payload = json.loads(handoff.full_text.split("\n", 1)[0])
+    payload = json.loads(handoff.text.split("\n", 1)[0])
     assert [item["target"]["process_id"] for item in payload["terminal_processes"]] == [
         "process:nfei6gwtp3dcs62w3tvew5w34i",
         "process:nihhtj3io4t4xhypmulh24ebgm",
     ]
-    assert "output" not in handoff.full_text
-    assert "result" not in handoff.full_text
+    assert "output" not in handoff.text
+    assert "result" not in handoff.text
 
 
 def test_round5b_runtime_handoff_reports_a_bounded_pca_projection() -> None:
@@ -1751,9 +1791,9 @@ def test_round5b_runtime_handoff_reports_a_bounded_pca_projection() -> None:
         todo=None,
     )
     assert handoff is not None
-    payload = json.loads(handoff.full_text.split("\n", 1)[0])
+    payload = json.loads(handoff.text.split("\n", 1)[0])
     assert 0 < len(payload["terminal_processes"]) < 200
-    assert HANDOFF_BUDGET_OMISSION in handoff.full_text
+    assert HANDOFF_BUDGET_OMISSION in handoff.text
     assert "omitted" not in payload
 
 
@@ -1885,345 +1925,6 @@ def test_round5b_manual_candidate_is_idempotent_and_conflict_closed() -> None:
     asyncio.run(exercise())
 
 
-def test_round5b_retained_skill_drops_body_already_full_in_successor_tail() -> None:
-    evidence = "sha256:" + "a" * 64
-    item_values = {
-        "name": "inspect",
-        "skill_path": "/workspace/.agents/skills/inspect/SKILL.md",
-        "body": "Use the ordinary read path.",
-        "delivery_sequence": 42,
-        "evidence_source_entry_fingerprint": evidence,
-    }
-    item = FrozenRetainedSkillContextItem(
-        **item_values,
-    )
-    body = canonical_json_bytes(
-        {
-            "skills": (
-                {
-                    "name": item.name,
-                    "skill_path": item.skill_path,
-                    "body": item.body,
-                },
-            )
-        }
-    ).decode("utf-8")
-    estimator = PulsaraHeuristicTokenEstimatorV3()
-    tokens = estimator.estimate_text(body)
-    selection = FrozenRetainedSkillContextSelection(
-        ordered_items=(item,),
-        rendered_body=body,
-        estimated_tokens=tokens,
-        selection_fingerprint=context_fingerprint(
-            "pulsara.retained-skill-context-selection.v1",
-            {
-                "items": (
-                    (
-                        item.name,
-                        item.skill_path,
-                        item.body,
-                        item.delivery_sequence,
-                        item.evidence_source_entry_fingerprint,
-                    ),
-                ),
-                "body": body,
-                "tokens": tokens,
-            },
-        ),
-    )
-
-    reduced = remove_full_tail_duplicates(
-        selection,
-        full_source_entry_fingerprints=frozenset({evidence}),
-        estimator=estimator,
-    )
-
-    assert reduced.ordered_items == ()
-    assert reduced.rendered_body == '{"skills":[]}'
-    assert reduced.estimated_tokens == 0
-
-
-@pytest.mark.parametrize("in_workspace", [False, True])
-def test_round5b_retained_skill_proves_older_full_from_installed_message(
-    tmp_path, in_workspace,
-) -> None:
-    from dataclasses import replace
-    timing_values = {
-        "source_turn_ref": "turn:klmmazz67vfgsfsvg6ceqgdsfu",
-        "observed_at_utc": "2026-08-21T01:02:03.000000Z",
-        "observation_duration_microseconds": 1_000,
-        "duration_disposition": ToolObservationDurationDisposition.MEASURED,
-        "tool_reported_duration_microseconds": None,
-        "observation_origin": ToolObservationOrigin.BUILTIN,
-    }
-    provisional = FrozenToolObservationTimingFact.__new__(
-        FrozenToolObservationTimingFact
-    )
-    for name, value in timing_values.items():
-        object.__setattr__(provisional, name, value)
-    object.__setattr__(provisional, "fact_fingerprint", "")
-    timing = FrozenToolObservationTimingFact(
-        **timing_values,
-        fact_fingerprint=tool_observation_timing_fingerprint(provisional),
-    )
-    item = FrozenProviderInputItem(
-        FrozenProviderInputItemKind.TOOL_RESULT,
-        "entry:fgbpydhlta3t4jtrmeidxygpai",
-        4,
-        "turn:klmmazz67vfgsfsvg6ceqgdsfu",
-        (LLMTextPart('{"status":"ok","content":"1|body"}'),),
-        tool_call_id="call:read",
-        tool_request_entry_id="entry:4dly6mqjthelonrh44jyrwniti",
-        tool_result_context=ProviderToolResultContextMetadata(
-            result_id="result:srq6zeb76vfd3te2ocypgokzby",
-            result_state="SUCCESS",
-            session_id=derive_id("session", "compaction-test"),
-            result_entry_id="entry:fgbpydhlta3t4jtrmeidxygpai",
-            output_omitted=False,
-            output_available=True,
-            required_facts={},
-            source_coverage=ToolOutputSourceCoverage.COMPLETE,
-            source_coverage_reason=None,
-            output_unavailability_reason=None,
-            model_visible_memory_fact_ids=(),
-            timing=timing,
-        ),
-        tool_result_body_text='{"status":"ok","content":"1|body"}',
-    )
-    lowered = lower_canonical_item(
-        item,
-    )
-    full = next(
-        variant.message
-        for variant in lowered.tool_result_variants
-        if variant.mode is ToolResultProviderRenderMode.FULL
-    )
-    key = (item.source_entry_id, provider_input_item_fingerprint(item))
-
-    assert _was_installed_full(
-        item,
-        decisions={},
-        installed_messages={key: (full,)},
-    )
-    assert not _was_installed_full(
-        item,
-        decisions={},
-        installed_messages={key: ()},
-    )
-
-    catalog_body = canonical_json_bytes(
-        {
-            "skills": (
-                {
-                    "name": "inspect",
-                    "description": "Inspect safely.",
-                    "skill_path": "/package/bundled_skills/inspect/SKILL.md",
-                },
-            )
-        }
-    ).decode("utf-8")
-
-    def catalog_message(
-        *,
-        lifecycle: SourceObservationLifecycle,
-        presence: SourceObservationPresence,
-        body: str,
-    ) -> object:
-        return encode_runtime_observation(
-            source_kind=ContextSourceKind.SKILL_CATALOG,
-            trust_class=ContextTrustClass.UNTRUSTED_OBSERVATION,
-            lifecycle=lifecycle,
-            presence=presence,
-            body=body,
-        )
-
-    full_catalog = catalog_message(
-        lifecycle=SourceObservationLifecycle.SNAPSHOT,
-        presence=SourceObservationPresence.VALUE,
-        body=catalog_body,
-    )
-    unavailable_catalog = catalog_message(
-        lifecycle=SourceObservationLifecycle.UNAVAILABLE,
-        presence=SourceObservationPresence.UNAVAILABLE,
-        body="",
-    )
-    predecessor = SimpleNamespace(
-        messages=(full_catalog, unavailable_catalog),
-        message_placements=(
-            SimpleNamespace(message_ordinal=1),
-            SimpleNamespace(message_ordinal=2),
-        ),
-    )
-    location = "/package/bundled_skills/inspect/SKILL.md"
-    assert (
-        _historical_catalog_row(
-            predecessor,
-            before_message_ordinal=3,
-            skill_path=location,
-        )
-        is None
-    )
-    row = _historical_catalog_row(
-        predecessor,
-        before_message_ordinal=2,
-        skill_path=location,
-    )
-    assert row == {
-        "name": "inspect",
-        "description": "Inspect safely.",
-        "skill_path": location,
-    }
-
-    document = "---\nname: inspect\ndescription: Inspect safely.\n---\nRetained body"
-    numbered = "\n".join(
-        f"{ordinal}|{line}"
-        for ordinal, line in enumerate(document.splitlines(), start=1)
-    )
-    exact_body = json.dumps(
-        {
-            "status": "ok",
-            "target": {"kind": "PATH", "path": location},
-            "content_revision": "revision:" + "a" * 52,
-            "access_scope": "external_absolute",
-            "workspace_relative": False,
-            "position": {"line": 1, "char_offset": 0},
-            "total_lines": len(document.splitlines()),
-            "file_size": len(document.encode("utf-8")),
-            "next": None,
-            "content": numbered,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    exact_item = FrozenProviderInputItem(
-        FrozenProviderInputItemKind.TOOL_RESULT,
-        "entry:lywgk7aaab6b5jp7xuyq4x2pre",
-        5,
-        "turn:klmmazz67vfgsfsvg6ceqgdsfu",
-        (LLMTextPart(exact_body),),
-        tool_call_id="call:exact-read",
-        tool_request_entry_id="entry:dvjipqudfovu34c5uscjf225oy",
-        tool_result_context=item.tool_result_context,
-        tool_result_body_text=exact_body,
-    )
-    assert (
-        _exact_historical_read(
-            exact_item,
-            catalog_row=row,
-            root_policy=SimpleNamespace(roots=()),
-        )
-        == "Retained body"
-    )
-
-    # Frozen result reads and later text fragments never become PATH activation
-    # evidence, even if their content happens to contain an entire Skill body.
-    for changed in (
-        {"target": {"kind": "SESSION_ENTRY", "entry_id": exact_item.source_entry_id}},
-        {"position": {"line": 1, "char_offset": 1}},
-        {"next": {"tool": "read_file", "arguments": {"target": {"kind": "PATH", "path": location}}}},
-    ):
-        changed_body = json.dumps({**json.loads(exact_body), **changed})
-        changed_item = replace(exact_item, content=(LLMTextPart(changed_body),),
-                               tool_result_body_text=changed_body)
-        assert _exact_historical_read(changed_item, catalog_row=row,
-                                      root_policy=SimpleNamespace(roots=())) is None
-
-    # Exercise the real producer contract, including its required content_revision.
-    from pulsara_agent.tools.builtins.filesystem import ReadFileTool
-    from pulsara_agent.ports.tool_execution import ToolCall
-    from pulsara_agent.capability.local_skills import LooseSkillDefinitionProducer
-
-    workspace = tmp_path / "workspace"
-    skill_root = workspace / ".agents" / "skills" if in_workspace else tmp_path / "user-skills"
-    skill_path = skill_root / "inspect" / "SKILL.md"
-    skill_path.parent.mkdir(parents=True)
-    skill_path.write_text(document)
-    root_policy = LooseSkillDefinitionProducer(
-        user_product_skills_root=tmp_path / "user-skills",
-        user_agents_skills_root=tmp_path / "user-agents",
-    ).prepare_root_policy(workspace)
-    actual = ReadFileTool(workspace).execute(
-        ToolCall(
-            "read:actual",
-            "read_file",
-            {"target": {"kind": "PATH", "path": str(skill_path)}},
-        )
-    )
-    actual_item = replace(
-        exact_item,
-        content=(LLMTextPart(actual.output),),
-        tool_result_body_text=actual.output,
-    )
-    actual_row = {**row, "skill_path": str(skill_path)}
-    assert (
-        _exact_historical_read(
-            actual_item, catalog_row=actual_row, root_policy=root_policy
-        )
-        == "Retained body"
-    )
-    malformed = json.loads(actual.output)
-    malformed["content_revision"] = "invalid"
-    assert (
-        _exact_historical_read(
-            replace(
-                actual_item,
-                content=(LLMTextPart(json.dumps(malformed)),),
-                tool_result_body_text=json.dumps(malformed),
-            ),
-            catalog_row=actual_row,
-            root_policy=root_policy,
-        )
-        is None
-    )
-
-
-def test_round5b_installed_retained_skill_is_inherited_only_within_same_turn() -> None:
-    body = canonical_json_bytes(
-        {
-            "skills": (
-                {
-                    "name": "inspect",
-                    "skill_path": ("/package/bundled_skills/inspect/SKILL.md"),
-                    "body": "Retained body",
-                },
-            )
-        }
-    ).decode("utf-8")
-    message = encode_runtime_observation(
-        source_kind=ContextSourceKind.RETAINED_SKILL_CONTEXT,
-        trust_class=ContextTrustClass.UNTRUSTED_OBSERVATION,
-        lifecycle=SourceObservationLifecycle.SNAPSHOT,
-        presence=SourceObservationPresence.VALUE,
-        body=body,
-    )
-    head = SimpleNamespace(
-        source_kind=ContextSourceKind.RETAINED_SKILL_CONTEXT,
-        presence=SourceObservationPresence.VALUE,
-        installed_observation_fingerprint=(_installed_observation_fingerprint(message)),
-        last_emitted_turn_id="turn:h2sohp3g7igptige7qc72g72y4",
-    )
-    predecessor = SimpleNamespace(
-        source_heads=(head,),
-        messages=(message,),
-    )
-
-    inherited = _installed_retained_items(
-        predecessor,
-        target_turn_id="turn:h2sohp3g7igptige7qc72g72y4",
-    )
-
-    assert tuple((item.name, item.body) for item in inherited) == (
-        ("inspect", "Retained body"),
-    )
-    assert (
-        _installed_retained_items(
-            predecessor,
-            target_turn_id="turn:csq5cy5euchursiopxdvtebl6e",
-        )
-        == ()
-    )
-
-
 def test_round5b_tool_groups_pair_reused_call_ids_with_exact_request() -> None:
     timing_values = {
         "source_turn_ref": "turn:klmmazz67vfgsfsvg6ceqgdsfu",
@@ -2272,13 +1973,7 @@ def test_round5b_tool_groups_pair_reused_call_ids_with_exact_request() -> None:
                 result_state="SUCCESS",
                 session_id=derive_id("session", "compaction-test"),
                 result_entry_id=entry_id,
-                output_omitted=False,
-                output_available=True,
-                required_facts={},
-                source_coverage=ToolOutputSourceCoverage.COMPLETE,
-                source_coverage_reason=None,
                 output_unavailability_reason=None,
-                model_visible_memory_fact_ids=(),
                 timing=timing,
             ),
             tool_result_body_text=body,
@@ -2313,11 +2008,15 @@ def test_round5b_tool_groups_pair_reused_call_ids_with_exact_request() -> None:
 def test_round5b_architecture_and_oracle_are_exact() -> None:
     assert len(COMMITTED_EVENT_DESCRIPTORS) == 24
     assert len(LIVE_EVENT_TYPES) == 20
-    assert not {"TerminalMonitorOpened", "TerminalMonitorObservation", "TerminalMonitorClosed"} & set(LIVE_EVENT_TYPES)
+    assert not {
+        "TerminalMonitorOpened",
+        "TerminalMonitorObservation",
+        "TerminalMonitorClosed",
+    } & set(LIVE_EVENT_TYPES)
     assert len(SUBJECT_SLOTS) == 8
     assert APPEND_GUARDS == ("HostWriterGuard",)
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 31
-    assert "canonical_image_refs" in CONVERSATION_KERNEL_RELATIONS
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
+    assert "content_parts" in CONVERSATION_KERNEL_RELATIONS
     assert not {
         "durable_jobs",
         "durable_job_attempts",
@@ -2535,3 +2234,219 @@ def test_compaction_adoption_transfers_unbound_input_to_common_safe_point() -> N
         "runner_back_reference",
     ):
         assert forbidden not in source
+
+
+def _current_skill_inspection(tmp_path, count=12):
+    from pulsara_agent.capability.local_skills import LooseSkillDefinitionProducer
+    from pulsara_agent.capability.resolver import (
+        CompleteEffectiveSkillCatalogInspection,
+    )
+
+    for index in range(count):
+        path = tmp_path / ".pulsara" / "skills" / f"inspect{index:02}" / "SKILL.md"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            f"---\nname: inspect{index:02}\ndescription: inspect current work\n---\n"
+            + ("private complete skill body " * 250)
+        )
+    producer = LooseSkillDefinitionProducer(
+        user_product_skills_root=tmp_path / "user-skills",
+        user_agents_skills_root=tmp_path / "user-agents",
+    )
+    policy = producer.prepare_root_policy(tmp_path)
+    definitions = producer.observe(policy)
+    skills = tuple(sorted(definitions.candidates, key=lambda item: item.name))
+    assert len(skills) == count
+    return CompleteEffectiveSkillCatalogInspection(policy, skills, (), skills)
+
+
+def _retained_read(paths):
+    from tests.support.model_input import _snapshot
+
+    canonical = _snapshot()
+    return SimpleNamespace(
+        successful_file_read_paths=tuple(paths),
+        dispatch_read=SimpleNamespace(
+            compile_snapshot=static_canonical_compile_facts(canonical)
+        )
+    )
+
+
+def test_successful_file_read_paths_carry_only_current_skill_identities(tmp_path):
+    from pulsara_agent.conversation_kernel.compaction.retained_skill import (
+        freeze_retained_skill_context,
+    )
+    from pulsara_agent.capability.types import MinimalSkillRef
+
+    inspection = _current_skill_inspection(tmp_path)
+    paths = tuple(skill.path.relative_to(tmp_path).as_posix() for skill in inspection.readable_skills)
+    selection = freeze_retained_skill_context(
+        canonical_read=_retained_read(paths),
+        predecessor_epoch=None,
+        inspection=inspection,
+        estimator=PulsaraHeuristicTokenEstimatorV3(),
+    )
+    assert selection.ordered_items == tuple(
+        MinimalSkillRef(skill.name, str(skill.path))
+        for skill in inspection.readable_skills
+    )
+    assert len(selection.ordered_items) == 12
+    assert all(
+        skill.body not in selection.rendered_body
+        for skill in inspection.readable_skills
+    )
+    assert "read_file" in selection.rendered_body
+    rendered = json.loads(selection.rendered_body.split("\n", 1)[1])
+    assert rendered == [
+        {"text": ref.name, "target": {"kind": "SKILL", "skill_path": ref.skill_path}}
+        for ref in selection.ordered_items
+    ]
+    assert (
+        selection.estimated_tokens
+        == PulsaraHeuristicTokenEstimatorV3().estimate_text(selection.rendered_body)
+    )
+
+
+def test_skill_reread_identities_survive_repeated_compaction_and_filter_current_readable_copies(
+    tmp_path,
+):
+    from pulsara_agent.conversation_kernel.compaction.retained_skill import (
+        freeze_retained_skill_context,
+    )
+    from pulsara_agent.capability.types import MinimalSkillRef
+    from pulsara_agent.model_input.continuity import InstalledObservationState
+
+    inspection = _current_skill_inspection(tmp_path, 3)
+    refs = tuple(
+        MinimalSkillRef(skill.name, str(skill.path))
+        for skill in inspection.readable_skills
+    )
+    read = _retained_read(())
+    scope = ProviderInputContinuityScope(
+        read.dispatch_read.compile_snapshot.canonical_input.identity.session_id,
+        ModelInputScopeKind.ROOT,
+    )
+    predecessor = SimpleNamespace(
+        scope=scope,
+        observation_state=InstalledObservationState(
+            last_turn_id="turn:klmmazz67vfgsfsvg6ceqgdsfu", reread_skills=refs
+        ),
+    )
+    selection = freeze_retained_skill_context(
+        canonical_read=read,
+        predecessor_epoch=predecessor,
+        inspection=inspection,
+        estimator=PulsaraHeuristicTokenEstimatorV3(),
+    )
+    assert selection.ordered_items == refs
+    changed = replace(inspection, readable_skills=inspection.readable_skills[1:])
+    selection = freeze_retained_skill_context(
+        canonical_read=read,
+        predecessor_epoch=predecessor,
+        inspection=changed,
+        estimator=PulsaraHeuristicTokenEstimatorV3(),
+    )
+    assert selection.ordered_items == refs[1:]
+    # A later turn uses the same retained identities until the current physical catalogue removes them.
+    predecessor.observation_state = InstalledObservationState(
+        last_turn_id="turn:mcie4zq2f6b4g2mm2ogvtx2uwq", reread_skills=refs
+    )
+    assert (
+        freeze_retained_skill_context(
+            canonical_read=read,
+            predecessor_epoch=predecessor,
+            inspection=inspection,
+            estimator=PulsaraHeuristicTokenEstimatorV3(),
+        ).ordered_items
+        == refs
+    )
+    predecessor.scope = ProviderInputContinuityScope(
+        derive_id("session", "different-scope"), ModelInputScopeKind.ROOT
+    )
+    with pytest.raises(ValueError, match="another scope"):
+        freeze_retained_skill_context(
+            canonical_read=read,
+            predecessor_epoch=predecessor,
+            inspection=inspection,
+            estimator=PulsaraHeuristicTokenEstimatorV3(),
+        )
+
+
+def test_unrelated_file_read_paths_do_not_create_skill_reread_identity(tmp_path):
+    from pulsara_agent.conversation_kernel.compaction.retained_skill import (
+        freeze_retained_skill_context,
+    )
+
+    inspection = _current_skill_inspection(tmp_path, 1)
+    selection = freeze_retained_skill_context(
+        canonical_read=_retained_read(("unrelated/SKILL.md",)),
+        predecessor_epoch=None,
+        inspection=inspection,
+        estimator=PulsaraHeuristicTokenEstimatorV3(),
+    )
+    assert (
+        selection.ordered_items == ()
+        and selection.rendered_body == ""
+        and selection.estimated_tokens == 0
+    )
+
+
+def test_temporarily_unavailable_skill_source_keeps_previously_read_identity_for_reread(
+    tmp_path,
+):
+    from pulsara_agent.capability.resolver import (
+        UnavailableEffectiveSkillCatalogInspection,
+    )
+    from pulsara_agent.capability.types import (
+        MinimalSkillRef,
+        ProducerUnavailableCause,
+        SkillProducerKind,
+        SkillProducerUnavailableReason,
+        SkillDiagnostic,
+        SkillDiagnosticSeverity,
+        SkillDiagnosticCode,
+    )
+    from pulsara_agent.conversation_kernel.compaction.retained_skill import (
+        freeze_retained_skill_context,
+    )
+    from pulsara_agent.model_input.continuity import InstalledObservationState
+
+    inspection = _current_skill_inspection(tmp_path, 1)
+    ref = MinimalSkillRef(
+        inspection.readable_skills[0].name, str(inspection.readable_skills[0].path)
+    )
+    unavailable = UnavailableEffectiveSkillCatalogInspection(
+        inspection.root_policy,
+        (
+            ProducerUnavailableCause(
+                SkillProducerKind.LOOSE,
+                SkillProducerUnavailableReason.LOOSE_DISCOVERY_RACED,
+                (
+                    SkillDiagnostic(
+                        SkillDiagnosticSeverity.ERROR,
+                        SkillDiagnosticCode.ROOT_ESCAPE,
+                        "actual source unavailable",
+                    ),
+                ),
+            ),
+        ),
+    )
+    read = _retained_read(())
+    identity = read.dispatch_read.compile_snapshot.canonical_input.identity
+    predecessor = SimpleNamespace(
+        scope=ProviderInputContinuityScope(
+            identity.session_id, identity.conversation_scope_kind
+        ),
+        observation_state=InstalledObservationState(reread_skills=(ref,)),
+    )
+    selection = freeze_retained_skill_context(
+        canonical_read=read,
+        predecessor_epoch=predecessor,
+        inspection=unavailable,
+        estimator=PulsaraHeuristicTokenEstimatorV3(),
+    )
+    assert selection.ordered_items == (ref,)
+    assert (
+        "暂不可用" in selection.rendered_body and "read_file" in selection.rendered_body
+    )
+    assert inspection.readable_skills[0].body not in selection.rendered_body

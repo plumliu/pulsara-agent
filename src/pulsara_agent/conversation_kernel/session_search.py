@@ -45,7 +45,9 @@ WHERE s.memory_domain_id=%s AND (%s='ALL' OR s.lifecycle=%s)
 """
 
 _DOCUMENT_SQL = (
-    "WITH sessions AS MATERIALIZED (" + _SESSION_SQL + """), documents AS (
+    "WITH sessions AS MATERIALIZED ("
+    + _SESSION_SQL
+    + """), documents AS (
  SELECT s.id AS session_id, NULL::text AS entry_id, 0::bigint AS sequence,
         0::integer AS ordinal, 'title'::text AS kind, NULL::text AS part_id,
         NULL::text AS type, NULL::bytea AS inline_value, NULL::text AS blob_id,
@@ -170,7 +172,11 @@ def search_session_page(
                             and row["entry_id"] != current_range.excluded_entry_id
                         )
                     )
-                    candidates = entry_documents(_decoded_documents(connection, scoped)) if patterns else scoped
+                    candidates = (
+                        entry_documents(_decoded_documents(connection, scoped))
+                        if patterns
+                        else scoped
+                    )
                     for row in candidates:
                         if monotonic() >= deadline_monotonic:
                             raise TimeoutError("session search deadline exceeded")
@@ -249,3 +255,80 @@ def search_session_page(
             json.dumps(value, ensure_ascii=False).encode()
         ).decode()
     return selected, next_cursor
+
+
+def search_sessions_complete(
+    connection,
+    *,
+    memory_domain_id,
+    query,
+    lifecycle,
+    current_session_id,
+    current_range,
+    deadline_monotonic,
+):
+    """Match complete dialogue entries before falling back to a title match."""
+    from pulsara_agent.conversation_kernel.session_text import display_title
+
+    patterns = keyword_patterns(query.strip())
+    selected = []
+    with connection.cursor(
+        name="complete_session_search", row_factory=dict_row
+    ) as stream:
+        stream.itersize = MAX_PAGE_SIZE
+        stream.execute(
+            _DOCUMENT_SQL if patterns else _SESSION_SQL + " ORDER BY s.id",
+            (memory_domain_id, lifecycle, lifecycle),
+        )
+        for _, documents in itertools.groupby(stream, key=lambda row: row["id"]):
+            first = None
+            title_match = False
+            entry_match = False
+            scoped = (
+                row
+                for row in documents
+                if not patterns
+                or row["kind"] == "title"
+                or row["id"] != current_session_id
+                or (
+                    row["sequence"] <= current_range.through_sequence
+                    and row["entry_id"] != current_range.excluded_entry_id
+                )
+            )
+            candidates = (
+                entry_documents(_decoded_documents(connection, scoped))
+                if patterns
+                else scoped
+            )
+            for row in candidates:
+                if monotonic() >= deadline_monotonic:
+                    raise TimeoutError("session search deadline exceeded")
+                if first is None:
+                    first = row
+                if patterns and all(
+                    pattern.search(row["text"]) for pattern in patterns
+                ):
+                    if row["kind"] == "title":
+                        title_match = True
+                    else:
+                        entry_match = True
+            if first is None or (patterns and not entry_match and not title_match):
+                continue
+            selected.append(
+                {
+                    "target": {"kind": "SESSION", "session_id": first["id"]},
+                    "title": display_title(first),
+                    "workspace_path": first["workspace_root"],
+                    "updated_at": first["updated_at"].isoformat(),
+                    **(
+                        {"matched_in": "ENTRY" if entry_match else "TITLE"}
+                        if patterns
+                        else {}
+                    ),
+                }
+            )
+    return sorted(
+        selected,
+        key=lambda row: (row["updated_at"], row["target"]["session_id"]),
+        reverse=True,
+    )

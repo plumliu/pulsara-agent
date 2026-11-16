@@ -22,16 +22,18 @@ async def _start(host, source, invoke=None, catalog=None, **kwargs):
         catalog = {**catalog, 'run_agent': {'parameters': run_agent_parameters_schema()}}
     captured = getattr(host, "_test_cells", {})
     host._test_cells = captured
-    closed = kwargs.pop("on_cell_closed", None)
-    def on_closed(identity):
-        captured[identity] = host._cell(identity)
-        if closed is not None:
-            closed(identity)
+    if not getattr(host,'_test_capture_installed',False):
+        collect=host._collect
+        async def capture(cell):
+            captured[cell.cell_id]=cell
+            await collect(cell)
+        host._collect=capture
+        host._test_capture_installed=True
     identity = await host.start(source=source, source_exec_attempt_id="test-source-attempt",
                             turn_id=kwargs.pop("turn_id", "test-turn"), snapshot=object(),
                             tool_catalog={"decide": {}, **(catalog or {"read_file": {}})}, invoke=invoke or empty,
                             decision_available=kwargs.pop("decision_available", False),
-                            on_cell_closed=on_closed, **kwargs)
+                            **kwargs)
     if identity in host._cells:
         captured[identity] = host._cell(identity)
     return identity
@@ -49,7 +51,13 @@ async def _finish(host, cell):
                     if lease.record["kind"] == "error":
                         observed_errors.append(lease.record["error"])
                     else:
-                        records.append(dict(lease.record))
+                        # SDK/lifecycle assertions inspect the timed VM's frozen
+                        # values; shared ordered text/image projection has its own gates.
+                        record=dict(lease.record)
+                        if record['kind'] in {'log','return'}:
+                            rendered=[item['value'] if item['type']=='text' else json.dumps(item['value'],ensure_ascii=False,separators=(',',':')) for item in record['values']]
+                            record={'kind':record['kind'],'text':' '.join(rendered)}
+                        records.append(record)
                     await host.acknowledge_output(lease)
                     continue
             if owned.state in {"completed", "failed", "terminated"} and not owned.pending and not owned.output:
@@ -167,8 +175,7 @@ def test_tool_lookup_diagnostics_preserve_frozen_directory_and_js_protocols():
 
 def test_repeated_name_hints_release_bridge_data_without_dispatch():
     async def run():
-        host = CodeModeHost(limits=replace(CodeModeLimits(), value_bytes=8192,
-            cell_bytes=32768, host_bytes=65536, control_bytes=12288, page_bytes=8192))
+        host = CodeModeHost(limits=replace(CodeModeLimits(), cell_bytes=32768, host_bytes=65536, control_bytes=12288, ))
         calls = []
         async def invoke(call):
             calls.append(call)
@@ -487,8 +494,7 @@ def test_unawaited_tool_rejection_is_not_hidden_by_fulfilled_root():
             assert page.state == "failed"
             assert page.error["name"] == "ToolError"
             assert page.error["code"] == "tool_failed"
-            assert page.error["result"] == {"detail": "actual failure"}
-            assert page.error["result_id"] == "actual-result"
+            assert page.error["message"] == "Actual failure"
             assert not output
         finally:
             await host.aclose()
@@ -527,11 +533,11 @@ def test_safe_numbers_and_text_have_distinct_bridge_semantics():
             page, output = await _finish(host, await _start(host, '''
                 console.log(await tools.read_file({case:'text'}));
                 try { await tools.read_file({case:'number'}); }
-                catch(e) { console.log(e.name,e.code,e.result.result_id); }
+                catch(e) { console.log(e.name,e.code,e.message); }
             ''', invoke))
             assert page.state == "completed"
             assert [record["text"] for record in output] == [
-                '{"unsafe":9007199254740993}', 'ToolError unsafe_integer retained-result']
+                '{"unsafe":9007199254740993}', "ToolError unsafe_integer Bridge JSON integer exceeds JavaScript's safe range"]
         finally:
             await host.aclose()
     asyncio.run(run())
@@ -645,7 +651,7 @@ def test_each_output_has_immutable_independent_admission_identity():
                     await host.acknowledge_output(lease, accepted=False)
                 await host.acknowledge_output(lease)
             assert identities == list(range(1, 6))
-            assert [record["text"][0] for record in records] == list("01234")
+            assert [record["values"][0]["value"][0] for record in records] == list("01234")
             assert wakes
         finally:
             await host.aclose()
@@ -659,7 +665,7 @@ def test_large_output_remains_complete_for_canonical_queue_content_owner():
             cell = await _start(host, 'console.log("x".repeat(60000));')
             await _vm_terminal(host, cell)
             lease = await host.lease_output(cell)
-            assert lease.record == {"kind": "log", "text": "x" * 60000}
+            assert lease.record == {"kind":"log","values":[{"type":"text","value":"x"*60000}]}
             assert lease.source_exec_attempt_id == "test-source-attempt"
             assert lease.source_turn_id == "test-turn"
             await host.acknowledge_output(lease)
@@ -670,7 +676,7 @@ def test_large_output_remains_complete_for_canonical_queue_content_owner():
 
 def test_output_full_fails_explicitly_and_keeps_every_accepted_record():
     async def run():
-        limits = replace(CodeModeLimits(), value_bytes=8192, cell_bytes=32768, host_bytes=65536, control_bytes=12288, page_bytes=8192)
+        limits = replace(CodeModeLimits(), cell_bytes=32768, host_bytes=65536, control_bytes=12288, )
         host = CodeModeHost(limits=limits)
         try:
             cell = await _start(host, 'for(let i=0;i<100;i++)console.log(String(i)+":"+"x".repeat(1000));')
@@ -692,11 +698,10 @@ def test_batch_preallocates_frozen_refs_then_one_real_descriptor():
         async def invoke(call):
             calls.append(call)
             if call.tool_name == 'run_agent':
-                return CodeModeToolResult(value={'agents':[{'kind':'AGENT','agent_id':m['agent_id']} for m in call.arguments['members']],
-                    'works':[{'kind':'WORK','work_id':m['work_id']} for m in call.arguments['members']],
-                    'details':[{'work_title':m['parameters'].get('work_title'),'status':'queued',
-                        'inspect':{'tool':'query_agents','arguments':{'target':{'kind':'WORK','work_id':m['work_id']}}}}
-                        for m in call.arguments['members']]})
+                return CodeModeToolResult(value={'meta':{'status':'SUCCESS'},'content':[
+                    {'type':'object','value':{'agent':{'kind':'AGENT','agent_id':m['agent_id']},
+                      'work':{'kind':'WORK','work_id':m['work_id']},'work_status':'queued'}}
+                    for m in call.arguments['members']]})
             return CodeModeToolResult(value={'state':'settled'})
         try:
             page, output = await _finish(host, await _start(host, '''
@@ -704,9 +709,9 @@ def test_batch_preallocates_frozen_refs_then_one_real_descriptor():
                   {instruction:({agents})=>JSON.stringify(agents[1])},
                   {instruction:'Review',depends_on:({works})=>[works[0]]}
                 ]);
-                if(result.agents.length!==2 || result.works.length!==2 || result.details.length!==2)
+                if(result.content.length!==2)
                   throw Error('dispatch arrays lost position');
-                console.log(await tools.wait_agent({agents:[result.agents[1]],until:"idle"}));
+                console.log(await tools.wait_agent({agents:[result.content[1].value.agent],settle:"all"}));
             ''', invoke, {'run_agent':{}, 'wait_agent':{}}))
             assert page.state == 'completed', page.error
             assert [call.tool_name for call in calls] == ['run_agent', 'wait_agent']
@@ -714,7 +719,7 @@ def test_batch_preallocates_frozen_refs_then_one_real_descriptor():
             a, b = calls[0].arguments['members']
             assert json.loads(a['parameters']['instruction'])['agent_id'] == b['agent_id']
             assert b['parameters']['depends_on'] == [{'kind':'WORK','work_id':a['work_id']}]
-            assert calls[1].arguments == {'agents': [{'kind':'AGENT','agent_id':b['agent_id']}], 'until':'idle'}
+            assert calls[1].arguments == {'agents': [{'kind':'AGENT','agent_id':b['agent_id']}], 'settle':'all'}
             assert output == [{'kind':'log','text':'{"state":"settled"}'}]
         finally:
             await host.aclose()
@@ -769,14 +774,14 @@ def test_dispatch_captures_values_before_await_and_callbacks_once_in_order():
         try:
             page, output = await _finish(host, await _start(host, '''
               const order=[];
-              const context={mode:'none'};
+              const materials=[{kind:'CONTEXT_MATERIAL',turns:1}];
               const assignments=[
-                {instruction:refs=>{order.push('instruction0');return 'original';},context},
+                {instruction:refs=>{order.push('instruction0');return 'original';},materials},
                 {instruction:'second',depends_on:refs=>{order.push('depends1');return [refs.works[0]];}}
               ];
               const pending=tools.run_agent(assignments);
               assignments.reverse(); assignments.length=0;
-              context.mode='last_n'; context.turns=100;
+              materials[0].turns=3; materials.length=0;
               await pending;
               console.log(order);
             ''', invoke, {'run_agent': {}}))
@@ -784,7 +789,7 @@ def test_dispatch_captures_values_before_await_and_callbacks_once_in_order():
             assert output == [{'kind': 'log', 'text': '["instruction0","depends1"]'}]
             assert len(calls) == 1 and calls[0].tool_name == 'run_agent'
             first, second = calls[0].arguments['members']
-            assert first['parameters'] == {'instruction': 'original', 'context': {'mode': 'none'}}
+            assert first['parameters'] == {'instruction':'original','materials':[{'kind':'CONTEXT_MATERIAL','turns':1}]}
             assert second['parameters']['depends_on'] == [{'kind': 'WORK', 'work_id': first['work_id']}]
             assert all(set(member) == {'agent_id', 'work_id', 'parameters'} for member in calls[0].arguments['members'])
         finally:
@@ -907,7 +912,13 @@ def test_dispatch_preparation_cannot_be_used_from_another_cell():
 
 def test_rejected_preparation_delivery_releases_python_record_while_cell_lives():
     async def run():
-        host = CodeModeHost(limits=replace(CodeModeLimits(), value_bytes=1024))
+        host = CodeModeHost()
+        deliver=host._deliver
+        async def reject_preparation(cell,pending,result):
+            if pending.sequence is None and result.error_code is None:
+                raise CodeModeError('data_boundary','Injected physical preparation delivery rejection')
+            return await deliver(cell,pending,result)
+        host._deliver=reject_preparation
         waiting, release = asyncio.Event(), asyncio.Event()
         calls = []
         async def invoke(call):
@@ -918,7 +929,7 @@ def test_rejected_preparation_delivery_releases_python_record_while_cell_lives()
         try:
             cell = await _start(host, '''
               try { await tools.run_agent(Array.from({length:8},()=>({instruction:'x'}))); }
-              catch(e) { if(e.code!=='value_boundary') throw e; }
+              catch(e) { if(e.code!=='data_boundary') throw e; }
               await tools.read_file({});
               return 'done';
             ''', invoke, {'run_agent': {}, 'read_file': {}})
@@ -1062,7 +1073,7 @@ def test_worker_request_boundary_rejects_legacy_and_wrong_kind_ids(kind, invalid
     asyncio.run(run())
 
 
-def test_worker_rejects_legacy_result_request_id_before_guest_continuation():
+def test_worker_rejects_malformed_result_request_id_before_guest_continuation():
     async def run():
         host = CodeModeHost()
         original_send = host._send
@@ -1086,7 +1097,7 @@ def test_worker_rejects_legacy_result_request_id_before_guest_continuation():
             assert len(calls) == 1
             # The malformed transport must not lose the tool's accepted effect.
             assert [item['kind'] for item in output] == ['tool_result']
-            assert output[0]['result'] == {'accepted': True}
+            assert output[0]['value'] == {'accepted': True}
         finally:
             await host.aclose()
 
@@ -1160,7 +1171,7 @@ def test_async_dispatch_callback_seals_only_new_submissions_in_its_cell(callback
         original_append = host._append_output
         def append(cell, output):
             original_append(cell, output)
-            if output.value == {'kind': 'log', 'text': 'new submission rejected'}:
+            if output.value == {'kind':'log','values':[{'type':'text','value':'new submission rejected'}]}:
                 rejected.set()
         host._append_output = append
         async def invoke(call):
@@ -1332,145 +1343,14 @@ def test_delivery_owner_commits_before_guest_promise_continuation():
     asyncio.run(run())
 
 
-def test_oversized_accepted_value_is_catchable_and_reads_the_original_body_once():
-    from pulsara_agent.identity import random_id
-    from pulsara_agent.ports.tool_output import tool_output_read_call
-
-    async def run():
-        host = CodeModeHost(limits=replace(CodeModeLimits(), value_bytes=2048))
-        session, entry = random_id("session"), random_id("entry")
-        read = tool_output_read_call(session, entry)
-        effects, deliveries, reads = [], [], []
-
-        async def invoke(call):
-            if "target" in call.arguments:
-                reads.append(call.arguments)
-                return CodeModeToolResult(value="exact frozen body")
-            effects.append(call.sequence)
-            async def delivered():
-                deliveries.append("full-value-delivered")
-            return CodeModeToolResult(value="x" * 8192, state="SUCCESS", result_id=random_id("result"),
-                result_entry_id=entry, read=read, output_available=True,
-                source_coverage="RETAINED_SNAPSHOT", source_coverage_reason="TERMINAL_RETENTION_GAP",
-                required_facts={"exit_code":23}, delivery_succeeded=delivered)
-
-        try:
-            cell = await _start(host, '''
-              try { await tools.read_file({effect:true}); }
-              catch(e) {
-                console.log(e.code,e.state,e.output_available,e.source_coverage,e.source_coverage_reason,e.required_facts.exit_code);
-                console.log(await tools.read_file(e.read.arguments));
-              }
-            ''', invoke)
-            page, output = await _finish(host, cell)
-            assert page.state == "completed", page.error
-            assert [record["text"] for record in output] == [
-                "value_boundary SUCCESS true RETAINED_SNAPSHOT TERMINAL_RETENTION_GAP 23", "exact frozen body"]
-            assert len(effects) == 1 and not deliveries
-            assert reads == [read["arguments"]]
-            assert not any(record["kind"] == "tool_result" for record in output)
-        finally:
-            await host.aclose()
-    asyncio.run(run())
 
 
-def test_cell_admission_budget_failure_precedes_vm_or_business_execution():
-    from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
-
-    async def run():
-        host = CodeModeHost()
-        denied = ToolResultPageBudget("test-call", accepts_provider_body=lambda *_: False)
-        try:
-            with pytest.raises(CodeModeError, match="admission receipt"):
-                await _start(host, "console.log('must not run');", page_budget=denied)
-            assert not host._cells and host._process is None
-        finally:
-            await host.aclose()
-    asyncio.run(run())
 
 
-def test_uncaught_bridge_boundary_keeps_original_read_route_when_diagnostic_is_shortened():
-    from pulsara_agent.identity import random_id
-    from pulsara_agent.ports.tool_output import tool_output_read_call
-
-    async def run():
-        host = CodeModeHost(limits=replace(CodeModeLimits(), value_bytes=65536))
-        read = tool_output_read_call(random_id("session"), random_id("entry"))
-        async def invoke(_):
-            return CodeModeToolResult(value="x" * 131072, result_id=random_id("result"),
-                result_entry_id=read["arguments"]["target"]["entry_id"], read=read,
-                output_available=True, required_facts={"details":"汉" * 2000})
-        try:
-            page, output = await _finish(host, await _start(host, "await tools.read_file({});", invoke))
-            assert page.state == "failed" and not output
-            assert page.error["code"] == "value_boundary" and page.error["state"] == "SUCCESS"
-            assert page.error["read"] == read and page.error["output_available"]
-            assert page.error["diagnostic_truncated"]
-        finally:
-            await host.aclose()
-    asyncio.run(run())
 
 
-def test_cell_stop_budget_failure_does_not_fence_the_running_script():
-    from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
-
-    async def run():
-        host = CodeModeHost()
-        entered, release = asyncio.Event(), asyncio.Event()
-        async def invoke(_):
-            entered.set()
-            await release.wait()
-            return CodeModeToolResult(value={})
-        try:
-            cell = await _start(host, "await tools.read_file({});console.log('still running');", invoke)
-            await entered.wait()
-            denied = ToolResultPageBudget("test-call", accepts_provider_body=lambda *_: False)
-            with pytest.raises(CodeModeError, match="stop receipt"):
-                await host.stop(cell, page_budget=denied)
-            assert not host._cells[cell].explicitly_stopped and not host._cells[cell].cancelled.is_set()
-            release.set()
-            page, output = await _finish(host, cell)
-            assert page.state == "completed"
-            assert output == [{"kind": "log", "text": "still running"}]
-        finally:
-            release.set()
-            await host.aclose()
-    asyncio.run(run())
 
 
-@pytest.mark.parametrize("refused_state", ["completed", "failed", "terminated"])
-def test_cell_stop_quotes_each_possible_terminal_receipt_before_fencing(refused_state):
-    from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
-
-    async def run():
-        host = CodeModeHost()
-        entered, release = asyncio.Event(), asyncio.Event()
-        quoted = []
-        async def invoke(_):
-            entered.set()
-            await release.wait()
-            return CodeModeToolResult(value={})
-        def quote(body, _):
-            value = json.loads(body)
-            quoted.append(value)
-            return value["state"] != refused_state
-        try:
-            cell = await _start(host, "await tools.read_file({});", invoke)
-            await entered.wait()
-            with pytest.raises(CodeModeError, match="stop receipt"):
-                await host.stop(cell, page_budget=ToolResultPageBudget("test-call", accepts_provider_body=quote))
-            states = ["completed", "failed", "terminated"]
-            assert [value["state"] for value in quoted] == states[:states.index(refused_state) + 1]
-            assert all(value == {"target": {"kind": "CELL", "cell_id": cell}, "state": value["state"]}
-                       for value in quoted)
-            assert not host._cells[cell].explicitly_stopped
-            release.set()
-            page, _ = await _finish(host, cell)
-            assert page.state == "completed"
-        finally:
-            release.set()
-            await host.aclose()
-    asyncio.run(run())
 
 
 def test_parallel_calls_settle_by_completion_without_slow_call_blocking_fast_call():
@@ -1500,7 +1380,7 @@ def test_parallel_calls_settle_by_completion_without_slow_call_blocking_fast_cal
 ])
 def test_many_failed_batch_preparations_release_current_data_without_total_call_cap(assignment):
     async def run():
-        host = CodeModeHost(limits=replace(CodeModeLimits(), value_bytes=8192, cell_bytes=32768, host_bytes=65536, control_bytes=12288, page_bytes=8192))
+        host = CodeModeHost(limits=replace(CodeModeLimits(), cell_bytes=32768, host_bytes=65536, control_bytes=12288, ))
         calls = []
         async def invoke(call):
             calls.append(call)
@@ -1523,7 +1403,7 @@ def test_many_failed_batch_preparations_release_current_data_without_total_call_
 
 def test_terminal_consumed_cells_release_host_slots_and_data():
     async def run():
-        host = CodeModeHost(limits=replace(CodeModeLimits(), value_bytes=8192, cell_bytes=16384, host_bytes=32768, control_bytes=4096, page_bytes=2048))
+        host = CodeModeHost(limits=replace(CodeModeLimits(), cell_bytes=16384, host_bytes=32768, control_bytes=4096, ))
         try:
             for _ in range(60):
                 page, output = await _finish(host, await _start(host, 'return "ok";'))
@@ -1568,7 +1448,7 @@ def test_unknown_admission_retains_same_complete_output_until_stop_confirmation(
             await host.stop(cell)
             assert not host.output_delivery_allowed(first)
             assert await host.lease_output(cell) is first
-            assert first.record['text'] == 'x' * 60000
+            assert first.record['values'][0]['value'] == 'x' * 60000
             await host.acknowledge_output(first, accepted=False)
             assert cell not in host.pending_output_cells()
         finally:
@@ -1595,7 +1475,7 @@ def test_empty_completed_cell_is_collected_without_any_model_acknowledgement():
 
 def test_source_ipc_resource_rejection_does_not_create_or_leave_a_live_cell():
     async def run():
-        host = CodeModeHost(limits=replace(CodeModeLimits(), value_bytes=8192,cell_bytes=16384,host_bytes=32768,control_bytes=4096,page_bytes=2048))
+        host = CodeModeHost(limits=replace(CodeModeLimits(), cell_bytes=16384,host_bytes=32768,control_bytes=4096,))
         try:
             # Source's literal bytes fit its limit; JSON escaping exceeds the
             # per-cell IPC allowance. Rejection must happen before live admission.
@@ -1739,7 +1619,7 @@ def test_sidecar_process_loss_does_not_replay_and_keeps_actual_late_result():
             assert page.state=='failed'
             assert len(calls)==1
             assert len(output)==1 and output[0]['kind']=='tool_result'
-            assert output[0]['result']=={'effect':'actually settled'}
+            assert output[0]['value']=={'effect':'actually settled'}
             with pytest.raises(CodeModeError,match='sidecar'):
                 await _start(host,'return "must not restart old VM";')
         finally:
@@ -1761,8 +1641,8 @@ def test_console_preserves_nul_and_lone_surrogates_with_valid_json_transport():
 
 def test_host_aggregate_current_data_limit_rejects_before_admission_and_releases():
     async def run():
-        limits=replace(CodeModeLimits(),value_bytes=8192,cell_bytes=32768,host_bytes=49152,
-                       control_bytes=12288,page_bytes=8192)
+        limits=replace(CodeModeLimits(),cell_bytes=32768,host_bytes=49152,
+                       control_bytes=12288,)
         host=CodeModeHost(limits=limits)
         calls=[]
         async def invoke(call):
@@ -1853,7 +1733,7 @@ def test_state_wait_ignores_output_and_cannot_consume_independent_records():
             await dispatched.wait()
             waiter = asyncio.create_task(host.wait_state(cell, 20))
             first = await host.lease_output(cell)
-            assert first.record_sequence == 1 and first.record == {"kind": "log", "text": "same"}
+            assert first.record_sequence == 1 and first.record == {"kind":"log","values":[{"type":"text","value":"same"}]}
             state = await waiter
             assert state["state"] == "running" and "output" not in state and "error" not in state
             assert await host.lease_output(cell) is first
@@ -1909,7 +1789,7 @@ def test_definite_output_rejection_is_a_local_readable_failure_not_an_ack_or_rec
             assert host.capture_cell(cell).state == "failed"
             assert host.capture_cell(cell).error["message"] == "Specific queue content rejection"
             remaining = await host.lease_output(cell)
-            assert remaining.record == {"kind": "log", "text": "independent record"}
+            assert remaining.record == {"kind":"log","values":[{"type":"text","value":"independent record"}]}
             assert remaining.record_sequence == rejected.record_sequence + 1
             await host.acknowledge_output(remaining)
             assert not host.pending_output_cells()

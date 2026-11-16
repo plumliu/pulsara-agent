@@ -1801,7 +1801,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     if (!ownsConnection(owner) || owner.sessionId !== action.sessionId) return;
     const delivery = receipt.promptDelivery;
     const accepted = action.kind === 'send'
-      ? Boolean((receipt.status === 'succeeded' && receipt.planDraftDecision === 'revise' && receipt.planContinuationTurnId)
+      ? Boolean((receipt.status === 'succeeded' && receipt.planDraftDecision === 'revise')
         || (delivery && delivery.deliveryMode === 'steer' && ['PENDING', 'CONSUMED'].includes(delivery.queueStatus)))
       : receipt.status === 'succeeded' && receipt.publicCode === 'PROMPT_CANCELLED'
         && delivery?.queueItemId === action.source.queueItemId;
@@ -1998,11 +1998,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
         return false;
       }
       if (requestPlan && !projection.planMode) {
-        const text = promptContentTextProjection(content);
-        const plan = await active.enterPlan(
-          text || '用户提交了一条图片输入。',
-          permission,
-        );
+        const plan = await active.enterPlan(permission);
         if (!ownsConnection(active)) return false;
         if (plan.status === 'rejected') {
           notify('无法为本轮启用规划', productMessage(plan.publicMessage, '请稍后重试。'), 'warning');
@@ -2392,8 +2388,8 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
         }
         const copy = {
           approve: ['方案已批准', '已创建按批准方案继续处理的任务。'],
-          revise: ['修改意见已提交', '已创建继续修订方案的任务。'],
-          cancel: ['规划已取消', '未因本次取消启动这份方案的实施。你可以发送新任务。'],
+          revise: ['修改意见已提交', 'Pulsara 将继续规划。'],
+          cancel: ['本次审批已取消', 'Pulsara 将继续规划。'],
         } as const;
         notify(copy[receipt.planDraftDecision][0], copy[receipt.planDraftDecision][1], 'success');
         return true;

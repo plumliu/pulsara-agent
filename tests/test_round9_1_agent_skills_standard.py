@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import replace
-import json
 import os
 from pathlib import Path
 
 import pytest
 
-from pulsara_agent.identity import content_revision
 from pulsara_agent.capability.bundled_skills import (
     BundledSkillDefinitionProducer,
     BundledSkillDistributionBindingOwner,
@@ -31,7 +29,6 @@ from pulsara_agent.capability.types import (
     ResolutionUnavailableCause,
     SkillDiagnostic,
     SkillDiagnosticCode,
-    SkillDiagnosticSeverity,
     SkillProducerUnavailableReason,
     SkillResolutionUnavailableReason,
 )
@@ -40,17 +37,10 @@ from pulsara_agent.capability.user_skill_config import (
     workspace_skill_config_path,
 )
 from pulsara_agent.conversation_kernel.capability import KernelSkillProjectionComposer
-from pulsara_agent.conversation_kernel.context_sources import (
-    _public_capability_diagnostics,
-)
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.ports.tool_execution import ToolCall
-from pulsara_agent.tools.builtins.filesystem import (
-    DEFAULT_READ_LINES,
-    MAX_READ_LINES,
-    ReadFileTool,
-)
+from pulsara_agent.tools.builtins.filesystem import ReadFileTool
 
 
 def _document(
@@ -244,16 +234,6 @@ def test_round9_1_explicit_null_metadata_is_not_standard_valid(
     ]
 
 
-def test_round9_1_inert_skill_diagnostics_are_not_public_degradation() -> None:
-    diagnostics = (
-        SkillDiagnostic(
-            severity=SkillDiagnosticSeverity.INFO,
-            code=SkillDiagnosticCode.HOST_EXTENSION_IGNORED,
-            message="behaviorally inert",
-        ),
-    )
-
-    assert _public_capability_diagnostics(diagnostics) == ()
 
 
 def test_round9_1_1025_directories_and_65_winners_publish_no_partial_catalog(
@@ -397,48 +377,21 @@ def test_round9_1_workspace_skill_switch_applies_on_the_next_owner_snapshot(
         binding.close()
 
 
-def test_round9_1_read_file_repeats_current_bytes_with_2000_line_window(
-    tmp_path: Path,
-) -> None:
-    assert DEFAULT_READ_LINES == MAX_READ_LINES == 2_000
-    path = tmp_path / "skill.md"
-    path.write_text(
-        "\n".join(f"old-{index}" for index in range(2_001)), encoding="utf-8"
-    )
-    tool = ReadFileTool(tmp_path)
-    first = tool.execute(ToolCall("call:first", "read_file", {"target": {"kind": "PATH", "path": "skill.md"}}))
-    first_payload = json.loads(first.output)
+def test_round9_1_read_file_reads_full_original_and_explicit_line_subset(tmp_path):
+    path=tmp_path/"skill.md"
+    path.write_text("\n".join(f"old-{index}" for index in range(2001)),encoding="utf-8")
+    tool=ReadFileTool(tmp_path)
+    first=tool.execute(ToolCall("call:first","read_file",{"target":{"kind":"PATH","path":"skill.md"}}))
     assert first.status is ToolResultState.SUCCESS
-    assert first.page_complete
-    assert first_payload["position"] == {"line": 1, "char_offset": 0}
-    assert first_payload["total_lines"] == 2_001
-    assert first_payload["content_revision"] == content_revision(path.read_bytes())
-    assert len(first_payload["content"].splitlines()) == 2_000
-    assert "2000|old-1999" in first_payload["content"]
-    assert first_payload["next"] == {
-        "tool": "read_file",
-        "arguments": {
-            "target": {"kind": "PATH", "path": "skill.md"},
-            "limit": 2_000,
-            "continuation": {
-                "line": 2_001,
-                "char_offset": 0,
-                "content_revision": first_payload["content_revision"],
-            },
-        },
-    }
+    assert first.business_value.public_fields["meta"]["total_lines"]==2001
+    assert first.business_value.content[0].value==path.read_text()
+    subset=tool.execute(ToolCall("call:subset","read_file",{"target":{"kind":"PATH","path":"skill.md"},"offset":2000,"limit":2}))
+    assert subset.business_value.content[0].value=="old-1999\nold-2000"
+    path.write_text("new-first\nsecond\n",encoding="utf-8")
+    second=tool.execute(ToolCall("call:second","read_file",{"target":{"kind":"PATH","path":"skill.md"}}))
+    assert second.business_value.content[0].value=="new-first\nsecond\n"
+    assert second.business_value.public_fields["meta"]["total_lines"]==2
 
-    path.write_text("new-first\nsecond\n", encoding="utf-8")
-    second = tool.execute(ToolCall("call:second", "read_file", {"target": {"kind": "PATH", "path": "skill.md"}}))
-    second_payload = json.loads(second.output)
-    assert second.status is ToolResultState.SUCCESS
-    assert second.page_complete
-    assert second_payload["content_revision"] == content_revision(path.read_bytes())
-    assert second_payload["content_revision"] != first_payload["content_revision"]
-    assert second_payload["total_lines"] == 2
-    assert second_payload["next"] is None
-    assert second_payload["content"] == "1|new-first\n2|second"
-    assert "content_returned" not in second_payload
 
 
 @pytest.mark.parametrize("custom_home", [False, True])
@@ -477,7 +430,7 @@ def test_round9_1_user_skill_paths_support_reads_and_scripts_without_environment
         )
     )
     assert read.status is ToolResultState.SUCCESS
-    assert "home-skill" in read.output
+    assert "home-skill" in read.business_value.content[0].value
     process = subprocess.run(
         ["/bin/sh", str(Path(home_skill.skill_path).parent / "scripts" / "check.sh")],
         cwd=workspace,

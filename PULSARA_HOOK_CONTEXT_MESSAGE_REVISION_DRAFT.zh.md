@@ -1,6 +1,6 @@
 # Pulsara Hook 独立消息修订草案
 
-状态：讨论草案，独立消息投影未实施。本文件确定给模型阅读的 Hook 附加文字如何承载和交付；输入候选隔离按第 3 节落实，不表示新外壳已经启用。Hook 的阻止、权限裁决和续接控制保持现有底层语义；PreToolUse 不修改工具参数。普通 runtime observation、压缩与 Plan 续接沿[Runtime Observation 修订草案](PULSARA_RUNTIME_OBSERVATION_REVISION_DRAFT.zh.md)；Hook 执行反馈独立交付，安装、移除、信任及启停均不产生 runtime observation。
+状态：Hook 独立消息投影及候选隔离已接入生产代码，已完成 hardcut 跨层验收；正常应用尚未重启。本文件确定给模型阅读的 Hook 附加文字如何承载和交付；输入候选隔离沿第 3 节的当前 owner 落实。Hook 的阻止、权限裁决和续接控制保持现有底层语义；PreToolUse 不修改工具参数。普通 runtime observation、压缩与 Plan 续接沿[Runtime Observation 修订草案](PULSARA_RUNTIME_OBSERVATION_REVISION_DRAFT.zh.md)；Hook 执行反馈独立交付，安装、移除、信任及启停均不产生 runtime observation。
 
 ## 1. 模型可见消息
 

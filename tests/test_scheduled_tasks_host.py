@@ -6,6 +6,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from dataclasses import replace
 from time import monotonic
+from zoneinfo import ZoneInfo
 import shutil
 import pytest
 from psycopg.rows import dict_row
@@ -78,14 +79,14 @@ def test_complete_core_schedule_tools_execute_and_user_management_needs_no_ui_se
 
             arguments = {"action": "create", "values": {
                 "name": "Core-owned report", "prompt": "Inspect current changes.", "timezone": "UTC",
-                "permission_mode": "ask-permissions", "schedule": {
-                    "kind": "interval", "seconds": 60,
+                "schedule": {
+                    "kind": "interval", "seconds": 900,
                     "anchor_at_utc": "2030-01-01T00:00:00Z",
                 },
             }}
             created = await invoke("manage_schedule", arguments)
             page = await invoke("query_schedules", {})
-            assert [task["target"] for task in page["tasks"]] == [created["target"]]
+            assert [part["value"]["target"] for part in page["content"] if part["type"] == "object"] == [created["target"]]
             task_id = created["target"]["task_id"]
             # A legitimate explicit ROOT domain is carried by its immutable
             # Host binding, never supplied as a model argument or inferred from
@@ -96,15 +97,15 @@ def test_complete_core_schedule_tools_execute_and_user_management_needs_no_ui_se
             separate_created = await invoke("manage_schedule", arguments, separate)
             own_page, separate_page = await asyncio.gather(
                 invoke("query_schedules", {}), invoke("query_schedules", {}, separate))
-            assert [item["target"] for item in own_page["tasks"]] == [created["target"]]
-            assert [item["target"] for item in separate_page["tasks"]] == [separate_created["target"]]
+            assert [part["value"]["target"] for part in own_page["content"] if part["type"] == "object"] == [created["target"]]
+            assert [part["value"]["target"] for part in separate_page["content"] if part["type"] == "object"] == [separate_created["target"]]
             await core.close_session(separate.host_session_id)
             await core.close_session(session.host_session_id)
             assert not core._sessions
             listed = await core.scheduled_tasks.list()
             assert [task["id"] for task in listed["tasks"]] == [task_id]
             changed = await core.scheduled_tasks.mutate(task_id=task_id,
-                expected_revision=created["revision"], action="pause")
+                expected_revision=listed["tasks"][0]["revision"], action="pause")
             assert changed["status"] == "PAUSED"
             assert not core._sessions
             assert (await other.scheduled_tasks.list())["tasks"] == []
@@ -191,7 +192,7 @@ def test_canonical_scheduled_pending_restore_waits_before_actual_provider_and_pr
             attempt = session._mcp_supervisor._tasks["fixture"]
             if finish == "stop":
                 await session.request_stop_turn(command_id=random_id("command"),
-                    admission_deadline_ms=int(datetime.now(timezone.utc).timestamp() * 1000) + 30_000,
+                    admission_deadline_ms=session.control_admission_deadline_ms(),
                     expected_session_id=session.session_id, expected_host_session_id=session.host_session_id,
                     target_turn_id=session.active_root_turn_id())
                 assert not attempt.done()
@@ -205,7 +206,9 @@ def test_canonical_scheduled_pending_restore_waits_before_actual_provider_and_pr
                     while (await session.query_command(request["client_command_id"])).status == "PENDING":
                         await asyncio.sleep(0)
                 assert len(requests) == 1
-                assert any(tool["function"]["name"] == "mcp__fixture__fake_echo" for tool in requests[0]["tools"])
+                tool_names = {tool["function"]["name"] for tool in requests[0]["tools"]}
+                assert {"query_capabilities", "call_mcp_tool"} <= tool_names
+                assert "mcp__fixture__fake_echo" not in tool_names
                 confirmed = await core.scheduled_tasks.run_now(request)
                 assert confirmed["queue_item_id"] == accepted["queue_item_id"]
                 assert confirmed["execution"]["status"] == "completed"
@@ -311,12 +314,13 @@ async def create(service, session, prompt="Scheduled report", once=False):
     schedule = {
         "kind": "interval",
         "anchor_at_utc": "2020-01-01T00:00:00+00:00",
-        "seconds": 60,
+        "seconds": 900,
     }
     if once:
         schedule = {
             "kind": "once",
-            "run_at_utc": (datetime.now(timezone.utc) + timedelta(hours=1))
+            "run_at": (datetime.now(ZoneInfo("Asia/Shanghai")) + timedelta(hours=1))
+            .replace(tzinfo=None)
             .replace(microsecond=0)
             .isoformat(),
         }
@@ -421,6 +425,19 @@ async def queue(service, sid):
                 "SELECT * FROM pulsara_v3.prompt_queue_items WHERE session_id=%s ORDER BY queue_sequence",
                 (sid,),
             ).fetchall()
+
+    return await service._io.run(read, deadline_monotonic=monotonic() + 30)
+
+
+async def queued_content(service, queue_item_id):
+    from pulsara_agent.conversation_kernel.content_parts import read_content_parts
+
+    def read(*, deadline_monotonic):
+        with service._core._repository.connection_provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR, row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            return read_content_parts(connection, queue_item_id=queue_item_id)
 
     return await service._io.run(read, deadline_monotonic=monotonic() + 30)
 
@@ -847,6 +864,8 @@ def test_scheduled_source_survives_real_compaction_fork_and_parent_deletion(
                     self.pausing = None
                     self.started.set()
                     await self.release.wait()
+                    for event in _tool_stream("query_schedules", "query:before-pause", {}):
+                        yield event
                     yield ToolCallStartPayload(
                         "pause:self", "pause:self", "manage_schedule"
                     )
@@ -945,7 +964,6 @@ def test_scheduled_source_survives_real_compaction_fork_and_parent_deletion(
             port.pausing = {
                 "action": "pause",
                 "target": {"kind": "SCHEDULE", "task_id": task["id"]},
-                "expected_revision": task["revision"],
             }
             await service.run_now(
                 dict(
@@ -1097,7 +1115,7 @@ def test_saved_task_sources_do_not_trigger_automatic_memory_recall(
                 )
 
             monkeypatch.setattr(
-                h.session._memory_tools, "freeze_automatic_recall_source", forbidden
+                h.session._memory_tools, "prepare_memory_observation", forbidden
             )
             if source is ScheduledTriggerSource.TIMER:
                 await due(service, h.session, task)
@@ -1171,6 +1189,7 @@ def test_scheduled_hook_gate_belongs_to_new_turn_consumption_and_keeps_route(
             )
             result = await service.run_now(request)
             original = (await queue(service, handle.session_id))[-1]
+            original_content = await queued_content(service, original["id"])
             assert original["status"] == "PENDING"
             assert original["scheduled_trigger_source"] == "RUN_ONCE"
             if active:
@@ -1192,7 +1211,7 @@ def test_scheduled_hook_gate_belongs_to_new_turn_consumption_and_keeps_route(
                 assert confirmed["delivery_mode"] == "NEW_TURN" and confirmed["target_turn_id"] is None
                 assert confirmed["execution"] == {"status": "stopped", "terminal_reason": "HOOK_BLOCKED_BEFORE_DELIVERY"}
                 final = (await queue(service, handle.session_id))[-1]
-                assert final["inline_content"] == original["inline_content"]
+                assert await queued_content(service, final["id"]) == original_content
                 assert final["consumed_entry_id"] is None
                 assert not port.requests
         finally:
@@ -1208,7 +1227,7 @@ def test_scheduled_hook_gate_belongs_to_new_turn_consumption_and_keeps_route(
 async def expire_paused_once_in_host(service, session, task):
     from psycopg.types.json import Jsonb
 
-    schedule = {**task["schedule"], "run_at_utc": (
+    schedule = {"kind": "once", "run_at_utc": (
         datetime.now(timezone.utc).replace(microsecond=0) - timedelta(seconds=1)
     ).isoformat()}
     repo = await service._repository()

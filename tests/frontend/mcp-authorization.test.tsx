@@ -103,10 +103,9 @@ it.each([
     return auth;
   });
   const target = { owner: { kind, scope_key: 'scope', server_id: 'notion', plugin_id: kind === 'plugin' ? 'plugin-test' : null }, config_identity: 'config', display_identity: 'display', package_install_id: kind === 'plugin' ? {visibility: 'VISIBLE', value: 'package:aaaaaaaaaaaaaaaaaaaaaaaaaa'} : null };
-  const publicTarget = {kind: 'MCP_CONNECTION', scope, source_kind: kind === 'plugin' ? 'PLUGIN' : 'LOCAL', server_id: 'notion', ...(kind === 'plugin' ? {plugin_id: 'plugin-test'} : {})};
-  const publicResult = {action: 'AUTHORIZE_MCP', status: 'APPLIED', current: {authorized: true}, target: publicTarget, authorization: target};
-  expect(parseMcpAuthorizationResult(JSON.stringify({...publicResult, target: {...publicTarget, server_id: 'other'}}))).toBeUndefined();
-  await act(async () => receive({ signal: new AbortController().signal, read: async () => parseMcpAuthorizationResult(JSON.stringify(publicResult)) } as McpAuthorizationRequest));
+  const fact = {...target, scope, package_install_id: kind === 'plugin' ? 'package:aaaaaaaaaaaaaaaaaaaaaaaaaa' : null};
+  expect(parseMcpAuthorizationResult({...fact, owner: {...fact.owner, server_id: ''}})).toBeUndefined();
+  await act(async () => receive({ signal: new AbortController().signal, read: async () => parseMcpAuthorizationResult(fact) } as McpAuthorizationRequest));
   expect(readStatus).toHaveBeenCalledWith(target);
   expect(result.current.statuses[key]).toEqual(authorized);
   expect(focus).toHaveBeenCalledTimes(1);
@@ -127,20 +126,12 @@ it('ignores a model completion after its connection closes, and does not focus f
 });
 
 
-it('keeps a withheld successful authorization without assigning it to a visible owner', async () => {
-  const authorization = {owner: {kind:'plugin', scope_key:'user', server_id:'notion', plugin_id:'plugin-test'}, config_identity:'config', display_identity:'display', package_install_id:{visibility:'WITHHELD'}};
-  const target = {kind:'MCP_CONNECTION', scope:'USER', source_kind:'PLUGIN', server_id:'notion', plugin_id:'plugin-test'};
-  const result = {action:'AUTHORIZE_MCP', status:'APPLIED', current:{authorized:true}, target, authorization};
-  expect(parseMcpAuthorizationResult(JSON.stringify(result))).toEqual({scope:'USER', authorization});
-  for (const invalid of ['package:aaaaaaaaaaaaaaaaaaaaaaaaaa', {visibility:'VISIBLE',value:'package:aaaaaaaaaaaaaaaaaaaaaaaaab'}, {visibility:'WITHHELD',value:'secret'}, null]) {
-    expect(parseMcpAuthorizationResult(JSON.stringify({...result, authorization:{...authorization,package_install_id:invalid}}))).toBeUndefined();
+it('rejects malformed accepted authorization facts', () => {
+  const fact = {scope:'USER', owner:{kind:'plugin', scope_key:'user', server_id:'notion', plugin_id:'plugin-test'}, config_identity:'config', display_identity:'display', package_install_id:'package:aaaaaaaaaaaaaaaaaaaaaaaaaa'};
+  expect(parseMcpAuthorizationResult(fact)?.authorization.package_install_id).toEqual({visibility:'VISIBLE', value:fact.package_install_id});
+  for (const invalid of ['package:aaaaaaaaaaaaaaaaaaaaaaaaab', {visibility:'VISIBLE',value:fact.package_install_id}, {visibility:'WITHHELD'}, null]) {
+    expect(parseMcpAuthorizationResult({...fact, package_install_id:invalid})).toBeUndefined();
   }
-  let receive!: (request: McpAuthorizationRequest) => void;
-  const connection = {role:'controller', sessionId:'session-test', subscribeMcpAuthorization: (listener: typeof receive) => {receive = listener; return () => {};}} as unknown as RuntimeConnection;
-  const readStatus = vi.fn().mockResolvedValue(authorized);
-  const adapter = {modelMcpAuthorizationStatus: readStatus} as unknown as RuntimeAdapter;
-  const {result: hook} = renderHook(() => { const auth = useMcpAuthorization(vi.fn()); useModelMcpAuthorization(connection, adapter, auth.run); return auth; });
-  await act(async () => receive({signal:new AbortController().signal,read:async () => parseMcpAuthorizationResult(JSON.stringify(result))}));
-  expect(readStatus).not.toHaveBeenCalled();
-  expect(hook.current.statuses).toEqual({});
+  expect(parseMcpAuthorizationResult({...fact, scope:'ALL'})).toBeUndefined();
+  expect(parseMcpAuthorizationResult({...fact, owner:{...fact.owner, kind:'local'}})).toBeUndefined();
 });

@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {copyFile, mkdtemp, readFile, rm} from 'node:fs/promises';
+import {copyFile, mkdtemp, readFile, rm, symlink} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {createPosixPostgresOperations} from './postgres-posix';
@@ -8,8 +8,11 @@ import {createPosixPostgresOperations} from './postgres-posix';
 test('local commands distinguish no submission, a settled exit and incomplete output', async t => {
   const root = await mkdtemp(path.join(tmpdir(), 'pulsara-pg-command-'));
   try {
-    // A native fixture exercises execFile on both Windows and POSIX without a shell.
-    await copyFile(process.execPath, path.join(root, process.platform === 'win32' ? 'pg_ctl.exe' : 'pg_ctl'));
+    // Keep POSIX runtime-relative libraries at their installed location. A copied
+    // dynamically linked Node can abort before executing the fixture script.
+    // Windows uses its standalone executable without requiring symlink privileges.
+    if (process.platform === 'win32') await copyFile(process.execPath, path.join(root, 'pg_ctl.exe'));
+    else await symlink(process.execPath, path.join(root, 'pg_ctl'));
     const operations = createPosixPostgresOperations(root, root);
     await t.test('missing executable never submitted', async () => {
       const absent = createPosixPostgresOperations(path.join(root, 'absent'), root);

@@ -69,7 +69,6 @@ def test_search_titles_users_final_commentary_and_long_blob_without_duplicates(
         lease.guard,
         cut=cut,
         entry_id=identity("entry"),
-        parent_content=InlineContent.from_bytes(b"excluded-manifest"),
         blocks=(
             AssistantTextBlock(identity("block"), blob),
             AssistantDataBlock(
@@ -324,11 +323,11 @@ def test_session_search_excludes_internal_native_tool_result(
     assert result.tool_call_count == 1
     tool_rows = rows(
         repo,
-        "SELECT inline_content FROM pulsara_v3.transcript_entries WHERE session_id=%s AND entry_kind='TOOL_RESULT'",
+        "SELECT p.inline_value FROM pulsara_v3.content_parts p JOIN pulsara_v3.transcript_entries e ON e.id=p.entry_id WHERE e.session_id=%s AND e.entry_kind='TOOL_RESULT' AND p.type='text'",
         (lease.guard.session_id,),
     )
-    assert tool_rows and tool_rows[0]["inline_content"]
-    tool_text = bytes(tool_rows[0]["inline_content"]).decode()
+    assert tool_rows and tool_rows[0]["inline_value"]
+    tool_text = bytes(tool_rows[0]["inline_value"]).decode()
     assert search(tool_text) == ([], None)
     assert len(search("root-visible-final")[0]) == 1
 

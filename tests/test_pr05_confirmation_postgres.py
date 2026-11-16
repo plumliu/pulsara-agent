@@ -17,7 +17,6 @@ from uuid import uuid4
 
 import pytest
 
-from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.host import KernelHostSession
 from pulsara_agent.conversation_kernel.interaction import (
     KernelInteractionCoordinator,
@@ -87,7 +86,6 @@ def pg_owner(database):
         lease.guard,
         cut=cut,
         entry_id=entry_id,
-        parent_content=InlineContent.from_bytes(b"tool request"),
         blocks=(
             AssistantToolCallBlock(
                 block_id=derive_id("block", "test-fixture", identity),

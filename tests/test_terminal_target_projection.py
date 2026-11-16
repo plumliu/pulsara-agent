@@ -8,7 +8,6 @@ from types import SimpleNamespace
 import pytest
 
 from pulsara_agent.identity import derive_id
-from pulsara_agent.llm.input import LLMTextPart
 from pulsara_agent.model_input.contracts import (
     CanonicalInputOriginKind,
     FrozenProviderInputItem,
@@ -22,7 +21,6 @@ from pulsara_agent.ports.terminal import (
 )
 from pulsara_agent.ports.terminal_observation import (
     CellOutputContent,
-    cell_output_provider_text,
 )
 from pulsara_agent.conversation_kernel.host import (
     KernelHostSession,
@@ -38,13 +36,23 @@ def ident(kind):
 @pytest.mark.parametrize("kind", ("log", "return", "diagnostic", "tool_result"))
 @pytest.mark.parametrize("text", ("ok", "\ud800", "\udfff", "汉\ud800🙂"))
 def test_cell_original_projection_preserves_exact_stored_text(kind, text):
-    record = (
-        {"kind": kind, "text": text}
+    from pulsara_agent.code_mode.output import project_output_record
+
+    raw = (
+        {"kind": kind, "values": [{"type": "text", "value": text}]}
         if kind in {"log", "return"}
-        else {"kind": "error", "error": {"message": text}}
-        if kind == "diagnostic"
-        else {"kind": "tool_result", "result": {"message": text}}
+        else (
+            {"kind": "error", "error": {"message": text}}
+            if kind == "diagnostic"
+            else {
+                "kind": "tool_result",
+                "tool_name": "sample",
+                "value": {"message": text},
+            }
+        )
     )
+    output_kind, parts = project_output_record(raw)
+    record = {"kind": output_kind, "content": list(parts)}
     fact = CellOutputContent(
         cell_id=ident("cell"),
         source_turn_id=ident("turn"),
@@ -52,7 +60,7 @@ def test_cell_original_projection_preserves_exact_stored_text(kind, text):
         record_sequence=1,
         record=record,
     )
-    expected = cell_output_provider_text(fact.storage_text)
+    expected = "".join(part.text for part in fact.content.parts)
     item = FrozenProviderInputItem(
         FrozenProviderInputItemKind.TERMINAL_OBSERVATION,
         ident("entry"),
@@ -60,13 +68,23 @@ def test_cell_original_projection_preserves_exact_stored_text(kind, text):
         ident("turn"),
         fact.content.parts,
         input_origin=CanonicalInputOriginKind.CELL_OUTPUT,
+        cell_output_source=fact.source,
     )
-    normal = lower_canonical_item(item).fixed_message
+    normal = lower_canonical_item(item).message
     assert normal is not None
-    assert normal.content == (LLMTextPart(expected),)
-    assert fact.record == record
+    assert normal.content[1:] == fact.content.parts
+    assert fact.cell_id in normal.content[0].text
+    assert kind in normal.content[0].text
+    from pulsara_agent.ports.tool_execution import thaw_tool_json_object
+
+    assert thaw_tool_json_object(fact.record) == record
     assert json.loads(fact.body) == {"parts": [{"type": "text", "text": expected}]}
-    assert normal.content[0].text.encode("utf-8").decode("utf-8") == expected
+    assert (
+        "".join(part.text for part in normal.content[1:])
+        .encode("utf-8")
+        .decode("utf-8")
+        == expected
+    )
 
 
 def test_human_stop_observation_projects_a_copyable_process_target():
@@ -86,16 +104,15 @@ def test_human_stop_observation_projects_a_copyable_process_target():
     host.workspace = SimpleNamespace(workspace_root="/tmp")
     body = asyncio.run(host.take_user_actions())
     assert body is not None
-    public = json.loads(body)["actions"][0]
+    from pulsara_agent.primitives.context import thaw_json
+
+    assert len(body) == 1
+    public = thaw_json(body[0].target)
     assert (
         parse_manage_process_input(
-            {"action": "poll", "target": public["target"]}
+            {"action": "wait", "target": public}
         ).target.process_id
         == process_id
     )
-    assert public["kind"] == "process_control"
-    assert public["origin"] == "ROOT"
-    assert public["status"] == "killed"
-    assert public["exit_code"] == -15
-    assert public["physical_state"] == "TERMINAL"
+    assert body[0].text == "用户已停止后台进程。"
     assert asyncio.run(host.take_user_actions()) is None

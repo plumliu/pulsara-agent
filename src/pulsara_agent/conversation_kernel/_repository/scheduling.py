@@ -15,6 +15,7 @@ from pulsara_agent.scheduling.contracts import (
     ScheduledTaskError,
     next_occurrence,
     validate_rule,
+    normalize_schedule_input,
     utc_instant,
 )
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
@@ -35,8 +36,7 @@ from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.context import context_fingerprint
 from .queue_content import read_input_owner
 from .prompts import queued_input_owner_is_exact
-from pulsara_agent.conversation_kernel.prompt_content import freeze_canonical_prompt
-from pulsara_agent.llm.input import FrozenPromptContent, LLMTextPart
+from pulsara_agent.llm.input import LLMTextPart
 from .locking import lock_session_admission
 from .request_execution import REQUEST_EXECUTION_COLUMNS, request_execution_from_row
 
@@ -51,13 +51,6 @@ _TASK_PROJECTION = """SELECT t.*, s.title AS session_title, q.id AS pending_queu
                     JOIN pulsara_v3.turns tr ON tr.session_id=e.session_id AND tr.id=e.turn_id
                     WHERE x.session_id=t.session_id AND x.scheduled_task_id=t.id ORDER BY x.queue_sequence DESC LIMIT 1) latest ON true
 """
-
-# Model inventory never hydrates prompt/name bodies. HTTP and scheduler reads
-# retain the original projection and their independent source-page contract.
-_MODEL_TASK_PROJECTION = _TASK_PROJECTION.replace("t.*", ", ".join(
-    "t." + key for key in ("id", "session_id", "revision", "status", "schedule", "timezone",
-                          "permission_mode", "next_run_at", "updated_at")))
-
 
 class _ExpiredPausedOnce(Exception):
     """Commit lifecycle deletion before returning the ordinary missing target."""
@@ -133,7 +126,6 @@ class _ScheduledTaskOperations:
         status=None,
         due_only=False,
         session_id=None,
-        model_summary=False,
         deadline_monotonic,
     ):
         if status is not None and status not in ("ACTIVE", "PAUSED"):
@@ -146,7 +138,7 @@ class _ScheduledTaskOperations:
             with c.cursor(name="scheduled_task_page", row_factory=dict_row) as page:
                 page.itersize = 1
                 page.execute(
-                    (_MODEL_TASK_PROJECTION if model_summary else _TASK_PROJECTION)
+                    _TASK_PROJECTION
                     + """                WHERE s.memory_domain_id=%s AND s.lifecycle='OPEN' AND (%s::text IS NULL OR t.id>%s)
                 AND (%s::text IS NULL OR t.status=%s)
                 AND (%s::text IS NULL OR t.session_id=%s)
@@ -182,6 +174,29 @@ class _ScheduledTaskOperations:
                     rows.append(row)
                     used += size
         return rows, (str(rows[-1]["id"]) if more else None)
+
+    def list_model_scheduled_tasks(self, *, session_id, memory_domain_id, status=None, deadline_monotonic):
+        with self._provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR, row_factory=dict_row,
+            isolation_level=IsolationLevel.REPEATABLE_READ, deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            return tuple(connection.execute(
+                _TASK_PROJECTION + "WHERE t.session_id=%s AND s.memory_domain_id=%s AND (%s::text IS NULL OR t.status=%s) ORDER BY t.id",
+                (session_id, memory_domain_id, status, status),
+            ).fetchall())
+
+    def read_saved_schedule_revisions(self, *, session_id, task_ids, memory_domain_id, deadline_monotonic):
+        with self._provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR, row_factory=dict_row, deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            return {str(row["task_id"]): int(row["revision"]) for row in connection.execute(
+                """SELECT facts.key AS task_id, max(facts.value::bigint) AS revision
+                   FROM pulsara_v3.tool_results r JOIN pulsara_v3.sessions s ON s.id=r.session_id
+                   CROSS JOIN LATERAL jsonb_each_text(COALESCE(r.result_facts->'schedule_revisions','{}'::jsonb)) facts
+                   WHERE r.session_id=%s AND s.memory_domain_id=%s
+                     AND r.output_unavailability_reason IS NULL AND facts.key=ANY(%s)
+                   GROUP BY facts.key""", (session_id, memory_domain_id, list(task_ids)),
+            ).fetchall()}
 
     def list_scheduled_task_sessions(
         self, *, memory_domain_id, query="", cursor=None, deadline_monotonic
@@ -265,17 +280,16 @@ class _ScheduledTaskOperations:
         values,
         status=None,
         model_resolution_snapshot,
-        result_check=None,
         deadline_monotonic,
     ):
         status = creation_status(status)
-        values = self._validate_scheduled_values(values)
         with self._scheduled_transaction(
             session_id=session_id,
             memory_domain_id=memory_domain_id,
             guard=guard,
             deadline_monotonic=deadline_monotonic,
         ) as (c, s):
+            values = self._validate_scheduled_values(values, now=s["database_now"], creating=True)
             if status == "ACTIVE":
                 self._assert_single_active_task(c, session_id)
             binding = model_call_binding_from_dict(s["model_call_binding"])
@@ -293,9 +307,6 @@ class _ScheduledTaskOperations:
                 )
             while monotonic() < deadline_monotonic:
                 task_id = random_id("schedule")
-                if result_check is not None:
-                    result_check({"id": task_id, "session_id": session_id, **values,
-                        "status": status, "revision": 1, "next_run_at": due if status == "ACTIVE" else None})
                 created = c.execute(
                     """INSERT INTO pulsara_v3.scheduled_tasks
                     (id, session_id, name, prompt, schedule, timezone, permission_mode, status, next_run_at, revision)
@@ -327,7 +338,6 @@ class _ScheduledTaskOperations:
         replacement,
         model_resolution_snapshot,
         cancelled_candidates=None,
-        result_check=None,
         deadline_monotonic,
     ):
         """The session writer owns both plans and cancellation in one transaction."""
@@ -365,20 +375,11 @@ class _ScheduledTaskOperations:
                     raise ScheduledTaskError(
                         "REVISION_CONFLICT", "目标计划已改变，请重新加载后选择。"
                     )
-                values = self._validate_scheduled_values(
-                    {
-                        k: destination[k]
-                        for k in (
-                            "name",
-                            "prompt",
-                            "schedule",
-                            "timezone",
-                            "permission_mode",
-                        )
-                    }
-                )
+                values = {key: destination[key] for key in (
+                    "name", "prompt", "schedule", "timezone", "permission_mode")}
             else:
-                values = self._validate_scheduled_values(replacement["values"])
+                values = self._validate_scheduled_values(
+                    replacement["values"], now=session["database_now"], creating=True)
             binding = model_call_binding_from_dict(session["model_call_binding"])
             if binding is None:
                 raise ScheduledTaskError(
@@ -393,14 +394,6 @@ class _ScheduledTaskOperations:
                     "TIME_RANGE_EXHAUSTED", "没有可用的未来触发时点。"
                 )
             new_task_id = random_id("schedule") if replacement["kind"] == "create" else None
-            projected_paused = {**source, "status": "PAUSED", "revision": source["revision"] + 1, "next_run_at": None}
-            def check_switch(candidate_id):
-                if result_check is not None:
-                    active = {"id": candidate_id, "session_id": session_id, **values,
-                        "revision": 1 if replacement["kind"] == "create" else destination["revision"] + 1,
-                        "status": "ACTIVE", "next_run_at": due}
-                    result_check({"paused": projected_paused, "active": active})
-            check_switch(new_task_id if new_task_id is not None else destination["id"])
             self._cancel_scheduled_pending_in_connection(
                 c, guard, source, cancelled_candidates
             )
@@ -433,7 +426,6 @@ class _ScheduledTaskOperations:
                     if active is not None:
                         break
                     new_task_id = random_id("schedule")
-                    check_switch(new_task_id)
                 else:
                     raise TimeoutError("schedule allocation deadline expired")
             return paused, active
@@ -455,32 +447,29 @@ class _ScheduledTaskOperations:
             )
 
     @staticmethod
-    def _validate_scheduled_values(values):
-        if not isinstance(values, dict) or set(values) != {
-            "name",
-            "prompt",
-            "schedule",
-            "timezone",
-            "permission_mode",
-        }:
+    def _validate_scheduled_values(values, *, now, creating, previous=None):
+        allowed = {"name", "prompt", "schedule", "timezone", "permission_mode"}
+        required = {"name", "prompt", "schedule", "permission_mode"} if creating else set()
+        if (not isinstance(values, dict) or not values or set(values) - allowed
+            or not required <= set(values)):
             raise ScheduledTaskError("INVALID_REQUEST", "任务配置字段无效。")
-        if any(
-            not isinstance(values[k], str) or not values[k].strip()
-            for k in ("name", "prompt")
-        ):
+        result = {} if previous is None else dict(previous)
+        result.update(values)
+        result.setdefault("timezone", "Asia/Shanghai")
+        if any(not isinstance(result.get(key), str) or not result[key].strip() for key in ("name", "prompt")):
             raise ScheduledTaskError("INVALID_REQUEST", "名称和提示词不能为空。")
-        # Reuse canonical input's actual storage/admission boundary, no new small cap.
-        freeze_canonical_prompt(
-            FrozenPromptContent(
-                (LLMTextPart(values["name"]), LLMTextPart(values["prompt"]))
+        result["name"].encode("utf-8")
+        result["prompt"].encode("utf-8")
+        result["permission_mode"] = PermissionMode(result["permission_mode"]).value
+        if "schedule" in values:
+            result["schedule"] = normalize_schedule_input(
+                values["schedule"], result["timezone"], now, creating=creating,
+                previous_rule=None if previous is None else previous["schedule"],
+                previous_timezone=None if previous is None else previous["timezone"],
             )
-        )
-        mode = PermissionMode(values["permission_mode"])
-        return {
-            **values,
-            "schedule": validate_rule(values["schedule"], values["timezone"]),
-            "permission_mode": mode.value,
-        }
+        else:
+            validate_rule(result["schedule"], result["timezone"])
+        return result
 
     def mutate_scheduled_task(
         self,
@@ -493,7 +482,6 @@ class _ScheduledTaskOperations:
         action,
         values=None,
         cancelled_candidates=None,
-        result_check=None,
         deadline_monotonic,
     ):
         with self._scheduled_transaction(
@@ -522,13 +510,8 @@ class _ScheduledTaskOperations:
             status, due = t["status"], t["next_run_at"]
             if action in ("pause", "delete"):
                 if action == "delete":
-                    if result_check is not None:
-                        result_check(t)
                     self._delete_scheduled_task_in_connection(c, guard, t, cancelled_candidates)
-                    return None
-                if result_check is not None:
-                    result_check({**t, "status": "PAUSED", "next_run_at": None,
-                        "revision": t["revision"] + (1 if status == "ACTIVE" else 0)})
+                    return t
                 self._cancel_scheduled_pending_in_connection(
                     c, guard, t, cancelled_candidates
                 )
@@ -545,7 +528,7 @@ class _ScheduledTaskOperations:
                         )
                     status = "ACTIVE"
             elif action == "update":
-                new = self._validate_scheduled_values(values)
+                new = self._validate_scheduled_values(values, now=s["database_now"], creating=False, previous=old)
                 effective = new["schedule"] != old["schedule"] or (
                     new["timezone"] != old["timezone"]
                     and new["schedule"]["kind"] not in ("once", "interval")
@@ -570,13 +553,9 @@ class _ScheduledTaskOperations:
             else:
                 raise ScheduledTaskError("INVALID_ACTION", "任务操作无效。")
             if new == old and status == t["status"] and due == t["next_run_at"]:
-                if result_check is not None:
-                    result_check(t)
                 return t
             if status == "ACTIVE" and t["status"] != "ACTIVE":
                 self._assert_single_active_task(c, session_id, task_id)
-            if result_check is not None:
-                result_check({**t, **new, "status": status, "next_run_at": due, "revision": t["revision"] + 1})
             return c.execute(
                 """UPDATE pulsara_v3.scheduled_tasks SET name=%s,prompt=%s,schedule=%s,timezone=%s,permission_mode=%s,
                  status=%s,next_run_at=%s,revision=revision+1,updated_at=clock_timestamp() WHERE id=%s RETURNING *""",

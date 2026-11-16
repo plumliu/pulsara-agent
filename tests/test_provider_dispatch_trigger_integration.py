@@ -8,13 +8,11 @@ from dataclasses import replace
 import pytest
 
 from pulsara_agent.conversation_kernel.compaction.contracts import ResolvedCompactionPolicy
-from pulsara_agent.conversation_kernel.context_sources import build_memory_context_source
 from pulsara_agent.conversation_kernel.direct_model import DirectKernelModelPort
 from pulsara_agent.conversation_kernel.host import KernelHostCore
 from pulsara_agent.conversation_kernel.memory.contracts import MemoryUsePolicy
 from pulsara_agent.identity import random_id
 from pulsara_agent.llm.input import PromptContent, text_part_values
-from pulsara_agent.model_input.contracts import ContextSourceKind
 from pulsara_agent.workspace_identity import HostWorkspaceInput
 from tests.dogfood.run_compaction_request_start_dogfood import _seed_history
 from tests.support.model_config import test_model_binding, test_model_runtime
@@ -51,14 +49,16 @@ def test_initial_trigger_is_prepared_once_after_summary_without_rebuilding_roots
         frozen_roots = []
         marker = "INITIAL_TRIGGER_RECALL_FROM_REAL_MEMORY_PORT"
 
-        async def recall(query, *, canonical_facts=None):
+        async def recall(query, *, previous_state, canonical_facts=None,trigger_policy=None):
             queries.append((query, canonical_facts))
-            return build_memory_context_source(
-                kind=ContextSourceKind.MEMORY_RECALL,
-                texts=(marker, marker, marker),
-            )
+            from pulsara_agent.conversation_kernel.memory.contracts import MemoryObservationCandidate,MemoryObservationText
+            if trigger_policy is not None and not trigger_policy.memory_use.allows_reads:
+                queries.pop()
+                return MemoryObservationCandidate((),previous_state)
+            return MemoryObservationCandidate((MemoryObservationText(marker),),previous_state)
 
-        monkeypatch.setattr(root._memory_tools, "freeze_automatic_recall_source", recall)
+
+        monkeypatch.setattr(root._memory_tools, "prepare_memory_observation", recall)
         original_finalize = root._runner._provider_dispatch.finalize_compaction_input
 
         async def observe_base(base, decision, **kwargs):

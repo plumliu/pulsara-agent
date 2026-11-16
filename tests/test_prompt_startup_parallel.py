@@ -9,11 +9,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from pulsara_agent.conversation_kernel.context_sources import build_memory_context_source
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.memory_tools import KernelMemoryToolPort
 from pulsara_agent.memory.scope import MemoryDomainContext, freeze_memory_read_context_binding
-from pulsara_agent.model_input.contracts import ContextSourceKind, ContextSourceAbsenceKind
 from tests.retrieval_fixtures import save_model
 from pulsara_agent.retrieval.config import EmbeddingBackendConfig
 from pulsara_agent.settings import LocalSettingsStore
@@ -78,7 +76,7 @@ def test_embedding_overlaps_sparse_and_history_and_cancellation_drains_all(tmp_p
         port._query.canonical_refetch = lambda **kwargs: ()
         port._embedding_provider = provider
 
-        task = asyncio.create_task(port.freeze_automatic_recall_source("请测试一下runtime的启动速度", canonical_facts=canonical_facts))
+        task = asyncio.create_task(port._mixed_candidates("请测试一下runtime的启动速度", canonical_facts))
         try:
             if cancel:
                 assert await asyncio.to_thread(sparse_started.wait, 5)
@@ -94,7 +92,7 @@ def test_embedding_overlaps_sparse_and_history_and_cancellation_drains_all(tmp_p
                 assert not port._remote_tasks
             else:
                 result = await asyncio.wait_for(task, 5)
-                assert result.absence_kind is ContextSourceAbsenceKind.EXPLICIT_EMPTY
+                assert result == ()
                 assert history_done.is_set()
         finally:
             release_search.set()
@@ -108,7 +106,7 @@ def test_embedding_overlaps_sparse_and_history_and_cancellation_drains_all(tmp_p
 
 @pytest.mark.postgres
 @pytest.mark.parametrize("failure", [False, True])
-def test_real_admission_overlaps_compile_and_recall_without_detached_tasks(
+def test_real_admission_installs_completed_memory_candidate_without_detached_tasks(
     tmp_path: Path, monkeypatch, stage2_migrated_postgres_database, failure,
 ):
     import pulsara_agent.conversation_kernel.host as host
@@ -130,15 +128,13 @@ def test_real_admission_overlaps_compile_and_recall_without_detached_tasks(
             recall_started, recall_done = Event(), Event()
             recall_calls = 0
 
-            async def recall(_text, *, canonical_facts):
+            async def recall(_text, *, previous_state, canonical_facts, trigger_policy=None):
                 nonlocal recall_calls
                 recall_calls += 1
                 recall_started.set()
                 try:
-                    if failure:
-                        await asyncio.Event().wait()
-                    return build_memory_context_source(kind=ContextSourceKind.MEMORY_RECALL,
-                        texts=None, absence_kind=ContextSourceAbsenceKind.EXPLICIT_EMPTY)
+                    from pulsara_agent.conversation_kernel.memory.contracts import MemoryObservationCandidate,MemoryObservationText
+                    return MemoryObservationCandidate((MemoryObservationText("读取失败") ,),None) if failure else MemoryObservationCandidate((),previous_state)
                 finally:
                     recall_done.set()
 
@@ -146,19 +142,13 @@ def test_real_admission_overlaps_compile_and_recall_without_detached_tasks(
             original = assembler.prepare_semantic
 
             def compile_input(**kwargs):
-                assert recall_started.wait(5), "recall waited for base compilation"
-                if failure:
-                    raise ValueError("test base compilation failure")
+                assert recall_started.is_set(), "memory candidate must be complete before final compilation"
                 return original(**kwargs)
 
-            monkeypatch.setattr(session._memory_tools, "freeze_automatic_recall_source", recall)
+            monkeypatch.setattr(session._memory_tools, "prepare_memory_observation", recall)
             monkeypatch.setattr(assembler, "prepare_semantic", compile_input)
-            if failure:
-                with pytest.raises(ValueError, match="test base compilation failure"):
-                    await session.run_turn(PromptContent.text("请测试消息启动并行准备"))
-            else:
-                result = await session.run_turn(PromptContent.text("请测试消息启动并行准备"))
-                assert result.final_text == "STAGE2_DOGFOOD_OK"
+            result=await session.run_turn(PromptContent.text("请测试消息启动准备"))
+            assert result.final_text == "STAGE2_DOGFOOD_OK"
             assert recall_calls == 1
             assert recall_done.is_set()
         finally:

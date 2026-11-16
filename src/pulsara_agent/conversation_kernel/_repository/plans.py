@@ -16,11 +16,10 @@ from pulsara_agent.conversation_kernel.content_parts import (
     ResultPart, write_content_parts, read_content_parts, public_result_parts, move_queue_content_parts,
 )
 from pulsara_agent.conversation_kernel.tool_outputs import (
-    assemble_tool_business_value, project_tool_result_export,
+    assemble_tool_business_value,
 )
 from .queue_content import publish_queue_input
 
-import json
 from datetime import datetime
 from typing import Mapping
 from psycopg import Connection, IsolationLevel
@@ -34,7 +33,6 @@ from pulsara_agent.conversation_kernel.contracts import (
     InlineContent,
     canonical_digest,
 )
-from pulsara_agent.primitives.tool_result_projection import project_tool_result_storage_body
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
     canonical_json_bytes,
@@ -59,7 +57,7 @@ from pulsara_agent.primitives.plan_workflow import (
     PlanQuestionAnswerKind,
     PlanQuestionContent,
     PlanWorkflowStatus,
-    extract_plan_entry_reason,
+    validate_plan_entry_arguments,
     extract_plan_draft,
     extract_plan_question,
     read_plan_draft_chunk,
@@ -126,8 +124,6 @@ def _plan_question_response(
             "selected_option_ordinal": answer.option_ordinal,
             "selected_label": content.options[answer.option_ordinal].label,
         }
-    if not content.allow_free_text:
-        raise ConversationKernelConflict("Plan question does not allow free text")
     return {"answer_kind": "FREE_TEXT", "answer": answer.free_text}
 
 
@@ -135,7 +131,8 @@ def _plan_question_result_values(
     *,
     interaction: Mapping[str, object],
     answer: PlanQuestionAnswer | None,
-) -> tuple[FrozenJsonObjectFact, dict[str, object], InlineContent]:
+    timed_out: bool = False,
+) -> tuple[FrozenJsonObjectFact, dict[str, object], dict[str, object]]:
     frozen = freeze_json(dict(interaction["tool_arguments"]))
     if not isinstance(frozen, FrozenJsonObjectFact):
         raise ConversationKernelConflict("Plan question arguments are invalid")
@@ -143,19 +140,15 @@ def _plan_question_result_values(
         interaction_id=str(interaction["id"]),
         arguments=frozen,
     )
-    response = ({"cancelled_by": "USER_CANCELLED", "message": "用户取消了问题"} if answer is None
+    response = ({"cancelled_by": "WAIT_EXPIRED" if timed_out else "USER_CANCELLED", "message": "问题等待回答超时（10 分钟），未获得用户回答。" if timed_out else "用户取消了本次问题。"} if answer is None
                 else _plan_question_response(content=content, answer=answer))
     return (
         frozen,
         response,
-        _plan_inline(
-            {
-                "status": "cancelled" if answer is None else "success",
-                "plan_control": "QUESTION_CANCELLED" if answer is None else "QUESTION_ANSWERED",
-                "interaction_id": str(interaction["id"]),
-                **response,
-            }
-        ),
+        {
+            "plan_control": "QUESTION_CANCELLED" if answer is None else "QUESTION_ANSWERED",
+            **response,
+        },
     )
 
 
@@ -224,69 +217,77 @@ def _plan_review_body(
     )
 
 
-def _plan_result_parts(
-    content: InlineContent, origin_kind: str
-) -> tuple[ResultPart, ...]:
-    """Store the public observation once; execution control remains relational."""
-    body = project_tool_result_storage_body(
-        content.canonical_bytes.decode("utf-8"),
-        ToolObservationOrigin.PLAN_CONTROL
-        if origin_kind == "PLAN_CONTROL"
-        else ToolObservationOrigin.POLICY,
-    )
-    value = json.loads(body)
-    value.pop("status", None)
-    return (ResultPart("object", value),)
+def _plan_result_parts(payload: Mapping[str, object], origin_kind: str) -> tuple[ResultPart, ...]:
+    """Project explicit Plan facts into the tool's declared text-only result."""
+    control = payload.get("plan_control")
+    if control == "ENTERED_PLAN":
+        text = "已进入计划模式。"
+    elif control == "PLAN_ALREADY_ACTIVE":
+        text = "当前已处于计划模式。"
+    elif control == "EXITED_PLAN":
+        text = f"已退出计划模式，恢复 {payload['resume_permission_mode']} 权限并继续。"
+    elif control == "QUESTION_ANSWERED":
+        text = (f"用户选择：{payload['selected_label']}" if payload["answer_kind"] == "OPTION"
+                else str(payload["answer"]))
+    elif control == "QUESTION_CANCELLED":
+        text = str(payload["message"])
+    elif control == "REJECTED":
+        text = {"INVALID_ARGUMENTS": "Plan 工具参数无效，请按工具声明提供参数。",
+                "TOOL_UNAVAILABLE": "当前无法执行这项 Plan 操作。",
+                "HOOK_BLOCKED": "这项 Plan 操作已被 Hook 阻止。"}[str(payload["error_kind"])]
+    elif payload.get("reason") == "plan_workflow_batch_barrier":
+        text = "Plan 控制必须单独调用；本次同批其他工具未执行。"
+    else:
+        raise ValueError("unknown Plan result facts")
+    return (ResultPart("text", text),)
 
 
-def _plan_business_body(content, origin_kind, result_state) -> str:
-    return canonical_json_bytes(
-        assemble_tool_business_value(
-            public_fields={},
-            content_parts=_plan_result_parts(content, origin_kind),
-            result_state=result_state,
-        )
-    ).decode("utf-8")
+def _plan_business_body(payload, origin_kind, result_state) -> str:
+    return canonical_json_bytes(assemble_tool_business_value(
+        public_fields={}, content_parts=_plan_result_parts(payload, origin_kind), result_state=result_state,
+    )).decode("utf-8")
 
 
-def _plan_result_is_exact(connection, row, content, origin_kind) -> bool:
-    return (
-        row["public_fields"] == {}
-        and row["result_facts"] == {}
+def _plan_result_is_exact(connection, row, payload, origin_kind) -> bool:
+    return (row["public_fields"] == {} and row["result_facts"] == {}
         and row["output_unavailability_reason"] is None
-        and public_result_parts(
-            read_content_parts(
-                connection,
-                session_id=str(row["session_id"]),
-                entry_id=str(row["result_entry_id"]),
-            )
-        )
-        == _plan_result_parts(content, origin_kind)
-    )
+        and public_result_parts(read_content_parts(connection, session_id=str(row["session_id"]),
+            entry_id=str(row["result_entry_id"]))) == _plan_result_parts(payload, origin_kind))
 
 
 def _plan_review_result_parts(
-    decision: PlanDraftDecision, resume_mode: str
+    decision: PlanDraftDecision, resume_mode: str, *,
+    timed_out: bool = False, file_error: str | None = None
 ) -> tuple[ResultPart, ...]:
     text = {
         PlanDraftDecision.APPROVE: f"用户已批准方案；已恢复 {resume_mode} 权限。",
         PlanDraftDecision.REVISE: "用户要求修订方案。",
         PlanDraftDecision.CANCEL: "用户取消了本次审批。",
     }[decision]
+    if timed_out:
+        text = "方案审批等待超时（10 分钟），未获得用户批准。"
+    if file_error is not None:
+        text += "\nMarkdown 文件保存失败：" + file_error
     return (ResultPart("text", text),)
 
 
+def _plan_review_public_fields(interaction) -> dict:
+    path = interaction["plan_file_path"]
+    return {"target": {"kind": "PATH", "path": path}} if path is not None else {}
+
+
 def _plan_review_settlement(
-    *, interaction, decision, result_id, result_entry_id, entry_sequence, occurred_at
+    *, interaction, decision, result_id, result_entry_id, entry_sequence, occurred_at, timed_out=False
 ):
     state = "CANCELLED" if decision is PlanDraftDecision.CANCEL else "SUCCESS"
     arguments = freeze_json(dict(interaction["tool_arguments"]))
     if not isinstance(arguments, FrozenJsonObjectFact):
         raise ConversationKernelConflict("Plan review call arguments are invalid")
     value = assemble_tool_business_value(
-        public_fields={},
+        public_fields=_plan_review_public_fields(interaction),
         content_parts=_plan_review_result_parts(
-            decision, str(interaction["resume_permission_mode"])
+            decision, str(interaction["resume_permission_mode"]),
+            timed_out=timed_out, file_error=interaction["plan_file_error"]
         ),
         result_state=state,
     )
@@ -377,7 +378,7 @@ def _plan_tool_result_settlement(
         accepted_entry_sequence=accepted_entry_sequence,
         result_state=result_state,
         result_origin_kind=result_origin_kind,
-        canonical_body=_plan_business_body(_plan_inline(payload), result_origin_kind, result_state),
+        canonical_body=_plan_business_body(payload, result_origin_kind, result_state),
                 observed_at=candidate.occurred_at,
         observation_origin=(
             ToolObservationOrigin.PLAN_CONTROL
@@ -565,6 +566,7 @@ class _PlanOperations:
             question: PlanQuestionContent | None = None
             draft: ExtractedPlanDraft | None = None
             interaction_kind: PlanInteractionKind | None = None
+            interaction_accepted_at = None
             if candidate.control_kind is PlanToolControlKind.ENTER:
                 if candidate.idempotent_existing:
                     if (
@@ -598,7 +600,7 @@ class _PlanOperations:
                         connection, candidate=candidate, active=active
                     )
                 )
-                question, draft, interaction_kind = self._insert_plan_interaction(
+                question, draft, interaction_kind, interaction_accepted_at = self._insert_plan_interaction(
                     connection,
                     candidate=candidate,
                     workflow_revision=workflow_revision,
@@ -643,7 +645,7 @@ class _PlanOperations:
                 )
                 write_content_parts(connection, session_id=guard.session_id,
                     workspace_id=candidate.workspace_id, entry_id=call.result_entry_id,
-                    parts=_plan_result_parts(_plan_inline(payload), origin_kind),
+                    parts=_plan_result_parts(payload, origin_kind),
                     publisher=self._canonical_content_publisher)
                 connection.execute(
                     """
@@ -814,6 +816,7 @@ class _PlanOperations:
                 continuation_entry_id=continuation_entry_id,
                 origin_turn_completed=origin_completed,
                 tool_result_settlements=tuple(settlements),
+                interaction_accepted_at=interaction_accepted_at,
             )
 
     def _accept_rejected_plan_tool_batch_in_transaction(
@@ -868,7 +871,7 @@ class _PlanOperations:
             )
             write_content_parts(connection, session_id=guard.session_id,
                 workspace_id=candidate.workspace_id, entry_id=call.result_entry_id,
-                parts=_plan_result_parts(_plan_inline(payload), "POLICY_NO_ATTEMPT"),
+                parts=_plan_result_parts(payload, "POLICY_NO_ATTEMPT"),
                 publisher=self._canonical_content_publisher)
             connection.execute(
                 """
@@ -980,6 +983,7 @@ class _PlanOperations:
         expected_workflow_revision: int,
         interaction_id: str,
         answer: PlanQuestionAnswer | None,
+        timed_out: bool = False,
         result_id: str,
         result_entry_id: str,
         occurred_at: datetime,
@@ -1010,6 +1014,7 @@ class _PlanOperations:
                 guard,
                 interaction=interaction,
                 answer=answer,
+                timed_out=timed_out,
                 result_id=result_id,
                 result_entry_id=result_entry_id,
                 occurred_at=occurred_at,
@@ -1081,6 +1086,7 @@ class _PlanOperations:
         *,
         interaction: Mapping[str, object],
         answer: PlanQuestionAnswer | None,
+        timed_out: bool = False,
         result_id: str,
         result_entry_id: str,
         occurred_at: datetime,
@@ -1089,6 +1095,7 @@ class _PlanOperations:
         frozen, _response, result_content = _plan_question_result_values(
             interaction=interaction,
             answer=answer,
+            timed_out=timed_out,
         )
         lock_clause = "FOR UPDATE OF t" if lock else ""
         turn = connection.execute(
@@ -1148,12 +1155,20 @@ class _PlanOperations:
             observed_at=occurred_at,
             observation_origin=ToolObservationOrigin.PLAN_CONTROL,
         )
-        # Prospective input must use the same complete-result projection and
-        # byte quote as the canonical reader after this result is accepted.
-        projected = project_tool_result_export(
-            json.loads(accepted_settlement.public_projection.canonical_body)
+        from pulsara_agent.conversation_kernel.native_tool_delivery import (
+            project_native_tool_page, render_native_tool_page, bind_native_observation,
         )
-        body = projected.decode("utf-8")
+        value = assemble_tool_business_value(public_fields={},
+            content_parts=_plan_result_parts(result_content, "PLAN_CONTROL"),
+            result_state="CANCELLED_BEFORE_DISPATCH" if answer is None else "SUCCESS")
+        def no_image(_ref):
+            raise ValueError("Plan question results contain text only")
+        page = project_native_tool_page(session_id=guard.session_id, entry_id=result_entry_id,
+            value=value, image_reader=no_image, source_tool_name="ask_plan_question",
+            source_arguments=thaw_json(frozen))
+        page = bind_native_observation(page, observed_at=occurred_at, duration_microseconds=None)
+        body = render_native_tool_page(page, observed_at=occurred_at, duration_microseconds=None)
+        projected = body.encode("utf-8")
         revision = int(interaction["workflow_revision"]) + 1
         return PreparedActiveRootInputCandidate(
             workspace_id=str(interaction["workspace_id"]),
@@ -1177,12 +1192,13 @@ class _PlanOperations:
                     tool_request_entry_id=str(interaction["assistant_entry_id"]),
                     tool_result_context=accepted_settlement.public_projection.metadata,
                     tool_result_body_text=body,
-                    tool_result_delivery=accepted_settlement.public_projection.delivery,
+                    native_page=page,
                 ),
             ),
             unpublished_item_canonical_expanded_bytes=(
                 len(projected),
             ),
+            native_tool_page=page,
             prospective_plan_workflow_fact=_freeze_active_plan_workflow_fact(
                 row=interaction,
                 permission=permission,
@@ -1200,6 +1216,7 @@ class _PlanOperations:
         expected_workflow_revision: int,
         interaction_id: str,
         answer: PlanQuestionAnswer | None,
+        timed_out: bool = False,
         result_id: str,
         result_entry_id: str,
         provider_input_admission: PreparedActiveRootInputAdmission,
@@ -1212,6 +1229,7 @@ class _PlanOperations:
             expected_workflow_revision=expected_workflow_revision,
             interaction_id=interaction_id,
             answer=answer,
+            timed_out=timed_out,
             result_id=result_id,
             result_entry_id=result_entry_id,
         )
@@ -1227,6 +1245,7 @@ class _PlanOperations:
                 command_id=command_id,
                 semantic_digest=semantic_digest,
                 expected_question_answer=answer,
+                expected_timed_out=timed_out,
                 expected_result_id=result_id,
                 expected_result_entry_id=result_entry_id,
                 expected_workflow_revision=expected_workflow_revision,
@@ -1242,6 +1261,7 @@ class _PlanOperations:
                 command_id=command_id,
                 semantic_digest=semantic_digest,
                 expected_question_answer=answer,
+                expected_timed_out=timed_out,
                 expected_result_id=result_id,
                 expected_result_entry_id=result_entry_id,
                 expected_workflow_revision=expected_workflow_revision,
@@ -1265,6 +1285,7 @@ class _PlanOperations:
                 guard,
                 interaction=interaction,
                 answer=answer,
+                timed_out=timed_out,
                 result_id=result_id,
                 result_entry_id=result_entry_id,
                 occurred_at=occurred_at,
@@ -1277,6 +1298,7 @@ class _PlanOperations:
             frozen, response, result_content = _plan_question_result_values(
                 interaction=interaction,
                 answer=answer,
+                timed_out=timed_out,
             )
             entry_sequence = self._allocate_entry_sequence(connection, guard.session_id)
             self._insert_entry(
@@ -1487,6 +1509,7 @@ class _PlanOperations:
         expected_workflow_revision: int,
         interaction_id: str,
         answer: PlanQuestionAnswer | None,
+        timed_out: bool = False,
         result_id: str,
         result_entry_id: str,
         deadline_monotonic: float,
@@ -1498,6 +1521,7 @@ class _PlanOperations:
             expected_workflow_revision=expected_workflow_revision,
             interaction_id=interaction_id,
             answer=answer,
+            timed_out=timed_out,
             result_id=result_id,
             result_entry_id=result_entry_id,
         )
@@ -1513,6 +1537,7 @@ class _PlanOperations:
                 command_id=command_id,
                 semantic_digest=semantic_digest,
                 expected_question_answer=answer,
+                expected_timed_out=timed_out,
                 expected_result_id=result_id,
                 expected_result_entry_id=result_entry_id,
                 expected_workflow_revision=expected_workflow_revision,
@@ -1524,19 +1549,15 @@ class _PlanOperations:
         *,
         command_id: str,
         workflow_id: str,
-        entry_reason: str,
         resume_permission_mode: PermissionMode,
         occurred_at: datetime,
         actor_id: str,
         deadline_monotonic: float,
     ) -> AcceptedPlanWorkflowCommand:
-        if not entry_reason or len(entry_reason.encode("utf-8")) > 4096:
-            raise ValueError("Plan entry reason is outside its bound")
         semantic_digest = canonical_digest(
             "pulsara:user-enter-plan:v1",
             {
                 "workflow_id": workflow_id,
-                "entry_reason": entry_reason,
                 "resume_permission_mode": resume_permission_mode.value,
             },
         )
@@ -1623,10 +1644,10 @@ class _PlanOperations:
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.plan_workflows (
-                id, session_id, workspace_id, workflow_ordinal, status, entered_by, entry_reason,
+                id, session_id, workspace_id, workflow_ordinal, status, entered_by,
                 entry_command_id, resume_permission_mode, workflow_revision
             ) VALUES (
-                %s, %s, %s, %s, 'ACTIVE', 'USER', %s, %s, %s, 1
+                %s, %s, %s, %s, 'ACTIVE', 'USER', %s, %s, 1
             )
                 """,
                 (
@@ -1634,7 +1655,6 @@ class _PlanOperations:
                     guard.session_id,
                     workspace_id,
                     ordinal,
-                    entry_reason,
                     command_id,
                     resume_permission_mode.value,
                 ),
@@ -2075,6 +2095,7 @@ class _PlanOperations:
         actor_id: str,
         deadline_monotonic: float,
         source_queue_item_id: str | None = None,
+        timed_out: bool = False,
     ) -> AcceptedPlanResolution:
         canonical_prompt, continuation_values, semantic_digest = (
             plan_draft_review_semantic_candidate(
@@ -2084,6 +2105,7 @@ class _PlanOperations:
                 decision=decision,
                 canonical_prompt=canonical_prompt,
                 source_queue_item_id=source_queue_item_id,
+                timed_out=timed_out,
                 continuation_turn_id=continuation_turn_id,
                 continuation_entry_id=continuation_entry_id,
                 continuation_context_binding_revision_id=(
@@ -2101,6 +2123,7 @@ class _PlanOperations:
                 command_id=command_id,
                 semantic_digest=semantic_digest,
                 expected_workflow_revision=expected_workflow_revision,
+                expected_timed_out=timed_out,
             )
             if winner is not None:
                 if decision is PlanDraftDecision.REVISE:
@@ -2189,7 +2212,8 @@ class _PlanOperations:
                 "CANCELLED" if decision is PlanDraftDecision.CANCEL else "SUCCESS"
             )
             result_parts = _plan_review_result_parts(
-                decision, str(interaction["resume_permission_mode"])
+                decision, str(interaction["resume_permission_mode"]),
+                timed_out=timed_out, file_error=interaction["plan_file_error"]
             )
             sequence = self._allocate_entry_sequence(connection, guard.session_id)
             self._insert_entry(
@@ -2235,7 +2259,7 @@ class _PlanOperations:
                     result_state,
                     interaction["permission_snapshot_fingerprint"],
                     interaction_id,
-                    Json({}),
+                    Json(_plan_review_public_fields(interaction)),
                     Jsonb({}),
                     occurred_at,
                 ),
@@ -2477,7 +2501,7 @@ class _PlanOperations:
                 result_id=result_id,
                 result_entry_id=result_entry_id,
                 entry_sequence=sequence,
-                occurred_at=occurred_at,
+                occurred_at=occurred_at, timed_out=timed_out,
             )
             return AcceptedPlanResolution(
                 command_id=command_id,
@@ -2511,6 +2535,7 @@ class _PlanOperations:
         continuation_context_binding_revision_id: str | None,
         deadline_monotonic: float,
         source_queue_item_id: str | None = None,
+        timed_out: bool = False,
     ) -> AcceptedPlanResolution | None:
         """Query one stable Plan review winner without writer authority."""
 
@@ -2521,6 +2546,7 @@ class _PlanOperations:
             decision=decision,
             canonical_prompt=canonical_prompt,
             source_queue_item_id=source_queue_item_id,
+            timed_out=timed_out,
             continuation_turn_id=continuation_turn_id,
             continuation_entry_id=continuation_entry_id,
             continuation_context_binding_revision_id=(
@@ -2539,6 +2565,7 @@ class _PlanOperations:
                 command_id=command_id,
                 semantic_digest=semantic_digest,
                 expected_workflow_revision=expected_workflow_revision,
+                expected_timed_out=timed_out,
             )
             if winner is not None and decision is PlanDraftDecision.REVISE:
                 _confirm_plan_review_feedback(
@@ -2725,9 +2752,7 @@ class _PlanOperations:
                 "Plan enter candidate lost the no-active-workflow cut"
             )
         try:
-            reason = extract_plan_entry_reason(
-                arguments=candidate.selected_arguments,
-            )
+            validate_plan_entry_arguments(arguments=candidate.selected_arguments)
         except ValueError as exc:
             raise ConversationKernelConflict("Plan entry reason is invalid") from exc
         ordinal = int(
@@ -2743,11 +2768,11 @@ class _PlanOperations:
         connection.execute(
             """
             INSERT INTO pulsara_v3.plan_workflows (
-                id, session_id, workspace_id, workflow_ordinal, status, entered_by, entry_reason,
+                id, session_id, workspace_id, workflow_ordinal, status, entered_by,
                 entry_turn_id, entry_assistant_entry_id, entry_tool_call_id, resume_permission_mode,
                 workflow_revision
             ) VALUES (
-                %s, %s, %s, %s, 'ACTIVE', 'AGENT', %s, %s, %s, %s, %s, 1
+                %s, %s, %s, %s, 'ACTIVE', 'AGENT', %s, %s, %s, %s, 1
             )
             """,
             (
@@ -2755,7 +2780,6 @@ class _PlanOperations:
                 candidate.session_id,
                 candidate.workspace_id,
                 ordinal,
-                reason,
                 candidate.origin_turn_id,
                 candidate.assistant_entry_id,
                 selected.tool_call_id,
@@ -2868,15 +2892,15 @@ class _PlanOperations:
             )
             kind = PlanInteractionKind.DRAFT_REVIEW
             control_result_id = None
-        connection.execute(
+        interaction_row = connection.execute(
             """
             INSERT INTO pulsara_v3.plan_interactions (
                 id, session_id, workspace_id, plan_workflow_id, interaction_ordinal, kind, status,
                 origin_turn_id, assistant_entry_id, tool_call_id, request_semantic_digest,
-                control_tool_result_id
+                control_tool_result_id, plan_file_path, plan_file_error
             ) VALUES (
-                %s, %s, %s, %s, %s, %s, 'OPEN', %s, %s, %s, %s, %s
-            )
+                %s, %s, %s, %s, %s, %s, 'OPEN', %s, %s, %s, %s, %s, %s, %s
+            ) RETURNING accepted_at
             """,
             (
                 candidate.interaction_id,
@@ -2889,10 +2913,10 @@ class _PlanOperations:
                 candidate.assistant_entry_id,
                 selected.tool_call_id,
                 request_digest,
-                control_result_id,
+                control_result_id, candidate.plan_file_path, candidate.plan_file_error,
             ),
-        )
-        return question, draft, kind
+        ).fetchone()
+        return question, draft, kind, interaction_row["accepted_at"]
 
     @staticmethod
     def _insert_plan_continuation_turn(
@@ -3175,7 +3199,7 @@ class _PlanOperations:
                     or str(entry["workspace_id"]) != candidate.workspace_id
                     or str(entry["turn_id"]) != candidate.origin_turn_id
                     or str(entry["entry_kind"]) != EntryKind.TOOL_RESULT.value
-                    or not _plan_result_is_exact(connection, row, _plan_inline(expected_payload), str(row["result_origin_kind"]))
+                    or not _plan_result_is_exact(connection, row, expected_payload, str(row["result_origin_kind"]))
                 ):
                     raise ConversationKernelConflict(
                         "rejected Plan batch result content conflicts"
@@ -3299,7 +3323,7 @@ class _PlanOperations:
                 or str(entry["workspace_id"]) != candidate.workspace_id
                 or str(entry["turn_id"]) != candidate.origin_turn_id
                 or str(entry["entry_kind"]) != EntryKind.TOOL_RESULT.value
-                or not _plan_result_is_exact(connection, row, _plan_inline(expected_payload), str(row["result_origin_kind"]))
+                or not _plan_result_is_exact(connection, row, expected_payload, str(row["result_origin_kind"]))
             ):
                 raise ConversationKernelConflict(
                     "Plan batch result content names another winner"
@@ -3352,14 +3376,11 @@ class _PlanOperations:
                     )
                 workflow_revision = int(key_row["workflow_revision"])
             else:
-                expected_reason = extract_plan_entry_reason(
-                    arguments=candidate.selected_arguments,
-                )
+                validate_plan_entry_arguments(arguments=candidate.selected_arguments)
                 if (
                     str(key_row["workspace_id"]) != candidate.workspace_id
                     or str(key_row["status"]) != "ACTIVE"
                     or str(key_row["entered_by"]) != "AGENT"
-                    or str(key_row["entry_reason"]) != expected_reason
                     or str(key_row["entry_turn_id"]) != candidate.origin_turn_id
                     or str(key_row["entry_assistant_entry_id"])
                     != candidate.assistant_entry_id
@@ -3408,6 +3429,8 @@ class _PlanOperations:
                 or str(key_row["kind"]) != expected_interaction_kind.value
                 or str(key_row["status"]) != "OPEN"
                 or str(key_row["request_semantic_digest"]) != request_digest
+                or key_row["plan_file_path"] != candidate.plan_file_path
+                or key_row["plan_file_error"] != candidate.plan_file_error
                 or key_row["control_tool_result_id"] != expected_control_result_id
                 or key_row["resolution_command_id"] is not None
                 or key_row["response_semantic_digest"] is not None
@@ -3585,6 +3608,7 @@ class _PlanOperations:
             continuation_entry_id=candidate.continuation_entry_id,
             origin_turn_completed=origin_completed,
             tool_result_settlements=tuple(settlements),
+            interaction_accepted_at=key_row["accepted_at"] if candidate.interaction_id is not None else None,
         )
 
     def _insert_resolution_plan_continuation(
@@ -3738,6 +3762,7 @@ class _PlanOperations:
         semantic_digest: str,
         expected_workflow_revision: int,
         expected_question_answer: PlanQuestionAnswer | None = None,
+        expected_timed_out: bool = False,
         expected_result_id: str | None = None,
         expected_result_entry_id: str | None = None,
     ) -> AcceptedPlanResolution | None:
@@ -3746,7 +3771,7 @@ class _PlanOperations:
             SELECT c.semantic_digest, c.target_plan_interaction_id,
                    i.status AS interaction_status, i.kind AS interaction_kind,
                    i.plan_workflow_id, i.decision_continuation_entry_id,
-                   i.control_tool_result_id,
+                   i.control_tool_result_id, i.plan_file_path, i.plan_file_error,
                    i.origin_turn_id, i.workspace_id,
                    i.assistant_entry_id, i.tool_call_id,
                    i.answer_kind, i.selected_option_ordinal, i.feedback_present,
@@ -3828,6 +3853,7 @@ class _PlanOperations:
             _, _, expected_content = _plan_question_result_values(
                 interaction={**row, "id": row["target_plan_interaction_id"]},
                 answer=expected_question_answer,
+                timed_out=expected_timed_out,
             )
             result_state = (
                 "CANCELLED_BEFORE_DISPATCH"
@@ -3989,7 +4015,7 @@ class _PlanOperations:
                 != row["target_plan_interaction_id"]
                 or result["permission_snapshot_fingerprint"]
                 != row["permission_snapshot_fingerprint"]
-                or result["public_fields"] != {}
+                or result["public_fields"] != _plan_review_public_fields(row)
                 or result["result_facts"] != {}
                 or result["output_unavailability_reason"] is not None
                 or entry["workspace_id"] != row["workspace_id"]
@@ -4001,7 +4027,8 @@ class _PlanOperations:
                     )
                 )
                 != _plan_review_result_parts(
-                    decision, str(row["resume_permission_mode"])
+                    decision, str(row["resume_permission_mode"]),
+                    timed_out=expected_timed_out, file_error=row["plan_file_error"]
                 )
                 or (
                     (decision is PlanDraftDecision.APPROVE)
@@ -4096,7 +4123,7 @@ class _PlanOperations:
                 result_id=result_id,
                 result_entry_id=entry_id,
                 entry_sequence=int(entry["entry_sequence"]),
-                occurred_at=result["observed_at"],
+                occurred_at=result["observed_at"], timed_out=expected_timed_out,
             )
         else:
             raise ConversationKernelConflict(

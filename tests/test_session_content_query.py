@@ -1,859 +1,175 @@
-"""Saved conversation recovery preserves scope, original text and continuation."""
-from tests.support.model_config import scheduled_task_service
-from tests.support.tool_outputs import prepare_output
-
-from uuid import uuid4
+"""Complete history business scope, direction and frozen source qualification."""
 
 from datetime import datetime, timezone
-import json
 from time import monotonic
 
 import pytest
 
-from pulsara_agent.conversation_kernel.blob import PostgresCanonicalBlobStore
 from pulsara_agent.conversation_kernel.contracts import InlineContent
-from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
 from pulsara_agent.conversation_kernel.repository import (
     AssistantTextBlock,
     AssistantDataBlock,
-    AssistantToolCallBlock,
-    build_prepared_tool_result_acceptance,
 )
 from pulsara_agent.conversation_kernel.session_content import (
     SessionContentQuery,
     SessionQueryError,
-    _decode,
-    _encode,
-    _fits,
 )
-from pulsara_agent.conversation_kernel.session_search import search_session_page
-from pulsara_agent.conversation_kernel.tool_execution import ToolBatchExecutor
 from pulsara_agent.ports.session_content import SessionContentRange
-from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
-from pulsara_agent.primitives.context import canonical_json_bytes, freeze_json
-from pulsara_agent.conversation_kernel.content_parts import ResultPart
-from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from tests.test_conversation_fork import (
     repo as repo,
-    identity,
+    new_session,
     turn,
     rows,
-    compact,
-    new_session,
+    identity,
+    final,
 )
-from tests.test_turn_interruption_history import stop
 from tests.support.history_projection import maintain_history
 
-
-def _cursor(page):
-    return None if page["next"] is None else page["next"]["arguments"]["cursor"]
+pytestmark = pytest.mark.postgres
 
 
-@pytest.fixture
-def context(repo):
-    domain = uuid4().hex.replace(":", "_")
+def query(repo, caller, operation, *, scope=None, **args):
+    from pulsara_agent.ports.session_content import session_query_result_schema
+    from tests.support.tool_result_schemas import validate_business_result
 
-    def new():
-        return repo.acquire_host_writer(
-            intent="NEW",
-            session_id=identity("session"),
-            workspace_id=identity("workspace"),
-            memory_domain_id=domain,
-            writer_owner_id=identity("host"),
-            lease_seconds=300,
-            deadline_monotonic=monotonic() + 30,
-        )
-
-    caller = new()
-    owner = SessionContentQuery(
-        repo, session_id=caller.guard.session_id, memory_domain_id=domain
-    )
-
-    def query(
-        name="read_session_content", *, scope=SessionContentRange(0), **arguments
-    ):
-        if name == "search_session_content":
-            # This repository fixture has no Core worker. Drive one production
-            # pass; failed derived builds remain valid read-path negative cases.
-            maintain_history(repo, allow_build_failure=True)
-        return owner.invoke(
-            name,
-            arguments,
-            current_range=scope,
-            tool_call_id="call:history",
-            page_budget=ToolResultPageBudget(tool_call_id="call:history"),
-            deadline_monotonic=monotonic() + 30,
-        )
-
-    return caller, new, query
-
-
-def sequence(repo, entry_id):
-    return rows(
-        repo,
-        "SELECT entry_sequence FROM pulsara_v3.transcript_entries WHERE id=%s",
-        (entry_id,),
-    )[0]["entry_sequence"]
-
-
-def blob_answer(repo, lease, text, *, extra_blocks=()):
-    _, cut, _ = turn(repo, lease.guard, "working", finish=False)
-    workspace = rows(
-        repo,
-        "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s",
-        (lease.guard.session_id,),
-    )[0]["workspace_id"]
-    body = PostgresCanonicalBlobStore(repo.connection_provider).publish(
-        workspace_id=workspace,
-        content=text.encode(),
-        media_type="text/plain",
-        codec="utf-8",
+    value = SessionContentQuery(
+        repo, session_id=caller.guard.session_id, memory_domain_id="u_local"
+    ).invoke(
+        operation,
+        args,
+        current_range=scope if scope is not None else SessionContentRange(0),
         deadline_monotonic=monotonic() + 30,
     )
-    entry = identity("entry")
-    repo.commit_assistant_message(
-        lease.guard,
-        cut=cut,
-        entry_id=entry,
-        blocks=(AssistantTextBlock(identity("block"), body), *extra_blocks),
-        complete_turn=True,
-        actor_id="model:test",
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=monotonic() + 30,
-    )
-    return entry
+    validate_business_result(session_query_result_schema(operation), value)
+    return value
 
 
-def saved_calls(repo, lease, blocks):
-    _, cut, _ = turn(repo, lease.guard, "working", finish=False)
-    entry = identity("entry")
+def test_complete_history_read_signed_direction_labels_and_domain(repo):
+    caller, source = new_session(repo), new_session(repo)
+    owner, cut, _ = turn(repo, source.guard, "first question", finish=False)
+    commentary = identity("entry")
     repo.commit_assistant_message(
-        lease.guard,
+        source.guard,
         cut=cut,
-        entry_id=entry,
-        blocks=blocks,
+        entry_id=commentary,
+        blocks=(
+            AssistantTextBlock(
+                identity("block"), InlineContent.from_bytes(b"progress\r\n")
+            ),
+            AssistantDataBlock(
+                identity("block"), InlineContent.from_bytes(b"private thought")
+            ),
+        ),
         complete_turn=False,
-        actor_id="model:test",
         occurred_at=datetime.now(timezone.utc),
+        actor_id="test",
         deadline_monotonic=monotonic() + 30,
     )
-    return entry
-
-
-def call_block(name, arguments):
-    return AssistantToolCallBlock(
-        identity("block"), identity("call"), name, freeze_json(arguments)
-    )
-
-
-@pytest.mark.parametrize("with_text", [False, True])
-def test_mixed_call_search_uses_sources_and_snippet_block_boundaries(
-    repo, context, with_text
-):
-    _, new, query = context
-    target = new()
-    blocks = [
-        call_block(name, {"query": "excluded-sentinel"})
-        for name in (
-            "search_sessions",
-            "search_session_content",
-            "read_session_content",
-        )
+    answer = final(repo, source.guard, owner, "final body")
+    _, _, second = turn(repo, source.guard, "second question", answer="second answer")
+    records = query(
+        repo,
+        caller,
+        "read_session_content",
+        target={"kind": "SESSION", "session_id": source.guard.session_id},
+        limit=-3,
+    ).content
+    assert [p.value["role"] for p in records] == [
+        "assistant final answer",
+        "user message",
+        "assistant final answer",
     ]
-    if with_text:
-        blocks.append(
-            AssistantTextBlock(
-                identity("block"),
-                InlineContent.from_bytes(b"ordinary-text read_session_content"),
-            )
-        )
-    blocks.extend(
-        (
-            call_block("exec_process", {"command": "ordinary-arg"}),
-            call_block("read_file", {"path": "second-arg"}),
-            AssistantDataBlock(
-                identity("block"), InlineContent.from_bytes(b"hidden-data")
-            ),
-        )
-    )
-    anchor = saved_calls(repo, target, tuple(blocks))
-    args = {"target": {"kind": "SESSION", "session_id": target.guard.session_id}, "include_tools": True}
-    for keyword in ("exec_process", "command", "ordinary-arg", "second-arg"):
-        hits = query("search_session_content", query=keyword, **args)["items"]
-        assert len(hits) == 1 and anchor in {m["target"]["entry_id"] for m in hits[0]["messages"]}
-        assert keyword in "\n".join(m["text"] for m in hits[0]["messages"])
-        assert "excluded-sentinel" not in "\n".join(
-            m["text"] for m in hits[0]["messages"]
-        )
-        assert (
-            "read_session_content" in "\n".join(m["text"] for m in hits[0]["messages"])
-        ) == with_text
-    hits = query("search_session_content", query="ordinary-arg second-arg", **args)[
-        "items"
+    assert records[0].value["target"] == {"kind": "SESSION_ENTRY", "entry_id": second}
+    forward = query(
+        repo,
+        caller,
+        "read_session_content",
+        target={"kind": "SESSION_ENTRY", "entry_id": commentary},
+        limit=2,
+    ).content
+    assert [p.value["text"] for p in forward] == ["progress\r\n", "final body"]
+    assert [p.value["role"] for p in forward] == [
+        "assistant commentary",
+        "assistant final answer",
     ]
-    assert len(hits) == 1 and anchor in {m["target"]["entry_id"] for m in hits[0]["messages"]}
-    for keyword in ("excluded-sentinel", "hidden-data", "Arguments:"):
-        assert query("search_session_content", query=keyword, **args)["items"] == [], keyword
-    assert query("search_sessions", query="ordinary-arg")["items"] == []
-    default = {"target": {"kind": "SESSION_ENTRY", "session_id": target.guard.session_id, "entry_id": anchor}, "limit": 1}
-    if with_text:
-        assert (
-            query(**default)["items"][0]["text"] == "ordinary-text read_session_content"
-        )
-        assert query(
-            "search_session_content", query="ordinary-text read_session_content", **args
-        )["items"]
-    else:
-        with pytest.raises(SessionQueryError) as error:
-            query(**default)
-        assert error.value.code == "ENTRY_NOT_READABLE"
-    read = query(**default, include_tools=True)["items"][0]
-    assert read["target"]["entry_id"] == anchor and read["role"] == "assistant"
-    assert read["text"].startswith(
-        'Tool call: search_sessions\nArguments: {"query":"excluded-sentinel"}'
-    )
-    assert (
-        "Tool call: exec_process\nArguments:" in read["text"]
-        and "hidden-data" not in read["text"]
-    )
-
-
-def test_query_only_calls_do_not_match_or_consume_search_limit(repo, context):
-    _, new, query = context
-    target = new()
-    _, _, old = turn(repo, target.guard, "earlier genuine-needle")
-    saved_calls(
-        repo,
-        target,
-        tuple(
-            call_block(name, {"query": "genuine-needle"})
-            for name in (
-                "search_sessions",
-                "search_session_content",
-                "read_session_content",
-            )
-        ),
-    )
-    hit = query('search_session_content', target={'kind': 'SESSION', 'session_id': target.guard.session_id}, include_tools=True, query='genuine-needle', limit=1)
-    assert (
-        hit["items"][0]["messages"][0]["role"] == "user" and _cursor(hit) is None
-    )
-    assert hit["items"][0]["target"]["entry_id"] != old
-
-
-def test_long_unicode_call_arguments_cursor_only(repo, context):
-    _, new, query = context
-    target = new()
-    arguments = {"z": ['引号"😀\\\n' * 6000], "a": {"β": False, "null": None}}
-    anchor = saved_calls(
-        repo,
-        target,
-        (call_block("exec_process", arguments), call_block("read_file", {"path": "last"})),
-    )
-    expected = (
-        "Tool call: exec_process\nArguments: "
-        + canonical_json_bytes(arguments).decode()
-        + '\nTool call: read_file\nArguments: {"path":"last"}'
-    )
-    page = query(target={'kind': 'SESSION_ENTRY', 'session_id': target.guard.session_id, 'entry_id': anchor}, include_tools=True, limit=1, max_chars=32000)
-    chunks = []
-    while True:
-        assert page["items"][0]["target"]["entry_id"] == anchor and _fits(page, "call:history")
-        chunks.append(page["items"][0]["text"])
-        if not _cursor(page):
-            break
-        page = query(cursor=_cursor(page), limit=1, max_chars=12345)
-    assert "".join(chunks) == expected
-    other = new()
-    turn(repo, other.guard, "needle", answer="needle")
-    turn(repo, other.guard, "needle again", answer="needle answer")
-    page = query('search_session_content', target={'kind': 'SESSION', 'session_id': other.guard.session_id}, query='needle', limit=1)
-    new_cursor = _cursor(page)
-    assert query("search_session_content", cursor=new_cursor)["items"]
-
-
-@pytest.mark.parametrize(
-    "tool_name",
-    ["exec_process", "search_sessions", "search_session_content", "read_session_content"],
-)
-@pytest.mark.parametrize(
-    "state", ["SUCCESS", "SYSTEM_ERROR", "PERMISSION_DENIED", "CANCELLED"]
-)
-def test_tool_result_search_uses_canonical_owner_and_read_keeps_all_saved_results(
-    repo, stage2_migrated_postgres_database, tool_name, state, monkeypatch, context
-):
-    from tests.support.tool_outputs import _install_tool_call
-    from pulsara_agent.ports.session_content import SESSION_QUERY_TOOL_NAMES
-
-    caller, _, _ = context
-    domain = rows(repo, "SELECT memory_domain_id FROM pulsara_v3.sessions WHERE id=%s", (caller.guard.session_id,))[0]["memory_domain_id"]
-    workspace = identity("workspace")
-    lease, turn_id, request, call, attempt = _install_tool_call(
-        repo, workspace, tool_name=tool_name, attempted=state != "PERMISSION_DENIED", memory_domain_id=domain
-    )
-    result_id = identity("entry")
-    text = 'result-needle read_session_content {"items":["ordinary output"]}'
-    projection = prepare_output(content_parts=(ResultPart("text", text),))
-    accepted = build_prepared_tool_result_acceptance(
-        guard=lease.guard,
-        workspace_id=workspace,
-        result_id=identity("result"),
-        result_entry_id=result_id,
-        turn_id=turn_id,
-        assistant_entry_id=request,
-        tool_call_id=call,
-        attempt_id=attempt,
-        result_state=state,
-        public_fields=projection.public_fields,
-        content_parts=projection.content_parts,
-        actor_id="tool:test",
-        observed_at=datetime.now(timezone.utc),
-        observation_duration_microseconds=None,
-        observation_origin_kind=ToolObservationOrigin.POLICY
-        if attempt is None
-        else ToolObservationOrigin.TERMINAL_PROCESS,
-        trusted_tool_reported_duration_microseconds=None,
-    )
-    repo.accept_tool_result(
-        lease.guard, candidate=accepted, deadline_monotonic=monotonic() + 30
-    )
-    owner = SessionContentQuery(
-        repo, session_id=caller.guard.session_id, memory_domain_id=domain
-    )
-
-    def invoke(name="read_session_content", **args):
-        if name == "search_session_content":
-            maintain_history(repo, allow_build_failure=True)
-        return owner.invoke(
-            name,
-            args,
-            current_range=SessionContentRange(0),
-            tool_call_id="call:history",
-            page_budget=ToolResultPageBudget(tool_call_id="call:history"),
-            deadline_monotonic=monotonic() + 30,
-        )
-
-    args = {"target": {"kind": "SESSION", "session_id": lease.guard.session_id}, "include_tools": True}
-    hits = invoke("search_session_content", query="result-needle", **args)["items"]
-    assert bool(hits) == (tool_name not in SESSION_QUERY_TOOL_NAMES)
-    if hits:
-        assert any(
-            m["target"]["entry_id"] == result_id and "result-needle" in m["text"]
-            for m in hits[0]["messages"]
-        )
-    assert invoke("search_sessions", query="result-needle")["items"] == []
-    read = invoke(target={'kind': 'SESSION_ENTRY', 'session_id': lease.guard.session_id, 'entry_id': result_id}, limit=1, include_tools=True)["items"][0]
-    assert (
-        read["text"] == text
-        and read["result_state"] == state
-        and read["tool_name"] == tool_name
-    )
-    with pytest.raises(SessionQueryError) as error:
-        invoke(target={'kind': 'SESSION_ENTRY', 'session_id': lease.guard.session_id, 'entry_id': result_id})
-    assert error.value.code == "ENTRY_NOT_READABLE"
-    if tool_name in SESSION_QUERY_TOOL_NAMES:
-        import pulsara_agent.conversation_kernel.session_content as module
-
-        def forbidden(*_args):
-            raise AssertionError("excluded query result body must not be decoded")
-
-        monkeypatch.setattr(module, "read_tool_output_content", forbidden)
-        from pulsara_agent.conversation_kernel import history_projection
-        monkeypatch.setattr(history_projection, "read_tool_output_content", forbidden)
-        assert (
-            invoke("search_session_content", query="result-needle", **args)["items"]
-            == []
-        )
-    # Canonical edge loss must still fail before a category can be guessed.
-    import psycopg
-
-    with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
-        connection.execute(
-            "DELETE FROM pulsara_v3.tool_results WHERE session_id=%s AND result_entry_id=%s",
-            (lease.guard.session_id, result_id),
-        )
-    with pytest.raises(RuntimeError, match="canonical edge"):
-        invoke(target={'kind': 'SESSION_ENTRY', 'session_id': lease.guard.session_id, 'entry_id': result_id}, limit=1, include_tools=True)
-
-    # Rebuilding a disposable projection cannot turn a missing canonical edge
-    # into a guessed category exclusion or a partially qualified answer process.
-    from pulsara_agent.conversation_kernel.history_publication import HistoryProjectionRepository
-    question = rows(repo, "SELECT id FROM pulsara_v3.transcript_entries WHERE session_id=%s AND entry_kind='USER_MESSAGE'", (lease.guard.session_id,))[0]['id']
-    assert HistoryProjectionRepository(repo.connection_provider).maintain_question(
-        lease.guard.session_id, question, deadline_monotonic=monotonic()+30,
-    ) == "build_failed"
-    assert invoke('search_session_content', query='run', **args)['items'] == []
-
-
-def test_full_history_uses_zero_not_genesis_and_explicit_self_cannot_bypass(
-    repo, context
-):
-    caller, _, query = context
-    turn(repo, caller.guard, "early decision", answer="older answer")
-    _, cut, _ = turn(repo, caller.guard, "current", finish=False)
-    facts = (
-        CanonicalProviderInputReader(repo.connection_provider)
-        .read_frozen_dispatch(cut, deadline_monotonic=monotonic() + 30)
-        .compile_snapshot
-    )
-    assert facts.context_binding_fact.source_through_sequence > 0
-    actual = ToolBatchExecutor._session_content_range(facts)
-    assert actual == SessionContentRange(0)
-    for args in ({}, {"target": {"kind": "SESSION", "session_id": caller.guard.session_id}}):
-        page = query(scope=actual, **args)
-        assert "search_session_content" in page["guidance"]
-        assert page == {
-            "items": [],
-            "next": None,
-            "note": "没有更早的会话内容。",
-            "guidance": page["guidance"],
-        }
-        assert (
-            query("search_session_content", scope=actual, query="decision", **args)[
-                "items"
-            ]
-            == []
-        )
-    assert query("search_sessions", scope=actual, query="decision")["items"] == []
-
-
-def test_snapshot_range_excludes_carried_active_request_and_not_retained_summary(
-    repo, context
-):
-    caller, _, query = context
-    _, _, old = turn(repo, caller.guard, "old needle", answer="old original needle")
-    active, _, _ = turn(repo, caller.guard, "active needle", finish=False)
-    head = rows(
-        repo,
-        "SELECT latest_entry_sequence FROM pulsara_v3.sessions WHERE id=%s",
-        (caller.guard.session_id,),
-    )[0]["latest_entry_sequence"]
-    compact(
-        repo,
-        caller.guard,
-        active,
-        head,
-        summary="old original needle already summarized",
-    )
-    cut = repo.prepare_provider_input_cut(
-        caller.guard, turn_id=active, deadline_monotonic=monotonic() + 30
-    )
-    facts = (
-        CanonicalProviderInputReader(repo.connection_provider)
-        .read_frozen_dispatch(cut, deadline_monotonic=monotonic() + 30)
-        .compile_snapshot
-    )
-    actual = ToolBatchExecutor._session_content_range(facts)
-    assert actual.through_sequence == head and actual.excluded_entry_id is not None
-    found = query("search_session_content", scope=actual, query="needle")
-    assert {m["target"]["entry_id"] for i in found["items"] for m in i["messages"]} == {
-        old,
-        rows(
-            repo,
-            "SELECT initial_entry_id FROM pulsara_v3.turns WHERE session_id=%s ORDER BY accepted_at LIMIT 1",
-            (caller.guard.session_id,),
-        )[0]["initial_entry_id"],
-    }
-    assert (
-        query(target={'kind': 'SESSION_ENTRY', 'entry_id': old}, scope=actual, limit=1)["items"][0]["text"]
-        == "old original needle"
-    )
-    with pytest.raises(SessionQueryError, match="readable range"):
-        query(target={'kind': 'SESSION_ENTRY', 'entry_id': actual.excluded_entry_id}, scope=actual)
-    page = query(scope=actual, max_chars=1)
-    raw = _decode(_cursor(page), "read_session_content")
-    raw["excluded"] = None
-    with pytest.raises(SessionQueryError) as rejected:
-        query(scope=actual, cursor=_encode(raw))
-    assert rejected.value.code == "CURSOR_RANGE_CHANGED"
-
-
-def test_entry_projection_matches_across_blocks_without_data_or_fake_snippet(
-    repo, context
-):
-    _, new, query = context
-    target = new()
-    body = "first keyword\n  exact spacing  "
-    entry = blob_answer(
-        repo,
-        target,
-        body,
-        extra_blocks=(
-            AssistantDataBlock(
-                identity("block"), InlineContent.from_bytes(b"hidden_reasoning")
-            ),
-            AssistantTextBlock(
-                identity("block"), InlineContent.from_bytes(b"second keyword")
-            ),
-        ),
-    )
-    result = query('search_session_content', target={'kind': 'SESSION', 'session_id': target.guard.session_id}, query='FIRST second')
-    assert len(result["items"]) == 1
-    expected = body + "\nsecond keyword"
-    assert (
-        next(
-            m["text"] for m in result["items"][0]["messages"] if m["target"]["entry_id"] == entry
-        )
-        == expected
-    )
-    read = query(target={'kind': 'SESSION_ENTRY', 'session_id': target.guard.session_id, 'entry_id': entry}, limit=1)
-    assert read["items"][0]["text"] == expected
-    ui, _ = search_session_page(
-        repo,
-        memory_domain_id=rows(
-            repo,
-            "SELECT memory_domain_id FROM pulsara_v3.sessions WHERE id=%s",
-            (target.guard.session_id,),
-        )[0]["memory_domain_id"],
-        query="first second",
-        deadline_monotonic=monotonic() + 30,
-    )
-    assert len(ui) == 1 and ui[0]["entry_id"] == entry
-    assert (
-        query('search_session_content', target={'kind': 'SESSION', 'session_id': target.guard.session_id}, query='hidden_reasoning')["items"]
-        == []
-    )
-
-
-def test_search_sessions_filters_own_suffix_before_choosing_best_hit(repo, context):
-    caller, _, query = context
-    _, _, old = turn(repo, caller.guard, "old", answer="decision needle")
-    turn(repo, caller.guard, "new suffix needle", answer="new suffix needle")
-    scope = SessionContentRange(sequence(repo, old))
-    result = query("search_sessions", scope=scope, query="needle")
-    assert len(result["items"]) == 1 and result["items"][0]["hit"]["target"]["entry_id"] == old
-    assert result["items"][0]["hit"]["text"] == "decision needle"
-
-
-def test_session_search_targets_copy_into_content_search_and_read(repo, context):
-    _, new, query = context
-    target = new()
-    turn(repo, target.guard, "copyaddressneedle question", answer="copyaddressneedle answer")
-    found = query("search_sessions", query="copyaddressneedle")["items"][0]
-    assert found["target"] == {"kind": "SESSION", "session_id": target.guard.session_id}
-    hit = found["hit"]
-    page = query(hit["read"]["tool"], **hit["read"]["arguments"])
-    assert page["items"][0]["target"] == hit["target"]
-    assert hit["text"] in page["items"][0]["text"]
-    searched = query("search_session_content", target=found["target"], query="copyaddressneedle")
-    unit = searched["items"][0]
-    assert unit["target"]["kind"] == "SESSION_ENTRY"
-    assert unit["target"]["session_id"] == target.guard.session_id
-    for message in unit["messages"]:
-        expanded = query(message["read"]["tool"], **message["read"]["arguments"])["items"][0]
-        assert expanded["target"] == message["target"]
-        assert expanded["role"] == message["role"]
-        assert message["text"] in expanded["text"]
-
-
-@pytest.mark.parametrize("arguments", [
-    {"session_id": "session:erpkjonqekxozlvfhjfu6p5tjq"},
-    {"entry_id": "entry:4bwk3sll4m4vlmtvnwpeywd6um"},
-    {"target": None},
-    {"target": {}},
-    {"target": {"kind": "SESSION"}},
-    {"target": {"kind": "SESSION_ENTRY"}},
-    {"target": {"kind": "SESSION", "session_id": None}},
-    {"target": {"kind": "SESSION", "session_id": "not-a-session"}},
-    {"target": {"kind": "SESSION_ENTRY", "entry_id": "not-an-entry"}},
-    {"target": {"kind": "SESSION_ENTRY", "entry_id": "entry:4bwk3sll4m4vlmtvnwpeywd6um", "session_id": None}},
-    {"target": {"kind": "SESSION_ENTRY", "entry_id": "entry:4bwk3sll4m4vlmtvnwpeywd6um", "direction": "older"}},
-    {"target": {"kind": "SESSION", "session_id": "session:erpkjonqekxozlvfhjfu6p5tjq", "entry_id": "entry:4bwk3sll4m4vlmtvnwpeywd6um"}},
-    {"target": {"kind": "MEMORY", "memory_id": "memory:erpkjonqekxozlvfhjfu6p5tjq"}},
-])
-def test_session_read_rejects_invalid_or_superseded_target_requests(context, arguments):
-    _, _, query = context
-    with pytest.raises(SessionQueryError) as error:
-        query(**arguments)
-    assert error.value.code in {"INVALID_REQUEST", "INVALID_ID"}
-
-
-def test_content_search_rejects_entry_targets_and_continuations_reject_targets(context):
-    caller, _, query = context
-    target = {"kind": "SESSION_ENTRY", "entry_id": identity("entry")}
-    with pytest.raises(SessionQueryError) as error:
-        query("search_session_content", query="needle", target=target)
-    assert error.value.code == "INVALID_REQUEST"
-    for name in ("search_sessions", "search_session_content", "read_session_content"):
-        with pytest.raises(SessionQueryError) as error:
-            query(name, cursor="opaque", target={"kind": "SESSION", "session_id": caller.guard.session_id})
-        assert error.value.code == ("INVALID_REQUEST" if name == "search_sessions" else "CURSOR_CONFLICT")
-
-
-def test_anchor_direction_shows_later_revision_without_matching_original_keyword(
-    repo, context
-):
-    _, new, query = context
-    target = new()
-    _, _, anchor = turn(repo, target.guard, "proposal", answer="Use scheme A")
-    _, _, decision = turn(
-        repo, target.guard, "reject that", answer="Final decision is B"
-    )
-    hit = query('search_session_content', target={'kind': 'SESSION', 'session_id': target.guard.session_id}, query='scheme')
-    assert any(m["target"]["entry_id"] == anchor for m in hit["items"][0]["messages"])
-    page = query(target={'kind': 'SESSION_ENTRY', 'session_id': target.guard.session_id, 'entry_id': anchor})
-    assert (
-        page["items"][0]["target"]["entry_id"] == anchor
-        and page["items"][-1]["target"]["entry_id"] == decision
-    )
-    old = query(target={'kind': 'SESSION_ENTRY', 'session_id': target.guard.session_id, 'entry_id': anchor}, direction='older')
-    assert [i["text"] for i in old["items"]] == ["Use scheme A", "proposal"]
-    assert query(target={'kind': 'SESSION', 'session_id': target.guard.session_id})["items"][0]["target"]["entry_id"] == decision
-    assert (
-        query(target={'kind': 'SESSION', 'session_id': target.guard.session_id}, direction='newer')["items"][0]["text"]
-        == "proposal"
-    )
-
-
-def test_long_unicode_anchor_stays_one_entry_cursor_only_then_follows_direction(
-    repo, context
-):
-    _, new, query = context
-    target = new()
-    source = '原文 "quote" 😀\n' * 5000
-    anchor = blob_answer(repo, target, source)
-    turn(repo, target.guard, "later decision", answer="later final")
-    page = query(target={'kind': 'SESSION_ENTRY', 'session_id': target.guard.session_id, 'entry_id': anchor}, limit=1, max_chars=32000)
-    chunks = []
-    while page["items"][0]["target"]["entry_id"] == anchor:
-        assert _fits(page, "call:history")
-        assert page["items"][0]["partial"] is True
-        chunks.append(page["items"][0]["text"])
-        assert _cursor(page)
-        page = query(cursor=_cursor(page), limit=1, max_chars=12345)
-    assert "".join(chunks) == source and page["items"][0]["text"] == "later decision"
-
-
-def test_max_chars_is_whole_page_and_empty_filters_are_ordinary_results(repo, context):
-    _, new, query = context
-    target = new()
-    turn(repo, target.guard, "12345678", answer="abcdefgh")
-    page = query(target={'kind': 'SESSION', 'session_id': target.guard.session_id}, max_chars=10)
-    assert sum(len(i["text"]) for i in page["items"]) == 10
-    assert [i["text"] for i in page["items"]] == ["abcdefgh", "12"]
-    rest = query(cursor=_cursor(page))
-    assert rest["items"][0]["text"] == "345678" and rest["items"][0]["partial"]
-    assert _cursor(rest) is None
-    page = query('search_session_content', target={'kind': 'SESSION', 'session_id': target.guard.session_id}, query='missing')
-    assert "read_session_content" in page["guidance"]
-    assert page == {"items": [], "next": None, "guidance": page["guidance"]}
-
-
-def test_content_page_freezes_entries_and_interruption_event_cut(repo, context):
-    _, new, query = context
-    target = new()
-    active, _, _ = turn(repo, target.guard, "pending", finish=False)
-    entry = rows(
-        repo, "SELECT initial_entry_id FROM pulsara_v3.turns WHERE id=%s", (active,)
-    )[0]["initial_entry_id"]
-    page = query(target={'kind': 'SESSION_ENTRY', 'session_id': target.guard.session_id, 'entry_id': entry}, max_chars=1)
-    stop(repo, target.guard, active, "PROVIDER_REQUEST_FAILED", "upstream failure")
-    turn(repo, target.guard, "new accepted", answer="new final")
-    old = query(cursor=_cursor(page))
-    assert old["items"][0]["text"] == "ending" and "interruption" not in old["items"][0]
-    assert _cursor(old) is None
-    newer = query(target={'kind': 'SESSION_ENTRY', 'session_id': target.guard.session_id, 'entry_id': entry}, limit=1)
-    assert newer["items"][0]["interruption"] == {
-        "reason": "PROVIDER_REQUEST_FAILED",
-        "detail": "upstream failure",
-    }
-
-
-def test_cursor_tampering_never_expands_current_or_other_scope(repo, context):
-    caller, new, query = context
-    _, _, old = turn(repo, caller.guard, "before", answer="old answer")
-    turn(repo, caller.guard, "current secret", answer="suffix secret")
-    scope = SessionContentRange(sequence(repo, old))
-    page = query(scope=scope, max_chars=1)
-    raw = _decode(_cursor(page), "read_session_content")
-    raw["range_end"] = raw["cut"]
-    with pytest.raises(SessionQueryError, match="range changed"):
-        query(scope=scope, cursor=_encode(raw))
-    with pytest.raises(SessionQueryError, match="only cursor"):
-        query(target={'kind': 'SESSION', 'session_id': caller.guard.session_id}, scope=scope, cursor=_cursor(page))
-    with pytest.raises(SessionQueryError):
-        query("search_session_content", scope=scope, cursor=_cursor(page))
-    raw = _decode(_cursor(page), "read_session_content")
-    raw["offset"] = 999999
-    with pytest.raises(SessionQueryError, match="outside"):
-        query(scope=scope, cursor=_encode(raw))
-    target = new()
-    _, _, other_entry = turn(repo, target.guard, "other", answer="other")
-    with pytest.raises(SessionQueryError, match="readable range"):
-        query(target={'kind': 'SESSION_ENTRY', 'entry_id': other_entry}, scope=scope)
-    turn(repo, target.guard, "second other", answer="more other")
-    other_page = query(target={'kind': 'SESSION', 'session_id': target.guard.session_id}, max_chars=1)
-    other_cursor = _decode(_cursor(other_page), "read_session_content")
-    other_cursor["session_id"] = caller.guard.session_id
-    with pytest.raises(SessionQueryError, match="range changed"):
-        query(scope=scope, cursor=_encode(other_cursor))
-    foreign = new_session(repo)
-    turn(repo, foreign.guard, "foreign")
-    with pytest.raises(SessionQueryError, match="domain"):
-        query(target={'kind': 'SESSION', 'session_id': foreign.guard.session_id})
-    for value in (
-        "not-base64",
-        _encode({"operation": "read_session_content"}),
-        _encode({**raw, "direction": []}),
+    assert all(set(p.value) == {"target", "role", "at", "text"} for p in forward)
+    assert "private thought" not in repr(forward)
+    for args in (
+        {
+            "target": {"kind": "SESSION", "session_id": source.guard.session_id},
+            "limit": 1,
+        },
+        {"target": {"kind": "SESSION", "session_id": source.guard.session_id}},
+        {"target": {"kind": "SESSION_ENTRY", "entry_id": answer}, "limit": 0},
+        {
+            "target": {
+                "kind": "SESSION_ENTRY",
+                "entry_id": answer,
+                "session_id": source.guard.session_id,
+            },
+            "limit": 1,
+        },
     ):
         with pytest.raises(SessionQueryError):
-            query(scope=scope, cursor=value)
+            query(repo, caller, "read_session_content", **args)
 
 
-def test_archive_missing_directory_and_fork_are_cold_own_history_only(
-    repo, context, tmp_path, stage2_migrated_postgres_database
+def test_session_search_complete_entry_precedes_title_without_entry_payload(
+    repo, tmp_path, stage2_migrated_postgres_database
 ):
-    caller, new, query = context
-    target = new()
-    _, _, anchor = turn(repo, target.guard, "source", answer="source answer")
-    domain = rows(
+    caller, source, title_only = new_session(repo), new_session(repo), new_session(repo)
+    turn(repo, source.guard, "entryneedle body", answer="answer")
+    turn(repo, title_only.guard, "different body", answer="answer")
+    import psycopg
+
+    with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
+        for index, lease in enumerate((source, title_only)):
+            actual = tmp_path / f"workspace-{index}"
+            actual.mkdir()
+            connection.execute(
+                "UPDATE pulsara_v3.workspaces SET workspace_root=%s WHERE id=(SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s)",
+                (str(actual), lease.guard.session_id),
+            )
+    for lease in (source, title_only):
+        assert repo.adopt_generated_session_title(
+            session_id=lease.guard.session_id,
+            memory_domain_id="u_local",
+            title="entryneedle title",
+            deadline_monotonic=monotonic() + 30,
+        )
+    records = query(repo, caller, "search_sessions", query="entryneedle").content
+    found = {p.value["target"]["session_id"]: p.value for p in records}
+    assert found[source.guard.session_id]["matched_in"] == "ENTRY"
+    assert found[title_only.guard.session_id]["matched_in"] == "TITLE"
+    assert all(
+        set(p.value)
+        == {"target", "title", "workspace_path", "updated_at", "matched_in"}
+        for p in records
+    )
+    assert all(p.value["workspace_path"].startswith("/") for p in records)
+    with pytest.raises(SessionQueryError):
+        query(repo, caller, "search_sessions", limit=1)
+
+
+def test_qa_search_uses_complete_candidates_and_four_label_text(repo):
+    caller, source = new_session(repo), new_session(repo)
+    turn(repo, source.guard, "alpha needle?", answer="answer needle")
+    turn(repo, source.guard, "follow up", answer="next answer")
+    maintain_history(repo)
+    value = query(
         repo,
-        "SELECT memory_domain_id FROM pulsara_v3.sessions WHERE id=%s",
-        (caller.guard.session_id,),
-    )[0]["memory_domain_id"]
-    workspace_root = tmp_path / "removed-project"
-    workspace_root.mkdir()
-    import psycopg
-
-    with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
-        connection.execute(
-            "UPDATE pulsara_v3.workspaces SET workspace_root=%s WHERE id=(SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s)",
-            (str(workspace_root), target.guard.session_id),
-        )
-        connection.commit()
-    workspace_root.rmdir()
-    child_id = identity("session")
-    created = repo.fork_conversation(
-        source_session_id=target.guard.session_id,
-        anchor_entry_id=anchor,
-        child_session_id=child_id,
-        memory_domain_id=domain,
-        deadline_monotonic=monotonic() + 30,
+        caller,
+        "search_session_content",
+        target={"kind": "SESSION", "session_id": source.guard.session_id},
+        query="needle",
     )
-    assert created.created
-    repo.archive_session(
-        session_id=target.guard.session_id,
-        memory_domain_id=domain,
-        closed_writer=target.guard,
-        deadline_monotonic=monotonic() + 30,
-    )
-    assert (
-        query(target={'kind': 'SESSION', 'session_id': target.guard.session_id})["items"][0]["text"] == "source answer"
-    )
-    with pytest.raises(SessionQueryError):
-        query(target={'kind': 'SESSION_ENTRY', 'session_id': child_id, 'entry_id': anchor})
-    child = query(target={'kind': 'SESSION', 'session_id': child_id})
-    assert (
-        child["items"][0]["text"] == "source answer"
-        and child["items"][0]["target"]["entry_id"] != anchor
-    )
-    assert (
-        repo.delete_session(
-            required_lifecycle=None,
-            session_id=target.guard.session_id,
-            memory_domain_id=domain,
-            closed_writer=target.guard,
-            deadline_monotonic=monotonic() + 30,
-        )
-        == "DELETED"
-    )
-    with pytest.raises(SessionQueryError):
-        query(target={'kind': 'SESSION', 'session_id': target.guard.session_id})
-    assert query(target={'kind': 'SESSION', 'session_id': child_id}) == child
-    assert not workspace_root.exists()
-
-
-def test_cross_session_tool_reads_exact_frozen_body_and_detects_corruption(
-    repo, stage2_migrated_postgres_database
-):
-    from tests.support.tool_outputs import _install_tool_call
-    from pulsara_agent.conversation_kernel.repository import ConversationKernelConflict
-
-    caller = new_session(repo)
-    workspace = identity("workspace")
-    lease, turn_id, request, call, attempt = _install_tool_call(repo, workspace)
-    source = (
-        "begin\n" + "x" * 50000 + "\nuniquemiddleneedle\n" + "z" * 50000 + "\nend"
-    )
-    result_id = identity("entry")
-    projection = prepare_output(
-        public_fields={"exit_code": 23},
-        content_parts=(ResultPart("text", source),),
-    )
-    accepted = build_prepared_tool_result_acceptance(
-        guard=lease.guard,
-        workspace_id=workspace,
-        result_id=identity("result"),
-        result_entry_id=result_id,
-        turn_id=turn_id,
-        assistant_entry_id=request,
-        tool_call_id=call,
-        attempt_id=attempt,
-        result_state="SUCCESS",
-        public_fields=projection.public_fields,
-        content_parts=projection.content_parts,
-        actor_id="terminal",
-        observed_at=datetime.now(timezone.utc),
-        observation_duration_microseconds=None,
-        observation_origin_kind=ToolObservationOrigin.TERMINAL_PROCESS,
-        trusted_tool_reported_duration_microseconds=None,
-    )
-    repo.accept_tool_result(
-        lease.guard, candidate=accepted, deadline_monotonic=monotonic() + 30
-    )
-    owner = SessionContentQuery(
-        repo, session_id=caller.guard.session_id, memory_domain_id="u_local"
-    )
-
-    def invoke(name="read_session_content", **args):
-        if name == "search_session_content":
-            maintain_history(repo, allow_build_failure=True)
-        return owner.invoke(
-            name,
-            args,
-            current_range=SessionContentRange(0),
-            tool_call_id="call:history",
-            page_budget=ToolResultPageBudget(tool_call_id="call:history"),
-            deadline_monotonic=monotonic() + 30,
-        )
-
-    assert (
-        invoke('search_session_content', target={'kind': 'SESSION', 'session_id': lease.guard.session_id}, query='uniquemiddleneedle')["items"]
-        == []
-    )
-    found = invoke('search_session_content', target={'kind': 'SESSION', 'session_id': lease.guard.session_id}, query='uniquemiddleneedle', include_tools=True)
-    assert any(
-        m["target"]["entry_id"] == result_id and "uniquemiddleneedle" in m["text"]
-        for m in found["items"][0]["messages"]
-    )
-    projection_body = rows(repo, "SELECT body FROM pulsara_v3.history_search_documents WHERE session_id=%s AND include_tools=true", (lease.guard.session_id,))
-    assert projection_body
-    assert all(source in row["body"] for row in projection_body)
-    page = invoke(target={'kind': 'SESSION_ENTRY', 'session_id': lease.guard.session_id, 'entry_id': result_id}, include_tools=True, limit=1)
-    parts = []
-    while True:
-        assert page["items"][0]["target"]["entry_id"] == result_id and _fits(page, "call:history")
-        parts.append(page["items"][0]["text"])
-        if not _cursor(page):
-            break
-        page = invoke(cursor=_cursor(page))
-    combined = "".join(parts)
-    assert combined == source
-    # Corrupt canonical bytes must fail rather than silently supply another value.
-    import psycopg
-
-    with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
-        blob_id = connection.execute(
-            "SELECT blob_id FROM pulsara_v3.content_parts WHERE entry_id=%s AND type='text'",
-            (result_id,),
-        ).fetchone()[0]
-        assert blob_id is not None
-        connection.execute(
-            "UPDATE pulsara_v3.blobs SET body=%s WHERE id=%s",
-            (b"x" * len(source.encode()), blob_id),
-        )
-    with pytest.raises(ConversationKernelConflict):
-        invoke(target={'kind': 'SESSION_ENTRY', 'session_id': lease.guard.session_id, 'entry_id': result_id}, include_tools=True)
+    assert value.content and all(p.type == "object" for p in value.content)
+    for part in value.content:
+        assert set(part.value) == {"target", "text"}
+        assert set(part.value["target"]) == {"kind", "entry_id"}
+        assert "user message (" in part.value["text"]
+        assert "assistant final answer (" in part.value["text"]
+        assert "needle" in part.value["text"]
 
 
 def test_session_query_tools_are_read_only_root_only():
@@ -869,6 +185,179 @@ def test_session_query_tools_are_read_only_root_only():
         assert len(entry.availability_requirement.allowed_invocation_owners) == 1
 
 
+def test_current_context_cannot_bypass_earlier_content_scope(repo):
+    from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
+    from pulsara_agent.ports.session_content import session_content_range
+
+    caller = new_session(repo)
+    turn(repo, caller.guard, "early decision", answer="older answer")
+    _, cut, _ = turn(repo, caller.guard, "current", finish=False)
+    facts = (
+        CanonicalProviderInputReader(repo.connection_provider)
+        .read_frozen_dispatch(cut, deadline_monotonic=monotonic() + 30)
+        .compile_snapshot
+    )
+    scope = session_content_range(facts)
+    assert scope == SessionContentRange(0)
+    value = query(
+        repo,
+        caller,
+        "read_session_content",
+        scope=scope,
+        target={"kind": "SESSION", "session_id": caller.guard.session_id},
+        limit=-10,
+    )
+    assert len(value.content) == 1 and value.content[0].type == "text"
+    assert (
+        query(repo, caller, "search_sessions", scope=scope, query="decision")
+        .content[0]
+        .type
+        == "text"
+    )
+
+
+def test_compacted_read_excludes_active_request_and_reads_original_not_summary(repo):
+    from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
+    from pulsara_agent.ports.session_content import session_content_range
+    from tests.test_conversation_fork import compact
+
+    caller = new_session(repo)
+    _, _, answer = turn(repo, caller.guard, "old needle", answer="old original needle")
+    active, _, _ = turn(repo, caller.guard, "active needle", finish=False)
+    head = rows(
+        repo,
+        "SELECT latest_entry_sequence FROM pulsara_v3.sessions WHERE id=%s",
+        (caller.guard.session_id,),
+    )[0]["latest_entry_sequence"]
+    compact(repo, caller.guard, active, head, summary="replacement summary text")
+    cut = repo.prepare_provider_input_cut(
+        caller.guard, turn_id=active, deadline_monotonic=monotonic() + 30
+    )
+    facts = (
+        CanonicalProviderInputReader(repo.connection_provider)
+        .read_frozen_dispatch(cut, deadline_monotonic=monotonic() + 30)
+        .compile_snapshot
+    )
+    scope = session_content_range(facts)
+    assert scope.through_sequence == head and scope.excluded_entry_id is not None
+    value = query(
+        repo,
+        caller,
+        "read_session_content",
+        scope=scope,
+        target={"kind": "SESSION_ENTRY", "entry_id": answer},
+        limit=1,
+    )
+    assert value.content[0].value["text"] == "old original needle"
+    with pytest.raises(SessionQueryError):
+        query(
+            repo,
+            caller,
+            "read_session_content",
+            scope=scope,
+            target={"kind": "SESSION_ENTRY", "entry_id": scope.excluded_entry_id},
+            limit=1,
+        )
+
+
+def test_cold_archived_history_survives_missing_directory_and_parent_deletion(
+    repo, tmp_path, stage2_migrated_postgres_database
+):
+    import psycopg
+    from tests.test_conversation_fork import fork
+
+    caller, source = new_session(repo), new_session(repo)
+    _, _, anchor = turn(repo, source.guard, "source", answer="source answer")
+    missing = tmp_path / "missing-workspace"
+    with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
+        connection.execute(
+            "UPDATE pulsara_v3.workspaces SET workspace_root=%s WHERE id=(SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s)",
+            (str(missing), source.guard.session_id),
+        )
+    created = fork(repo, source.guard.session_id, anchor)
+    assert created.created
+    repo.archive_session(
+        session_id=source.guard.session_id,
+        memory_domain_id="u_local",
+        closed_writer=source.guard,
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert (
+        query(
+            repo,
+            caller,
+            "read_session_content",
+            target={"kind": "SESSION", "session_id": source.guard.session_id},
+            limit=-1,
+        )
+        .content[0]
+        .value["text"]
+        == "source answer"
+    )
+    child = query(
+        repo,
+        caller,
+        "read_session_content",
+        target={"kind": "SESSION", "session_id": created.child_session_id},
+        limit=-1,
+    )
+    assert child.content[0].value["target"]["entry_id"] != anchor
+    assert (
+        repo.delete_session(
+            session_id=source.guard.session_id,
+            memory_domain_id="u_local",
+            closed_writer=source.guard,
+            required_lifecycle=None,
+            deadline_monotonic=monotonic() + 30,
+        )
+        == "DELETED"
+    )
+    assert (
+        query(
+            repo,
+            caller,
+            "read_session_content",
+            target={"kind": "SESSION", "session_id": created.child_session_id},
+            limit=-1,
+        )
+        == child
+    )
+    assert not missing.exists()
+
+
+def test_read_and_search_reject_cross_domain_and_tool_only_anchor(repo):
+    from tests.support.history_tools import saved_calls, call_block
+
+    caller, source = new_session(repo), new_session(repo)
+    tool = saved_calls(
+        repo, source, (call_block("exec_process", {"command": "hidden tool args"}),)
+    )
+    with pytest.raises(SessionQueryError):
+        query(
+            repo,
+            caller,
+            "read_session_content",
+            target={"kind": "SESSION_ENTRY", "entry_id": tool},
+            limit=1,
+        )
+    other = repo.acquire_host_writer(
+        intent="NEW",
+        session_id=identity("session"),
+        workspace_id=identity("workspace"),
+        memory_domain_id="another_domain",
+        writer_owner_id=identity("host"),
+        lease_seconds=300,
+        deadline_monotonic=monotonic() + 30,
+    )
+    _, _, anchor = turn(repo, other.guard, "private-domain", answer="private")
+    for target in (
+        {"kind": "SESSION", "session_id": other.guard.session_id},
+        {"kind": "SESSION_ENTRY", "entry_id": anchor},
+    ):
+        with pytest.raises(SessionQueryError):
+            query(repo, caller, "read_session_content", target=target, limit=-1)
+
+
 def test_direct_query_uses_physical_owner_cancel_settlement_and_root_surface(tmp_path):
     import asyncio
     from dataclasses import replace
@@ -878,15 +367,14 @@ def test_direct_query_uses_physical_owner_cancel_settlement_and_root_surface(tmp
     from pulsara_agent.conversation_kernel.tool_policy import (
         DefaultToolDispatchAuthorizationPolicy,
     )
+    from pulsara_agent.conversation_kernel.content_parts import ResultPart
     from pulsara_agent.model_input.contracts import ModelInputScopeKind
     from pulsara_agent.ports.session_content import SESSION_QUERY_TOOL_NAMES
+    from pulsara_agent.ports.tool_execution import ToolBusinessValue
+    from tests.support.model_config import scheduled_task_service
     from tests.support.round3 import (
         direct_tool_invocation_context,
         prepare_test_direct_tool_surface,
-    )
-    from pulsara_agent.storage.migrations.errors import (
-        PostgresSchemaError,
-        PostgresSchemaFailureCode,
     )
 
     started, release = Event(), Event()
@@ -894,106 +382,101 @@ def test_direct_query_uses_physical_owner_cancel_settlement_and_root_surface(tmp
     class Query:
         failure = None
 
-        def invoke(
-            self,
-            operation,
-            arguments,
-            *,
-            current_range,
-            tool_call_id,
-            page_budget,
-            deadline_monotonic,
-        ):
+        def invoke(self, operation, arguments, *, current_range, deadline_monotonic):
             assert current_range == SessionContentRange(0)
-            assert isinstance(page_budget, ToolResultPageBudget)
             if self.failure:
                 raise self.failure
             started.set()
             assert release.wait(5)
-            return {"items": [], "next": None}
+            return ToolBusinessValue(
+                {}, (ResultPart("text", "complete frozen result"),)
+            )
 
-    query = Query()
+    store = Query()
 
     async def run():
-        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
+        session = identity("session")
+        port = DirectKernelToolPort(
+            scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path,
-            host_owner_id='host:bri7pnkejy5ycd6bf5z6u6mq6e',
-            session_id='session:tonl7moeh47xjefxa32vgqmvkq',
+            host_owner_id=identity("host"),
+            session_id=session,
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
-            session_content_query=query,
+            session_content_query=store,
         )
+        attempt, owner, entry = identity("attempt"), identity("turn"), identity("entry")
         borrow, context = direct_tool_invocation_context(
             port,
-            session_id='session:tonl7moeh47xjefxa32vgqmvkq',
+            session_id=session,
             tool_name="read_session_content",
-            tool_call_id="call:query",
-            attempt_id='attempt:6lcu64tcolmjuk5vjtgz3jk3pa',
-            turn_id='turn:xuiovfj7unyhhjtxjxa2ejqwdy',
-            assistant_entry_id='entry:4bwk3sll4m4vlmtvnwpeywd6um',
+            tool_call_id="external-call",
+            attempt_id=attempt,
+            turn_id=owner,
+            assistant_entry_id=entry,
         )
-        context = replace(context, session_content_range=SessionContentRange(0),
-                          page_budget=ToolResultPageBudget(tool_call_id="call:query"))
+        context = replace(context, session_content_range=SessionContentRange(0))
 
         async def invoke():
-            return await port.invoke(
+            result = await port.invoke(
                 tool_name="read_session_content",
-                arguments={},
-                tool_call_id="call:query",
-                attempt_id='attempt:6lcu64tcolmjuk5vjtgz3jk3pa',
-                turn_id='turn:xuiovfj7unyhhjtxjxa2ejqwdy',
-                assistant_entry_id='entry:4bwk3sll4m4vlmtvnwpeywd6um',
+                arguments={
+                    "target": {"kind": "SESSION", "session_id": session},
+                    "limit": -1,
+                },
+                tool_call_id="external-call",
+                attempt_id=attempt,
+                turn_id=owner,
+                assistant_entry_id=entry,
                 invocation_context=context,
             )
+            from pulsara_agent.ports.session_content import session_query_result_schema
+            from tests.support.tool_result_schemas import validate_business_result
+
+            validate_business_result(session_query_result_schema("read_session_content"),
+                result.content, result.state)
+            return result
 
         try:
             child = prepare_test_direct_tool_surface(
-                port,
-                conversation_scope_kind=ModelInputScopeKind.SUBAGENT,
-
+                port, conversation_scope_kind=ModelInputScopeKind.SUBAGENT
             )
             assert SESSION_QUERY_TOOL_NAMES.isdisjoint(
-                s.name for s in child.model_surface.tool_specs
+                spec.name for spec in child.model_surface.tool_specs
             )
             operation = asyncio.create_task(invoke())
             assert await asyncio.to_thread(started.wait, 5)
-            assert (
-                port._physical_io._active
-            )  # Actual admitted owner, also drained by aclose.
+            assert port._physical_io._active
             operation.cancel()
             await asyncio.sleep(0)
             release.set()
             result = await operation
             assert result.state == "SUCCESS" and result.caller_cancelled_while_running
-            assert (
-                result.physical_timing == "LATE_AFTER_WATCHDOG"
-                and result.page_complete
+            assert result.content.content == (
+                ResultPart("text", "complete frozen result"),
             )
-            assert json.loads(result.content) == {"items": [], "next": None}
-            for error, expected in [
-                (
-                    PostgresSchemaError(
-                        PostgresSchemaFailureCode.CONNECTION_FAILED, "offline"
-                    ),
-                    "QUERY_UNAVAILABLE",
-                ),
-                (
-                    PostgresSchemaError(
-                        PostgresSchemaFailureCode.DEADLINE_EXCEEDED, "expired"
-                    ),
-                    "QUERY_TIMEOUT",
-                ),
-                (RuntimeError("corrupt text"), "CONTENT_CORRUPT"),
-            ]:
-                query.failure = error
-                result = await invoke()
-                assert (
-                    result.state == "APPLICATION_ERROR"
-                    and json.loads(result.content)["code"] == expected
-                )
+            assert result.physical_timing == "LATE_AFTER_WATCHDOG"
+            store.failure = RuntimeError("stored text is corrupt")
+            failed = await invoke()
+            assert failed.state == "APPLICATION_ERROR"
+            assert failed.content.content == (
+                ResultPart("text", "stored text is corrupt"),
+            )
         finally:
             release.set()
             borrow.close()
             await port.aclose()
 
     asyncio.run(run())
+
+
+def test_session_discovery_returns_the_complete_business_scope_past_ui_page_size(repo):
+    caller = new_session(repo)
+    expected = {new_session(repo).guard.session_id for _ in range(55)}
+    value = query(repo, caller, "search_sessions")
+    discovered = {
+        part.value["target"]["session_id"]
+        for part in value.content
+        if part.type == "object"
+    }
+    assert expected <= discovered

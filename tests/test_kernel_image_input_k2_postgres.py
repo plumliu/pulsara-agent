@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 
 from pulsara_agent.identity import random_id
 
@@ -23,20 +22,13 @@ from pulsara_agent.conversation_kernel.blob import (
     _delete_orphans_in_connection,
 )
 from pulsara_agent.conversation_kernel.contracts import (
-    InlineContent,
     PromptDeliveryMode,
 )
 from tests.support.round3 import new_test_provider_input_continuity_owner
 from pulsara_agent.conversation_kernel.prompt_content import freeze_canonical_prompt, bind_prompt_images
-from pulsara_agent.conversation_kernel.prompt_content import (
-    PROMPT_BODY_CODEC,
-    PROMPT_BODY_MEDIA_TYPE,
-)
 from pulsara_agent.conversation_kernel.prompt_storage import (
     CanonicalImageReferenceResourceExceeded,
-    CanonicalImageReferenceUnavailable,
     PostgresCanonicalImageReferenceReadPort,
-    insert_canonical_prompt_refs,
 )
 from pulsara_agent.conversation_kernel.provider_dispatch import canonical_frontier
 from pulsara_agent.conversation_kernel.queued_prompt_actions import QueuedPromptAction
@@ -71,7 +63,9 @@ from pulsara_agent.model_input.lowering import (
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
-from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
+from pulsara_agent.conversation_kernel.content_parts import ResultPart
+from pulsara_agent.conversation_kernel.tool_outputs import prepare_native_tool_observation
+from tests.test_native_tool_delivery_postgres import freeze_page
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.support.model_config import test_model_binding, test_model_runtime
 from tests.support.postgres import verified_postgres_provider
@@ -90,9 +84,11 @@ def _png(*, size: tuple[int, int] = (7, 5)) -> bytes:
     return output.getvalue()
 
 
-def _image(payload: bytes | None = None, *, workspace_id: str | None = None) -> LLMImagePart:
-    image = LLMImagePart("image/png", payload or _png(), 7, 5)
-    return image if workspace_id is None else bind_prompt_images(FrozenPromptContent((image,)), workspace_id).parts[0]
+def _image(payload: bytes | None = None) -> LLMImagePart:
+    payload = payload or _png()
+    with Image.open(BytesIO(payload)) as decoded:
+        width, height = decoded.size
+    return bind_prompt_images(FrozenPromptContent((LLMImagePart("image/png", payload, width, height),))).parts[0]
 
 
 def _workspace(repository, lease):
@@ -131,7 +127,7 @@ def _direct_intent(repository, lease, runtime, content: FrozenPromptContent):
         context_binding_revision_id=_id("binding"),
         permission_snapshot_id=_id("permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
-        canonical_prompt=freeze_canonical_prompt(content, workspace_id=_workspace(repository, lease)),
+        canonical_prompt=freeze_canonical_prompt(content),
         occurred_at=datetime.now(timezone.utc),
     )
     resolution_snapshot = runtime.freeze_resolution_snapshot()
@@ -161,7 +157,7 @@ def test_direct_image_owner_confirms_and_reader_lowers_exact_typed_content(
     lease, runtime, _binding = _bound_session(
         repository, workspace_id=workspace_id
     )
-    image = _image(workspace_id=_workspace(repository, lease))
+    image = _image()
     content = FrozenPromptContent(
         (LLMTextPart("before"), image, LLMTextPart("after"), image)
     )
@@ -175,20 +171,14 @@ def test_direct_image_owner_confirms_and_reader_lowers_exact_typed_content(
     assert confirmation.kind.value == "FULL"
     refs = _rows(
         repository,
-        """SELECT ref_ordinal, blob_id FROM pulsara_v3.canonical_image_refs
-           WHERE session_id=%s AND transcript_entry_id=%s ORDER BY ref_ordinal""",
+        """SELECT ordinal, blob_id FROM pulsara_v3.content_parts
+           WHERE type='image' AND session_id=%s AND entry_id=%s ORDER BY ordinal""",
         (lease.guard.session_id, intent.entry_id),
     )
-    assert [(row["ref_ordinal"], row["blob_id"]) for row in refs] == [
-        (0, refs[0]["blob_id"]),
+    assert [(row["ordinal"], row["blob_id"]) for row in refs] == [
         (1, refs[0]["blob_id"]),
+        (3, refs[0]["blob_id"]),
     ]
-    entry = _rows(
-        repository,
-        "SELECT inline_content, blob_id FROM pulsara_v3.transcript_entries WHERE id=%s",
-        (intent.entry_id,),
-    )[0]
-    assert entry["inline_content"] is not None and entry["blob_id"] is None
     image_blob = _rows(
         repository,
         "SELECT body, media_type, codec FROM pulsara_v3.blobs WHERE id=%s",
@@ -212,8 +202,8 @@ def test_direct_image_owner_confirms_and_reader_lowers_exact_typed_content(
     lowered = lower_canonical_item(
         snapshot.items[0],
     )
-    assert lowered.fixed_message is not None
-    assert lowered.fixed_message.content == image_referenced_content(content.parts)
+    assert lowered.message is not None
+    assert lowered.message.content == image_referenced_content(content.parts)
     assert accepted.accepted.entry_id == intent.entry_id
 
     changed = replace(
@@ -238,14 +228,14 @@ def test_direct_image_owner_confirms_and_reader_lowers_exact_typed_content(
         )
 
 
-def test_known_image_reference_requires_one_committed_owner_in_the_workspace(
+def test_known_image_reference_reads_global_asset_and_quotes_before_payload(
     stage2_migrated_postgres_database,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = _repository(stage2_migrated_postgres_database)
     workspace_id = _id("workspace")
     lease, runtime, _binding = _bound_session(repository, workspace_id=workspace_id)
-    image = _image(workspace_id=_workspace(repository, lease))
+    image = _image()
     _direct_intent(
         repository,
         lease,
@@ -254,12 +244,8 @@ def test_known_image_reference_requires_one_committed_owner_in_the_workspace(
     )
     reader = PostgresCanonicalImageReferenceReadPort(
         repository.connection_provider,
-        session_id=lease.guard.session_id,
-        workspace_id=workspace_id,
     )
     reread = reader.read_image(
-        session_id=lease.guard.session_id,
-        workspace_id=workspace_id,
         image_ref=image.image_ref,
         maximum_encoded_bytes=1 << 20,
         deadline_monotonic=monotonic() + 30,
@@ -280,8 +266,6 @@ def test_known_image_reference_requires_one_committed_owner_in_the_workspace(
     )
     with pytest.raises(CanonicalImageReferenceResourceExceeded):
         reader.read_image(
-            session_id=lease.guard.session_id,
-            workspace_id=workspace_id,
             image_ref=image.image_ref,
             maximum_encoded_bytes=len(image.immutable_bytes) - 1,
             deadline_monotonic=monotonic() + 30,
@@ -293,19 +277,15 @@ def test_known_image_reference_requires_one_committed_owner_in_the_workspace(
     )
     other_reader = PostgresCanonicalImageReferenceReadPort(
         repository.connection_provider,
-        session_id=other_lease.guard.session_id,
-        workspace_id=workspace_id,
     )
     monkeypatch.setattr(PostgresCanonicalBlobStore, "read_exact_in_connection", staticmethod(original_read))
     assert other_reader.read_image(
-            session_id=other_lease.guard.session_id,
-            workspace_id=workspace_id,
             image_ref=image.image_ref,
             maximum_encoded_bytes=1 << 20,
             deadline_monotonic=monotonic() + 30,
     ) == image
 
-    orphan = _image(_png(size=(8, 6)), workspace_id=_workspace(repository, lease))
+    orphan = _image(_png(size=(8, 6)))
     with repository.connection_provider.connection(
         lane=PostgresConnectionLane.ARTIFACT,
         row_factory=dict_row,
@@ -313,19 +293,14 @@ def test_known_image_reference_requires_one_committed_owner_in_the_workspace(
     ) as connection:
         PostgresCanonicalBlobStore.publish_in_connection(
             connection,
-            workspace_id=workspace_id,
+            workspace_id=None,
+            validated_image=orphan,
             content=orphan.immutable_bytes,
             media_type=orphan.media_type,
             codec="binary",
         )
-    with pytest.raises(CanonicalImageReferenceUnavailable):
-        reader.read_image(
-            session_id=lease.guard.session_id,
-            workspace_id=workspace_id,
-            image_ref=orphan.image_ref,
-            maximum_encoded_bytes=1 << 20,
-            deadline_monotonic=monotonic() + 30,
-        )
+    assert reader.read_image(image_ref=orphan.image_ref, maximum_encoded_bytes=1<<20,
+        deadline_monotonic=monotonic()+30) == orphan
 
 
 def test_typed_tool_results_commit_confirm_reuse_and_rollback_atomically(
@@ -354,7 +329,6 @@ def test_typed_tool_results_commit_confirm_reuse_and_rollback_atomically(
         lease.guard,
         cut=cut,
         entry_id=assistant_entry_id,
-        parent_content=InlineContent.from_bytes(b"inspect"),
         blocks=tuple(
             AssistantToolCallBlock(
                 block_id=_id("block"),
@@ -395,14 +369,11 @@ def test_typed_tool_results_commit_confirm_reuse_and_rollback_atomically(
             deadline_monotonic=monotonic() + 30,
         )
 
-    shared_image = _image(workspace_id=_workspace(repository, lease))
+    shared_image = _image()
 
     def candidate(
         *, ordinal: int, image: LLMImagePart, result_entry_id: str
     ):
-        prompt = freeze_canonical_prompt(
-            FrozenPromptContent((LLMTextPart("Image loaded."), image))
-        )
         return build_prepared_tool_result_acceptance(
             guard=lease.guard,
             workspace_id=workspace_id,
@@ -413,17 +384,9 @@ def test_typed_tool_results_commit_confirm_reuse_and_rollback_atomically(
             tool_call_id=call_ids[ordinal],
             attempt_id=attempt_ids[ordinal],
             result_state="SUCCESS",
-            canonical_preview_content=InlineContent.from_bytes(
-                prompt.body,
-                media_type=PROMPT_BODY_MEDIA_TYPE,
-                codec=PROMPT_BODY_CODEC,
-            ),
-            canonical_prompt=prompt,
-            output_body=None,
-            source_coverage=ToolOutputSourceCoverage.COMPLETE,
-            output_omitted=False,
-            source_coverage_reason=None,
-            output_unavailability_reason=None,
+            public_fields={},
+            content_parts=(ResultPart("text", "Image loaded."), ResultPart("image", {"kind":"IMAGE_REF", "image_ref":image.image_ref})),
+            pending_images=(image,),
             observed_at=datetime.now(timezone.utc),
             observation_duration_microseconds=1,
             observation_origin_kind=ToolObservationOrigin.BUILTIN,
@@ -453,18 +416,22 @@ def test_typed_tool_results_commit_confirm_reuse_and_rollback_atomically(
 
     refs = _rows(
         repository,
-        "SELECT transcript_entry_id, blob_id FROM pulsara_v3.canonical_image_refs "
-        "WHERE session_id=%s AND transcript_entry_id = ANY(%s) "
-        "ORDER BY transcript_entry_id",
+        "SELECT entry_id, blob_id FROM pulsara_v3.content_parts "
+        "WHERE type='image' AND session_id=%s AND entry_id = ANY(%s) "
+        "ORDER BY entry_id",
         (
             lease.guard.session_id,
             [item.result_entry_id for item in accepted_candidates],
         ),
     )
     assert len(refs) == 2
-    assert len({str(row["transcript_entry_id"]) for row in refs}) == 2
-    assert len({str(row["blob_id"]) for row in refs}) == 1
+    assert len({str(row["entry_id"]) for row in refs}) == 2
+    assert len({row["blob_id"] for row in refs}) == 1
 
+    for prepared in accepted_candidates:
+        page = prepare_native_tool_observation(repository, lease.guard,
+            workspace_id=workspace_id, result_entry_id=prepared.result_entry_id, deadline_monotonic=monotonic()+30)
+        freeze_page(repository, lease.guard, result_entry_id=prepared.result_entry_id, page=page)
     final_cut = repository.prepare_provider_input_cut(
         lease.guard,
         turn_id=intent.turn_id,
@@ -482,34 +449,7 @@ def test_typed_tool_results_commit_confirm_reuse_and_rollback_atomically(
     assert tuple(item.tool_call_ordinal for item in tool_results) == (0, 1)
     assert all(item.content[1] == shared_image for item in tool_results)
 
-    # History projection uses the typed tool body only when tools are included.
-    from pulsara_agent.conversation_kernel.history_projection import canonical_history_message
-    from pulsara_agent.conversation_kernel.session_content import SessionContentQuery
-    from pulsara_agent.ports.session_content import SessionContentRange
-    from pulsara_agent.llm.input import HISTORICAL_IMAGE_MARKER
-    with repository.connection_provider.connection(
-        lane=PostgresConnectionLane.MEMORY_QUERY, row_factory=dict_row,
-        deadline_monotonic=monotonic() + 30,
-    ) as connection:
-        entry = connection.execute(
-            "SELECT * FROM pulsara_v3.transcript_entries WHERE id=%s",
-            (accepted_candidates[0].result_entry_id,),
-        ).fetchone()
-        state = connection.execute("SELECT * FROM pulsara_v3.sessions WHERE id=%s", (lease.guard.session_id,)).fetchone()
-        assert canonical_history_message(connection, entry) is None
-        projected = canonical_history_message(connection, entry, include_tools=True)
-        assert HISTORICAL_IMAGE_MARKER in projected["text"]
-        assert shared_image.content_digest not in str(projected)
-        assert HISTORICAL_IMAGE_MARKER not in str(projected["fields"])
-    page = SessionContentQuery(repository, session_id=lease.guard.session_id, memory_domain_id=state["memory_domain_id"]).invoke(
-        "read_session_content", {"target": {"kind": "SESSION_ENTRY", "entry_id": entry["id"]}, "include_tools": True, "limit": 1},
-        current_range=SessionContentRange(state["latest_entry_sequence"]),
-        tool_call_id="call:history", page_budget=ToolResultPageBudget(tool_call_id="call:history"), deadline_monotonic=monotonic() + 30,
-    )
-    assert shared_image.image_ref in page["items"][0]["text"]
-    assert page["items"][0]["tool_name"] == "view_image"
-
-    rollback_image = _image(_png(size=(8, 6)), workspace_id=_workspace(repository, lease))
+    rollback_image = _image(_png(size=(8, 6)))
     rollback_entry_id = _id("entry")
     rollback_candidate = candidate(
         ordinal=2,
@@ -551,18 +491,9 @@ def test_typed_tool_results_commit_confirm_reuse_and_rollback_atomically(
         (workspace_id, rollback_image.content_digest),
     ) == []
 
-    drifted_prompt = freeze_canonical_prompt(
-        FrozenPromptContent((LLMTextPart("Image loaded."), rollback_image))
-    )
-    drifted = replace(
-        accepted_candidates[0],
-        canonical_preview_content=InlineContent.from_bytes(
-            drifted_prompt.body,
-            media_type=PROMPT_BODY_MEDIA_TYPE,
-            codec=PROMPT_BODY_CODEC,
-        ),
-        canonical_prompt=drifted_prompt,
-    )
+    drifted = replace(accepted_candidates[0],
+        content_parts=(ResultPart("text", "Image loaded."), ResultPart("image", {"kind":"IMAGE_REF", "image_ref":rollback_image.image_ref})),
+        pending_images=(rollback_image,))
     with pytest.raises(ConversationKernelConflict, match="different winner"):
         repository.confirm_tool_result_winner(
             lease.guard,
@@ -572,43 +503,12 @@ def test_typed_tool_results_commit_confirm_reuse_and_rollback_atomically(
 
     reference_reader = PostgresCanonicalImageReferenceReadPort(
         repository.connection_provider,
-        session_id=lease.guard.session_id,
-        workspace_id=workspace_id,
     )
     assert reference_reader.read_image(
-        session_id=lease.guard.session_id,
-        workspace_id=workspace_id,
         image_ref=shared_image.image_ref,
         maximum_encoded_bytes=1 << 20,
         deadline_monotonic=monotonic() + 30,
     ) == shared_image
-    selected_owner_id = min(item.result_entry_id for item in accepted_candidates)
-    with psycopg.connect(
-        stage2_migrated_postgres_database.admin_dsn,
-        autocommit=True,
-        row_factory=dict_row,
-    ) as connection:
-        connection.execute("SET session_replication_role = replica")
-        row = connection.execute(
-            "SELECT content_size FROM pulsara_v3.transcript_entries WHERE id=%s",
-            (selected_owner_id,),
-        ).fetchone()
-        assert row is not None
-        try:
-            connection.execute(
-                "UPDATE pulsara_v3.transcript_entries SET inline_content=%s WHERE id=%s",
-                (b"x" * int(row["content_size"]), selected_owner_id),
-            )
-        finally:
-            connection.execute("SET session_replication_role = origin")
-    with pytest.raises(ConversationKernelConflict):
-        reference_reader.read_image(
-            session_id=lease.guard.session_id,
-            workspace_id=workspace_id,
-            image_ref=shared_image.image_ref,
-            maximum_encoded_bytes=1 << 20,
-            deadline_monotonic=monotonic() + 30,
-        )
 
 
 def test_compaction_headroom_counts_summary_and_original_repeated_images_once_per_occurrence(
@@ -618,14 +518,14 @@ def test_compaction_headroom_counts_summary_and_original_repeated_images_once_pe
 
     repository = _repository(stage2_migrated_postgres_database)
     lease, runtime, _binding = _bound_session(repository)
-    image = _image(_png(), workspace_id=_workspace(repository, lease))
+    image = _image(_png())
     content = FrozenPromptContent((LLMTextPart("request"), image, image))
     intent, accepted = _direct_intent(repository, lease, runtime, content)
     carrier = compact(repository, lease.guard, intent.turn_id, 1)
     assert carrier.retained_entry_ids == (intent.entry_id,)
     assert _rows(repository, "SELECT 1 FROM information_schema.columns WHERE table_schema='pulsara_v3' AND table_name='canonical_image_refs' AND column_name='context_snapshot_id'") == []
-    refs = _rows(repository, "SELECT ref_ordinal,blob_id FROM pulsara_v3.canonical_image_refs WHERE session_id=%s AND transcript_entry_id=%s ORDER BY ref_ordinal", (lease.guard.session_id, intent.entry_id))
-    assert [ref["ref_ordinal"] for ref in refs] == [0, 1]
+    refs = _rows(repository, "SELECT ordinal,blob_id FROM pulsara_v3.content_parts WHERE type='image' AND session_id=%s AND entry_id=%s ORDER BY ordinal", (lease.guard.session_id, intent.entry_id))
+    assert [ref["ordinal"] for ref in refs] == [1, 2]
     assert refs[0]["blob_id"] == refs[1]["blob_id"]
     cut = repository.prepare_provider_input_cut(
         lease.guard, turn_id=intent.turn_id, deadline_monotonic=monotonic() + 30,
@@ -644,19 +544,19 @@ def test_full_confirmation_reads_body_blob_but_not_image_payload(
 ) -> None:
     repository = _repository(stage2_migrated_postgres_database)
     lease, runtime, _binding = _bound_session(repository)
-    image = _image(workspace_id=_workspace(repository, lease))
+    image = _image()
     content = FrozenPromptContent((LLMTextPart("x" * 70_000), image))
     intent, _accepted = _direct_intent(
         repository, lease, runtime, content
     )
     owner = _rows(
         repository,
-        "SELECT blob_id FROM pulsara_v3.transcript_entries WHERE id=%s",
+        "SELECT blob_id FROM pulsara_v3.content_parts WHERE entry_id=%s AND type='text'",
         (intent.entry_id,),
     )[0]
     image_ref = _rows(
         repository,
-        "SELECT blob_id FROM pulsara_v3.canonical_image_refs WHERE transcript_entry_id=%s",
+        "SELECT blob_id FROM pulsara_v3.content_parts WHERE type='image' AND entry_id=%s",
         (intent.entry_id,),
     )[0]
     assert owner["blob_id"] is not None and owner["blob_id"] != image_ref["blob_id"]
@@ -690,6 +590,7 @@ def test_full_confirmation_reads_body_blob_but_not_image_payload(
         ).read_frozen_snapshot(cut, deadline_monotonic=monotonic() + 30)
 
     with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
+        connection.execute("UPDATE pulsara_v3.blobs SET body=%s WHERE id=%s", (payload,image_ref["blob_id"]))
         body = bytes(
             connection.execute(
                 "SELECT body FROM pulsara_v3.blobs WHERE id=%s",
@@ -707,6 +608,8 @@ def test_full_confirmation_reads_body_blob_but_not_image_payload(
         ).kind.value
         == "CONFLICT"
     )
+    with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
+        connection.execute("UPDATE pulsara_v3.blobs SET body=%s WHERE id=%s", (body,owner["blob_id"]))
 
 
 def test_queue_redirect_and_steer_copy_independent_ordered_refs(
@@ -714,14 +617,7 @@ def test_queue_redirect_and_steer_copy_independent_ordered_refs(
 ) -> None:
     repository = _repository(stage2_migrated_postgres_database)
     lease, runtime, binding = _bound_session(repository)
-    workspace_id = str(
-        _rows(
-            repository,
-            "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s",
-            (lease.guard.session_id,),
-        )[0]["workspace_id"]
-    )
-    image = _image(workspace_id=_workspace(repository, lease))
+    image = _image()
     initial_content = FrozenPromptContent((image,))
     permission_id = _id("permission")
     expected_permission = repository.prepare_root_permission_snapshot(
@@ -759,17 +655,10 @@ def test_queue_redirect_and_steer_copy_independent_ordered_refs(
     )
     reference_reader = PostgresCanonicalImageReferenceReadPort(
         repository.connection_provider,
-        session_id=lease.guard.session_id,
-        workspace_id=workspace_id,
     )
-    with pytest.raises(CanonicalImageReferenceUnavailable):
-        reference_reader.read_image(
-            session_id=lease.guard.session_id,
-            workspace_id=workspace_id,
-            image_ref=image.image_ref,
-            maximum_encoded_bytes=1 << 20,
-            deadline_monotonic=monotonic() + 30,
-        )
+    assert reference_reader.read_image(image_ref=image.image_ref, maximum_encoded_bytes=1<<20,
+        deadline_monotonic=monotonic()+30) == image
+    initial_parts = _rows(repository,"SELECT id,ordinal,blob_id FROM pulsara_v3.content_parts WHERE queue_item_id=%s ORDER BY ordinal",(initial.queue_item_id,))
     queued = repository.prepare_prompt_head_consumption(
         session_id=lease.guard.session_id,
         occurred_at=datetime.now(timezone.utc),
@@ -785,8 +674,6 @@ def test_queue_redirect_and_steer_copy_independent_ordered_refs(
     assert consumed is not None
     assert consumed.kind is QueuedRootTurnAdmissionConfirmationKind.FULL
     assert reference_reader.read_image(
-        session_id=lease.guard.session_id,
-        workspace_id=workspace_id,
         image_ref=image.image_ref,
         maximum_encoded_bytes=1 << 20,
         deadline_monotonic=monotonic() + 30,
@@ -827,6 +714,7 @@ def test_queue_redirect_and_steer_copy_independent_ordered_refs(
         deadline_monotonic=monotonic() + 30,
         _expected_permission_snapshot=second_permission,
     )
+    second_parts = _rows(repository,"SELECT id,ordinal,blob_id FROM pulsara_v3.content_parts WHERE queue_item_id=%s ORDER BY ordinal",(second.queue_item_id,))
     action = QueuedPromptAction(
         session_id=lease.guard.session_id,
         command_id=random_id("command"),
@@ -844,21 +732,22 @@ def test_queue_redirect_and_steer_copy_independent_ordered_refs(
     assert replacement_id is not None
     owner_refs = _rows(
         repository,
-        """SELECT queue_item_id, transcript_entry_id, ref_ordinal, blob_id
-           FROM pulsara_v3.canonical_image_refs WHERE session_id=%s
-           ORDER BY queue_item_id NULLS LAST, transcript_entry_id NULLS LAST, ref_ordinal""",
+        """SELECT queue_item_id, entry_id, ordinal, blob_id
+           FROM pulsara_v3.content_parts WHERE type='image' AND session_id=%s
+           ORDER BY queue_item_id NULLS LAST, entry_id NULLS LAST, ordinal""",
         (lease.guard.session_id,),
     )
     grouped: dict[tuple[str | None, str | None], list[tuple[int, str]]] = {}
     for row in owner_refs:
         grouped.setdefault(
-            (row["queue_item_id"], row["transcript_entry_id"]), []
-        ).append((int(row["ref_ordinal"]), str(row["blob_id"])))
-    assert grouped[(initial.queue_item_id, None)] == grouped[
-        (None, queued.exact_initial_entry_id)
-    ]
-    assert grouped[(second.queue_item_id, None)] == grouped[(replacement_id, None)]
-    assert [ordinal for ordinal, _blob in grouped[(replacement_id, None)]] == [0, 1]
+            (row["queue_item_id"], row["entry_id"]), []
+        ).append((int(row["ordinal"]), row["blob_id"]))
+    assert (initial.queue_item_id,None) not in grouped
+    assert (second.queue_item_id,None) not in grouped
+    assert grouped[(None,queued.exact_initial_entry_id)] == [(part["ordinal"],part["blob_id"]) for part in initial_parts]
+    assert grouped[(replacement_id,None)] == [(part["ordinal"],part["blob_id"]) for part in second_parts if part["blob_id"] is not None]
+    assert [ordinal for ordinal,_ in grouped[(replacement_id,None)]] == [1,2]
+    assert _rows(repository,"SELECT id FROM pulsara_v3.content_parts WHERE queue_item_id=%s ORDER BY ordinal",(replacement_id,)) == [{"id":part["id"]} for part in second_parts]
 
     fact = repository.read_pending_prompt_steer_facts(
         session_id=lease.guard.session_id,
@@ -911,12 +800,12 @@ def test_queue_redirect_and_steer_copy_independent_ordered_refs(
         ).kind
         is SteerConsumptionConfirmationKind.FULL
     )
-    assert grouped[(replacement_id, None)] == [
-        (int(row["ref_ordinal"]), str(row["blob_id"]))
+    assert [(part["ordinal"],part["blob_id"]) for part in second_parts] == [
+        (int(row["ordinal"]), row["blob_id"])
         for row in _rows(
             repository,
-            """SELECT ref_ordinal, blob_id FROM pulsara_v3.canonical_image_refs
-               WHERE session_id=%s AND transcript_entry_id=%s ORDER BY ref_ordinal""",
+            """SELECT ordinal, blob_id FROM pulsara_v3.content_parts
+               WHERE session_id=%s AND entry_id=%s ORDER BY ordinal""",
             (lease.guard.session_id, accepted.entry_id),
         )
     ]
@@ -941,7 +830,7 @@ def test_direct_publication_rolls_back_body_image_refs_and_command_together(
         context_binding_revision_id=_id("binding"),
         permission_snapshot_id=_id("permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
-        canonical_prompt=freeze_canonical_prompt(FrozenPromptContent((_image(workspace_id=_workspace(repository, lease)),))),
+        canonical_prompt=freeze_canonical_prompt(FrozenPromptContent((_image(),))),
         occurred_at=datetime.now(timezone.utc),
     )
     resolution_snapshot = runtime.freeze_resolution_snapshot()
@@ -957,7 +846,7 @@ def test_direct_publication_rolls_back_body_image_refs_and_command_together(
         """SELECT
              (SELECT count(*) FROM pulsara_v3.session_commands WHERE session_id=%s) commands,
              (SELECT count(*) FROM pulsara_v3.transcript_entries WHERE session_id=%s) entries,
-             (SELECT count(*) FROM pulsara_v3.canonical_image_refs WHERE session_id=%s) refs,
+             (SELECT count(*) FROM pulsara_v3.content_parts WHERE type='image' AND session_id=%s) refs,
              (SELECT count(*) FROM pulsara_v3.blobs WHERE workspace_id=(
                  SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s
              )) blobs""",
@@ -967,18 +856,23 @@ def test_direct_publication_rolls_back_body_image_refs_and_command_together(
 
 
 def _insert_gc_queue_owner(connection, *, owner_id, session_id, workspace_id, turn_id, image):
-    prompt = freeze_canonical_prompt(FrozenPromptContent((image,)))
-    body = InlineContent.from_bytes(prompt.body, media_type="application/vnd.pulsara.prompt+json", codec="utf-8")
     connection.execute(
         """INSERT INTO pulsara_v3.prompt_queue_items (
-            id, session_id, workspace_id, queue_sequence, delivery_mode, input_origin,
-            source_session_id, target_turn_id, status, inline_content, content_digest,
-            content_size, content_media_type, content_codec
+            id,session_id,workspace_id,queue_sequence,delivery_mode,input_origin,
+            source_session_id,target_turn_id,status
         ) VALUES (%s,%s,%s,(SELECT COALESCE(MAX(queue_sequence),0)+1 FROM pulsara_v3.prompt_queue_items WHERE session_id=%s),
-            'STEER_ACTIVE_TURN','AGENT_MESSAGE',%s,%s,'PENDING',%s,%s,%s,%s,%s)""",
-        (owner_id, session_id, workspace_id, session_id, session_id, turn_id,
-            body.canonical_bytes, body.digest, body.size, body.media_type, body.codec),
-    )
+            'STEER_ACTIVE_TURN','AGENT_MESSAGE',%s,%s,'PENDING')""",
+        (owner_id,session_id,workspace_id,session_id,session_id,turn_id))
+
+
+def attach_image_part(connection, *, session_id, workspace_id, image_blob_ids, queue_item_id):
+    # Direct INSERT isolates the real blob FK lock/GC ordering. Full prompt
+    # publication and decoding are independently exercised above.
+    for ordinal, image_id in enumerate(image_blob_ids):
+        connection.execute("""INSERT INTO pulsara_v3.content_parts
+            (id,session_id,workspace_id,queue_item_id,ordinal,type,blob_id)
+            VALUES (%s,%s,%s,%s,%s,'image',%s)""",
+            (_id("block"),session_id,workspace_id,queue_item_id,ordinal,image_id))
 
 
 def test_image_ref_fk_gc_commit_orders_cascade_scope_and_runtime_grants(
@@ -999,7 +893,7 @@ def test_image_ref_fk_gc_commit_orders_cascade_scope_and_runtime_grants(
     child_intent, _ = _direct_intent(repository, child_lease, child_runtime, FrozenPromptContent.text("queue owner target"))
     provider = repository.connection_provider
     store = PostgresCanonicalBlobStore(provider)
-    payload = _png()
+    payload = _png(size=(23,17))
 
     # Attach commits first on one caller-owned connection; GC on another
     # connection must retain the blob until deleting the real owner cascades.
@@ -1012,22 +906,22 @@ def test_image_ref_fk_gc_commit_orders_cascade_scope_and_runtime_grants(
     ) as attach:
         blob = PostgresCanonicalBlobStore.publish_in_connection(
             attach,
-            validated_image=_image(payload, workspace_id=workspace_id),
-            workspace_id=str(workspace_id),
+            validated_image=_image(payload),
+            workspace_id=None,
             content=payload,
             media_type="image/png",
             codec="binary",
         )
-        _insert_gc_queue_owner(attach, owner_id=owner_id, session_id=session_id, workspace_id=workspace_id, turn_id=root_intent.turn_id, image=_image(payload, workspace_id=str(workspace_id)))
-        insert_canonical_prompt_refs(
+        _insert_gc_queue_owner(attach, owner_id=owner_id, session_id=session_id, workspace_id=workspace_id, turn_id=root_intent.turn_id, image=_image(payload))
+        attach_image_part(
             attach,
             session_id=session_id,
             workspace_id=str(workspace_id),
             image_blob_ids=(blob.blob_id,),
             queue_item_id=owner_id,
         )
-        _insert_gc_queue_owner(attach, owner_id=child_owner_id, session_id=child_lease.guard.session_id, workspace_id=workspace_id, turn_id=child_intent.turn_id, image=_image(payload, workspace_id=str(workspace_id)))
-        insert_canonical_prompt_refs(
+        _insert_gc_queue_owner(attach, owner_id=child_owner_id, session_id=child_lease.guard.session_id, workspace_id=workspace_id, turn_id=child_intent.turn_id, image=_image(payload))
+        attach_image_part(
             attach,
             session_id=child_lease.guard.session_id,
             workspace_id=str(workspace_id),
@@ -1047,7 +941,7 @@ def test_image_ref_fk_gc_commit_orders_cascade_scope_and_runtime_grants(
         admin.execute("DELETE FROM pulsara_v3.prompt_queue_items WHERE id=%s", (owner_id,))
     assert _rows(
         repository,
-        "SELECT 1 FROM pulsara_v3.canonical_image_refs WHERE queue_item_id=%s",
+        "SELECT 1 FROM pulsara_v3.content_parts WHERE type='image' AND queue_item_id=%s",
         (owner_id,),
     ) == []
     assert blob.blob_id not in store.delete_orphans(
@@ -1056,7 +950,7 @@ def test_image_ref_fk_gc_commit_orders_cascade_scope_and_runtime_grants(
     )
     assert _rows(
         repository,
-        "SELECT blob_id FROM pulsara_v3.canonical_image_refs WHERE queue_item_id=%s",
+        "SELECT blob_id FROM pulsara_v3.content_parts WHERE type='image' AND queue_item_id=%s",
         (child_owner_id,),
     ) == [{"blob_id": blob.blob_id}]
     with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as admin:
@@ -1077,8 +971,8 @@ def test_image_ref_fk_gc_commit_orders_cascade_scope_and_runtime_grants(
     ) as publication:
         deleted = PostgresCanonicalBlobStore.publish_in_connection(
             publication,
-            validated_image=_image(payload + b"different", workspace_id=workspace_id),
-            workspace_id=str(workspace_id),
+            validated_image=_image(payload + b"different"),
+            workspace_id=None,
             content=payload + b"different",
             media_type="image/png",
             codec="binary",
@@ -1093,14 +987,14 @@ def test_image_ref_fk_gc_commit_orders_cascade_scope_and_runtime_grants(
         deadline_monotonic=monotonic() + 30,
     )
     failed_owner = _id("queue")
-    with pytest.raises(psycopg.errors.ForeignKeyViolation):
+    with pytest.raises(psycopg.errors.CheckViolation, match="validated independent image asset"):
         with provider.connection(
             lane=PostgresConnectionLane.HOST_CONTROL,
             row_factory=dict_row,
             deadline_monotonic=monotonic() + 30,
         ) as stale_attach:
-            _insert_gc_queue_owner(stale_attach, owner_id=failed_owner, session_id=session_id, workspace_id=workspace_id, turn_id=root_intent.turn_id, image=_image(payload, workspace_id=str(workspace_id)))
-            insert_canonical_prompt_refs(
+            _insert_gc_queue_owner(stale_attach, owner_id=failed_owner, session_id=session_id, workspace_id=workspace_id, turn_id=root_intent.turn_id, image=_image(payload))
+            attach_image_part(
                 stale_attach,
                 session_id=session_id,
                 workspace_id=str(workspace_id),
@@ -1116,10 +1010,10 @@ def test_image_ref_fk_gc_commit_orders_cascade_scope_and_runtime_grants(
     grants = _rows(
         repository,
         """SELECT
-             has_table_privilege(current_user,'pulsara_v3.canonical_image_refs','SELECT') can_select,
-             has_table_privilege(current_user,'pulsara_v3.canonical_image_refs','INSERT') can_insert,
-             has_table_privilege(current_user,'pulsara_v3.canonical_image_refs','UPDATE') can_update,
-             has_table_privilege(current_user,'pulsara_v3.canonical_image_refs','DELETE') can_delete""",
+             has_table_privilege(current_user,'pulsara_v3.content_parts','SELECT') can_select,
+             has_table_privilege(current_user,'pulsara_v3.content_parts','INSERT') can_insert,
+             has_table_privilege(current_user,'pulsara_v3.content_parts','UPDATE') can_update,
+             has_table_privilege(current_user,'pulsara_v3.content_parts','DELETE') can_delete""",
     )[0]
     assert grants == {
         "can_select": True,
@@ -1148,7 +1042,7 @@ def test_image_ref_gc_and_old_blob_attach_overlap_in_both_commit_orders(
     def insert_owner(connection, owner_id, payload):
         _insert_gc_queue_owner(connection, owner_id=owner_id, session_id=session_id,
             workspace_id=workspace_id, turn_id=root_intent.turn_id,
-            image=_image(payload, workspace_id=workspace_id))
+            image=_image(payload))
 
     def age(blob_id: str) -> None:
         with psycopg.connect(admin_dsn) as connection:
@@ -1184,8 +1078,8 @@ def test_image_ref_gc_and_old_blob_attach_overlap_in_both_commit_orders(
     with psycopg.connect(runtime_dsn, row_factory=dict_row) as publication:
         attach_first_blob = PostgresCanonicalBlobStore.publish_in_connection(
             publication,
-            validated_image=_image(attach_first_payload, workspace_id=workspace_id),
-            workspace_id=workspace_id,
+            validated_image=_image(attach_first_payload),
+            workspace_id=None,
             content=attach_first_payload,
             media_type="image/png",
             codec="binary",
@@ -1208,15 +1102,15 @@ def test_image_ref_gc_and_old_blob_attach_overlap_in_both_commit_orders(
     with psycopg.connect(runtime_dsn, row_factory=dict_row) as attach:
         reused = PostgresCanonicalBlobStore.publish_in_connection(
             attach,
-            validated_image=_image(attach_first_payload, workspace_id=workspace_id),
-            workspace_id=workspace_id,
+            validated_image=_image(attach_first_payload),
+            workspace_id=None,
             content=attach_first_payload,
             media_type="image/png",
             codec="binary",
         )
         assert reused.blob_id == attach_first_blob.blob_id
         insert_owner(attach, attach_first_owner, attach_first_payload)
-        insert_canonical_prompt_refs(
+        attach_image_part(
             attach,
             session_id=session_id,
             workspace_id=workspace_id,
@@ -1232,7 +1126,7 @@ def test_image_ref_gc_and_old_blob_attach_overlap_in_both_commit_orders(
     assert _rows(
         repository,
         """SELECT r.blob_id, b.body
-           FROM pulsara_v3.canonical_image_refs r
+           FROM pulsara_v3.content_parts r
            JOIN pulsara_v3.blobs b ON b.id=r.blob_id
            WHERE r.queue_item_id=%s""",
         (attach_first_owner,),
@@ -1245,8 +1139,8 @@ def test_image_ref_gc_and_old_blob_attach_overlap_in_both_commit_orders(
     with psycopg.connect(runtime_dsn, row_factory=dict_row) as publication:
         delete_first_blob = PostgresCanonicalBlobStore.publish_in_connection(
             publication,
-            validated_image=_image(delete_first_payload, workspace_id=workspace_id),
-            workspace_id=workspace_id,
+            validated_image=_image(delete_first_payload),
+            workspace_id=None,
             content=delete_first_payload,
             media_type="image/png",
             codec="binary",
@@ -1279,7 +1173,7 @@ def test_image_ref_gc_and_old_blob_attach_overlap_in_both_commit_orders(
             application_name="k2-stale-attach-delete-first",
         ) as connection:
             insert_owner(connection, delete_first_owner, delete_first_payload)
-            insert_canonical_prompt_refs(
+            attach_image_part(
                 connection,
                 session_id=session_id,
                 workspace_id=workspace_id,
@@ -1308,62 +1202,27 @@ def test_image_ref_gc_and_old_blob_attach_overlap_in_both_commit_orders(
     ) == []
 
 
-def test_scope_misbinding_and_extra_ref_fail_before_image_hydration(
+def test_common_image_parts_enforce_owner_scope_and_exact_intent_confirmation(
     stage2_migrated_postgres_database,
 ) -> None:
     repository = _repository(stage2_migrated_postgres_database)
-    lease, runtime, _binding = _bound_session(repository)
-    image = _image(workspace_id=_workspace(repository, lease))
-    content = FrozenPromptContent((image,))
-    intent, _accepted = _direct_intent(
-        repository, lease, runtime, content
-    )
-    cut = repository.prepare_provider_input_cut(
-        lease.guard,
-        turn_id=intent.turn_id,
-        deadline_monotonic=monotonic() + 30,
-    )
-    ref = _rows(
-        repository,
-        "SELECT workspace_id, blob_id FROM pulsara_v3.canonical_image_refs WHERE transcript_entry_id=%s",
-        (intent.entry_id,),
-    )[0]
-    with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as admin:
-        admin.execute(
-            """INSERT INTO pulsara_v3.canonical_image_refs (
-                 session_id, workspace_id, transcript_entry_id, ref_ordinal, blob_id
-               ) VALUES (%s,%s,%s,1,%s)""",
-            (lease.guard.session_id, ref["workspace_id"], intent.entry_id, ref["blob_id"]),
-        )
-    with pytest.raises(ConversationKernelConflict, match="refs do not exact-join"):
-        CanonicalProviderInputReader(
-            repository.connection_provider
-        ).read_frozen_snapshot(cut, deadline_monotonic=monotonic() + 30)
-    assert (
-        repository.confirm_root_turn_intent(
-            intent=intent,
-            deadline_monotonic=monotonic() + 30,
-        ).kind.value
-        == "CONFLICT"
-    )
-
-    other_repository = _repository(stage2_migrated_postgres_database)
-    other_lease, _other_runtime, _other_binding = _bound_session(other_repository)
-    other_workspace = _rows(
-        other_repository,
-        "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s",
-        (other_lease.guard.session_id,),
-    )[0]["workspace_id"]
-    with pytest.raises(psycopg.errors.ForeignKeyViolation):
-        with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as admin:
-            admin.execute(
-                """INSERT INTO pulsara_v3.canonical_image_refs (
-                     session_id, workspace_id, transcript_entry_id, ref_ordinal, blob_id
-                   ) VALUES (%s,%s,%s,2,%s)""",
-                (
-                    lease.guard.session_id,
-                    other_workspace,
-                    intent.entry_id,
-                    ref["blob_id"],
-                ),
-            )
+    lease,runtime,_ = _bound_session(repository)
+    image=_image()
+    intent,_ = _direct_intent(repository,lease,runtime,FrozenPromptContent((image,)))
+    owner=_rows(repository,"SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s",(lease.guard.session_id,))[0]
+    other,_,_ = _bound_session(repository)
+    workspace=_rows(repository,"SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s",(other.guard.session_id,))[0]["workspace_id"]
+    with pytest.raises(psycopg.errors.CheckViolation,match="exact scope"):
+        with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
+            connection.execute("""INSERT INTO pulsara_v3.content_parts
+                (id,session_id,workspace_id,entry_id,ordinal,type,blob_id)
+                VALUES (%s,%s,%s,%s,1,'image',%s)""",
+                (_id("block"),lease.guard.session_id,workspace,intent.entry_id,image.image_ref))
+    # A real additional occurrence belongs to the common ordered value; it is
+    # not a parallel ref manifest. Exact original intent confirmation detects it.
+    with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
+        connection.execute("""INSERT INTO pulsara_v3.content_parts
+            (id,session_id,workspace_id,entry_id,ordinal,type,blob_id)
+            VALUES (%s,%s,%s,%s,1,'image',%s)""",
+            (_id("block"),lease.guard.session_id,owner["workspace_id"],intent.entry_id,image.image_ref))
+    assert repository.confirm_root_turn_intent(intent=intent,deadline_monotonic=monotonic()+30).kind.value == "CONFLICT"

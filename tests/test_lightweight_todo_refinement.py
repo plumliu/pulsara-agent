@@ -46,7 +46,6 @@ from tests.support.round3 import (
     direct_tool_invocation_context,
 )
 from pulsara_agent.tools.builtins.todo import (
-    MAXIMUM_TODO_CANONICAL_JSON_BYTES,
     TodoValidationError,
     parse_todo_replacement,
 )
@@ -69,7 +68,7 @@ def _root_activation(turn: str = 'turn:nzc36cttgo7xxki7bcjc7ops7a'):
 
 
 
-def test_todo_complete_snapshot_contract_and_byte_truth() -> None:
+def test_todo_complete_snapshot_contract_and_counts() -> None:
     candidate = parse_todo_replacement(
         {
             "items": [
@@ -85,44 +84,21 @@ def test_todo_complete_snapshot_contract_and_byte_truth() -> None:
         candidate.in_progress_count,
         candidate.completed_count,
     ) == (1, 1, 1)
-    assert candidate.canonical_json_utf8_bytes <= MAXIMUM_TODO_CANONICAL_JSON_BYTES
     assert parse_todo_replacement({"items": []}).ordered_items == ()
 
 
-@pytest.mark.parametrize("text", ["x" * 192, "界" * 64, "😀" * 48])
-def test_todo_text_accepts_exact_utf8_boundaries(text: str) -> None:
+@pytest.mark.parametrize("text", ["x" * 10000, "界" * 10000, "😀" * 10000])
+def test_todo_text_preserves_long_valid_unicode(text: str) -> None:
     candidate = parse_todo_replacement({"items": [{"text": text, "status": "pending"}]})
     assert candidate.ordered_items[0].text == text
 
 
-def test_todo_item_and_aggregate_bounds_are_independent() -> None:
-    sixteen = [
-        {"text": f"{index:02d}-" + "x" * 157, "status": "pending"}
-        for index in range(16)
-    ]
-    assert len(parse_todo_replacement({"items": sixteen}).ordered_items) == 16
-    with pytest.raises(TodoValidationError, match="at most 16"):
-        parse_todo_replacement(
-            {"items": sixteen + [{"text": "one too many", "status": "pending"}]}
-        )
-    oversized = [
-        {"text": f"{index:02d}" + "\\" * 190, "status": "pending"}
-        for index in range(16)
-    ]
-    with pytest.raises(TodoValidationError, match="4 KiB"):
-        parse_todo_replacement({"items": oversized})
-
-    near_bound = parse_todo_replacement(
-        {
-            "items": [
-                {"text": f"{index:02d}" + "x" * 190, "status": "pending"}
-                for index in range(16)
-            ]
-        }
-    )
-    assert near_bound.canonical_json_utf8_bytes == 3579
-    # Current work notifications contain no second copy of the checklist.
-    payload = CurrentWorkSnapshotUpdatedPayload(root_run_id=derive_id("todo-run", "test", "near-bound"))
+def test_todo_ten_items_preserve_long_text_and_notification_has_no_second_copy() -> None:
+    ten = [{"text": f"{index:02d}-" + "界" * 10000, "status": "pending"} for index in range(10)]
+    assert [item.text for item in parse_todo_replacement({"items": ten}).ordered_items] == [item["text"] for item in ten]
+    with pytest.raises(TodoValidationError, match="at most 10"):
+        parse_todo_replacement({"items": ten + [{"text":"one too many","status":"pending"}]})
+    payload = CurrentWorkSnapshotUpdatedPayload(root_run_id=derive_id("todo-run", "test", "ten-items"))
     assert payload.media_read_attempt_id is None
 
 
@@ -155,14 +131,6 @@ def test_todo_item_and_aggregate_bounds_are_independent() -> None:
         (
             {"items": [{"text": "valid", "status": "pending", "id": "old"}]},
             "requires only",
-        ),
-        (
-            {"items": [{"text": "x" * 193, "status": "pending"}]},
-            "192 UTF-8 bytes",
-        ),
-        (
-            {"items": [{"text": "😀" * 49, "status": "pending"}]},
-            "192 UTF-8 bytes",
         ),
         (
             {
@@ -454,7 +422,6 @@ def test_todo_close_fails_closed_for_ownerless_pending_settlement() -> None:
         candidate=parse_todo_replacement(
             {"items": [{"text": "settle before close", "status": "in_progress"}]}
         ),
-        acknowledgement=b'{"status":"UPDATED"}',
     )
     assert owner.mark_closing(
         scope_kind=ModelInputScopeKind.ROOT

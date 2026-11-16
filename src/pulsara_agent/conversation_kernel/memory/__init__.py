@@ -1,21 +1,6 @@
-"""Advisory memory subsystem for the canonical conversation Kernel."""
+"""Advisory memory's canonical objects and retrieval owner."""
 
-from pulsara_agent.conversation_kernel.memory.contracts import (
-    MemoryFactKind,
-    MemoryRelationKind,
-    MemorySupersedeMode,
-)
-from pulsara_agent.conversation_kernel.memory.recall import (
-    MAXIMUM_MEMORY_QUERY_RESULTS,
-    MemoryQueryResult,
-    PostgresMemoryQuery,
-)
+from .contracts import MemoryFactKind, MemoryRecord
+from .recall import MemoryQueryResult, PostgresMemoryQuery
 
-__all__ = [
-    "MAXIMUM_MEMORY_QUERY_RESULTS",
-    "MemoryFactKind",
-    "MemoryQueryResult",
-    "MemoryRelationKind",
-    "MemorySupersedeMode",
-    "PostgresMemoryQuery",
-]
+__all__ = ["MemoryFactKind", "MemoryRecord", "MemoryQueryResult", "PostgresMemoryQuery"]

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from pulsara_agent.identity import derive_id, require_id
 from pulsara_agent.primitives.context import canonical_json_bytes, context_fingerprint
@@ -20,12 +20,15 @@ if TYPE_CHECKING:
 class McpKnownToolResult:
     """Known tool observation, including delivery failure with remote outcome unknown."""
 
+    kind: Literal["TOOL", "RESOURCE", "TEXT"]
     state: str
     content: bytes
     remote_identity: str
     remote_identity_verification: str
 
     def __post_init__(self) -> None:
+        if self.kind not in {"TOOL", "RESOURCE", "TEXT"}:
+            raise ValueError("MCP known payload kind is invalid")
         require_id(self.remote_identity, "mcp-tool")
         if re.fullmatch(r"sha256:[0-9a-f]{64}", self.remote_identity_verification) is None:
             raise ValueError("MCP remote identity verification is invalid")
@@ -70,19 +73,12 @@ def _mcp_standard_operation_identity(
     )
 
 
-def mcp_failure_required_facts(effect_kind: McpEffectKind) -> dict[str, object]:
-    """The same bounded uncertain-outcome facts used before and after dispatch."""
-    guidance = (
-        "No reliable observation was received. You may continue with another "
-        "source or retry this read when the connection is available."
-        if effect_kind is McpEffectKind.READ_ONLY
-        else "The remote operation may have executed. Do not assume success or "
-        "that nothing happened. Before repeating an operation with side effects, "
-        "verify its outcome or idempotency; otherwise ask the user. You may "
-        "continue with independent work or another read-only source."
+def _mcp_failure_notice(effect_kind):
+    return (
+        "No reliable observation was received. You may continue with another source or retry this read when the connection is available."
+        if effect_kind is McpEffectKind.READ_ONLY else
+        "The remote operation may have executed. Before repeating an operation with side effects, verify its outcome or idempotency; otherwise ask the user."
     )
-    return {"error": "MCP_CALL_FAILED", "remote_outcome": "UNKNOWN",
-            "retry_performed": False, "guidance": guidance}
 
 
 def _mcp_invocation_failure(
@@ -97,10 +93,9 @@ def _mcp_invocation_failure(
     # Settle without replaying tools/call or claiming an effect did not happen.
     return McpKnownToolResult(
         state="SYSTEM_ERROR",
-        content=canonical_json_bytes({
-            **mcp_failure_required_facts(effect_kind),
-            "message": client.diagnostic_message(error),
-        }),
+        kind="TEXT",
+        content=(client.diagnostic_message(error) + "\n" + _mcp_failure_notice(effect_kind)
+            + "\n请求可能已发送，结果未确认。未自动重做。").encode("utf-8"),
         remote_identity=remote_identity,
         remote_identity_verification=remote_identity_verification,
     )
@@ -124,17 +119,11 @@ def _known_mcp_remote_error(
     # or treating a server rejection as a reason to retire a healthy slot.
     return McpKnownToolResult(
         state="SYSTEM_ERROR",
-        content=canonical_json_bytes(
-            {
-                "error": "MCP_REMOTE_ERROR",
-                "remote_error": {
-                    "code": error.code,
-                    "message": client.diagnostic_message(error),
-                    **({"data": error.data} if error.data is not None else {}),
-                },
-                "retry_performed": False,
-            }
-        ),
+        kind="TEXT",
+        content=("服务返回错误：" + canonical_json_bytes({"code": error.code,
+            "message": client.diagnostic_message(error),
+            **({"data": error.data} if error.data is not None else {})}).decode("utf-8")
+            + "\n服务已收到本次请求。未自动重做。").encode("utf-8"),
         remote_identity=remote_identity,
         remote_identity_verification=remote_identity_verification,
     )
@@ -146,15 +135,12 @@ def _known_mcp_system_failure(
 ) -> McpKnownToolResult:
     return McpKnownToolResult(
         state="SYSTEM_ERROR",
-        content=canonical_json_bytes(
-            {
-                "error": error_code,
-                "retry_performed": False,
-                **({"guidance": "The remote request was not sent."}
-                   if error_code == "MCP_TRANSPORT_UNWRITTEN" else {}),
-                **({"message": message} if message is not None else {}),
-            }
-        ),
+        kind="TEXT",
+        content=(error_code + ("：" + message if message is not None else "") + "\n"
+            + ("本次请求未发送。" if error_code == "MCP_TRANSPORT_UNWRITTEN"
+                else "请求可能已发送，结果未确认。" if error_code == "MCP_STANDARD_READ_TIMEOUT"
+                else "服务已返回响应，未能完成本次结果处理。")
+            + "未自动重做。").encode("utf-8"),
         remote_identity=remote_identity,
         remote_identity_verification=remote_identity_verification,
     )

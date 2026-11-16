@@ -8,8 +8,8 @@ description: Create, review or edit portable Agent Skills, including customizing
 ## Choose the working directory
 
 For an installed Skill, use `query_capabilities` with `kind:"SKILL"` and inspect
-its exact target. Read the returned `current.skill_path`; `current.skill_root`
-is the installed directory. Do not infer the target from terminal cwd.
+its exact Target. The object record's target.skill_path identifies SKILL.md;
+its parent is the resource directory. Do not infer it from terminal cwd.
 
 Edit an installed **loose Skill** directly in that directory. Prefer
 `read_file` / `edit_file` with a `PATH` target whose `path` is the file path;

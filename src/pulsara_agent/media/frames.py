@@ -10,7 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from fractions import Fraction
 import io
-import json
 import math
 from typing import Callable, Literal
 
@@ -28,10 +27,6 @@ from .frames_selection import (
 )
 
 FrameMode = Literal["overview", "detail", "motion"]
-# This policy changes only at a declared selection-contract revision. Its
-# physical analysis slots reuse the existing total image-raster allocation;
-# neither provider remaining allowance nor the current page changes the plan.
-FRAME_SELECTION_REVISION = "frames-v3"
 FRAME_ANALYSIS_FRAMES = max(3, MAXIMUM_PROMPT_IMAGE_PIXELS // (256 * 256))
 
 
@@ -68,9 +63,8 @@ class FrameImage:
 @dataclass(frozen=True)
 class FrameReadResult:
     images: tuple[FrameImage, ...]
-    text: str
-    processed_range: tuple[float, float]
-    complete: bool
+    index: tuple[dict, ...]
+    limitations: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -190,13 +184,22 @@ def _validate_request(start, end, mode, crop):
 
 
 def _prepare_detail_plan(
-    source, info, *, start_time, requested_end, end_time, crop,
-    capacity, cancelled, progress,
+    source,
+    info,
+    *,
+    start_time,
+    requested_end,
+    end_time,
+    crop,
+    capacity,
+    cancelled,
+    progress,
 ) -> FramePlan:
     """Resolve the complete local start/middle/end plan before page sizing."""
     effective_start = (
         max(start_time, info.video_start)
-        if info.video_start is not None else start_time
+        if info.video_start is not None
+        else start_time
     )
     if progress is not None:
         progress((float(effective_start), float(end_time)))
@@ -234,8 +237,11 @@ def _prepare_detail_plan(
         priority=tuple(observations),
         requested_range=(float(start_time), float(requested_end)),
         processed_range=(effective_start, end_time),
-        mode="detail", crop=crop, display_aspect=aspect,
-        complete=effective_start == start_time, video_ended=end_time < requested_end,
+        mode="detail",
+        crop=crop,
+        display_aspect=aspect,
+        complete=effective_start == start_time,
+        video_ended=end_time < requested_end,
         probe_count=len(observations),
         max_probe_gap=max(
             (float(b.t - a.t) for a, b in zip(observations, observations[1:])),
@@ -289,9 +295,15 @@ def prepare_frame_plan(
     crop = tuple(crop) if crop is not None else None
     if mode == "detail":
         return _prepare_detail_plan(
-            source, info, start_time=start_time, requested_end=requested_end,
-            end_time=end_time, crop=crop, capacity=analysis_frames,
-            cancelled=cancelled, progress=progress,
+            source,
+            info,
+            start_time=start_time,
+            requested_end=requested_end,
+            end_time=end_time,
+            crop=crop,
+            capacity=analysis_frames,
+            cancelled=cancelled,
+            progress=progress,
         )
     samples: list[Sample] = []
     observations: dict[Fraction, FrameObservation] = {}
@@ -378,7 +390,7 @@ def prepare_frame_plan(
             for visible in decoder.scan(
                 window_start if window_start is not None else scan_start,
                 end_time,
-                FRAME_ANALYSIS_FRAMES,
+                analysis_frames,
                 first_interval=publish,
             ):
                 if (
@@ -692,22 +704,35 @@ def render_frame_page(
     )
     if plan.mode == "detail":
         if floor:
-            raise MediaError("INVALID_ARGUMENTS", "Detail does not permit scene-floor images")
+            raise MediaError(
+                "INVALID_ARGUMENTS", "Detail does not permit scene-floor images"
+            )
         from .frames_detail_render import render_detail_images
 
         images, index = render_detail_images(
-            source, info, plan, selected, budget=budget, cancelled=cancelled,
+            source,
+            info,
+            plan,
+            selected,
+            budget=budget,
+            cancelled=cancelled,
         )
     else:
         images, index = _render_layout_images(
-            source, info, plan, selected, budget=budget, floor=floor, cancelled=cancelled,
+            source,
+            info,
+            plan,
+            selected,
+            budget=budget,
+            floor=floor,
+            cancelled=cancelled,
         )
     limitations = [
         "Detail samples the start, midpoint and just before the end. Use crop for small text or motion for changes between samples."
-        if plan.mode == "detail" else
-        "Overview provides sparse representative frames. Use detail for small text or motion to examine a sequence."
-        if plan.mode == "overview" else
-        "Motion frames are ordered by their actual source timestamps."
+        if plan.mode == "detail"
+        else "Overview provides sparse representative frames. Use detail for small text or motion to examine a sequence."
+        if plan.mode == "overview"
+        else "Motion frames are ordered by their actual source timestamps."
     ]
     if info.video_start is not None and info.video_start > _fraction(
         plan.requested_range[0]
@@ -723,149 +748,5 @@ def render_frame_page(
         limitations.append(
             "Scene-floor image dimensions were used because a target-size atomic page did not fit; small text may be unreadable."
         )
-    body = {
-        "video_frames": True,
-        "target": {"kind": "PATH", "path": str(source.path)},
-        "media_version": {"modified_ns": str(source.modified_ns), "size": source.size},
-        "requested_range": list(plan.requested_range),
-        "processed_range": list(map(float, plan.processed_range)),
-        "sampling": "ordered" if plan.mode == "motion" else "sparse",
-        "complete": False,
-        "display_size": [info.width, info.height],
-        "crop": list(plan.crop) if plan.crop else [0, 0, 1, 1],
-        "frames": index,
-        "next": None,
-        "limitations": limitations,
-        "scanned_ranges": [[float(a), float(b)] for a, b in plan.scanned_ranges],
-        "observed_cut_times": list(map(float, plan.observed_cut_times)),
-        "probe_count": plan.probe_count,
-        "maximum_probe_gap": plan.max_probe_gap,
-    }
     source.assert_unchanged()
-    return FrameReadResult(
-        tuple(images),
-        json.dumps(body, ensure_ascii=False, separators=(",", ":")),
-        tuple(map(float, plan.processed_range)),
-        False,
-    )
-
-
-def read_video_frames(
-    source: MediaSource,
-    info: MediaInfo,
-    *,
-    start: float,
-    end: float,
-    mode: FrameMode = "overview",
-    crop: tuple[float, float, float, float] | None = None,
-    budget: FrameBudget,
-    continuation: object | None = None,
-    cancelled: Callable[[], bool] | None = None,
-    accepts: Callable[[FrameReadResult], bool] | None = None,
-    progress: Callable[[tuple[float, float]], None] | None = None,
-) -> FrameReadResult:
-    """Convenience admission over the same prepare/render/source-page pipeline."""
-    from .frames_paging import (
-        FramePagePosition,
-        read_frame_continuation,
-        trim_detail_page,
-        with_frame_page_continuation,
-    )
-
-    position = (
-        FramePagePosition()
-        if continuation is None
-        else read_frame_continuation(
-            continuation,
-            source=source,
-            info=info,
-            start=start,
-            end=end,
-            mode=mode,
-            crop=crop,
-            selection_revision=FRAME_SELECTION_REVISION,
-        )
-    )
-    plan = prepare_frame_plan(
-        source,
-        info,
-        start=start,
-        end=end,
-        mode=mode,
-        crop=crop,
-        window_start=position.window_start,
-        analysis_frames=budget.analysis_frames,
-        cancelled=cancelled,
-        progress=progress,
-    )
-    remaining = plan.observation_count - position.next_observation
-    if remaining <= 0:
-        raise MediaError(
-            "INVALID_ARGUMENTS",
-            "Frame continuation is outside the fixed selection plan",
-        )
-    count = remaining
-    detail_candidate = None
-    while count:
-        retry_singleton = False
-        for floor in (False, True) if count == 1 and mode == "overview" else (False,):
-            if not frame_page_fits_geometry(
-                plan,
-                offset=position.next_observation,
-                count=count,
-                budget=budget,
-                floor=floor,
-            ):
-                continue
-            try:
-                if detail_candidate is not None:
-                    candidate = trim_detail_page(detail_candidate, count)
-                else:
-                    candidate = render_frame_page(
-                        source,
-                        info,
-                        plan,
-                        offset=position.next_observation,
-                        count=count,
-                        budget=budget,
-                        floor=floor,
-                        cancelled=cancelled,
-                    )
-            except MediaError as exc:
-                if exc.code == "RESOURCE_BOUNDARY":
-                    if mode == "detail":
-                        # A resource failure may come from outside the prefix
-                        # renderer. Try the exact singleton once, without
-                        # guessing from an error message or replaying every size.
-                        if count > 1:
-                            count = 1
-                            retry_singleton = True
-                            break
-                        raise
-                    continue
-                raise
-            if mode == "detail":
-                actual_frames = json.loads(candidate.text).get("frames")
-                if not isinstance(actual_frames, list) or not 1 <= len(actual_frames) <= count:
-                    raise ValueError("Detail rendering must return a nonempty selected prefix")
-                count = len(actual_frames)
-                if detail_candidate is None:
-                    detail_candidate = candidate
-            candidate = with_frame_page_continuation(
-                candidate,
-                source=source,
-                info=info,
-                plan=plan,
-                position=position,
-                count=count,
-                selection_revision=FRAME_SELECTION_REVISION,
-            )
-            if accepts is None or accepts(candidate):
-                return candidate
-        if retry_singleton:
-            continue
-        count -= 1
-    raise MediaError(
-        "RESOURCE_BOUNDARY",
-        "One readable source frame, its complete index and continuation do not fit this call",
-    )
+    return FrameReadResult(tuple(images), tuple(index), tuple(limitations))

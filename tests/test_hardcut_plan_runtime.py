@@ -113,7 +113,7 @@ def test_draft_waiter_can_resolve_before_open_publication():
             tool_call_id=answer.tool_result_settlement.tool_call_id,
             request_semantic_digest="sha256:" + "1" * 64, arguments=freeze_json({"plan": "方案"}),
         )
-        await coordinator.publish_open(waiter, draft=draft)
+        await coordinator.publish_open(waiter, draft=draft, accepted_at=datetime.now(timezone.utc), workflow_id=answer.workflow_id, workflow_revision=answer.workflow_revision)
         assert await coordinator.current_open() is None
         assert await coordinator.wait(waiter) is answer
         assert await coordinator.current_waiter(answer.interaction_id) is None
@@ -141,6 +141,8 @@ def test_host_resolves_review_against_live_origin_and_only_approval_installs_suc
             def read_started_turn_input_group(self, guard, **kwargs):
                 return None
         class Host(_HostPlanOperations):
+            async def _prepare_plan_resolution_page(self, accepted, **kwargs):
+                return accepted
             def _require_open(self):
                 pass
             def _canonical_deadline(self):
@@ -199,5 +201,33 @@ def test_host_resolves_review_against_live_origin_and_only_approval_installs_suc
             assert host._pending_root_successor is None
             assert host._active_turn_id == origin_turn_id
         await host._plan_continuations.aclose()
+        await coordinator.aclose()
+    asyncio.run(run())
+
+
+def test_accepted_deadline_uses_one_ten_minute_window_and_resolves_once():
+    from datetime import timedelta
+    async def run():
+        answer = resolution(PlanDraftDecision.CANCEL)
+        fired = []
+        coordinator = None
+        async def expire(opened):
+            fired.append(opened)
+            await coordinator.settle(interaction_id=opened.interaction_id, resolution=answer)
+        coordinator = KernelPlanInteractionCoordinator(timeout_resolver=expire)
+        waiter = await coordinator.prepare_interaction(interaction_id=answer.interaction_id, origin_turn_id=answer.tool_result_settlement.turn_id)
+        draft = extract_plan_draft(interaction_id=answer.interaction_id,
+            assistant_entry_id=answer.tool_result_settlement.assistant_entry_id,
+            tool_call_id=answer.tool_result_settlement.tool_call_id,
+            request_semantic_digest="sha256:" + "1"*64, arguments=freeze_json({"plan":"方案"}))
+        accepted_at = datetime.now(timezone.utc) - timedelta(seconds=601)
+        opened = await coordinator.publish_open(waiter, draft=draft, accepted_at=accepted_at,
+            workflow_id=answer.workflow_id, workflow_revision=1)
+        assert opened.expires_at == accepted_at + timedelta(seconds=600)
+        assert await coordinator.wait(waiter) is answer
+        assert fired == [opened]
+        assert await coordinator.current_open() is None
+        assert await coordinator.wait(waiter) is answer
+        assert fired == [opened]
         await coordinator.aclose()
     asyncio.run(run())

@@ -348,7 +348,7 @@ def test_async_start_contexts_use_existing_child_scope_owner(tmp_path):
                 item.definition.event_type.external_name
                 for item in prepared.reservation.batch.contributions
             ] == ["SessionStart", "SubagentStart"]
-            assert prepared.full_text.count("async child context") == 2
+            assert prepared.text.count("async child context") == 2
             prepared.reservation.retire()
             assert (
                 owner.freeze_for_target(

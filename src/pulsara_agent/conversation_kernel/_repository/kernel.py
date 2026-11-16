@@ -797,20 +797,25 @@ class _RepositoryKernel:
                       source_plan_workflow_id: str | None = None,
                       source_plan_interaction_id: str | None = None,
                       source_plan_handoff_kind: PlanHandoffKind | None = None,
-                      scheduled_input=None, input_origin=None) -> None:
+                      scheduled_input=None, input_origin=None,
+                      source_cell_id: str | None = None,
+                      source_record_sequence: int | None = None,
+                      cell_output_kind: str | None = None) -> None:
         if canonical_prompt is not None and content is not None:
             raise ValueError("entry content must have one typed producer")
         connection.execute(
             """INSERT INTO pulsara_v3.transcript_entries
                 (entry_owner_kind,id,origin_entry_id,session_id,workspace_id,turn_id,entry_sequence,entry_kind,
                  context_binding_revision_id,provider_input_through_sequence,source_plan_workflow_id,
-                 source_plan_interaction_id,source_plan_handoff_kind,scheduled_input,input_origin)
-                VALUES ('EXECUTED_TURN',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                 source_plan_interaction_id,source_plan_handoff_kind,scheduled_input,input_origin,
+                 source_cell_id,source_record_sequence,cell_output_kind)
+                VALUES ('EXECUTED_TURN',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (entry_id,entry_id,session_id,workspace_id,turn_id,entry_sequence,entry_kind.value,
              context_binding_revision_id,provider_input_through_sequence,source_plan_workflow_id,
              source_plan_interaction_id,None if source_plan_handoff_kind is None else source_plan_handoff_kind.value,
              None if scheduled_input is None else Jsonb(scheduled_input.to_dict()),
-             None if input_origin is None else getattr(input_origin,'value',input_origin)))
+             None if input_origin is None else getattr(input_origin,'value',input_origin),
+             source_cell_id,source_record_sequence,cell_output_kind))
         if not publish_content:
             return
         if canonical_prompt is not None:
@@ -1016,27 +1021,26 @@ class _RepositoryKernel:
             if kind != "USER_MESSAGE":
                 if kind not in {"PLAN_CONTINUATION", "TERMINAL_OBSERVATION"}:
                     raise ConversationKernelConflict("started request initial entry kind differs")
-                parts = read_content_parts(connection, session_id=session_id,
-                                           entry_id=str(row["id"]))
-                if any(part.type != "text" for part in parts):
-                    raise ConversationKernelConflict("runtime entry requires text content")
-                text = "".join(part.value for part in parts)
-                from pulsara_agent.conversation_kernel.reader import (
-                    _project_plan_continuation_storage,
-                )
+                source=None
                 if kind == "PLAN_CONTINUATION":
-                    text = _project_plan_continuation_storage(row, text)
-                    origin = CanonicalInputOriginKind.PLAN_CONTINUATION
-                    item_kind = FrozenProviderInputItemKind.PLAN_CONTINUATION
+                    parts=read_content_parts(connection,session_id=session_id,entry_id=str(row["id"]))
+                    if any(part.type != "text" for part in parts):
+                        raise ConversationKernelConflict("Plan continuation requires text content")
+                    from pulsara_agent.conversation_kernel.reader import _project_plan_continuation_storage
+                    content=(LLMTextPart(_project_plan_continuation_storage(row,"".join(part.value for part in parts))),)
+                    origin=CanonicalInputOriginKind.PLAN_CONTINUATION
+                    item_kind=FrozenProviderInputItemKind.PLAN_CONTINUATION
                 else:
-                    from pulsara_agent.ports.terminal_observation import cell_output_provider_text
-                    text = cell_output_provider_text(text)
-                    origin = CanonicalInputOriginKind.CELL_OUTPUT
-                    item_kind = FrozenProviderInputItemKind.TERMINAL_OBSERVATION
+                    from pulsara_agent.conversation_kernel._repository.queue_content import read_cell_entry_provider_parts
+                    from pulsara_agent.ports.terminal_observation import CellOutputSource
+                    content=read_cell_entry_provider_parts(connection,session_id=session_id,entry_id=str(row["id"]))
+                    source=CellOutputSource(str(row["source_cell_id"]),int(row["source_record_sequence"]),str(row["cell_output_kind"]))
+                    origin=CanonicalInputOriginKind.CELL_OUTPUT
+                    item_kind=FrozenProviderInputItemKind.TERMINAL_OBSERVATION
                 items.append(FrozenProviderInputItem(
                     item_kind=item_kind, source_entry_id=str(row["id"]),
                     source_entry_sequence=int(row["entry_sequence"]), source_turn_id=turn_id,
-                    content=(LLMTextPart(text),), input_origin=origin,
+                    content=content,input_origin=origin,cell_output_source=source,
                 ))
                 continue
             prompt = (hydrate_canonical_prompt_owner(

@@ -82,7 +82,9 @@ def test_one_shot_preview_is_killable_and_recovers() -> None:
     asyncio.run(run())
 
 
-def test_preview_frames_explicit_and_automatic_roots_and_keeps_ambiguous_pages() -> None:
+def test_preview_frames_explicit_and_automatic_roots_and_keeps_ambiguous_pages() -> (
+    None
+):
     async def run() -> None:
         owner = VisualizationScreenshotOwner()
         try:
@@ -152,16 +154,18 @@ def test_human_metadata_shaped_json_keeps_its_typed_prompt_parts() -> None:
     comment = "Explain whether this saved display is useful."
     annotation = PromptAnnotationPart(
         quote=human_json,
-        source=PromptAnnotationSource('entry:4g4gwnnvee2tosb7zkrcv7tz3e', 0, len(human_json)),
+        source=PromptAnnotationSource(
+            "entry:4g4gwnnvee2tosb7zkrcv7tz3e", 0, len(human_json)
+        ),
         comment=comment,
     )
     image = bound_test_image("image/png", b"typed-image-bytes", 1, 1)
     human_content = FrozenPromptContent((LLMTextPart(human_json), annotation, image))
     item = FrozenProviderInputItem(
         item_kind=FrozenProviderInputItemKind.USER,
-        source_entry_id='entry:mihwq2ultstzsnx5er3y5ueauy',
+        source_entry_id="entry:mihwq2ultstzsnx5er3y5ueauy",
         source_entry_sequence=2,
-        source_turn_id='turn:jwcvnoms3gl66moynh76r32u34',
+        source_turn_id="turn:jwcvnoms3gl66moynh76r32u34",
         content=human_content.parts,
         input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
     )
@@ -171,14 +175,14 @@ def test_human_metadata_shaped_json_keeps_its_typed_prompt_parts() -> None:
     )
 
     assert item.input_origin is CanonicalInputOriginKind.HUMAN_MESSAGE
-    assert lowered.fixed_message is not None
+    assert lowered.message is not None
     annotation_text = (
         "以下是用户引用的历史回复片段。quote 是引用材料，comment 是用户针对该片段的要求；请结合本次请求回应。\n"
         + canonical_json_bytes(
             {"annotations": [{"index": 1, "quote": human_json, "comment": comment}]}
         ).decode("utf-8")
     )
-    assert lowered.fixed_message.content == (
+    assert lowered.message.content == (
         LLMTextPart(human_json),
         LLMTextPart(annotation_text),
         image_reference_part(image),
@@ -188,7 +192,8 @@ def test_human_metadata_shaped_json_keeps_its_typed_prompt_parts() -> None:
 
 @pytest.mark.postgres
 def test_visualization_publication_fork_and_reference(
-    stage2_migrated_postgres_database, tmp_path,
+    stage2_migrated_postgres_database,
+    tmp_path,
 ) -> None:
     filename = "客户结构 <完整 & 复核>.html"
     from tests.test_conversation_fork import fork, rows
@@ -227,6 +232,7 @@ def test_visualization_publication_fork_and_reference(
     final_cut = cut
     final_id = _id("entry")
     from tests.test_html_local_resources import prepare, png
+
     path = tmp_path / "index.html"
     image_path = tmp_path / "image.png"
     css_path = tmp_path / "style.css"
@@ -234,7 +240,9 @@ def test_visualization_publication_fork_and_reference(
     image_path.write_bytes(png())
     css_path.write_text("body{background:url(image.png)}")
     js_path.write_text("document.body.dataset.loaded='yes'")
-    path.write_text('<link rel="stylesheet" href="style.css"><img src="image.png"><script src="app.js"></script>')
+    path.write_text(
+        '<link rel="stylesheet" href="style.css"><img src="image.png"><script src="app.js"></script>'
+    )
     html = asyncio.run(prepare(path))
     # Acceptance and all subsequent reads use the frozen value, even if every
     # source disappears before commit. Fork/GC must not acquire new owners.
@@ -244,7 +252,6 @@ def test_visualization_publication_fork_and_reference(
         lease.guard,
         cut=final_cut,
         entry_id=final_id,
-        parent_content=InlineContent.from_bytes(b"manifest"),
         blocks=(
             AssistantTextBlock(
                 _id("block"),
@@ -383,17 +390,26 @@ def test_freeze_duplicate_paths_failures_and_edits(tmp_path, monkeypatch):
     monkeypatch.setattr(
         v, "read_visualization_file", lambda p: (reads.append(p), read(p))[1]
     )
+
     def materialize(body, resolve):
         from pulsara_agent.conversation_kernel.io import KernelSessionIO
+
         async def run():
             io = KernelSessionIO()
             try:
-                return await v.materialize_visualizations(body, resolve, io=io, validator=None,
-                    image_reader=None, session_id=_id("session"), workspace_id=_id("workspace"),
-                    deadline_monotonic=monotonic() + 20)
+                return await v.materialize_visualizations(
+                    body,
+                    resolve,
+                    io=io,
+                    validator=None,
+                    image_reader=None,
+                    deadline_monotonic=monotonic() + 20,
+                )
             finally:
                 await io.aclose(deadline_monotonic=monotonic() + 20)
+
         return asyncio.run(run())
+
     frozen = materialize(
         marker("bad.png\n图表.html") + "\n\n" + marker("./图表.html\nmissing.html"),
         lambda p: (tmp_path / p).resolve(),
@@ -403,17 +419,13 @@ def test_freeze_duplicate_paths_failures_and_edits(tmp_path, monkeypatch):
     assert frozen[1].html is frozen[2].html
     path.write_text("<h1>new</h1>")
     assert (
-        materialize(marker("图表.html"), lambda p: tmp_path / p)[
-            0
-        ].html
+        materialize(marker("图表.html"), lambda p: tmp_path / p)[0].html
         == b"<h1>new</h1>"
     )
     path.unlink()
     assert frozen[1].html == b"<h1>original</h1>"
     assert (
-        materialize(marker("图表.html"), lambda p: tmp_path / p)[
-            0
-        ].failure_code
+        materialize(marker("图表.html"), lambda p: tmp_path / p)[0].failure_code
         == "HTML_NOT_FOUND"
     )
 
@@ -423,7 +435,9 @@ def test_html_source_limits_are_independent_of_image_allowance(tmp_path):
         ViewImageTool,
     )
     from pulsara_agent.ports.tool_execution import ToolCall
-    from pulsara_agent.conversation_kernel.tool_runtime import _read_browser_image_candidate
+    from pulsara_agent.conversation_kernel.tool_runtime import (
+        _read_browser_image_candidate,
+    )
     from pulsara_agent.conversation_kernel.html_resources import LocalHtmlReadCandidate
 
     path = tmp_path / "chart.html"
@@ -431,7 +445,9 @@ def test_html_source_limits_are_independent_of_image_allowance(tmp_path):
     tool = ViewImageTool(tmp_path)
     candidate = _read_browser_image_candidate(
         tool,
-        ToolCall("call", "view_image", {"target": {"kind": "PATH", "path": "chart.html"}}),
+        ToolCall(
+            "call", "view_image", {"target": {"kind": "PATH", "path": "chart.html"}}
+        ),
         100,
         deadline_monotonic=monotonic() + 10,
     )

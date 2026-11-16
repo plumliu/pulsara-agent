@@ -6,7 +6,6 @@ from time import monotonic
 
 import pytest
 
-from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.repository import AssistantToolCallBlock
 from pulsara_agent.identity import random_id
 from pulsara_agent.primitives.context import freeze_json
@@ -30,7 +29,7 @@ def _interrupted_attempt(repository, lease):
     )
     repository.commit_assistant_message(
         lease.guard, cut=cut, entry_id=entry_id,
-        parent_content=InlineContent.from_bytes(b"tool manifest"),
+
         blocks=(AssistantToolCallBlock(
             block_id=random_id("block"), tool_call_id=call_id,
             tool_name="exec_process", arguments=freeze_json({"command": "true"}),

@@ -3,6 +3,7 @@
 import asyncio
 from datetime import datetime, timezone
 import json
+import re
 import sys
 
 import pytest
@@ -298,7 +299,7 @@ def test_restored_pending_waits_before_final_provider_and_prefix(
                         await asyncio.sleep(0)
                 assert len(requests) == 1
                 names = {item['function']['name'] for item in requests[0]['tools']}
-                assert ('mcp__fixture__fake_echo' in names) is (finish == 'ready')
+                assert {'query_capabilities','call_mcp_tool'} <= names
                 if finish == 'ready':
                     # A later physical reconnect is not another cold boundary.
                     release.clear()
@@ -388,15 +389,13 @@ def test_failure_then_ready_on_tool_continuation_keeps_actual_prefix_and_uses_me
                     arguments = {}
                 elif len(requests) == 2:
                     name = 'query_capabilities'
-                    arguments = {'target': {'kind': 'MCP_TOOL', 'server_id': 'fixture', 'tool_name': 'mcp__fixture__fake_echo'}}
+                    arguments = {'kind':'MCP','target': {'kind': 'MCP_TOOL', 'server_id': 'fixture', 'remote_tool_name': 'fake_echo'}}
                 elif len(requests) == 3:
                     result = next(message for message in reversed(payload['messages']) if message['role'] == 'tool')
-                    envelope = json.JSONDecoder().raw_decode(result['content'])[0]
-                    detail = json.JSONDecoder().raw_decode(envelope['pulsara_tool_result']['body'])[0]
-                    assert 'invocation' in detail, detail
-                    assert detail['invocation']['mode'] == 'META'
-                    name = 'use_new_mcp_tool'
-                    arguments = {'target': detail['invocation']['target'], 'arguments': {'text': 'late MCP'}}
+                    token = re.search(r'mcpref:[a-z2-7]{26}', result['content'])
+                    assert token is not None, result
+                    name = 'call_mcp_tool'
+                    arguments = {'target': {'kind':'MCP_TOOL_REF','tool_ref':token.group()}, 'arguments': {'text': 'late MCP'}}
                 else:
                     assert len(requests) == 4
                     assert 'fake-result' in json.dumps(payload['messages'], ensure_ascii=False)
@@ -458,6 +457,7 @@ def test_new_child_canonical_work_uses_its_own_cold_readiness_scope(
 
     async def scenario():
         monkeypatch.setenv('PULSARA_HOME', str(tmp_path / 'home'))
+        (tmp_path/'delegation.js').write_text('await tools.run_agent([{instruction:"CHILD_MCP_ONLY",work_title:"Child MCP readiness"}]);')
         ChildClient, entered, release = controlled_mcp_client(phase)
         preparations = []
 
@@ -483,7 +483,7 @@ def test_new_child_canonical_work_uses_its_own_cold_readiness_scope(
                     if len(root_requests) == 1:
                         chunks = [{'choices': [{'index': 0, 'delta': {'tool_calls': [{
                             'index': 0, 'id': 'delegate_child', 'type': 'function',
-                            'function': {'name': 'exec_cell', 'arguments': json.dumps({'code': 'await tools.run_agent([{instruction: "CHILD_MCP_ONLY"}]);'})},
+                            'function': {'name': 'exec_cell', 'arguments': json.dumps({'target':{'kind':'PATH','path':'delegation.js'}})},
                         }]}}]}, {'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'tool_calls'}]}]
                 else:
                     child_requests.append(payload)
@@ -521,7 +521,7 @@ def test_new_child_canonical_work_uses_its_own_cold_readiness_scope(
             await asyncio.wait_for(child_sent.wait(), 10)
             assert len(child_requests) == 1
             names = {item['function']['name'] for item in child_requests[0]['tools']}
-            assert 'mcp__fixture__fake_echo' in names
+            assert {'query_capabilities','call_mcp_tool'} <= names
             assert 'manage_schedule' not in names and 'run_agent' not in names
         finally:
             release.set()

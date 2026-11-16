@@ -11,12 +11,12 @@ from pulsara_agent.primitives.context import FrozenJsonObjectFact, thaw_json
 from pulsara_agent.primitives.permission import PermissionMode
 
 
-MAXIMUM_PLAN_ENTRY_REASON_BYTES = 4 * 1024
+# Native Plan interactions wait ten minutes, independent of task lifetime.
+PLAN_INTERACTION_WAIT_SECONDS = 10 * 60
 MAXIMUM_PLAN_QUESTION_BYTES = 16 * 1024
 MAXIMUM_PLAN_OPTION_LABEL_BYTES = 256
 MAXIMUM_PLAN_OPTION_DESCRIPTION_BYTES = 2 * 1024
 MAXIMUM_PLAN_DRAFT_BYTES = 1 * 1024 * 1024
-MAXIMUM_PLAN_SUMMARY_BYTES = 8 * 1024
 MAXIMUM_PLAN_RESPONSE_BYTES = 32 * 1024
 MINIMUM_PLAN_CHUNK_BYTES = 4
 MAXIMUM_PLAN_CHUNK_BYTES = 64 * 1024
@@ -60,26 +60,33 @@ class PlanDraftDecision(StrEnum):
     CANCEL = "CANCEL"
 
 
-class PlanApprovedMaterializationDisposition(StrEnum):
-    PIN_EXISTING_CANONICAL_BLOCK = "PIN_EXISTING_CANONICAL_BLOCK"
-    MATERIALIZE_REFERENCED_BLOCK = "MATERIALIZE_REFERENCED_BLOCK"
+
+def validate_plan_entry_arguments(*, arguments: FrozenJsonObjectFact) -> None:
+    if thaw_json(arguments) != {}:
+        raise ValueError("enter_plan 只接受空对象 {}。")
 
 
-def extract_plan_entry_reason(
-    *,
-    arguments: FrozenJsonObjectFact,
-) -> str:
-    """Validate and extract the bounded semantic payload of ``enter_plan``."""
+def plan_enter_schema():
+    return {"type": "object", "properties": {}, "additionalProperties": False}
 
-    raw = thaw_json(arguments)
-    if not isinstance(raw, dict) or set(raw) - {"reason"}:
-        raise ValueError("Plan entry arguments are invalid")
-    return _bounded_text(
-        raw.get("reason", ""),
-        name="reason",
-        maximum_bytes=MAXIMUM_PLAN_ENTRY_REASON_BYTES,
-        allow_empty=True,
-    )
+
+def plan_question_schema():
+    return {"type": "object", "additionalProperties": False, "required": ["question"], "properties": {
+        "question": {"type": "string", "minLength": 1, "maxLength": MAXIMUM_PLAN_QUESTION_BYTES},
+        "options": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+            "required": ["label"], "properties": {
+                "label": {"type": "string", "minLength": 1, "maxLength": MAXIMUM_PLAN_OPTION_LABEL_BYTES},
+                "description": {"type": "string", "maxLength": MAXIMUM_PLAN_OPTION_DESCRIPTION_BYTES},
+                "recommended": {"type": "boolean"},
+            }}, "oneOf": [{"maxItems": 0}, {"minItems": 2, "maxItems": 3}]},
+    }}
+
+
+def plan_exit_schema():
+    return {"type": "object", "additionalProperties": False, "properties": {
+        "plan": {"type": ["string", "null"], "maxLength": MAXIMUM_PLAN_DRAFT_BYTES},
+        "summary": {"type": "string"},
+    }}
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,7 +102,6 @@ class PlanQuestionContent:
     interaction_id: str
     question: str
     options: tuple[PlanQuestionOption, ...]
-    allow_free_text: bool
     typed_content_fingerprint: str
 
 
@@ -161,12 +167,12 @@ def plan_draft_utf8_digest(body: bytes) -> str:
 
 def parse_plan_question_arguments(
     *, arguments: FrozenJsonObjectFact,
-) -> tuple[str, tuple[PlanQuestionOption, ...], bool]:
+) -> tuple[str, tuple[PlanQuestionOption, ...]]:
     """Validate content before a workflow or interaction exists."""
     raw = thaw_json(arguments)
     if not isinstance(raw, dict):
         raise ValueError("Plan question arguments must be an object")
-    if set(raw) - {"question", "options", "allow_free_text"}:
+    if set(raw) - {"question", "options"}:
         raise ValueError("Plan question arguments contain unknown fields")
     question = _bounded_text(
         raw.get("question"),
@@ -207,12 +213,7 @@ def parse_plan_question_arguments(
         )
     if sum(item.recommended for item in options) > 1:
         raise ValueError("Plan question options allow at most one recommendation")
-    allow_free_text = raw.get("allow_free_text")
-    if not isinstance(allow_free_text, bool):
-        raise ValueError("Plan question free-text flag must be boolean")
-    if not options and not allow_free_text:
-        raise ValueError("optionless Plan question must allow free text")
-    return question, tuple(options), allow_free_text
+    return question, tuple(options)
 
 
 def extract_plan_question(
@@ -220,7 +221,7 @@ def extract_plan_question(
     interaction_id: str,
     arguments: FrozenJsonObjectFact,
 ) -> PlanQuestionContent:
-    question, options, allow_free_text = parse_plan_question_arguments(
+    question, options = parse_plan_question_arguments(
         arguments=arguments
     )
     payload = {
@@ -235,13 +236,11 @@ def extract_plan_question(
             }
             for item in options
         ],
-        "allow_free_text": allow_free_text,
     }
     return PlanQuestionContent(
         interaction_id=interaction_id,
         question=question,
         options=tuple(options),
-        allow_free_text=allow_free_text,
         typed_content_fingerprint=_canonical_fingerprint(
             "pulsara:plan-question-content:v1", payload
         ),
@@ -267,17 +266,9 @@ def parse_plan_exit_arguments(
             allow_empty=True,
         )
     )
-    summary_value = raw.get("summary")
-    summary = (
-        None
-        if summary_value is None
-        else _bounded_text(
-            summary_value,
-            name="summary",
-            maximum_bytes=MAXIMUM_PLAN_SUMMARY_BYTES,
-            allow_empty=True,
-        )
-    )
+    summary = raw.get("summary")
+    if "summary" in raw and not isinstance(summary, str):
+        raise ValueError("summary must be a string")
     body = None if plan is None or not plan.strip() else plan.encode("utf-8")
     return body, summary
 
@@ -402,7 +393,6 @@ def project_plan_continuation_for_provider(
 __all__ = [
     "ExtractedPlanDraft",
     "MAXIMUM_PLAN_RESPONSE_BYTES",
-    "PlanApprovedMaterializationDisposition",
     "PlanDraftContentIdentity",
     "PlanDraftDecision",
     "PlanDraftTextChunk",
@@ -413,7 +403,10 @@ __all__ = [
     "PlanQuestionOption",
     "PlanWorkflowEnteredBy",
     "PlanWorkflowStatus",
-    "extract_plan_entry_reason",
+    "validate_plan_entry_arguments",
+    "plan_enter_schema",
+    "plan_question_schema",
+    "plan_exit_schema",
     "extract_plan_draft",
     "extract_plan_question",
     "plan_draft_utf8_digest",

@@ -16,6 +16,13 @@ from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
 
 
+def remote_error(result):
+    assert result.kind == "TEXT"
+    text = result.content.decode("utf-8")
+    assert "服务已收到本次请求" in text and "未自动重做" in text
+    return json.JSONDecoder().raw_decode(text.split("服务返回错误：", 1)[1])[0]
+
+
 _SERVER = '''
 import json,os,sys
 options = json.loads(OPTIONS)
@@ -168,10 +175,9 @@ def test_remote_error_data_retains_diagnostics_and_scrubs_actual_secret(tmp_path
             )
             permit.mark_attempt_accepted()
             result = await executor.invoke(permit, {})
-            body = json.loads(result.content)
-            assert body["error"] == "MCP_REMOTE_ERROR"
+            body = remote_error(result)
             assert secret.encode() not in result.content
-            assert body["remote_error"]["data"] == {
+            assert body["data"] == {
                 "reason":"server rejected request", "retryHint":"fix parameters",
                 "credential":"[credential removed]",
             }
@@ -224,17 +230,14 @@ def test_remote_rpc_error_keeps_slot_and_allows_next_operation(
                         tool_name=tool_name, arguments=arguments, permit=permit,
                         scope_kind=ModelInputScopeKind.ROOT,
                     )
-                body = json.loads(result.content)
                 if index == 0:
+                    body = remote_error(result)
                     assert result.state == "SYSTEM_ERROR"
-                    assert body["error"] == "MCP_REMOTE_ERROR"
-                    assert body["remote_error"]["code"] == error_code
-                    assert "requested operation rejected" in body["remote_error"]["message"]
-                    assert body["remote_error"]["data"] == {
+                    assert body["code"] == error_code
+                    assert "requested operation rejected" in body["message"]
+                    assert body["data"] == {
                         "reason":"server rejected request", "retryHint":"fix parameters",
                     }
-                    assert body["retry_performed"] is False
-                    assert "remote_outcome" not in body
                 else:
                     assert result.state == "SUCCESS"
                     assert b"same connection success" in result.content

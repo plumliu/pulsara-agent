@@ -728,7 +728,7 @@ class TerminalKernelProtocolServer:
             wire.CANCEL_QUEUED_PROMPT, wire.STEER_QUEUED_PROMPT,
         )
         if queue_action:
-            if (not request.target_queue_item_id or request.plan_reason
+            if (not request.target_queue_item_id
                 or request.HasField("prompt_content")
                 or bool(request.target_turn_id) != (request.command_kind == wire.STEER_QUEUED_PROMPT)):
                 return _error(request.request_id, "QUEUE_ACTION_INVALID")
@@ -768,7 +768,7 @@ class TerminalKernelProtocolServer:
                 != wire.PERMISSION_MODE_UNSPECIFIED
                 or request.target_plan_workflow_id
                 or request.expected_plan_workflow_revision
-                or request.plan_reason
+
                 or request.HasField("prompt_content")
             ):
                 return _error(request.request_id, "CONTROL_REQUEST_INVALID")
@@ -780,8 +780,7 @@ class TerminalKernelProtocolServer:
             return _error(request.request_id, "CONTROL_FIELDS_NOT_ALLOWED")
         if request.command_kind == wire.SUBMIT_PROMPT:
             if (
-                request.plan_reason
-                or not request.HasField("prompt_content")
+                not request.HasField("prompt_content")
                 or request.target_turn_id
             ):
                 return _error(request.request_id, "PROMPT_INVALID")
@@ -796,7 +795,7 @@ class TerminalKernelProtocolServer:
                 requested_permission_mode=requested_permission,
             )
         elif request.command_kind == wire.STEER_ACTIVE_TURN:
-            if not request.target_turn_id or request.plan_reason or not request.HasField("prompt_content"):
+            if not request.target_turn_id or not request.HasField("prompt_content"):
                 return _error(request.request_id, "STEER_INVALID")
             try:
                 content = _prompt_content_from_wire(request.prompt_content)
@@ -866,7 +865,6 @@ class TerminalKernelProtocolServer:
         elif request.command_kind == wire.ENTER_PLAN:
             if (
                 requested_permission is None
-                or not _valid_prompt(request.plan_reason)
                 or request.HasField("prompt_content")
                 or request.target_turn_id
                 or request.target_plan_workflow_id
@@ -876,15 +874,13 @@ class TerminalKernelProtocolServer:
             try:
                 outcome = await state.host_session.enter_plan(
                     command_id=request.command_id,
-                    entry_reason=request.plan_reason,
                     resume_permission_mode=requested_permission,
                 )
             except (ConversationKernelConflict, ValueError):
                 return _error(request.request_id, "PLAN_ENTER_CONFLICT")
         elif request.command_kind in (wire.CANCEL_PLAN, wire.FORCE_EXIT_PLAN):
             if (
-                request.plan_reason
-                or request.HasField("prompt_content")
+                request.HasField("prompt_content")
                 or request.target_turn_id
                 or not request.target_plan_workflow_id
                 or request.expected_plan_workflow_revision < 1
@@ -907,8 +903,7 @@ class TerminalKernelProtocolServer:
                 return _error(request.request_id, "PLAN_EXIT_CONFLICT")
         elif request.command_kind == wire.COMPACT_CONTEXT:
             if (
-                request.plan_reason
-                or request.HasField("prompt_content")
+                request.HasField("prompt_content")
                 or request.target_plan_workflow_id
                 or request.expected_plan_workflow_revision
                 or request.target_turn_id
@@ -934,8 +929,7 @@ class TerminalKernelProtocolServer:
             )
         elif request.command_kind == wire.DETACH:
             if (
-                request.plan_reason
-                or request.HasField("prompt_content")
+                request.HasField("prompt_content")
                 or request.target_turn_id
             ):
                 return _error(request.request_id, "DETACH_REQUEST_INVALID")
@@ -947,8 +941,7 @@ class TerminalKernelProtocolServer:
             )
         elif request.command_kind == wire.CLOSE_SESSION:
             if (
-                request.plan_reason
-                or request.HasField("prompt_content")
+                request.HasField("prompt_content")
                 or request.target_turn_id
             ):
                 return _error(request.request_id, "CLOSE_REQUEST_INVALID")
@@ -1139,7 +1132,6 @@ class TerminalKernelProtocolServer:
                     )
                     for item in question.options
                 ),
-                allow_free_text=question.allow_free_text,
                 typed_content_fingerprint=question.typed_content_fingerprint,
             )
         )

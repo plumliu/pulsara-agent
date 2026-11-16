@@ -12,9 +12,9 @@ const record = (value: unknown): Record<string, unknown> => value && typeof valu
 const actions: Record<string, string> = {
   INSTALL_LOOSE_SKILL: '安装技能', SET_LOOSE_SKILL_ENABLED: '更改技能开关', REMOVE_LOOSE_SKILL: '删除技能',
   TRUST_HOOK_SOURCE: '信任 Hook 来源', REVOKE_HOOK_TRUST: '撤销 Hook 信任', SET_HOOK_SOURCE_ENABLED: '更改 Hook 来源开关',
-  ADD_LOCAL_MCP: '添加 MCP 连接', UPDATE_LOCAL_MCP: '编辑 MCP 连接', REMOVE_LOCAL_MCP: '删除 MCP 连接',
+  ADD_LOCAL_MCP: '添加 MCP 连接', UPDATE_MCP_CONNECTION: '编辑 MCP 连接', REMOVE_LOCAL_MCP: '删除 MCP 连接',
   INSTALL_PLUGIN: '安装插件（暂不启用）', SET_PLUGIN_ENABLED: '更改插件启用状态', REMOVE_PLUGIN: '删除插件',
-  CONFIGURE_PLUGIN_MCP_CONNECTION: '配置插件连接', AUTHORIZE_MCP: '在浏览器中登录', CLEAR_MCP_AUTHORIZATION: '退出 MCP 登录',
+  AUTHORIZE_MCP: '在浏览器中登录', CLEAR_MCP_AUTHORIZATION: '退出 MCP 登录',
 };
 
 export function CapabilityInteractionEditor({form, onResolve}: {
@@ -48,13 +48,13 @@ export function CapabilityInteractionEditor({form, onResolve}: {
       if (!accepted) { resolving.current = false; setBusy(false); }
     }).catch(() => { resolving.current = false; setBusy(false); });
   };
-  if (action === 'ADD_LOCAL_MCP' || action === 'UPDATE_LOCAL_MCP') {
+  if (action === 'ADD_LOCAL_MCP' || (action === 'UPDATE_MCP_CONNECTION' && !form.connection)) {
     const config = record(prefill.config);
     const transport = record(config.transport);
     const server: UserMcpServerCapability = {
       id: String(target.server_id), name: String(config.display_name ?? target.server_id), config,
       currentIdentity: String(record(form.expected_current).expected_identity ?? ''), enabled: config.enabled !== false,
-      status: 'configured', availableToSubagents: Boolean(config.available_to_subagents),
+      status: 'configured', availableToSubagents: config.scope_policy !== 'ROOT_ONLY',
       toolCount: 0, resourceCount: 0, resourceTemplateCount: 0, promptCount: 0,
       instructions: '', hasFailure: false, tools: [],
       transport: {kind: transport.type === 'stdio' ? 'stdio' : 'http', summary: String(transport.endpoint ?? transport.command ?? '')},
@@ -63,7 +63,7 @@ export function CapabilityInteractionEditor({form, onResolve}: {
       onClose={cancel} onSave={input => submit({config: input.config, secret_changes: input.secretChanges,
         retain_credentials_confirmed: input.retainCredentialsConfirmed ?? false})} />;
   }
-  if (action === 'CONFIGURE_PLUGIN_MCP_CONNECTION') {
+  if (action === 'UPDATE_MCP_CONNECTION' && Boolean(form.connection)) {
     const connection = record(form.connection);
     const packageInstallId = parsePublicPackageId(plugin.package_install_id);
     if (!packageInstallId) return null;
@@ -81,7 +81,7 @@ export function CapabilityInteractionEditor({form, onResolve}: {
   const enableReview = action === 'SET_PLUGIN_ENABLED' && prefill.enabled === true;
   const config = record(prefill.config);
   const transport = record(config.transport);
-  const identity = String(target.plugin_id ?? target.server_id ?? target.skill_path ?? prefill.source_path ?? record(prefill.hook_source).path ?? '');
+  const identity = String(target.plugin_path ?? target.server_id ?? target.skill_path ?? target.config_path ?? target.path ?? record(prefill.hook_source).path ?? '');
   const name = String(plugin.name ?? config.display_name ?? prefill.name ?? identity);
   const removing = action === 'REMOVE_LOCAL_MCP' || action === 'REMOVE_PLUGIN' || action === 'REMOVE_LOOSE_SKILL';
   const isHook = action.includes('HOOK');

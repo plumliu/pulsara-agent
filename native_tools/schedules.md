@@ -1,8 +1,8 @@
-# Pulsara 定时会话工具修订与使用教程草案
+# Pulsara 定时会话工具合同与使用教程
 
 共用规则见[原生工具修订草案索引](../PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 1、2 章；完整保存、原生 12k 分页及 NEXT 沿[统一交付草案](../PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)。
 
-状态：讨论草案，未实施。本族只有 ROOT 原生调用，不提供 JS API。当前记录 query_schedules，以及 manage_schedule 的 create／switch／update／pause／resume／delete、五种时间规则、返回类型和原生示例。TypeScript 只描述合同类型，不表示存在脚本入口。本轮只改文档。
+状态：当前生效合同。本族只有 ROOT 原生调用，不提供 JS API。当前记录 query_schedules，以及 manage_schedule 的 create／switch／update／pause／resume／delete、五种时间规则、返回类型和原生示例。TypeScript 只描述合同类型，不表示存在脚本入口。
 
 ## 1. 共用时间规则 schedule
 

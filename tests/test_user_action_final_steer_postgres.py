@@ -1,7 +1,6 @@
 """Final settlement and exact steering retain their canonical arbitration."""
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
 from datetime import datetime, timezone
 from threading import Event, local
 from time import monotonic
@@ -17,7 +16,7 @@ from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.conversation_kernel.prompt_content import freeze_canonical_prompt
 from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
 from pulsara_agent.conversation_kernel.repository import AssistantTextBlock
-from pulsara_agent.conversation_kernel.runner import ConversationKernelRunner, OutputResourceInterruption
+from pulsara_agent.conversation_kernel.runner import ConversationKernelRunner
 from pulsara_agent.identity import random_id
 from pulsara_agent.llm.input import FrozenPromptContent
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
@@ -29,12 +28,10 @@ from tests.test_canonical_request_start_postgres import (
     intent_for,
     root as root,
 )
-from tests.test_stage2_conversation_runner import (
-    _AssertingTool,
-    _ScriptedModel,
-    _text_stream,
-    frozen_test_prompt,
-)
+from tests.support.round3 import ScriptedKernelModel
+from tests.support.model_config import frozen_test_prompt
+from tests.test_round4_plan_host import _text
+
 
 
 pytestmark = pytest.mark.postgres
@@ -85,7 +82,6 @@ def test_exact_steer_and_plain_final_have_one_transactional_winner(root, monkeyp
     def final():
         return repository.commit_assistant_message(
             lease.guard, cut=cut, entry_id=final_id,
-            parent_content=InlineContent.from_bytes(b"finished"),
             blocks=(AssistantTextBlock(random_id("block"), InlineContent.from_bytes(b"finished")),),
             complete_turn=True, occurred_at=_now(), actor_id="model:foreground",
             deadline_monotonic=monotonic() + 30,
@@ -178,32 +174,15 @@ def test_exact_steer_and_plain_final_have_one_transactional_winner(root, monkeyp
 
 
 def test_legal_final_settles_when_its_hypothetical_followup_exceeds_input_budget(root, monkeypatch):
-    import pulsara_agent.conversation_kernel.runner as runner_module
-
     repository, lease, _, _ = root
-    model = _ScriptedModel([_text_stream("finished answer " * 1024)])
+    model = ScriptedKernelModel([_text("finished answer " * 1024)])
     runner = ConversationKernelRunner(
         model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository, writer_lease=lease, model=model,
-        tools=StructuredToolPort(_AssertingTool(repository.connection_provider, lease.guard.session_id), tool_names=()),
+        tools=StructuredToolPort(object(), tool_names=()),
         live_bus=LiveAgentEventBus(), context_source_collector=StaticContextSourceCollector(),
         maximum_input_tokens_per_call=1024,
     )
-    followup_calls = []
-    resource_quotes = []
-    quote_response = runner._quote_post_response_resources
-
-    def observe_response(**kwargs):
-        quote = quote_response(**kwargs)
-        resource_quotes.append(quote)
-        return quote
-
-    def observe_followup(**kwargs):
-        followup_calls.append(kwargs)
-        return quote_provider_followup_wire_resources(**kwargs)
-
-    monkeypatch.setattr(runner_module, "quote_provider_followup_wire_resources", observe_followup)
-    monkeypatch.setattr(runner, "_quote_post_response_resources", observe_response)
     result = asyncio.run(runner.run_turn(frozen_test_prompt("Give the completed answer.")))
     assert result.final_text == "finished answer " * 1024
     assert result.model_call_count == 1
@@ -217,14 +196,6 @@ def test_legal_final_settles_when_its_hypothetical_followup_exceeds_input_budget
         provider_replay=result.final_source.provider_replay, bounded_suffix_messages=(),
     )
     assert hypothetical.budget_input_tokens > request.wire_input_plan.quote.effective_input_budget_tokens
-    assert followup_calls == []
-    assert len(resource_quotes) == 1
-    with pytest.raises(OutputResourceInterruption) as rejected:
-        runner._require_post_response_resources(
-            replace(resource_quotes[0], followup_wire=hypothetical),
-            effective_input_budget_tokens=request.wire_input_plan.quote.effective_input_budget_tokens,
-        )
-    assert rejected.value.reason == "FOLLOWUP_INPUT_TOKENS"
     assert _rows(repository,
         "SELECT status, final_entry_id FROM pulsara_v3.turns WHERE session_id=%s AND id=%s",
         (lease.guard.session_id, result.turn_id)) == [{"status": "COMPLETED", "final_entry_id": result.final_entry_id}]

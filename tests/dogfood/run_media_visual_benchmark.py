@@ -1,8 +1,8 @@
 """Real-provider visual QA on small synthetic ground truth.
 
 The production overview plan is rendered and fully drained through its source
-continuations before pictures reach the model. The physical budget applies to
-each source page; the fixed-picture probe receives the collected pages. Actual
+complete source selection before pictures reach the model. The physical budget applies to
+each internal render batch; the fixed-picture probe receives all selected images. Actual
 usage is measured. This fixture suite does not compare alternate selectors or
 layouts and cannot establish general visual understanding quality.
 """
@@ -32,9 +32,11 @@ from pulsara_agent.llm.runtime import ModelRuntime
 from pulsara_agent.media.frames import (
     FRAME_ANALYSIS_FRAMES,
     FrameBudget,
-    read_video_frames,
+    prepare_frame_plan,
+    render_frame_page,
+    frame_page_fits_geometry,
 )
-from pulsara_agent.media.source import MediaSource, probe_media
+from pulsara_agent.media.source import MediaError, MediaSource, probe_media
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.settings import LocalPostgresConfig, LocalSettingsStore
 from pulsara_agent.workspace_identity import HostWorkspaceInput
@@ -104,48 +106,45 @@ def fixture(path, category, truth):
             output.mux(packet)
 
 
-def collect_overview_pages(source, info, *, start, end, budget):
-    """Use the public source-page pipeline and copy its complete next calls.
-
-    Printed frame numbers remain local to each accepted page. The benchmark's
-    image index is remapped to the accumulated picture attachments, with the
-    original page and image indices retained explicitly.
-    """
-    arguments = {"from": start, "to": end, "mode": "overview"}
-    images, index, pages = [], [], []
-    while True:
-        result = read_video_frames(
-            source,
-            info,
-            start=arguments["from"],
-            end=arguments["to"],
-            mode=arguments["mode"],
-            crop=arguments.get("crop"),
-            continuation=arguments.get("continuation"),
-            budget=budget,
-        )
-        body = json.loads(result.text)
+def collect_overview_evidence(source, info, *, start, end, budget):
+    """Collect the complete fixed overview using internal physical batches."""
+    plan = prepare_frame_plan(
+        source,
+        info,
+        start=start,
+        end=end,
+        mode="overview",
+        analysis_frames=budget.analysis_frames,
+    )
+    plan = replace(plan, priority=tuple(sorted(plan.priority, key=lambda item: item.t)))
+    images, index, batches = [], [], []
+    offset = 0
+    while offset < plan.observation_count:
+        count = plan.observation_count - offset
+        while count > 1 and not frame_page_fits_geometry(
+            plan, offset=offset, count=count, budget=budget
+        ):
+            count -= 1
+        while True:
+            try:
+                result = render_frame_page(
+                    source, info, plan, offset=offset, count=count, budget=budget
+                )
+                break
+            except MediaError as exc:
+                if exc.code != "RESOURCE_BOUNDARY" or count == 1:
+                    raise
+                count -= 1
         image_offset = len(images)
-        pages.append(body)
         images.extend(result.images)
-        index.extend(
-            dict(
-                frame,
-                source_page=len(pages),
-                page_image=frame["image"],
-                image=image_offset + frame["image"],
-            )
-            for frame in body["frames"]
+        batches.append(
+            {"observations": len(result.index), "images": len(result.images)}
         )
-        following = body["next"]
-        if following is None:
-            break
-        assert following["tool"] == "read_video_frames"
-        next_arguments = following["arguments"]
-        assert next_arguments != arguments, "Source continuation did not advance"
-        assert next_arguments["target"] == {"kind": "PATH", "path": str(source.path)}
-        arguments = next_arguments
-    return tuple(images), index, pages
+        index.extend(
+            dict(frame, image=image_offset + frame["image"]) for frame in result.index
+        )
+        offset += len(result.index)
+    return tuple(images), index, batches
 
 
 def prepare(workspace, category, truth):
@@ -154,7 +153,7 @@ def prepare(workspace, category, truth):
     begin = monotonic()
     with MediaSource.open(source_path) as source:
         info = probe_media(source)
-        images, index, pages = collect_overview_pages(
+        images, index, batches = collect_overview_evidence(
             source, info, start=0, end=info.duration, budget=BUDGET
         )
     preparation_seconds = monotonic() - begin
@@ -163,7 +162,7 @@ def prepare(workspace, category, truth):
         path = workspace / f"{category}-production_overview-{i + 1}.jpg"
         path.write_bytes(image.data)
         paths.append(str(path))
-    return images, index, paths, preparation_seconds, pages
+    return images, index, paths, preparation_seconds, batches
 
 
 def parse(answer):
@@ -264,14 +263,18 @@ async def run(args, report):
             model_runtime=_RecordingModelRuntime(runtime, records)
         )
         for category, truth in CASES.items():
-            images, index, paths, preparation_seconds, pages = await asyncio.to_thread(
-                prepare, workspace, category, truth
-            )
+            (
+                images,
+                index,
+                paths,
+                preparation_seconds,
+                batches,
+            ) = await asyncio.to_thread(prepare, workspace, category, truth)
             prompt = (
                 "Inspect only these sampled frames and their actual source timestamps. Do not use any tools. "
                 "These are sparse observations; do not invent unseen events or interpolate. "
                 "Return only JSON with keys first_label, last_label, brief_label, brief_t, brand. "
-                "Read the main large label at the earliest/latest supplied source timestamps; page order may differ from time order and printed numbers are local to source_page. brief_label is the visible temporary main label that differs from both; "
+                "Read the main large label at the earliest/latest supplied source timestamps; images are in source-time order and printed frame numbers are local to each image. brief_label is the visible temporary main label that differs from both; "
                 "brief_t is its supplied timestamp; use null if absent. brand is the explicit company/brand name shown; null if absent. "
                 "Frame index: " + json.dumps(index)
             )
@@ -312,7 +315,7 @@ async def run(args, report):
                     "truth": truth,
                     "index": index,
                     "images": paths,
-                    "source_pages": pages,
+                    "render_batches": batches,
                     "image_pixels": sum(i.width * i.height for i in images),
                     "image_bytes": sum(len(i.data) for i in images),
                     "prompt": prompt,

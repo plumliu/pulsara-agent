@@ -7,19 +7,12 @@ from pulsara_agent.identity import derive_id
 import asyncio
 import base64
 from dataclasses import replace
-from datetime import datetime, timezone
 from io import BytesIO
-import json
 from types import SimpleNamespace
 
 import pytest
 from PIL import Image
 
-from pulsara_agent.conversation_kernel.assembler import (
-    CompletedAssistantMessage,
-    CompletedTextBlock,
-    CompletedToolCallBlock,
-)
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionScope,
     CompactionTrigger,
@@ -46,25 +39,9 @@ from pulsara_agent.conversation_kernel.compaction.planner import (
     project_destination_dialogue_plan_for_text_only_handover,
 )
 from pulsara_agent.conversation_kernel.direct_model import (
-    ProviderFollowupWireResourceQuote,
     freeze_provider_wire_measurement,
 )
-from pulsara_agent.conversation_kernel.runner import (
-    ConversationKernelRunner,
-    FrozenPostResponseResourceQuote,
-    OutputResourceInterruption,
-    _completed_assistant_canonical_bytes,
-    _entered_plan_continuation_followup_upper,
-    _ordinary_result_followup_upper,
-    _plan_result_followup_upper,
-)
 from pulsara_agent.conversation_kernel.host import KernelHostSession
-from pulsara_agent.conversation_kernel._repository.contracts import (
-    PLAN_CONTROL_RESULT_INLINE_HARD_BYTES,
-)
-from pulsara_agent.conversation_kernel.tool_outputs import (
-    CANONICAL_TOOL_RESULT_PREVIEW_HARD_BYTES,
-)
 from pulsara_agent.llm.adapters.openai.chat_completions import (
     chat_semantic_wire_group,
 )
@@ -78,11 +55,8 @@ from pulsara_agent.llm.input import (
     LLMImagePart,
     LLMMessage,
     LLMTextPart,
-    frozen_tool_result_public_text,
-    join_text_content,
     llm_content_logical_bytes,
 )
-from pulsara_agent.conversation_kernel.prompt_content import canonical_prompt_body_bytes
 from pulsara_agent.llm.errors import ModelTargetCapabilityMismatch
 from pulsara_agent.model_input.contracts import (
     CanonicalInputOriginKind,
@@ -96,17 +70,6 @@ from pulsara_agent.model_input.contracts import (
 from pulsara_agent.primitives.context import (
     canonical_json_bytes,
     freeze_json,
-)
-from pulsara_agent.primitives.tool_result_projection import (
-    ToolResultLogicalMessageKind,
-    conservative_tool_result_logical_message,
-    provider_neutral_message_logical_bytes,
-    render_provider_tool_result_logical_message,
-)
-from pulsara_agent.primitives.tool_observation import (
-    MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES,
-    ToolObservationOrigin,
-    freeze_tool_observation_timing_fact,
 )
 
 
@@ -126,343 +89,6 @@ def _image(
 
 def _message(*parts: LLMTextPart | LLMImagePart) -> LLMMessage:
     return LLMMessage.user_content(FrozenPromptContent(tuple(parts)))
-
-
-def _assert_source_variant_wire_upper(candidate, upper, *, wire_api: str) -> None:
-    from pulsara_agent.model_input.compiler import _observation_lifecycle
-    from pulsara_agent.model_input.continuity import (
-        SourceObservationPresence,
-        encode_runtime_observation,
-    )
-
-    def wire(message):
-        if wire_api == "chat":
-            return chat_semantic_wire_group(message)[0]
-        return responses_semantic_wire_group(message)[0]
-
-    estimator = PulsaraHeuristicTokenEstimatorV3()
-    upper_wire = wire(upper)
-    for variant in candidate.variants:
-        actual = encode_runtime_observation(
-            source_kind=candidate.source_kind,
-            trust_class=candidate.trust_class,
-            lifecycle=_observation_lifecycle(candidate.lifecycle),
-            presence=SourceObservationPresence.VALUE,
-            body=variant.text,
-        )
-        actual_wire = wire(actual)
-        assert provider_neutral_message_logical_bytes(actual) <= (
-            provider_neutral_message_logical_bytes(upper)
-        )
-        assert len(canonical_json_bytes(actual_wire)) <= len(
-            canonical_json_bytes(upper_wire)
-        )
-        assert estimator.estimate_wire_json_component(actual_wire) <= (
-            estimator.estimate_wire_json_component(upper_wire)
-        )
-
-
-def _source_upper_collector(
-    tmp_path, *, display_timezone=timezone.utc, clock=None, hook_owner=None
-):
-    from pulsara_agent.conversation_kernel.context_sources import (
-        KernelContextSourceCollector,
-    )
-    from tests.test_round3_structured_model_input_compiler import (
-        _Capability,
-    )
-
-    return KernelContextSourceCollector(
-        workspace_kind="project",
-        workspace_root=tmp_path,
-        capability_composer=_Capability(),
-        base_system_prompt="BASE",
-        display_timezone=display_timezone,
-        clock=clock or (lambda: datetime(2026, 9, 14, tzinfo=timezone.utc)),
-        hook_context_owner=hook_owner,
-    )
-
-
-@pytest.mark.parametrize("wire_api", ("chat", "responses"))
-@pytest.mark.parametrize("timezone_name", ("UTC", "America/New_York", "Asia/Kathmandu"))
-def test_clock_upper_bounds_actual_full_and_compact_sources(
-    tmp_path, wire_api: str, timezone_name: str
-) -> None:
-    from zoneinfo import ZoneInfo
-    from pulsara_agent.model_input.contracts import ContextSourceKind
-    from tests.support.round3 import StructuredToolPort
-    from tests.test_round3_structured_model_input_compiler import (
-        _canonical_facts,
-        _collect_context_sources,
-    )
-
-    observed = [datetime(2024, 11, 3, 5, 59, 59, 999999, tzinfo=timezone.utc)]
-    collector = _source_upper_collector(
-        tmp_path,
-        display_timezone=ZoneInfo(timezone_name),
-        clock=lambda: observed[0],
-    )
-    surface = (
-        StructuredToolPort(object(), tool_names=())
-        .snapshot_tool_surface(
-            conversation_scope_kind=ModelInputScopeKind.ROOT,
-        )
-        .model_surface
-    )
-    (upper,) = collector.freeze_post_response_call_source_upper()
-    # The second capture crosses the New York DST boundary; both must fit the
-    # one upper frozen before either actual observation is collected.
-    for instant in (
-        observed[0],
-        datetime(2024, 11, 3, 6, 0, 0, tzinfo=timezone.utc),
-    ):
-        observed[0] = instant
-        sources = _collect_context_sources(
-            collector,
-            activation_subject=None,
-            activation_text="",
-            tool_surface=surface,
-            canonical_facts=_canonical_facts(),
-        )
-        candidate = next(
-            c
-            for c in sources.candidates
-            if c.source_kind is ContextSourceKind.RUNTIME_CLOCK
-        )
-        _assert_source_variant_wire_upper(candidate, upper, wire_api=wire_api)
-
-
-@pytest.mark.parametrize("wire_api", ("chat", "responses"))
-@pytest.mark.parametrize("mode", ("bounded_tool", "unlimited_tool", "stop"))
-@pytest.mark.parametrize("character", ("\x01", "界", "🙂"))
-def test_hook_upper_bounds_actual_accepted_context_and_continuation(
-    tmp_path, wire_api: str, mode: str, character: str
-) -> None:
-    from pulsara_agent.hooks.config_parser import DEFAULT_ADDITIONAL_CONTEXT_LIMIT
-    from pulsara_agent.hooks.context import HookContextOwner
-    from pulsara_agent.hooks.contracts import (
-        HookContextEntry,
-        HookEventType,
-        PostToolRef,
-        StopRef,
-    )
-    from pulsara_agent.hooks.executor import HookSecretScrubSet
-    from pulsara_agent.model_input.contracts import ContextSourceCandidate
-    from tests.test_round9_2_hook_subsystem import _definition, _scope, _view
-
-    owner = HookContextOwner()
-    scope = _scope()
-    owner.register_scope(scope)
-    stop = mode == "stop"
-    event = HookEventType.STOP_EVENT if stop else HookEventType.POST_TOOL_USE_EVENT
-    context_limit = 0 if mode == "unlimited_tool" else 1 if stop else 256
-    definition = _definition(tmp_path, event, "noop", context_limit=context_limit)
-    view = _view(tmp_path, (definition,))
-    runner = object.__new__(ConversationKernelRunner)
-    runner._hook_dispatcher = SimpleNamespace(capture_view=lambda: view)
-    runner._hook_context_owner = owner
-    runner._hook_scope = scope
-    upper = runner._hook_output_source_upper(
-        call_count=0 if stop else 2, scope_kind=ModelInputScopeKind.ROOT
-    )
-    assert upper is not None
-    estimator = PulsaraHeuristicTokenEstimatorV3()
-    threshold = DEFAULT_ADDITIONAL_CONTEXT_LIMIT if stop else context_limit
-    repeats = 65536 if threshold == 0 else threshold * 4
-    while threshold and estimator.estimate_text(character * repeats) > threshold:
-        repeats -= 1
-    body = character * repeats
-    for ordinal in range(1 if stop else 2):
-        entry = HookContextEntry(
-            definition, 0, ordinal + 1, body, HookSecretScrubSet.capture()
-        )
-        if stop:
-            owner.accept_continuation(
-                scope=scope,
-                causal_ref=StopRef(
-                    "turn:nzc36cttgo7xxki7bcjc7ops7a",
-                    "entry:jfasfwsw2puygc3hrueckpvgba",
-                    object(),
-                ),
-                source_entry=entry,
-                reason=body,
-            )
-        else:
-            owner.accept_sync(
-                scope=scope,
-                causal_ref=PostToolRef(
-                    "turn:nzc36cttgo7xxki7bcjc7ops7a",
-                    f"call:{ordinal}",
-                    derive_id("result", "test-fixture", f"result:{ordinal}"),
-                    derive_id("entry", "test-fixture", f"entry:{ordinal}"),
-                    "SUCCESS",
-                    object(),
-                ),
-                entries=(entry,),
-            )
-    collector = _source_upper_collector(tmp_path, hook_owner=owner)
-    candidate, reservation = collector.freeze_hook_context_source(
-        scope_kind="ROOT", session_id=scope.session_id, estimator=estimator
-    )
-    assert isinstance(candidate, ContextSourceCandidate)
-    assert reservation is not None
-    try:
-        assert body in candidate.variants[0].text
-        _assert_source_variant_wire_upper(candidate, upper, wire_api=wire_api)
-    finally:
-        reservation.retire()
-
-
-@pytest.mark.parametrize("wire_api", ("chat", "responses"))
-def test_fresh_plan_upper_bounds_actual_source_collection(
-    tmp_path, wire_api: str
-) -> None:
-    from dataclasses import fields
-    from pulsara_agent.model_input.contracts import (
-        FrozenCanonicalCompileSnapshot,
-        FrozenPlanHandoffCompileFact,
-        FrozenPlanWorkflowCompileFact,
-        canonical_compile_snapshot_fingerprint,
-        plan_handoff_compile_fact_fingerprint,
-        plan_workflow_compile_fact_fingerprint,
-    )
-    from pulsara_agent.model_input.continuity import decode_runtime_observation
-    from pulsara_agent.primitives.permission import PermissionMode
-    from pulsara_agent.primitives.plan_workflow import (
-        PlanHandoffKind,
-        PlanWorkflowEnteredBy,
-        PlanWorkflowStatus,
-    )
-    from pulsara_agent.primitives.run_permission import (
-        RunPermissionAdmissionSource,
-        RunPermissionOverlay,
-        build_run_permission_snapshot,
-    )
-    from tests.support.round3 import StructuredToolPort
-    from tests.test_round3_structured_model_input_compiler import (
-        _canonical_facts,
-        _collect_context_sources,
-        _snapshot,
-    )
-
-    collector = _source_upper_collector(tmp_path)
-    surface = (
-        StructuredToolPort(object(), tool_names=())
-        .snapshot_tool_surface(
-            conversation_scope_kind=ModelInputScopeKind.ROOT,
-        )
-        .model_surface
-    )
-    base = _canonical_facts(
-        _snapshot(
-            FrozenProviderInputItem(
-                FrozenProviderInputItemKind.PLAN_CONTINUATION,
-                "entry:jfasfwsw2puygc3hrueckpvgba",
-                1,
-                "turn:klmmazz67vfgsfsvg6ceqgdsfu",
-                (
-                    LLMTextPart(
-                        '{"pulsara_plan_continuation":{"status":"ACTIVE","transition":"ENTERED_PLAN"}}'
-                    ),
-                ),
-                input_origin=CanonicalInputOriginKind.PLAN_CONTINUATION,
-            )
-        )
-    )
-    identity = base.canonical_input.identity
-    for requested_mode in PermissionMode:
-        original_permission = build_run_permission_snapshot(
-            snapshot_id="permission:vuoih2x5apxuhi5gy7udc2nexu",
-            requested_mode=requested_mode,
-            effective_mode=requested_mode,
-            admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
-        )
-        uppers = {
-            decode_runtime_observation(message).source_kind: message
-            for message in collector.freeze_fresh_entered_plan_source_upper(
-                original_permission
-            )
-        }
-        permission = build_run_permission_snapshot(
-            snapshot_id="permission:jkftzyuw2e3gxuxnkrx7kfmabi",
-            requested_mode=requested_mode,
-            effective_mode=PermissionMode.READ_ONLY,
-            admission_source=RunPermissionAdmissionSource.RUNTIME_PLAN_CONTINUATION,
-            overlay=RunPermissionOverlay.PLAN_READ_ONLY,
-            plan_context_ordinal_at_admission=1,
-            plan_workflow_id="plan:ximdv6p6grb5aj3iu6nav3ektq",
-            plan_workflow_revision_at_admission=1,
-            inherited_from_turn_id=identity.turn_id,
-        )
-        common = dict(
-            session_id=identity.session_id,
-            workspace_id="workspace:wdl6b3mtrkghwnvjo4an3ekbau",
-            workflow_id="plan:ximdv6p6grb5aj3iu6nav3ektq",
-            workflow_ordinal=1,
-            workflow_status=PlanWorkflowStatus.ACTIVE,
-            resume_permission_mode=requested_mode,
-        )
-        workflow_values = dict(
-            **common,
-            turn_id=identity.turn_id,
-            permission_snapshot_id=permission.snapshot_id,
-            permission_snapshot_fingerprint=permission.snapshot_fingerprint,
-            current_workflow_revision=1,
-            entered_by=PlanWorkflowEnteredBy.AGENT,
-        )
-        workflow = FrozenPlanWorkflowCompileFact(
-            **workflow_values,
-            fact_fingerprint=plan_workflow_compile_fact_fingerprint(
-                SimpleNamespace(**workflow_values)
-            ),
-        )
-        handoff_values = dict(
-            **common,
-            target_turn_id=identity.turn_id,
-            carrier_entry_id=identity.initial_entry_id,
-            carrier_entry_sequence=1,
-            workflow_revision_at_transition=1,
-            interaction_id=None,
-            handoff_kind=PlanHandoffKind.ENTERED_PLAN,
-            transition_semantic_digest="sha256:" + "1" * 64,
-        )
-        handoff = FrozenPlanHandoffCompileFact(
-            **handoff_values,
-            fact_fingerprint=plan_handoff_compile_fact_fingerprint(
-                SimpleNamespace(**handoff_values)
-            ),
-        )
-        values = {
-            field.name: getattr(base, field.name)
-            for field in fields(base)
-            if field.name != "canonical_read_cut_fingerprint"
-        }
-        values.update(
-            run_permission_snapshot=permission,
-            plan_workflow_fact=workflow,
-            plan_handoff_fact=handoff,
-        )
-        facts = FrozenCanonicalCompileSnapshot(
-            **values,
-            canonical_read_cut_fingerprint=canonical_compile_snapshot_fingerprint(
-                SimpleNamespace(**values)
-            ),
-        )
-        sources = _collect_context_sources(
-            collector,
-            activation_subject=None,
-            activation_text="",
-            tool_surface=surface,
-            canonical_facts=facts,
-        )
-        actual_sources = {
-            c.source_kind: c for c in sources.candidates if c.source_kind in uppers
-        }
-        assert actual_sources.keys() == uppers.keys()
-        for kind, candidate in actual_sources.items():
-            _assert_source_variant_wire_upper(
-                candidate, uppers[kind], wire_api=wire_api
-            )
 
 
 def test_compaction_recovery_requires_the_exact_admitted_writer_owner() -> None:
@@ -778,7 +404,6 @@ def _recent(entry_id: str, sequence: int, *parts: LLMTextPart | LLMImagePart):
     )
 
 
-
 def test_optional_tail_retry_is_limited_to_closed_resource_failures() -> None:
     assert not _can_retry_compaction_with_smaller_tail(
         CompactionReclaimUnavailable("no raw-token improvement")
@@ -905,11 +530,23 @@ def test_text_only_projection_p_preserves_order_occurrences_and_is_idempotent() 
     )
 
     original = FrozenProviderInputItem(
-        FrozenProviderInputItemKind.USER, derive_id("entry", "projection-p"), 1,
-        derive_id("turn", "projection-p"), source.parts,
+        FrozenProviderInputItemKind.USER,
+        derive_id("entry", "projection-p"),
+        1,
+        derive_id("turn", "projection-p"),
+        source.parts,
         input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
     )
-    plan = DestinationDialogueProjectionPlan((RecentDialogueUnit(original.source_turn_id, (1,), (DestinationDialogueEntry("user", original),)),), None)
+    plan = DestinationDialogueProjectionPlan(
+        (
+            RecentDialogueUnit(
+                original.source_turn_id,
+                (1,),
+                (DestinationDialogueEntry("user", original),),
+            ),
+        ),
+        None,
+    )
     projected = project_destination_dialogue_plan_for_text_only_handover(plan)
     assert projected.units[0].entries[0].content == (
         LLMTextPart("before"),
@@ -925,7 +562,9 @@ def test_text_only_projection_p_preserves_order_occurrences_and_is_idempotent() 
             "media_type: image/png; width: 512; height: 512"
         ),
     )
-    assert project_destination_dialogue_plan_for_text_only_handover(projected) == projected
+    assert (
+        project_destination_dialogue_plan_for_text_only_handover(projected) == projected
+    )
     assert plan.units[0].entries[0].source is original
     assert original.content == source.parts
 
@@ -970,7 +609,9 @@ def test_history_and_recent_image_checks_exclude_only_the_exact_active_request()
     )
 
 
-def test_target_projection_image_history_excludes_the_complete_first_call_group() -> None:
+def test_target_projection_image_history_excludes_the_complete_first_call_group() -> (
+    None
+):
     current_turn = derive_id("turn", "image-projection-test", "current")
 
     def item(label, sequence, origin, *parts):
@@ -985,11 +626,15 @@ def test_target_projection_image_history_excludes_the_complete_first_call_group(
 
     # Canonical-level image fixtures exercise projection; Work delegation is text-only.
     initial_material = item(
-        "initial-material", 2, CanonicalInputOriginKind.AGENT_MATERIAL,
+        "initial-material",
+        2,
+        CanonicalInputOriginKind.AGENT_MATERIAL,
         _image(b"initial-material"),
     )
     instruction = item(
-        "instruction", 3, CanonicalInputOriginKind.AGENT_INSTRUCTION,
+        "instruction",
+        3,
+        CanonicalInputOriginKind.AGENT_INSTRUCTION,
         LLMTextPart("KEEP_CURRENT_REQUEST"),
     )
     material = item(
@@ -1048,21 +693,8 @@ def test_text_only_handover_requires_known_text_without_image(
     assert _target_is_known_text_only(target) is expected
 
 
-def test_post_response_charge_includes_assistant_arguments_and_result_uppers() -> None:
+def test_canonical_assistant_charge_includes_complete_arguments() -> None:
     arguments = freeze_json({"path": "\\\\quoted", "line": 7})
-    completed = CompletedAssistantMessage(
-        draft_identity="entry:5qidalqvkujk5ykzzzfpwie2qy",
-        blocks=(
-            CompletedTextBlock("block:7oequpu7eqto5oci7j4q6msbje", "answer"),
-            CompletedToolCallBlock(
-                "block:eahusw3qjz45fyozavqv6xlbxa",
-                "call:1",
-                "read_file",
-                arguments,
-            ),
-        ),
-        public_text="answer",
-    )
     item = FrozenProviderInputItem(
         item_kind=FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST,
         source_entry_id="entry:5qidalqvkujk5ykzzzfpwie2qy",
@@ -1075,98 +707,13 @@ def test_post_response_charge_includes_assistant_arguments_and_result_uppers() -
         canonical_json_bytes({"path": "\\\\quoted", "line": 7})
     )
 
-    assert _completed_assistant_canonical_bytes(completed) == expected_canonical
     assert provider_input_item_canonical_expanded_bytes(item) == expected_canonical
 
-    call = completed.blocks[1]
-    assert isinstance(call, CompletedToolCallBlock)
-    ordinary_canonical, ordinary_logical, ordinary_items, ordinary_messages = (
-        _ordinary_result_followup_upper(call)
-    )
-    assert ordinary_canonical >= CANONICAL_TOOL_RESULT_PREVIEW_HARD_BYTES
-    assert ordinary_items == len(ordinary_messages) == 2
-    assert ordinary_logical == sum(
-        provider_neutral_message_logical_bytes(message) for message in ordinary_messages
-    )
 
-    plan_canonical, plan_logical, plan_items, plan_messages = (
-        _plan_result_followup_upper(call)
-    )
-    assert plan_canonical == PLAN_CONTROL_RESULT_INLINE_HARD_BYTES
-    assert plan_items == len(plan_messages) == 1
-    assert plan_logical == provider_neutral_message_logical_bytes(plan_messages[0])
-
-    (
-        continuation_canonical,
-        continuation_logical,
-        continuation_items,
-        continuation_messages,
-    ) = _entered_plan_continuation_followup_upper()
-    assert continuation_canonical == len(
-        canonical_json_bytes(
-            {
-                "transition": "ENTERED_PLAN",
-                "workflow_id": "plan:" + ("a" * 26),
-            }
-        )
-    )
-    assert continuation_items == len(continuation_messages) == 1
-    assert continuation_logical == provider_neutral_message_logical_bytes(
-        continuation_messages[0]
-    )
-    assert json.loads(join_text_content(continuation_messages[0].content)) == {
-        "pulsara_plan_continuation": {
-            "status": "ACTIVE",
-            "transition": "ENTERED_PLAN",
-        }
-    }
-
-
-@pytest.mark.parametrize("replace_existing", [None, False, True])
-def test_disabled_plugin_install_reserves_only_catalogs_it_can_change(
-    replace_existing: bool | None,
-) -> None:
-    from pulsara_agent.conversation_kernel.runner import (
-        _capability_catalog_source_kinds,
-    )
-    from pulsara_agent.model_input.contracts import ContextSourceKind
-
-    arguments = {
-        "action": "INSTALL_PLUGIN",
-        "scope": "WORKSPACE",
-        "source_path": "/test/source",
-    }
-    if replace_existing is not None:
-        arguments["replace"] = replace_existing
-    call = CompletedToolCallBlock(
-        "block:ha7yvztds33p37mr7ouhlk3kcu",
-        "call:install",
-        "manage_capability",
-        freeze_json(arguments),
-    )
-    expected = (
-        (ContextSourceKind.SKILL_CATALOG, ContextSourceKind.MCP_CATALOG)
-        if replace_existing
-        else ()
-    )
-    assert _capability_catalog_source_kinds(call) == expected
-    for action in ("SET_PLUGIN_ENABLED", "REMOVE_PLUGIN"):
-        changed = replace(
-            call,
-            arguments=freeze_json(
-                {"action": action, "scope": "WORKSPACE", "plugin_id": "test"}
-            ),
-        )
-        assert _capability_catalog_source_kinds(changed) == (
-            ContextSourceKind.SKILL_CATALOG,
-            ContextSourceKind.MCP_CATALOG,
-        )
-
-
-def test_typed_tool_result_canonical_charge_includes_prompt_body_and_image_bytes() -> (
+def test_typed_tool_result_canonical_charge_counts_visible_text_and_image_bytes() -> (
     None
 ):
-    from tests.test_round3_structured_model_input_compiler import _tool_result
+    from tests.support.model_input import _tool_result
 
     image = _image(b"typed-image-bytes", width=12, height=8)
     content = FrozenPromptContent((LLMTextPart("attached"), image))
@@ -1177,14 +724,16 @@ def test_typed_tool_result_canonical_charge_includes_prompt_body_and_image_bytes
             turn_id="turn:hei4tpo3ncy7wcxg6s4x3caeae",
         ),
         content=content.parts,
-        tool_result_body_text=frozen_tool_result_public_text(content),
+        tool_result_body_text="attached",
         tool_call_ordinal=0,
-        tool_call_arguments=freeze_json({"target": {"kind": "PATH", "path": "/tmp/image.png"}}),
+        tool_call_arguments=freeze_json(
+            {"target": {"kind": "PATH", "path": "/tmp/image.png"}}
+        ),
         tool_call_name="view_image",
     )
 
     assert provider_input_item_canonical_expanded_bytes(item) == (
-        len(canonical_prompt_body_bytes(content)) + len(image.immutable_bytes)
+        len(b"attached") + len(image.immutable_bytes)
     )
 
     late_content = FrozenPromptContent(
@@ -1202,294 +751,5 @@ def test_typed_tool_result_canonical_charge_includes_prompt_body_and_image_bytes
         content=late_content.parts,
     )
     assert provider_input_item_canonical_expanded_bytes(late) == (
-        len(canonical_prompt_body_bytes(late_content)) + len(image.immutable_bytes)
-    )
-
-
-@pytest.mark.parametrize(
-    "message_kind",
-    tuple(ToolResultLogicalMessageKind),
-)
-@pytest.mark.parametrize("wire_api", ("chat", "responses"))
-def test_tool_result_full_upper_bounds_escaping_body_wire_and_d1(
-    message_kind: ToolResultLogicalMessageKind,
-    wire_api: str,
-) -> None:
-    tool_call_id = "call:1"
-    timing = freeze_tool_observation_timing_fact(
-        session_id="session:cbauiajfisf4gvpdotrq4qgxhq",
-        turn_id="turn:nzc36cttgo7xxki7bcjc7ops7a",
-        observed_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        observation_duration_microseconds=0,
-        tool_reported_duration_microseconds=0,
-        observation_origin=ToolObservationOrigin.BUILTIN,
-    )
-
-    def render(body_chars: int):
-        return render_provider_tool_result_logical_message(
-            message_kind=message_kind,
-            tool_call_id=tool_call_id,
-            body="\\" * body_chars,
-            result_state="SUCCESS",
-            timing=timing,
-            model_visible_memory_ids=(),
-        )
-
-    low = 0
-    high = MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
-    actual = render(0)
-    while low <= high:
-        middle = (low + high) // 2
-        candidate = render(middle)
-        if (
-            candidate.logical_utf8_bytes
-            <= MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
-        ):
-            actual = candidate
-            low = middle + 1
-        else:
-            high = middle - 1
-    upper = conservative_tool_result_logical_message(
-        message_kind=message_kind,
-        tool_call_id=tool_call_id,
-    )
-
-    if wire_api == "chat":
-        actual_item = chat_semantic_wire_group(actual.message)[0]
-        upper_item = chat_semantic_wire_group(upper.message)[0]
-    else:
-        actual_item = responses_semantic_wire_group(actual.message)[0]
-        upper_item = responses_semantic_wire_group(upper.message)[0]
-
-    estimator = PulsaraHeuristicTokenEstimatorV3()
-    assert actual.logical_utf8_bytes <= upper.logical_utf8_bytes
-    assert len(canonical_json_bytes(actual_item)) <= len(
-        canonical_json_bytes(upper_item)
-    )
-    assert estimator.estimate_wire_json_component(
-        actual_item
-    ) <= estimator.estimate_wire_json_component(upper_item)
-
-
-def _post_response_quote(
-    *,
-    current_canonical: int = 0,
-    assistant_canonical: int = 0,
-    followup_canonical: int = 0,
-    current_logical: int = 0,
-    assistant_logical: int = 0,
-    followup_logical: int = 0,
-    current_items: int = 0,
-    followup_items: int = 0,
-    wire: ProviderFollowupWireResourceQuote | None = None,
-) -> FrozenPostResponseResourceQuote:
-    return FrozenPostResponseResourceQuote(
-        current_canonical_expanded_bytes=current_canonical,
-        actual_assistant_canonical_bytes=assistant_canonical,
-        bounded_followup_canonical_bytes=followup_canonical,
-        canonical_upper_after=(
-            current_canonical + assistant_canonical + followup_canonical
-        ),
-        current_epoch_logical_bytes=current_logical,
-        actual_assistant_logical_bytes=assistant_logical,
-        bounded_followup_logical_bytes=followup_logical,
-        logical_upper_after=current_logical + assistant_logical + followup_logical,
-        current_canonical_items=current_items,
-        bounded_followup_items=followup_items,
-        item_upper_after=current_items + 1 + followup_items,
-        followup_wire=wire,
-    )
-
-
-@pytest.mark.parametrize(
-    ("quote", "budget", "reason"),
-    (
-        (
-            _post_response_quote(
-                wire=ProviderFollowupWireResourceQuote((64 << 20) + 1, 1, 1, 1)
-            ),
-            10,
-            "FOLLOWUP_WIRE_BYTES",
-        ),
-        (
-            _post_response_quote(wire=ProviderFollowupWireResourceQuote(1, 11, 11, 1)),
-            10,
-            "FOLLOWUP_INPUT_TOKENS",
-        ),
-    ),
-)
-def test_post_response_gate_reports_each_closed_resource_boundary(
-    quote: FrozenPostResponseResourceQuote,
-    budget: int,
-    reason: str,
-) -> None:
-    with pytest.raises(OutputResourceInterruption) as raised:
-        ConversationKernelRunner._require_post_response_resources(
-            quote,
-            effective_input_budget_tokens=budget,
-        )
-
-    assert raised.value.reason == reason
-
-
-@pytest.mark.parametrize("wire_api", ["chat", "responses"])
-@pytest.mark.parametrize("source_kind", ["SKILL_CATALOG", "MCP_CATALOG"])
-@pytest.mark.parametrize(
-    "text",
-    ["\\" * 500, '"' * 500, "\x01" * 500, "汉字🙂" * 100, "\n\t\r" * 100],
-    ids=["slashes", "quotes", "controls", "unicode", "whitespace"],
-)
-def test_serialized_catalog_quote_bounds_real_owner_json_escaping(
-    wire_api, source_kind, text
-):
-    from pulsara_agent.conversation_kernel.runner import _runtime_source_message_upper
-    from pulsara_agent.model_input.continuity import encode_runtime_observation
-    from pulsara_agent.model_input.contracts import ContextSourceKind, ContextTrustClass
-    from pulsara_agent.model_input.continuity import (
-        SourceObservationLifecycle,
-        SourceObservationPresence,
-    )
-
-    source_kind = ContextSourceKind(source_kind)
-    body = canonical_json_bytes(
-        {
-            "skills" if source_kind is ContextSourceKind.SKILL_CATALOG else "servers": [
-                {"description": text}
-            ]
-        }
-    ).decode()
-    assert all(ord(char) >= 32 for char in body)
-    actual = encode_runtime_observation(
-        source_kind=source_kind,
-        trust_class=ContextTrustClass.UNTRUSTED_OBSERVATION,
-        lifecycle=SourceObservationLifecycle.SNAPSHOT,
-        presence=SourceObservationPresence.VALUE,
-        body=body,
-    )
-    upper = _runtime_source_message_upper(
-        source_kind=source_kind,
-        trust_class=ContextTrustClass.UNTRUSTED_OBSERVATION,
-        lifecycle=SourceObservationLifecycle.SNAPSHOT,
-        maximum_body_utf8_bytes=len(body.encode()),
-        serialized_json_body=True,
-    )
-    raw_upper = _runtime_source_message_upper(
-        source_kind=source_kind,
-        trust_class=ContextTrustClass.UNTRUSTED_OBSERVATION,
-        lifecycle=SourceObservationLifecycle.SNAPSHOT,
-        maximum_body_utf8_bytes=len(body.encode()),
-    )
-    group = (
-        chat_semantic_wire_group
-        if wire_api == "chat"
-        else responses_semantic_wire_group
-    )
-    actual_wire, upper_wire, raw_wire = (
-        group(message)[0] for message in (actual, upper, raw_upper)
-    )
-    estimator = PulsaraHeuristicTokenEstimatorV3()
-    assert (
-        len(canonical_json_bytes(actual_wire))
-        <= len(canonical_json_bytes(upper_wire))
-        < len(canonical_json_bytes(raw_wire))
-    )
-    assert (
-        estimator.estimate_wire_json_component(actual_wire)
-        <= estimator.estimate_wire_json_component(upper_wire)
-        < estimator.estimate_wire_json_component(raw_wire)
-    )
-
-
-def test_plugin_enable_keeps_epoch_bound_without_phantom_maximum_catalog_tokens(
-    monkeypatch,
-):
-    from types import SimpleNamespace
-    from pulsara_agent.conversation_kernel import runner as module
-    from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV3
-    from tests.test_stage2_direct_model import _port, _prepared_execution
-
-    estimator = PulsaraHeuristicTokenEstimatorV3()
-    prepared_request, _ = _prepared_execution(
-        _port(api="openai_chat_completions"), maximum_input_tokens=200_000
-    )
-    prepared_call = prepared_request.prepared_call
-    prepared_request.surface_borrow.close()
-    wire_plan = SimpleNamespace(
-        quote=SimpleNamespace(effective_input_budget_tokens=200_000)
-    )
-    identity = SimpleNamespace(conversation_scope_kind=ModelInputScopeKind.ROOT)
-    canonical = SimpleNamespace(identity=identity, canonical_expanded_bytes=0, items=())
-    runner = object.__new__(ConversationKernelRunner)
-    runner._continuity = SimpleNamespace(
-        current_usage_anchor=lambda _scope: None,
-        current_view=lambda scope: SimpleNamespace(
-            epoch_nonce="epoch",
-            epoch_revision=1,
-            wire_input_plan=wire_plan,
-            logical_bytes=0,
-        ),
-    )
-    runner._context_source_collector = SimpleNamespace(
-        freeze_post_response_call_source_upper=lambda: (LLMMessage.user("clock"),)
-    )
-    runner._hook_output_source_upper = lambda **kwargs: None
-    runner._subagent_runtime = None
-    seen = []
-
-    def quote_wire(**kwargs):
-        assert kwargs["plan"] is wire_plan
-        assert kwargs["call"] is prepared_call.call
-        messages = kwargs["bounded_suffix_messages"]
-        seen.extend(messages)
-        items = tuple(chat_semantic_wire_group(message)[0] for message in messages)
-        return ProviderFollowupWireResourceQuote(
-            sum(len(canonical_json_bytes(item)) for item in items),
-            sum(estimator.estimate_wire_json_component(item) for item in items),
-            sum(estimator.estimate_wire_json_component(item) for item in items),
-            len(items),
-        )
-
-    monkeypatch.setattr(module, "quote_provider_followup_wire_resources", quote_wire)
-    completed = CompletedAssistantMessage(
-        "draft:test",
-        (
-            CompletedToolCallBlock(
-                "block:dweyobrw6nyayfeqqkfqzbmtgu",
-                "call:test",
-                "manage_capability",
-                freeze_json(
-                    {
-                        "action": "SET_PLUGIN_ENABLED",
-                        "enabled": True,
-                        "target": {
-                            "kind": "PLUGIN",
-                            "scope": "USER",
-                            "plugin_id": "ponytail",
-                        },
-                    }
-                ),
-            ),
-        ),
-        "",
-    )
-    quote = runner._quote_post_response_resources(
-        request=SimpleNamespace(
-            wire_input_plan=wire_plan,
-            prepared_call=prepared_call,
-            compiled_input=SimpleNamespace(canonical_input_identity=identity),
-        ),
-        permit=SimpleNamespace(scope=None, epoch_nonce="epoch", epoch_revision=1),
-        collected=SimpleNamespace(completed=completed, provider_replay=None),
-        canonical_facts=SimpleNamespace(
-            canonical_input=canonical, plan_workflow_fact=None
-        ),
-    )
-    assert quote.bounded_followup_logical_bytes > 800_000
-    assert quote.followup_wire.raw_final_wire_estimated_input_tokens < 200_000
-    assert not any(
-        "post-response-resource-upper" in join_text_content(message.content)
-        for message in seen
-    )
-    runner._require_post_response_resources(
-        quote, effective_input_budget_tokens=200_000
+        len(late_content.parts[0].text.encode()) + len(image.immutable_bytes)
     )

@@ -269,7 +269,7 @@ def test_round4_central_question_and_draft_extractor_owns_utf8_identity() -> Non
         interaction_id="interaction:question",
         arguments=freeze_json(
             {
-                "allow_free_text": True,
+
                 "options": [
                     {
                         "label": "保守",
@@ -313,7 +313,7 @@ def test_round4_question_recommendation_is_optional_but_at_most_one() -> None:
             {"label": "A", "recommended": False},
             {"label": "B"},
         ],
-        "allow_free_text": True,
+
     }
     question = extract_plan_question(
         interaction_id="interaction:no-recommendation",
@@ -345,10 +345,10 @@ def test_round4_question_waiter_accepts_resolution_before_publish_and_await() ->
         question = extract_plan_question(
             interaction_id=waiter.interaction_id,
             arguments=freeze_json(
-                {"question": "继续吗？", "options": [], "allow_free_text": True}
+                {"question": "继续吗？", "options": []}
             ),  # type: ignore[arg-type]
         )
-        await coordinator.publish_open(waiter, question=question)
+        await coordinator.publish_open(waiter, question=question, accepted_at=datetime.now(timezone.utc), workflow_id=resolution.workflow_id, workflow_revision=resolution.workflow_revision)
         assert await coordinator.wait(waiter) == resolution
         assert await coordinator.current_open() is None
         await coordinator.aclose()
@@ -362,6 +362,10 @@ def test_round4_question_waiter_caller_cancel_only_detaches() -> None:
         waiter = await coordinator.prepare_interaction(
             interaction_id="interaction:question", origin_turn_id='turn:qb63tb3eshpbkryzmq6wzhzt2u'
         )
+        question = extract_plan_question(interaction_id=waiter.interaction_id,
+            arguments=freeze_json({"question":"继续？"}))
+        await coordinator.publish_open(waiter, question=question,
+            accepted_at=datetime.now(timezone.utc), workflow_id=derive_id("plan","test","waiting"), workflow_revision=1)
         waiting = asyncio.create_task(coordinator.wait(waiter))
         await asyncio.sleep(0)
         waiting.cancel()
@@ -824,6 +828,9 @@ def test_round4_existing_draft_winner_precedes_root_slot_reservation() -> None:
         host.repository = Repository()  # type: ignore[attr-defined]
         host._io = IO()  # type: ignore[attr-defined]
         host._plan_interactions = KernelPlanInteractionCoordinator()
+        async def prepare_saved(resolution, **kwargs):
+            return resolution
+        host._prepare_plan_resolution_page = prepare_saved
         host._lock = asyncio.Lock()
         blocker = asyncio.Event()
         active = asyncio.create_task(blocker.wait())

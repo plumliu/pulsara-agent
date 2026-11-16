@@ -744,19 +744,7 @@ def _capability_payload(
                 workspace_root.resolve(strict=False) / ".pulsara/mcp.yaml"
             ),
             "servers": mcp_servers,
-            "collisions": [
-                {
-                    "name": item.provider_name,
-                    "members": [
-                        {
-                            "server_id": member.server_id,
-                            "tool_name": member.remote_tool_name,
-                        }
-                        for member in item.members
-                    ],
-                }
-                for item in catalog.provider_name_collision_facts
-            ],
+
         },
     }
 

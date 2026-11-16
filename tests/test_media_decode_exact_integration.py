@@ -12,7 +12,6 @@ from collections import Counter
 from contextlib import contextmanager
 from dataclasses import replace
 from fractions import Fraction
-import json
 from pathlib import Path
 from time import monotonic
 
@@ -344,12 +343,9 @@ def test_native_worker_cancellation_after_decode_progress_reaps_process(tmp_path
     asyncio.run(scenario())
 
 
-def test_authoritative_quote_retries_prepare_once_and_keep_plan_membership(tmp_path, monkeypatch):
+def test_model_display_allowance_does_not_change_complete_media_plan(tmp_path, monkeypatch):
     from pulsara_agent.conversation_kernel.image_validation import HostPromptImageValidator
-    from pulsara_agent.conversation_kernel.tool_contracts import (
-        FrozenImageToolResourceAllowance, FrozenImageToolResourceIncrement,
-    )
-    from pulsara_agent.llm.input import FrozenPromptContent, frozen_tool_result_public_text
+    from pulsara_agent.ports.tool_execution import ToolBusinessValue
     from tests.support.round3 import direct_tool_invocation_context
     from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
     from pulsara_agent.conversation_kernel.tool_policy import DefaultToolDispatchAuthorizationPolicy
@@ -376,7 +372,6 @@ def test_authoritative_quote_retries_prepare_once_and_keep_plan_membership(tmp_p
         )
         operations = Counter()
         plans = []
-        quoted = []
         original_run = port._media_worker.run
 
         async def observe_operation(operation, *args, **kwargs):
@@ -393,25 +388,8 @@ def test_authoritative_quote_retries_prepare_once_and_keep_plan_membership(tmp_p
             turn_id=turn, assistant_entry_id=entry,
         )
 
-        class RejectFirstQuotes:
-            def quote(self, **kwargs):
-                assert isinstance(kwargs["content"], FrozenPromptContent)
-                quoted.append(json.loads(frozen_tool_result_public_text(
-                    kwargs["content"], tool_name="read_video_frames"
-                )))
-                return FrozenImageToolResourceIncrement(
-                    canonical_bytes=8 << 20 if len(quoted) <= 2 else 0,
-                    logical_bytes=0, wire_bytes=0, input_tokens=0,
-                )
-
         try:
-            allowance = FrozenImageToolResourceAllowance(
-                0, context.tool_call_id,
-                borrow.execution_binding("read_video_frames").executor_binding_fingerprint,
-                4 << 20, 4 << 20, 8 << 20, 100_000, RejectFirstQuotes(),
-            )
-            invocation = replace(context, input_modalities=("text", "image"),
-                                 image_resource_allowance=allowance)
+            invocation = replace(context, input_modalities=("text",))
             result = await port.invoke(
                 tool_name="read_video_frames",
                 arguments={"target": {"kind": "PATH", "path": str(path)}},
@@ -419,15 +397,14 @@ def test_authoritative_quote_retries_prepare_once_and_keep_plan_membership(tmp_p
                 turn_id=turn, assistant_entry_id=entry, invocation_context=invocation,
             )
             assert result.state == "SUCCESS", result.content
+            assert isinstance(result.content, ToolBusinessValue)
             assert operations["prepare_frame_plan"] == 1
-            assert operations["render_frame_page"] >= 2
-            assert len(plans) == 1 and len(quoted) >= 3
+            assert operations["render_frame_page"] == 1
+            assert len(plans) == 1
             priority = plans[0].priority
             assert len(priority) > 2
-            for candidate in quoted:
-                actual = [frame["t"] for frame in candidate["frames"]]
-                assert actual == sorted(float(frame.t) for frame in priority[:len(actual)])
-            assert len(quoted[-1]["frames"]) < len(quoted[0]["frames"])
+            actual = [cell["t"] for part in result.content.content if part.type == "object" for cell in part.value["frames"]]
+            assert actual == sorted(float(frame.t) for frame in priority)
         finally:
             borrow.close()
             await port.aclose()

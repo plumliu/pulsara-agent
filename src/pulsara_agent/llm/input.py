@@ -323,35 +323,6 @@ def prompt_text_projection(
     )
 
 
-def frozen_tool_result_public_text(
-    content: FrozenPromptContent, *, tool_name: str = "view_image"
-) -> str:
-    """Project image content to bounded text for Hooks and Tool-role output."""
-
-    if not isinstance(content, FrozenPromptContent):
-        raise TypeError("ToolResult public projection requires frozen content")
-    if any(isinstance(part, PromptAnnotationPart) for part in content.parts):
-        raise ValueError("ToolResult cannot contain annotations")
-    images = tuple(part for part in content.parts if isinstance(part, LLMImagePart))
-    if not images:
-        raise ValueError("ToolResult public projection requires images")
-    if tool_name == "read_video_frames":
-        text = "\n".join(
-            part.text for part in content.parts if isinstance(part, LLMTextPart)
-        )
-        import json
-
-        value = json.loads(text)
-        if not isinstance(value, dict) or value.get("video_frames") is not True:
-            raise ValueError("Video images require their complete time index")
-        return text
-    if tool_name != "view_image" or len(images) != 1:
-        raise ValueError("view_image requires exactly one validated image")
-    image = images[0]
-    return (
-        f"Image loaded ({image.media_type}, {image.width}x{image.height}, "
-        f"{len(image.immutable_bytes)} bytes)."
-    )
 
 
 def llm_content_identity_value(

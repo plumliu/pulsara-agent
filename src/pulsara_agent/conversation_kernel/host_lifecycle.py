@@ -792,13 +792,12 @@ def _is_input_resource_exhaustion(
     error: StructuredModelInputCompileError,
 ) -> bool:
     return error.kind in {
-        ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED,
+        ModelInputCompileFailureKind.PROVIDER_INPUT_WIRE_BYTES_EXCEEDED,
         ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED,
         ModelInputCompileFailureKind.PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET,
         ModelInputCompileFailureKind.PREFIX_EPOCH_BUDGET_EXHAUSTED,
-        ModelInputCompileFailureKind.STATEFUL_SOURCE_REPLACEMENT_OVER_BUDGET,
+
         ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET,
         ModelInputCompileFailureKind.TOOL_SCHEMA_EXCEEDS_BUDGET,
-        ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_NOT_INLINEABLE,
-        ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET,
+
     }
