@@ -4,6 +4,8 @@ MCP 首请求采用[非阻塞启动与不完整搜索合同](PULSARA_MCP_NONBLOC
 
 日期：2026-11-12。
 
+新增网页能力的合同见[网页工具草案](native_tools/web.md)：已确定 web_search、web_fetch 的参数、四家后端映射、精简返回值及原生／JS 用法，以及模型按需交错搜索与阅读的方式。默认无 Key 免费池为 Firecrawl → Tavily；可选四家之一＋API Key，自有 Key 按对应账户正常计费，额度不足等实际失败时静默回退；Exa／DeepSeek 不进入免费池。两工具可用于只读／Plan，支持 ROOT／Subagent 原生及 ROOT JS，沿既有权限与结算，尚未实施。下文已实施状态指原有工具族。
+
 状态：各工具族的当前合同已接入生产代码，包含 read_file 原生 NEXT 续读与 write_file 完整结果导出，已完成 hardcut 跨层及真实 provider 验收；正常应用尚未重启，完成范围见实施计划。本文件记录已确定的参数、业务返回值、原生交付形状及 Code Mode 用法，也作为后续 bundled skill 的教程底稿。工具、数据库、SDK、提示词和 bundled skill 使用同一当前合同。
 
 MCP 发现上下文遵循[MCP 初始服务目录规范](PULSARA_MCP_CATALOG_INCREMENTAL_IMPLEMENTATION_SPEC.zh.md)：合法新上下文在 Skill 目录后提供轻量已启用服务名称，接口与引用仍按任务查询；不增加工具数量或 API 边界。增量验收见[实施报告](output/hardcut-20261116/mcp-catalog/REPORT.md)。 本增量最终 205 项相关测试通过、无跳过；保存的 DeepSeek 两协议完成 19 次真实请求、6 次 SDK MCP 调用和 13 对同 epoch 前缀核验，冷／压缩目录及引用复用均通过。
@@ -22,6 +24,8 @@ MCP 发现上下文遵循[MCP 初始服务目录规范](PULSARA_MCP_CATALOG_INCR
 | edit_file，PATH Target | 精确唯一替换、整文件替换、空文件规则、diff 返回、原生与 JS 示例、错误语义 |
 | find_files，目录 PATH Target | target 在先的最简参数、Target 内容项、无匹配说明、原生与 JS 示例、扫描失败及取消 |
 | search_file_content，PATH Target | target 在先的参数、三种输出模式、匹配行及非重叠匹配次数、object 内容项、原生与 JS 示例 |
+| web_search（新增合同，待实施） | query、可选 count／include_domains／exclude_domains／after／before；域名排除优先并核对返回 URL，日期为引擎检索条件；四家共用 meta.status 和逐条 URL Target／标题／摘要／可选日期 object；自有 Key 优先，否则 Firecrawl → Tavily 免费池，回退保留全部条件，成功空结果不补搜；只读／Plan 可用，ROOT／Subagent 原生冻结 12k／NEXT、ROOT JS 完整返回 |
+| web_fetch（新增合同，待实施） | 只传 URL target；返回请求目标、meta.status／可选 title 与实际提取的 Markdown text；复用网页免费池与可选自有 Key；完整保存实际提取结果，不保证覆盖网页全部原文，回退不拼接多家正文；只读／Plan 可用，ROOT／Subagent 原生冻结 12k／NEXT 不重新抓取、ROOT JS 完整返回；模型按需交错搜索与读取，不自动抓取全部搜索命中 |
 | exec_process | 四个启动参数、工具状态与进程状态分离、运行／退出结果、实际输出及原生与 JS 示例；删除 observe 和公开游标；待观察日志透明暂存 |
 | manage_process | wait、write、close_stdin、kill 四个动作；内部观察位置、完整待观察增量、控制动作、原生与 JS 示例及输入小实验 |
 | query_processes | 可选 PROCESS Target、单查与列表共用的 object 记录、原生与 JS 示例，以及列表无记录与单查未找到的不同状态和说明 |
@@ -103,7 +107,7 @@ query_processes 的进程 Target 只放在 content 的每条 object 记录中，
 
 现有观察信息在原生消息顶层并列呈现：`observed_at_utc` 是实际观察时间，`observation_duration_microseconds` 是实际观察耗时，单位为微秒。二者与 target、meta、content、tool_result、next 同层，不放进 meta、content 或嵌套 observation。未测得耗时不得伪造为 0，仍沿既有观察 owner 表达实际可用事实，不为本次修订增加一套计时机制。
 
-JS 的 `tools.read_file`、`tools.write_file`、`tools.edit_file`、`tools.find_files`、`tools.search_file_content`、`tools.exec_process`、`tools.manage_process`、`tools.query_processes`、`tools.query_agents`、`tools.send_agent_message`、`tools.stop_agent`、`tools.run_agent`、`tools.wait_agent`、`tools.decide`、`tools.search_sessions`、`tools.search_session_content`、`tools.read_session_content`、`tools.view_image`、`tools.read_video_frames`、`tools.read_transcript`、`tools.call_mcp_tool`、`tools.read_mcp_resource`，以及 `tools.query_capabilities` 的 SKILL、HOOK、MCP、PLUGIN 四个分支，成功时直接返回各节定义的完整业务值，不套用原生消息的时间外壳、12k 页预算、tool_result 或 next。数据库内容、JS 值和原生投影来自同一份结果，不保存第二份手工维护的业务正文。
+JS 的 `tools.read_file`、`tools.write_file`、`tools.edit_file`、`tools.find_files`、`tools.search_file_content`、`tools.web_search`、`tools.web_fetch`、`tools.exec_process`、`tools.manage_process`、`tools.query_processes`、`tools.query_agents`、`tools.send_agent_message`、`tools.stop_agent`、`tools.run_agent`、`tools.wait_agent`、`tools.decide`、`tools.search_sessions`、`tools.search_session_content`、`tools.read_session_content`、`tools.view_image`、`tools.read_video_frames`、`tools.read_transcript`、`tools.call_mcp_tool`、`tools.read_mcp_resource`，以及 `tools.query_capabilities` 的 SKILL、HOOK、MCP、PLUGIN 四个分支，成功时直接返回各节定义的完整业务值，不套用原生消息的时间外壳、12k 页预算、tool_result 或 next。数据库内容、JS 值和原生投影来自同一份结果，不保存第二份手工维护的业务正文。
 
 content 的每项统一为 type/value：文字项的 value 是字符串，图片项的 value 是 IMAGE_REF Target，Target 项的 value 是该工具声明的具体 Target，object 项的 value 是 JSON 对象。find_files 将命中文件保存为 PATH Target 内容项，不并列返回 targets 或重复文字清单；search_file_content 的匹配行和计数使用 object 项；PLUGIN 精确查询使用 text 与 SKILL／HOOK_SOURCE／MCP_CONNECTION Target 项交错返回。原生工具消息及显式 console.log／return 将 Target 项投影为文字引用，将 object 项投影为通用 JSON 文字，不自动打开、读取或加载其中的文件；图片项按当前模型能力投递真实图片或固定文字说明，原生能力不足显示 ERROR，Cell steer 不增加工具状态外壳。console.log 每个参数及显式 return 均递归识别实际输出任意层级的 image 内容项，其他内容呈现一次；不解析引用字符串或扫描未输出变量。普通文字项仍不自动增加分隔符。共同类型见第 2.4 节，投影及准入沿统一交付草案。
 
@@ -202,6 +206,7 @@ object.value 本身是唯一权威业务对象，完整 JSON 文字按需投影�
 | 文档 | 工具章节 |
 | --- | --- |
 | [文件系统工具](native_tools/filesystem.md) | 第 1–5 章：read_file、write_file、edit_file、find_files、search_file_content；第 1.10 节为仅原生 NEXT 续读、图文顺序及 object 跨页，JS read_file 只接受 PATH；第 2 章包含 content／tool_result_target 互斥输入、完整结果导出及原生／JS 示例 |
+| [网页工具](native_tools/web.md) | 第 1 章：web_search 六个参数、域名与日期条件、四家映射、精简返回值和原生／JS 示例；第 2 章：web_fetch 只传 URL Target，完整保存实际提取正文及可选标题，NEXT 不重新抓取；第 3 章：模型按需交错搜索与读取；第 4 章：默认 Firecrawl → Tavily 无 Key 免费池，可选四选一＋API Key、账户计费与静默回退，Exa／DeepSeek 不入免费池；只读／Plan 可用，ROOT／Subagent 原生、ROOT JS，共用权限与结算，尚未实施 |
 | [终端工具](native_tools/terminal.md) | 第 1–3 章：exec_process、manage_process、query_processes |
 | [Agent 协作工具](native_tools/agents.md) | 第 1 章：query_agents 三个查询分支；第 2 章：send_agent_message 交付语义及精简结果；二者支持 ROOT／Subagent 原生及 ROOT JS；第 3 章：stop_agent 参数、四个并列 Work 状态计数、逐项状态及原生／JS 示例，仅 ROOT；第 4 章：wait_message，Subagent 专用仅原生，超时 SUCCESS，正文独立交付；前四者沿冻结 12k／NEXT；第 5 章：tools.run_agent 参数、材料、同批引用与返回；第 6 章：tools.wait_agent 的 WORK／AGENT 双分支、完整快照、first／all、消息／超时／取消、返回类型及 JS 示例；后两者仅 ROOT JS、完整返回，无原生分页；第 7 章为实现参考 |
 | [语义判断工具](native_tools/decide.md) | 第 1 章：tools.decide 的两个参数、decisions object、available()、JS 示例、完整保存与错误语义；仅 ROOT JS、bypass 权限，无原生分页；第 2 章为实现参考 |
