@@ -51,3 +51,14 @@ button:focus-visible,select:focus-visible,a:focus-visible{outline:2px solid #9c7
 @keyframes refresh-spin{to{transform:rotate(360deg)}}
 @media(prefers-reduced-motion:reduce){#wsl-refresh[aria-busy="true"] svg{animation:none}button,.environment-selection{transition:none}}
 @media(max-width:480px){main{padding:32px 20px}.environment-card{padding:18px}.wsl-help{margin-inline:0}}
+
+#reset-notice{margin-top:12px;text-align:left;font-size:13px;line-height:1.8;color:#7d7b74}
+#reset-notice p{margin:0}
+#reset-home{word-break:break-all;overflow-wrap:anywhere;user-select:text;-webkit-app-region:no-drag}
+#reset-confirmation{display:flex;align-items:center;justify-content:center;gap:8px;margin-top:12px;font-size:13px;line-height:20px;-webkit-app-region:no-drag}
+#reset-confirmation:not([hidden])+#actions{margin-top:12px}
+#reset-confirmed{margin:0;accent-color:#855d2c}
+#actions #reset-local-data{background:#855d2c;color:#fffaf0;border-color:#805821}
+:root{--line-strong:#ddd8cc;--paper-solid:#faf8f2;--shadow-lg:0 8px 30px #3b352718;--amber-soft:#f5e6ca;--amber:#966a32;--red:#a45040;--red-soft:#f6e5df;--muted:#7d7b74;--faint:#a29f96;--type-label:13px;--type-caption:12px;-webkit-app-region:no-drag}
+
+.toast-stack{-webkit-app-region:no-drag}

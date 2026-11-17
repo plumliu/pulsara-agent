@@ -22,6 +22,8 @@ function fixture(options: {
   chosenDirectory?: string;
   platform?: 'darwin' | 'linux' | 'win32';
   packagedResources?: string;
+  startupFailure?: Error;
+  resetFailure?: Error;
   stopFailure?: Error;
   stopStillRunning?: boolean;
   confirmRestart?: boolean;
@@ -60,7 +62,7 @@ function fixture(options: {
     cli?: CliRegistration;
     initialize?: boolean;
   } = {};
-  const host = { resolveHome(python: string) { composition.python = python; return '/tmp/pulsara-main-test'; } };
+  const host = { async execFile() { calls.push('reset-home'); if (options.resetFailure) throw options.resetFailure; return {stdout:'', stderr:''}; }, resolveHome(python: string) { composition.python = python; return '/tmp/pulsara-main-test'; } };
   const app = Object.assign(new EventEmitter(), {
     commandLine: {appendSwitch(name: string) { assert.equal(readyRequested, false); switches.push(name); }},
     isPackaged: options.packagedResources !== undefined, setName() {}, setPath() {}, setAsDefaultProtocolClient() { return true; }, getPath(name: string) {
@@ -85,7 +87,7 @@ function fixture(options: {
     webContents = Object.assign(new EventEmitter(), {
       mainFrame: { url: workbenchUrl },
       isDestroyed() { return false; },
-      setWindowOpenHandler() {}, session: { setPermissionRequestHandler() {}, setPermissionCheckHandler() {} },
+      setWindowOpenHandler() {}, session: { async clearStorageData() { calls.push('clear-storage'); }, async clearCache() { calls.push('clear-cache'); }, async clearAuthCache() {}, async closeAllConnections() {}, setPermissionRequestHandler() {}, setPermissionCheckHandler() {} },
     });
     isMinimized() { return false; }
     isMaximized() { return false; }
@@ -141,6 +143,7 @@ function fixture(options: {
         await preparation;
         composition.initialize = initialize();
         calls.push('start-frame');
+        if (options.startupFailure) { const error = options.startupFailure; options.startupFailure = undefined; throw error; }
         return workbenchUrl;
       } catch (error) {
         // PythonRuntime owns the real EOF/close behavior, covered by its
@@ -172,6 +175,7 @@ function fixture(options: {
     Menu: { buildFromTemplate() {}, setApplicationMenu() {} },
   };
   const modules: Record<string, unknown> = {
+    './uninstall-stop': { async stopInstalledDesktop() { calls.push('stop-installed-desktop'); } },
     './wsl-maintenance': {
       async checkInstalledWslMaintenance() { calls.push('maintenance-check'); if (options.maintenanceFailure) throw options.maintenanceFailure; },
       async uninstallWsl(_home: string, _version: string, mode: string) { calls.push(`uninstall:${mode}`); if (options.maintenanceFailure) throw options.maintenanceFailure; },
@@ -214,6 +218,7 @@ function fixture(options: {
     }},
     './ui-preferences': { UiPreferences: class {
       values: Record<string,string> = {};
+      reset() { calls.push('clear-preferences'); this.values = {}; }
       read() { return {...this.values}; }
       write(input: {key:string;value:string}) { this.values[input.key] = input.value; }
     } },
@@ -264,7 +269,7 @@ for (const mode of ['keep', 'all']) for (const failure of [undefined, new Error(
     const value = fixture({platform:'win32', uninstallMode:mode, maintenanceFailure:failure});
     await value.ready.catch(() => {});
     await Promise.resolve();
-    assert.deepEqual(value.calls, [`uninstall:${mode}`, `exit:${failure ? 1 : 0}`]);
+    assert.deepEqual(value.calls, ['stop-installed-desktop', `uninstall:${mode}`, `exit:${failure ? 1 : 0}`]);
     assert.equal(value.handlers.size, 0);
     assert.equal(value.composition.runtime, undefined);
     assert.equal(value.composition.postgres, undefined);
@@ -587,3 +592,33 @@ for (const scenario of [
     assert.deepEqual(Array.from(value.dialogOptions[0].properties), ['openDirectory', 'createDirectory']);
   });
 }
+
+for (const eligible of [true, false]) test(`reset requires typed startup eligibility and explicit checkbox: ${eligible}`, async () => {
+  const value = fixture({startupFailure:Object.assign(new Error('startup error'), {resetRequired:eligible})});
+  value.previous.resolve(); value.database.resolve(); value.cover.resolve();
+  await value.ready;
+  const reset = value.handlers.get('desktop:reset-local-data')!;
+  await assert.rejects(reset(value.trustedEvent(), false), /勾选/);
+  assert.equal(value.calls.includes('reset-home'), false);
+  if (!eligible) {
+    await assert.rejects(reset(value.trustedEvent(), true), /不兼容/);
+    assert.equal(value.calls.includes('reset-home'), false);
+    return;
+  }
+  await reset(value.trustedEvent(), true);
+  assert.ok(value.calls.indexOf('kernel-stopped') < value.calls.indexOf('reset-home'));
+  assert.ok(value.calls.indexOf('reset-home') < value.calls.indexOf('clear-storage'));
+  assert.ok(value.calls.indexOf('clear-preferences') < value.calls.lastIndexOf('child-spawned'));
+  assert.equal(value.confirmations.length, 0);
+  assert.equal(value.calls.filter(call => call.startsWith('navigate:')).length, 1);
+});
+
+test('failed data deletion stays on error page and never restarts the kernel', async () => {
+  const value = fixture({startupFailure:Object.assign(new Error('old data'), {resetRequired:true}), resetFailure:new Error('cannot stop database')});
+  value.previous.resolve(); value.database.resolve(); value.cover.resolve();
+  await value.ready;
+  await value.handlers.get('desktop:reset-local-data')!(value.trustedEvent(), true);
+  assert.equal(value.calls.filter(call => call === 'child-spawned').length, 1);
+  assert.equal(value.calls.includes('clear-storage'), false);
+  assert.match(value.failures.at(-1)!, /重置未完成.*cannot stop database/);
+});

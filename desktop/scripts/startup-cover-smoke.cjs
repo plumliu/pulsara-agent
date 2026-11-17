@@ -167,6 +167,37 @@ app.whenReady().then(async () => {
   assert.equal(host.contentView.children.includes(hiddenView), false);
   console.log('PASS: hidden startup skips animation and releases the renderer interaction gate');
 
+  // The destructive action uses inline confirmation and the shared workbench toast.
+  let resets = 0;
+  ipcMain.handle('desktop:reset-local-data', (event, confirmed) => {
+    assert.equal(cover.accepts(event), true);
+    assert.equal(confirmed, true);
+    resets++;
+  });
+  await cover.show('typed incompatible data', 'failed', '/example/private/pulsara');
+  const resetContents = coverView().webContents;
+  host.show(); host.focus();
+  await within(resetContents.executeJavaScript(`new Promise(resolve => setTimeout(resolve, 100))`), 'reset page did not settle');
+  const confirmation = await resetContents.executeJavaScript(`(() => {
+    const label = document.getElementById('reset-confirmation');
+    const actions = document.getElementById('actions');
+    document.getElementById('reset-local-data').click();
+    return {checked:document.getElementById('reset-confirmed').checked, above:label.getBoundingClientRect().bottom <= actions.getBoundingClientRect().top};
+  })()`);
+  assert.deepEqual(confirmation, {checked:false, above:true});
+  assert.equal(resets, 0);
+  await within(resetContents.executeJavaScript(`new Promise(resolve => {
+    const check = () => { if (document.querySelector('.toast')) { resolve(); return; } requestAnimationFrame(check); };
+    check();
+  })`), 'unchecked reset did not show the shared toast');
+  assert.match(await resetContents.executeJavaScript(`document.querySelector('.toast').textContent`), /请先勾选/);
+  await resetContents.executeJavaScript(`document.getElementById('reset-confirmed').checked = true; document.getElementById('reset-local-data').click()`);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(resets, 1);
+  await cover.show('connection refused');
+  assert.equal(await coverView().webContents.executeJavaScript(`document.getElementById('reset-local-data').hidden`), true);
+  console.log('PASS: typed reset page requires checkbox, uses shared toast and leaves ordinary failure non-destructive');
+
   // Electron can clear view.webContents before the cover owner disposes the view.
   await cover.show();
   const earlyDestroyed = coverView();

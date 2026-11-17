@@ -22,6 +22,26 @@ document.getElementById('retry').onclick = () => window.pulsaraDesktop.retryStar
 document.getElementById('logs').onclick = () => window.pulsaraDesktop.showLogs();
 document.getElementById('quit').onclick = () => window.pulsaraDesktop.quit();
 
+const resetHome = phase === 'failed' ? parameters.get('resetHome') : '';
+const resetButton = document.getElementById('reset-local-data');
+const resetConfirmed = document.getElementById('reset-confirmed');
+const toast = message => window.dispatchEvent(new CustomEvent('pulsara-startup-toast', {detail:message}));
+if (resetHome) {
+  document.getElementById('status').textContent = '本地数据与当前版本不兼容';
+  document.getElementById('reset-notice').hidden = false;
+  document.getElementById('reset-home').textContent = resetHome;
+  document.getElementById('reset-confirmation').hidden = false;
+  document.getElementById('retry').hidden = true;
+  resetButton.hidden = false;
+}
+resetButton.onclick = async () => {
+  if (!resetConfirmed.checked) { toast('请先勾选确认永久删除本地数据。'); return; }
+  resetButton.disabled = true;
+  try { await window.pulsaraDesktop.resetLocalData(true); }
+  catch (error) { toast(String(error.message || error)); }
+  finally { resetButton.disabled = false; }
+};
+
 if (phase === 'setup') {
   const form = document.getElementById('wsl-setup');
   const select = document.getElementById('wsl-distribution');

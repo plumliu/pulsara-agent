@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
-import sys
 
 import pytest
 
-pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="WSL uninstall uses Linux locks")
 
 
 @pytest.fixture
@@ -97,7 +95,7 @@ def test_home_cannot_be_the_personal_data_target(layout, monkeypatch):
     assert all(version.exists() for version in versions)
 
 
-def test_live_postgres_blocks_cleanup_even_without_lock(layout):
+def test_unknown_postgres_state_blocks_cleanup_even_without_lock(layout):
     module, home, data, versions, _ = layout
     database = data / "desktop/postgres"
     database.mkdir(parents=True, mode=0o700)
@@ -105,9 +103,9 @@ def test_live_postgres_blocks_cleanup_even_without_lock(layout):
     (database / "PG_VERSION").write_text("17")
     (database / "PG_VERSION").chmod(0o600)
     pgctl = versions[-1] / "postgres/bin/pg_ctl"
-    pgctl.write_text("#!/bin/sh\nexit 0\n")
+    pgctl.write_text("#!/bin/sh\nexit 4\n")
     pgctl.chmod(0o700)
-    with pytest.raises(Exception, match="active"):
+    with pytest.raises(RuntimeError, match="无法确认 PostgreSQL 状态"):
         module.uninstall(versions[-1], home, "all")
     assert database.exists()
     assert all(version.exists() for version in versions)

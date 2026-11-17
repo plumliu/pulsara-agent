@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'"><title>Pulsara</title><link rel="stylesheet" href="startup-fonts.css"><link rel="stylesheet" href="startup.css">
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'"><title>Pulsara</title><link rel="stylesheet" href="startup-fonts.css"><link rel="stylesheet" href="startup-ui/toast.css"><link rel="stylesheet" href="startup.css">
 <body><nav id="window-controls" hidden aria-label="窗口控制"><button id="window-minimize" aria-label="最小化">—</button><button id="window-maximize" aria-label="最大化或还原">□</button><button id="window-close" aria-label="关闭窗口">×</button></nav><main><img class="mark" src="pulsara.png" width="72" height="72" alt=""><h1>Pulsara</h1><p id="status">正在准备本地工作台…</p>
 <form id="wsl-setup" hidden>
   <div class="environment-card">
@@ -11,8 +11,13 @@
   <p class="wsl-help">尚未安装 WSL2 或 Ubuntu？请按 <a href="https://learn.microsoft.com/windows/wsl/install" id="wsl-help">Microsoft 安装说明</a> 完成安装后重新检查。</p>
 </form>
 <details id="error-details" hidden><summary>技术详情</summary><pre id="error-detail-text"></pre></details>
+<section id="reset-notice" hidden>
+  <p>重置后可以重新开始使用 Pulsara。已有会话、设置、API Key、授权信息及 <span id="reset-home"></span> 中的文件（包括快速开始文件）将被删除，需要重新配置模型。</p>
+</section>
+<label id="reset-confirmation" hidden><input id="reset-confirmed" type="checkbox">我已了解并确认永久删除上述本地数据</label>
 <div id="actions" hidden>
+  <button id="reset-local-data" type="button" hidden>重置并重新开始</button>
   <button id="retry" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5"/><path d="M4 17v-5h5"/><path d="M6.1 6.1a8 8 0 0 1 13.2 3.1L20 12M4 12l.7 2.8a8 8 0 0 0 13.2 3.1"/></svg><span>重试</span></button>
   <button id="logs" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z"/><path d="M14 3v6h6M8 13h8M8 17h5"/></svg><span>查看日志</span></button>
   <button id="quit" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h4m5-12 4 4-4 4m-6-4h12"/></svg><span>退出</span></button>
-</div></main><script src="startup.js"></script></body></html>
+</div></main><div id="startup-toasts"></div><script src="startup-ui/toast.js"></script><script src="startup.js"></script></body></html>

@@ -24,7 +24,7 @@ export class BundledPostgres {
     let version: string | undefined;
     try { version = (await this.operations.readVersion()).trim(); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-    if (version && version !== PG_MAJOR) throw new Error(`数据库目录属于 PostgreSQL ${version}，当前应用需要 ${PG_MAJOR}。请明确执行开发期数据库重置；启动失败不会自动清库。`);
+    if (version && version !== PG_MAJOR) throw Object.assign(new Error(`数据库目录属于 PostgreSQL ${version}，当前应用需要 ${PG_MAJOR}。请重置本地数据后重新开始。`), {resetRequired:/^\d+$/.test(version)});
     if (!version) {
       // initdb itself refuses a nonempty directory. Never erase a failed or unknown installation.
       await this.operations.run('initdb', ['-D', this.directory, '-U', 'pulsara_admin', '--auth-local=trust', '--auth-host=reject', '--encoding=UTF8', '--locale=C']);

@@ -3,25 +3,11 @@ import fcntl
 import os
 from pathlib import Path
 import re
-import shutil
-import stat
 import sys
 
-from pulsara_agent.desktop_guest_ops import PostgresFacts, _lock_file, _private_directory
-
-
-def remove_tree(directory):
-    # Imported attachments can have read-only parent directories.
-    for current, _, _ in os.walk(directory, followlinks=False):
-        info = os.lstat(current)
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
-            raise ValueError("目录所有者已改变，无法清理。")
-        descriptor = os.open(current, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            os.fchmod(descriptor, stat.S_IMODE(info.st_mode) | stat.S_IRWXU)
-        finally:
-            os.close(descriptor)
-    shutil.rmtree(directory)
+from pulsara_agent.desktop_guest_ops import _lock_file, _private_directory
+from pulsara_agent.capability.pulsara_home import require_pulsara_home
+from pulsara_agent.desktop_maintenance import Maintenance, remove_tree, stop_kernel
 
 
 def uninstall(runtime, user_home, mode):
@@ -32,7 +18,7 @@ def uninstall(runtime, user_home, mode):
         raise ValueError("无法确认应用资源目录。")
     _private_directory(base)
     lock = os.open(base / ".install.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-    facts = None
+    maintenance = None
     try:
         _lock_file(lock)
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -49,19 +35,22 @@ def uninstall(runtime, user_home, mode):
             versions.append(entry)
         if runtime not in versions:
             raise ValueError("当前应用资源不完整。")
-        facts = PostgresFacts(runtime / "postgres/bin", "maintenanceCheck")
-        # A configured app home must never authorize deleting the Linux home or resource ancestors.
-        if facts.home in {user_home, *user_home.parents, base, *base.parents} or facts.home.is_relative_to(base):
+        home = require_pulsara_home()
+        if home in {user_home, *user_home.parents, base, *base.parents} or home.is_relative_to(base):
             raise ValueError("应用数据目录范围无效，未执行清理。")
-        facts.acquire()
-        facts.perform({"operation": "maintenanceCheck"})
-        if mode == "all" and not facts.empty_home:
-            remove_tree(facts.home)
+        if home.exists() or home.is_symlink():
+            stop_kernel(base, home)
+            maintenance = Maintenance(home, base, runtime / "postgres/bin")
+            maintenance.__enter__()
+            if mode == "all":
+                maintenance.clear()
         for entry in sorted(versions, key=lambda entry: entry == runtime):
             remove_tree(entry)
+        if mode == "all" and maintenance is not None:
+            remove_tree(home)
     finally:
-        if facts is not None:
-            facts.close()
+        if maintenance is not None:
+            maintenance.__exit__(None, None, None)
         os.close(lock)
 
 

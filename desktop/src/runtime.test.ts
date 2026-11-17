@@ -39,6 +39,7 @@ lines.on('line', line => {
     if (mode === 'malformed') { process.stdout.write('not JSON\\n'); return; }
     if (mode === 'pre-ready-failure') { output({type:'failed', error:'startup cleanup failed'}); process.exit(0); }
     if (mode === 'pre-ready-exit') process.exit(3);
+    if (mode.startsWith('reset-')) { output({type:'failed', phase:'startup', error:'incompatible', resetRequired:mode === 'reset-yes'}); output({type:'stopped', clean:true}); process.exit(1); }
     if (mode.startsWith('startup-settlement-')) {
       output({type:'failed', phase:'startup', error:'database preparation failed'});
       output({type:'stopping'});
@@ -572,4 +573,12 @@ test('a log append failure remains a runtime event and does not replace shutdown
     assert.equal(value.runtime.running, false);
     assert.equal((await value.calls()).filter(value => value.type === 'shutdown').length, 1);
   } finally { await value.close(); }
+});
+
+for (const reset of [true, false]) test(`typed reset eligibility crosses the startup protocol: ${reset}`, async () => {
+  const value = await fixture(reset ? 'reset-yes' : 'reset-no');
+  try {
+    await assert.rejects(value.runtime.start(async () => settings, () => false), (error: any) => error.resetRequired === reset);
+    await value.runtime.stop();
+  } finally { await rm(value.root, {recursive:true, force:true}); }
 });

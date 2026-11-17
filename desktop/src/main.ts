@@ -19,6 +19,7 @@ import { WslSetup, loadWslPayload } from './wsl-setup';
 import { createWslPostgresOperations } from './postgres-wsl';
 import { toBackendPath, toWindowsPath } from './backend-paths';
 import { createBackendSession } from './backend-session';
+import { stopInstalledDesktop } from './uninstall-stop';
 import { checkInstalledWslMaintenance, uninstallWsl } from './wsl-maintenance';
 
 const windowsHost = process.platform === 'win32';
@@ -56,6 +57,7 @@ let restarting = false;
 let databaseReady = false;
 let startupError = '';
 let startupFailure: unknown;
+let resetAvailable = false;
 let postgres: BundledPostgres;
 let runtime: PythonRuntime;
 function configureRuntime(interopHelper?: string) {
@@ -120,7 +122,7 @@ async function showStartup(error = '', phase = error ? 'failed' : 'starting'): P
     const retiring = browser?.retireHost();
     origin = undefined;
     await retiring;
-    return {showing:startupCover?.show(error, phase)};
+    return {showing:startupCover?.show(error, phase, phase === 'failed' && resetAvailable ? home : '')};
   });
   await showing;
   focusWindow();
@@ -183,6 +185,7 @@ async function boot(fromMaintenance = false) {
   starting = (async () => {
     if (windowsHost && !runtime) { await prepareWindows(); if (!runtime || quitting) return; }
     if (runtime.running) throw new Error('之前的内核仍在收尾，请等待它退出后重试。');
+    resetAvailable = false;
     startupCancellation = new AbortController();
     // Loading the cover and waiting for the old owner need not delay Python
     // imports. The old owner still gates PostgreSQL, and both preparations gate
@@ -221,6 +224,7 @@ async function boot(fromMaintenance = false) {
     catch (error) { if (!quitting) throw error; }
   })().catch(async error => {
     startupFailure = error;
+    resetAvailable = (error as {resetRequired?: unknown})?.resetRequired === true;
     startupError = error instanceof Error ? error.message : String(error);
     if (!quitting) await showStartup(startupError, windowsHost && !runtime ? 'setup' : 'failed')
       .catch(retirement => dialog.showErrorBox('Pulsara 无法完成界面清理', `${startupError}\n${String(retirement)}`));
@@ -253,6 +257,33 @@ async function ensureCli(replaceConflict = false) {
   const pending = (cliRegistrationPending ?? Promise.resolve()).then(() => registerCli(cliRegistration(), replaceConflict));
   cliRegistrationPending = pending;
   try { return await pending; } finally { if (cliRegistrationPending === pending) cliRegistrationPending = undefined; }
+}
+async function resetLocalData(confirmed: unknown) {
+  if (confirmed !== true) throw new Error('请先勾选确认删除本地数据。');
+  if (!resetAvailable || !runtime) throw new Error('当前没有已确认的数据不兼容问题。');
+  if (starting || quitting || quittingRequest || resetting || restarting) throw new Error('请等待当前操作完成。');
+  resetting = true;
+  try {
+    await showStartup('正在停止工作台并重置本地数据…', 'resetting');
+    await stopWorkbench();
+    await host.execFile(resources.pythonExecutable, ['-m', 'pulsara_agent.desktop_maintenance',
+      '--resources', resources.root, '--postgres-bin', resources.postgresBin,
+      ...(!windowsHost ? ['--keep-electron'] : [])], {env:{...process.env, PULSARA_HOME:home}});
+    // Electron owns its live profile. Never remove its singleton locks or open databases.
+    const session = window!.webContents.session;
+    await session.clearStorageData();
+    await session.clearCache();
+    await session.clearAuthCache();
+    await session.closeAllConnections();
+    uiPreferences.reset();
+    postgres.initialized = false;
+    postgres.startedHere = false;
+    databaseReady = false;
+    resetAvailable = false;
+    await boot(true);
+  } catch (error) {
+    await showStartup(`本地数据重置未完成：${error instanceof Error ? error.message : String(error)}`);
+  } finally { resetting = false; }
 }
 async function resetDatabase() {
   if (!runtime) throw new Error('请先完成 WSL 接入。');
@@ -303,7 +334,7 @@ async function restartWorkbench() {
     await showStartup(`工作台重启未完成：${error instanceof Error ? error.message : String(error)}`);
   } finally { restarting = false; }
 }
-async function requestQuit() {
+async function requestQuit(explicitUninstall = false) {
   if (quittingRequest || quitting || resetting) return;
   quittingRequest = true;
   try {
@@ -315,7 +346,7 @@ async function requestQuit() {
       return;
     }
     const work = await runtime.inspectQuit();
-    if (work.error || work.activeTasks || work.scheduledTasks) {
+    if (!explicitUninstall && (work.error || work.activeTasks || work.scheduledTasks)) {
       focusWindow();
       const choice = await dialog.showMessageBox(window!, {type:'question', message:'退出 Pulsara？', detail: work.error || '退出会停止当前工作及后台调度。关闭窗口可以继续在后台运行。', buttons:['继续后台运行','退出 Pulsara'], defaultId:0, cancelId:0});
       if (choice.response !== 1) return;
@@ -345,15 +376,24 @@ async function requestQuit() {
 
 const uninstallArgument = process.argv?.find(argument => argument.startsWith('--pulsara-uninstall='));
 if (windowsHost && uninstallArgument) {
-  void app.whenReady().then(() => uninstallWsl(app.getPath('userData'), app.getVersion(),
-    uninstallArgument.slice('--pulsara-uninstall='.length), path.resolve(__dirname, '..', 'assets', 'wsl-uninstall.py'), process.resourcesPath))
+  void app.whenReady().then(async () => {
+    const mode = uninstallArgument.slice('--pulsara-uninstall='.length);
+    if (mode !== 'keep' && mode !== 'all') throw new Error('无效的卸载选项。');
+    await stopInstalledDesktop();
+    await uninstallWsl(app.getPath('userData'), app.getVersion(),
+      mode, path.resolve(__dirname, '..', 'assets', 'wsl-uninstall.py'), process.resourcesPath);
+  })
     .then(() => app.exit(0), error => { console.error('WSL uninstall failed:', error instanceof Error ? error.message : String(error)); app.exit(1); });
 } else if (windowsHost && process.argv?.includes('--pulsara-maintenance-check')) {
   void app.whenReady().then(() => checkInstalledWslMaintenance(app.getPath('userData'), app.getVersion()))
     .then(() => app.exit(0), error => { console.error('WSL maintenance admission refused:', error instanceof Error ? error.message : String(error)); app.exit(1); });
 } else if (!app.requestSingleInstanceLock()) app.quit();
+else if (windowsHost && process.argv?.includes('--pulsara-uninstall-stop')) app.exit(0);
 else {
-  app.on('second-instance', focusWindow);
+  app.on('second-instance', (_event, argv: string[]) => {
+    if (windowsHost && argv.includes('--pulsara-uninstall-stop')) void requestQuit(true);
+    else focusWindow();
+  });
   app.on('open-url', (event, url) => {
     event.preventDefault();
     if (isOAuthReturn(url)) focusWindow();
@@ -399,6 +439,7 @@ else {
       });
     }
     handle('reset-database',()=>resetDatabase(),true);
+    handle('reset-local-data', value => resetLocalData(value), true);
     handle('read-ui-preferences', () => uiPreferences.read());
     handle('startup-settled', () => startupCover!.finish());
     handle('focus', focusWindow);

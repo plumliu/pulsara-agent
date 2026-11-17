@@ -370,7 +370,7 @@ class LocalSessionController(SessionCapabilities):
         return {
             "application": {
                 "name": "Pulsara",
-                "version": "0.1.3",
+                "version": "0.2.0",
                 "transport": "localhost-http+terminal-v3",
             },
             "protocol": {"major": 3, "minor": 0},

@@ -1,12 +1,13 @@
 {
   "name": "pulsara-desktop-workbench",
-  "version": "0.1.3-alpha.1",
+  "version": "0.2.0-alpha.1",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
   },
   "scripts": {
-    "build:desktop": "vite build --config vite.desktop.config.ts",
+    "build:startup": "vite build --config vite.startup.config.ts",
+  "build:desktop": "vite build --config vite.desktop.config.ts && vite build --config vite.startup.config.ts",
     "demo:follow": "vite --config vite.desktop.config.ts --host 127.0.0.1",
     "lint": "eslint .",
     "test": "vitest run",

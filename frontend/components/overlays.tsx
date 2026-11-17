@@ -130,9 +130,9 @@ function subscribeToModalChange(onChange: () => void): () => void {
 
 const noModalSubscription = () => () => {};
 
-function Toast({ toast, exiting, onDismiss, onExitComplete }: {
-  toast: ToastMessage; exiting: boolean;
-  onDismiss: (id: number) => void; onExitComplete: (id: number) => void;
+function Toast<Id extends string | number>({ toast, exiting, onDismiss, onExitComplete }: {
+  toast: ToastMessage<Id>; exiting: boolean;
+  onDismiss: (id: Id) => void; onExitComplete: (id: Id) => void;
 }) {
   const button = useRef<HTMLElement | null>(null);
   const entrance = useRef<Animation | undefined>(undefined);
@@ -225,10 +225,10 @@ function Toast({ toast, exiting, onDismiss, onExitComplete }: {
     }}><span className="toast-mark">{toast.tone === 'success' ? <Check size={12} /> : '✦'}</span><span><strong>{toast.title}</strong>{detail && <small>{linked ? <>{detail.before}<a href={detail.href} onPointerDown={event => event.stopPropagation()} onClick={event => { event.preventDefault(); detail.onClick(); onDismiss(toast.id); }}>{detail.label}</a>{detail.after}</> : detail}</small>}</span>{linked ? <button className="toast-close" aria-label="关闭提示" disabled={exiting} onPointerDown={event => event.stopPropagation()} onClick={() => onDismiss(toast.id)}><X size={11} /></button> : toast.onClick ? <ChevronRight size={11} aria-hidden="true" /> : <X size={11} />}</Container>;
 }
 
-export function ToastStack({ toasts, onDismiss }: { toasts: ToastMessage[]; onDismiss: (id: number) => void }) {
+export function ToastStack<Id extends string | number>({ toasts, onDismiss }: { toasts: ToastMessage<Id>[]; onDismiss: (id: Id) => void }) {
   const stackRef = useRef<HTMLDivElement>(null);
-  const items = useRef(new Map<number, HTMLDivElement>());
-  const positions = useRef(new Map<number, { element: HTMLDivElement; top: number; animation?: Animation }>());
+  const items = useRef(new Map<Id, HTMLDivElement>());
+  const positions = useRef(new Map<Id, { element: HTMLDivElement; top: number; animation?: Animation }>());
   const [presentToasts, setPresentToasts] = useState(toasts);
   useLayoutEffect(() => {
     // Retain removed nodes only until their shared exit animation completes.
@@ -237,7 +237,7 @@ export function ToastStack({ toasts, onDismiss }: { toasts: ToastMessage[]; onDi
       ...toasts.filter(toast => !current.some(existing => existing.id === toast.id)),
     ]);
   }, [toasts]);
-  const finishExit = useCallback((id: number) => {
+  const finishExit = useCallback((id: Id) => {
     setPresentToasts(current => current.filter(toast => toast.id !== id));
   }, []);
   const [portalHost] = useState<HTMLDivElement | null>(() => (
@@ -265,7 +265,7 @@ export function ToastStack({ toasts, onDismiss }: { toasts: ToastMessage[]; onDi
   }, [modal, hasToasts, portalHost]);
 
   useLayoutEffect(() => {
-    const next = new Map<number, { element: HTMLDivElement; top: number; animation?: Animation }>();
+    const next = new Map<Id, { element: HTMLDivElement; top: number; animation?: Animation }>();
     for (const [id, element] of items.current) {
       const previous = positions.current.get(id);
       const transform = window.getComputedStyle(element).transform;

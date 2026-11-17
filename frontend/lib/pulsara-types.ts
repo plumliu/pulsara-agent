@@ -432,8 +432,8 @@ export interface VisualizationOccurrence {
   failureDetail?: string;
 }
 
-export interface ToastMessage {
-  id: number;
+export interface ToastMessage<Id extends string | number = number> {
+  id: Id;
   title: string;
   detail?: string | { before: string; label: string; after: string; href: string; onClick: () => void };
   tone?: 'neutral' | 'success' | 'warning';

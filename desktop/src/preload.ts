@@ -44,6 +44,7 @@ if (process.isMainFrame) contextBridge.exposeInMainWorld('pulsaraDesktop', {
   openPath: (value: {path: string; reveal: boolean}) => ipcRenderer.invoke('desktop:open-path', value),
   openExternal: (url: string) => ipcRenderer.invoke('desktop:open-external', url),
   retryStartup: () => ipcRenderer.invoke('desktop:retry'),
+  resetLocalData: (confirmed: boolean) => ipcRenderer.invoke('desktop:reset-local-data', confirmed),
   resetDatabase: () => ipcRenderer.invoke('desktop:reset-database'),
   showLogs: () => ipcRenderer.invoke('desktop:logs'),
   quit: () => ipcRenderer.invoke('desktop:quit'),

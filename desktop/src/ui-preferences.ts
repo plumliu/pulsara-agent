@@ -1,5 +1,5 @@
 import { isCanonicalIdentity } from './identity';
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 function workspaceOpenKey(key: string): boolean {
@@ -31,6 +31,7 @@ export class UiPreferences {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') console.warn('Could not read UI preferences', error);
     }
   }
+  reset(): void { rmSync(this.file, {force:true}); this.values = {}; }
   read(): Record<string, string> { return { ...this.values }; }
   write(input: unknown): void {
     if (!input || typeof input !== 'object') throw new Error('无效的界面偏好。');

@@ -28,7 +28,7 @@ export class StartupCover {
     this.current?.view.setBounds({ x: 0, y: 0, width, height });
   }
 
-  async show(error = '', phase = error ? 'failed' : 'starting') {
+  async show(error = '', phase = error ? 'failed' : 'starting', resetHome = '') {
     const request = {};
     this.requested = request;
     await this.dispose();
@@ -48,7 +48,7 @@ export class StartupCover {
     contents.on('will-attach-webview', event => event.preventDefault());
     this.resize();
     this.host.contentView.addChildView(view);
-    await contents.loadFile(this.file, { query: { error, phase } });
+    await contents.loadFile(this.file, { query: { error, phase, resetHome } });
   }
 
   accepts(event: IpcMainInvokeEvent): boolean {

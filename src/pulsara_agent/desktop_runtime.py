@@ -388,8 +388,18 @@ async def run_desktop_child(reader: asyncio.StreamReader, emit, *, application_f
             commands_task.result()
     except Exception as exc:
         failed = True
+        from pulsara_agent.settings import LocalSettingsInvalid
+        from pulsara_agent.storage.migrations.errors import PostgresSchemaError, PostgresSchemaFailureCode
+        reset_required = not ready_announced and (
+            isinstance(exc, LocalSettingsInvalid) or
+            isinstance(exc, PostgresSchemaError) and exc.code in {
+                PostgresSchemaFailureCode.MIGRATION_UNIVERSE_RESET_REQUIRED,
+                PostgresSchemaFailureCode.CATALOG_DRIFT,
+            }
+        )
         emit({"type": "failed", "error": error_text(exc),
-              "phase": "runtime" if ready_announced else "startup"})
+              "phase": "runtime" if ready_announced else "startup",
+              **({"resetRequired": reset_required} if not ready_announced else {})})
     finally:
         emit({"type": "stopping"})
         if server is not None:

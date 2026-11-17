@@ -589,3 +589,31 @@ def test_control_requests_keep_correlation_and_reject_old_encoding(desktop_home,
         with pytest.raises(ConnectionError, match='channel closed'):
             await pending
     asyncio.run(exercise())
+
+@pytest.mark.parametrize('kind,reset', [
+    ('baseline', True), ('drift', True), ('settings', True),
+    ('connection', False), ('permission', False), ('extension', False), ('unknown', False),
+])
+def test_startup_failure_carries_only_typed_reset_eligibility(desktop_home, kind, reset):
+    from pulsara_agent.settings import LocalSettingsInvalid, LocalSettingsUnavailable
+    from pulsara_agent.storage.migrations.errors import PostgresSchemaError, PostgresSchemaFailureCode as Code
+    errors = {
+        'baseline': PostgresSchemaError(Code.MIGRATION_UNIVERSE_RESET_REQUIRED, 'old baseline'),
+        'drift': PostgresSchemaError(Code.CATALOG_DRIFT, 'different actual columns'),
+        'settings': LocalSettingsInvalid('invalid structure'),
+        'connection': PostgresSchemaError(Code.CONNECTION_FAILED, 'offline'),
+        'permission': LocalSettingsUnavailable('cannot read'),
+        'extension': PostgresSchemaError(Code.EXTENSION_MISSING, 'missing native extension'),
+        'unknown': RuntimeError('schema_migration_universe_reset_required'),
+    }
+    async def exercise():
+        reader = asyncio.StreamReader()
+        reader.feed_data((json.dumps(frame(desktop_home)) + '\n').encode())
+        events = []
+        def prepare(*args, **kwargs): raise errors[kind]
+        result = await module.run_desktop_child(reader, events.append, database_preparer=prepare)
+        assert result == 1
+        failure = next(event for event in events if event['type'] == 'failed')
+        assert failure['phase'] == 'startup'
+        assert failure['resetRequired'] is reset
+    asyncio.run(exercise())

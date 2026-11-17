@@ -97,8 +97,12 @@ sources = ["desktop/scripts/prepare_wsl_payload.py", "desktop/scripts/prepare_re
 outputs = ["desktop/build/wsl-payload/payload.tar", "desktop/build/wsl-payload/manifest.json"]
 run = ".venv/bin/python desktop/scripts/prepare_wsl_payload.py"
 
+[tasks."desktop:startup-ui"]
+depends = ["desktop:frontend-dependencies"]
+run = "npm --prefix frontend run build:startup"
+
 [tasks."desktop:windows-resources"]
-depends = ["desktop:bootstrap", "desktop:windows-shell-dependencies"]
+depends = ["desktop:bootstrap", "desktop:windows-shell-dependencies", "desktop:startup-ui"]
 sources = ["desktop/scripts/prepare_windows_resources.py", "desktop/native/windows-interop-helper/Program.cs", "desktop/resources/wsl-payload/payload.tar", "desktop/resources/wsl-payload/manifest.json", "desktop/package.json"]
 outputs = ["desktop/resources/windows-interop/pulsara-interop.exe"]
 run = '.venv\Scripts\python.exe desktop\scripts\prepare_windows_resources.py'

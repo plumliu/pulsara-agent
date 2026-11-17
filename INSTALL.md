@@ -2,13 +2,13 @@
 
 [简体中文](INSTALL.zh-CN.md) · [Build from source](DEVELOPMENT.md)
 
-## Download 0.1.3-alpha.1
+## Download 0.2.0-alpha.1
 
 | System | Installer |
 | --- | --- |
-| macOS 15+, Apple Silicon | [Download DMG](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.3-alpha.1/Pulsara-0.1.3-alpha.1-macos-arm64.dmg) |
+| macOS 15+, Apple Silicon | [Download DMG](https://github.com/plumliu/pulsara-agent/releases/download/v0.2.0-alpha.1/Pulsara-0.2.0-alpha.1-macos-arm64.dmg) |
 
-This release includes only the macOS Apple Silicon DMG. No Windows or Ubuntu installer is published for 0.1.3-alpha.1. Source-build instructions for those platforms remain in the [development guide](DEVELOPMENT.md).
+The initial 0.2.0-alpha.1 release includes the macOS Apple Silicon DMG. Windows + WSL will be published after Windows-side testing; no Ubuntu installer is included. Source-build instructions for those platforms remain in the [development guide](DEVELOPMENT.md).
 
 ## macOS
 
@@ -22,7 +22,7 @@ macOS separately controls access to Desktop, Documents and other protected folde
 
 ## Windows + WSL2
 
-No Windows installer is included in this release. The following setup applies to a separately built Windows package.
+The Windows installer will be published after Windows-side testing. The following setup applies to a separately built Windows package.
 
 1. If needed, [install WSL2 and Ubuntu](https://learn.microsoft.com/windows/wsl/install). Restart when prompted, open Ubuntu once, and finish creating your Linux user.
 2. Run the EXE installer, then open Pulsara from the Start menu. The installer is unsigned; Windows may show an unknown-publisher warning.
@@ -51,9 +51,9 @@ The Windows uninstaller offers two choices. Both remove the app and its WSL runt
 - **Keep personal data** (default): retain settings, sessions and files.
 - **Uninstall completely**: also delete settings, sessions, the database and quick-start files.
 
-Ubuntu and project folders outside the Pulsara data directory are preserved. If WSL cleanup fails, uninstalling stops so you can retry.
+Ubuntu and project folders outside the Pulsara data directory are preserved. Explicit uninstall requests a normal Pulsara shutdown, then terminates verified application processes if they do not respond and stops its dedicated database before cleanup. This can interrupt unfinished work; it never terminates the WSL distribution. If process exit cannot be confirmed or cleanup fails, uninstall reports the error and stops for retry.
 
-**Upgrading from 0.1.1 or earlier:** 0.1.3 changes the database baseline, agent sessions and identity format. Earlier release databases cannot be reused directly, and there is no automatic migration. Fully quit the old app and back up the entire Pulsara data directory before opening this version. Keep the old app and data for access to past sessions; retaining that history in this version requires a separate migration. Use a fresh data home for this version rather than deleting the existing `~/.pulsara` directory. For example, launch the installed macOS app with `PULSARA_HOME="$HOME/.pulsara-0.1.3" /Applications/Pulsara.app/Contents/MacOS/pulsara`, then configure your model connection in Settings.
+**Incompatible local data after upgrading:** The startup page explains the incompatibility. Select the permanent-deletion checkbox above the buttons, then click “Reset and start over”. Pulsara stops its dedicated database, clears the current personal data and initializes the current database before reopening the workbench. No old data is migrated. This removes model connections, API keys, authorizations, sessions, memory, skill/plugin configuration, attachments and quick-start files inside the data home. Configure your models again afterwards. Project files outside that home remain untouched; save any files you need before confirming. Ordinary network, permission or database-occupancy errors do not offer this reset action.
 
 Development and installed builds share the default data home. Quit one before opening the other. Updates are manual.
 

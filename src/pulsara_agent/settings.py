@@ -200,6 +200,10 @@ class LocalSettingsUnavailable(RuntimeError):
     pass
 
 
+class LocalSettingsInvalid(LocalSettingsUnavailable):
+    """Readable settings do not satisfy the current data contract."""
+
+
 class LocalSettingsPublishIndeterminate(RuntimeError):
     pass
 
@@ -378,7 +382,7 @@ def read_local_settings(path: Path | None = None) -> LocalSettings:
         decoded = yaml.safe_load(raw.decode("utf-8"))
         return local_settings_from_dict(decoded)
     except (UnicodeError, yaml.YAMLError, ValueError) as exc:
-        raise LocalSettingsUnavailable("local settings are invalid") from exc
+        raise LocalSettingsInvalid("local settings are invalid") from exc
 
 
 def write_local_settings(path: Path, settings: LocalSettings) -> None:
@@ -948,6 +952,7 @@ __all__ = [
     "LocalSettingsSecretMissing",
     "LocalSettingsStore",
     "LocalSettingsUnavailable",
+    "LocalSettingsInvalid",
     "default_local_settings_path",
     "local_settings_from_dict",
     "local_settings_to_dict",

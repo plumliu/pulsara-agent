@@ -3,7 +3,7 @@ import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { HostOperations } from './host-operations';
 import type { DesktopResourcePaths } from './resource-paths';
 
-export type RuntimeEvent = {type: string; origin?: string; certificatePem?: string; url?: string; error?: string; requestId?: string; activeTasks?: number; scheduledTasks?: number; database_state?: string; phase?: 'startup' | 'runtime' | 'shutdown'; clean?: boolean};
+export type RuntimeEvent = {type: string; origin?: string; certificatePem?: string; url?: string; error?: string; requestId?: string; activeTasks?: number; scheduledTasks?: number; database_state?: string; phase?: 'startup' | 'runtime' | 'shutdown'; clean?: boolean; resetRequired?: boolean};
 export interface WslRuntimeOptions {
   distribution: string;
   user: string;
@@ -86,6 +86,7 @@ export class PythonRuntime {
             invalidFrame();
             return;
           }
+          if (event.resetRequired !== undefined && (typeof event.resetRequired !== 'boolean' || event.type !== 'failed' || event.phase !== 'startup')) { invalidFrame(); return; }
           if (event.type === 'open-oauth-browser') {
             void (async () => {
               let opened = false;
@@ -127,7 +128,7 @@ export class PythonRuntime {
             settlementFailure ||= event.phase === 'shutdown';
             startupFailure = !announced && !controlFailure && event.phase === 'startup';
             cleanStartupSettlement = false;
-            reject(new Error(failure));
+            reject(Object.assign(new Error(failure), {resetRequired:event.resetRequired === true && startupFailure}));
           }
           this.onEvent(event);
         };

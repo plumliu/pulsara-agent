@@ -26,6 +26,9 @@ test(`${platform} shell archive keeps only startup fonts and preserves workbench
     const files = listPackage(archive, { isPack: false }).map(value => value.replaceAll('\\', '/').replace(/^\//, ''));
     const html = extractFile(archive, path.join('assets', 'startup.html')).toString();
     assert.match(html, /href="startup-fonts.css"/);
+    assert.ok(files.includes('assets/startup-ui/toast.js'));
+    assert.ok(files.includes('assets/startup-ui/toast.css'));
+    assert.match(html, /src="startup-ui\/toast.js"/);
     assert.ok(!files.includes('assets/fonts.css'));
     const css = extractFile(archive, path.join('assets', 'startup-fonts.css')).toString();
     const startupFonts = [...css.matchAll(/url\("\.\/fonts\/([^"/]+)"\)/g)].map(match => match[1]);
