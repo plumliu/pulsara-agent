@@ -1,6 +1,8 @@
 # Pulsara Hook 独立消息修订草案
 
-状态：Hook 独立消息投影及候选隔离已接入生产代码，已完成 hardcut 跨层验收；正常应用尚未重启。本文件确定给模型阅读的 Hook 附加文字如何承载和交付；输入候选隔离沿第 3 节的当前 owner 落实。Hook 的阻止、权限裁决和续接控制保持现有底层语义；PreToolUse 不修改工具参数。普通 runtime observation、压缩与 Plan 续接沿[Runtime Observation 修订草案](PULSARA_RUNTIME_OBSERVATION_REVISION_DRAFT.zh.md)；Hook 执行反馈独立交付，安装、移除、信任及启停均不产生 runtime observation。
+> 已归档。当前工具参数和用法见 [native_tools/](../native_tools/)。
+
+状态：Hook 独立消息投影及候选隔离已接入生产代码，已完成 hardcut 跨层验收。本文件确定给模型阅读的 Hook 附加文字如何承载和交付；输入候选隔离沿第 3 节的当前 owner 落实。Hook 的阻止、权限裁决和续接控制保持现有底层语义；PreToolUse 不修改工具参数。普通 runtime observation、压缩与 Plan 续接沿[Runtime Observation 修订草案](PULSARA_RUNTIME_OBSERVATION_REVISION_DRAFT.zh.md)；Hook 执行反馈独立交付，安装、移除、信任及启停均不产生 runtime observation。
 
 ## 1. 模型可见消息
 
@@ -85,7 +87,7 @@ PreToolUse 可以检查即将执行的参数、阻止调用并说明原因，不
 
 成功进入／退出规划并完成原 turn 时，同步 PreToolUse 正文按现有路径退役，PostToolUse 附加正文不自动转发到后继 turn；runtime 控制的结束、新 turn 和恢复权限均保持原语义，不因统一展示外壳扩大跨 turn 转发。
 
-插件导入沿[INSTALL_PLUGIN 合同](native_tools/manage_capability.md#13-install_plugin安装或替换-plugin)逐组件尽力适配。多文件／内联数组声明按选定来源形成一个逻辑 Hook 源：外部格式导入写固定托管配置，原生 OpenAI 声明使用实际 manifest config_path，不改原文件、不伪造固定路径；仍共用原 parser／executor。显式空声明或被排除的已选 Pulsara 声明均保留为空托管配置，不回退激活邻近宿主定义。无效或不支持的文件、组、handler 只影响各自独立单元，保留其他有效组件并报告具体原因。范围仍是现有 11 事件和 command handler；matcher:null、command_windows 等配置写法适配不改变 matcher 执行含义、原生工具输入或输出控制，不恢复改参。安装与启用保持分离，未支持内容不执行。
+插件导入沿[INSTALL_PLUGIN 合同](../native_tools/manage_capability.md#13-install_plugin安装或替换-plugin)逐组件尽力适配。多文件／内联数组声明按选定来源形成一个逻辑 Hook 源：外部格式导入写固定托管配置，原生 OpenAI 声明使用实际 manifest config_path，不改原文件、不伪造固定路径；仍共用原 parser／executor。显式空声明或被排除的已选 Pulsara 声明均保留为空托管配置，不回退激活邻近宿主定义。无效或不支持的文件、组、handler 只影响各自独立单元，保留其他有效组件并报告具体原因。范围仍是现有 11 事件和 command handler；matcher:null、command_windows 等配置写法适配不改变 matcher 执行含义、原生工具输入或输出控制，不恢复改参。安装与启用保持分离，未支持内容不执行。
 
 同时保留现有来源解析、启用设置、信任、作用域、凭据秘密清理、执行超时与副作用结算。修改展示外壳不重新授予信任、不删除管理能力，也不改变已接纳操作的结果。阻止原因已经由工具或输入结果表达时，不为了新消息格式额外复制一条控制通知。
 
@@ -109,12 +111,12 @@ Hook 安装、移除、信任、撤销信任、启用和停用均不主动通知
 
 | 当前接点 | 修订或保留范围 |
 | --- | --- |
-| [事件与控制类型](src/pulsara_agent/hooks/contracts.py)及[输出解析](src/pulsara_agent/hooks/output_parser.py) | 沿用 11 类事件及实际允许的正文／控制字段，不为模型展示修改正式控制协议 |
-| [Hook dispatcher](src/pulsara_agent/hooks/dispatcher.py) | 保留匹配、执行、控制汇总和后台处理；有效附加文字仍由其产生 |
-| [附加上下文 owner](src/pulsara_agent/hooks/context.py)及[输入接纳](src/pulsara_agent/conversation_kernel/host_prompts.py) | 复用原 owner，闭合异步输入候选绑定、拒绝／取消清理和 FULL 后激活，已激活后的晚到正文仍可交付；保留作用域、顺序和秘密清理 |
-| [来源采集](src/pulsara_agent/conversation_kernel/context_sources.py)、[输入编译](src/pulsara_agent/model_input/compiler.py)与[模型输入准备](src/pulsara_agent/conversation_kernel/provider_dispatch.py) | 删除旧 HOOK_CONTEXT source 及其专用生产消费路径；独立 Hook context 按事件在合法追加位置交付，不改已安装前缀 |
-| [生命周期 Hook](src/pulsara_agent/conversation_kernel/runner_hooks.py)、[工具执行](src/pulsara_agent/conversation_kernel/tool_execution.py)及[输入接纳](src/pulsara_agent/conversation_kernel/host_prompts.py) | 保持控制和结算，只衔接新的模型可读消息 |
-| [runner 响应后预算预留](src/pulsara_agent/conversation_kernel/runner.py) | 替换旧 _hook_output_source_upper 包装计量，核对新 JSON 正文、预留和实际 wire 字节／token 一致 |
+| [事件与控制类型](../src/pulsara_agent/hooks/contracts.py)及[输出解析](../src/pulsara_agent/hooks/output_parser.py) | 沿用 11 类事件及实际允许的正文／控制字段，不为模型展示修改正式控制协议 |
+| [Hook dispatcher](../src/pulsara_agent/hooks/dispatcher.py) | 保留匹配、执行、控制汇总和后台处理；有效附加文字仍由其产生 |
+| [附加上下文 owner](../src/pulsara_agent/hooks/context.py)及[输入接纳](../src/pulsara_agent/conversation_kernel/host_prompts.py) | 复用原 owner，闭合异步输入候选绑定、拒绝／取消清理和 FULL 后激活，已激活后的晚到正文仍可交付；保留作用域、顺序和秘密清理 |
+| [来源采集](../src/pulsara_agent/conversation_kernel/context_sources.py)、[输入编译](../src/pulsara_agent/model_input/compiler.py)与[模型输入准备](../src/pulsara_agent/conversation_kernel/provider_dispatch.py) | 删除旧 HOOK_CONTEXT source 及其专用生产消费路径；独立 Hook context 按事件在合法追加位置交付，不改已安装前缀 |
+| [生命周期 Hook](../src/pulsara_agent/conversation_kernel/runner_hooks.py)、[工具执行](../src/pulsara_agent/conversation_kernel/tool_execution.py)及[输入接纳](../src/pulsara_agent/conversation_kernel/host_prompts.py) | 保持控制和结算，只衔接新的模型可读消息 |
+| [runner 响应后预算预留](../src/pulsara_agent/conversation_kernel/runner.py) | 替换旧 _hook_output_source_upper 包装计量，核对新 JSON 正文、预留和实际 wire 字节／token 一致 |
 
 行为核对应覆盖：启动／输入／工具前后输出的实际顺序，ROOT 与子代理归属，多处理器同次输出和同文不同事件，PreToolUse 阻止及附加文字、PermissionRequest 裁决、Stop／SubagentStop 续接和结束不变，无正文事件不发空消息，排队输入未采用不交付，后台晚到不唤醒或回插历史，实际秘密不进入正文，以及压缩、Plan 续接与同 epoch 前缀连续性保持。保留有意义的控制与交付验证，不新增只证明旧字段不存在的测试。
 

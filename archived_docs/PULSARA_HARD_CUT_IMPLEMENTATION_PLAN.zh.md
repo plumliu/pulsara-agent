@@ -1,8 +1,10 @@
 # Pulsara Hardcut 实施计划
 
+> 已归档。当前工具参数和用法见 [native_tools/](../native_tools/)。
+
 日期：2026-11-16。
 
-状态：A、B、C、D、E、F 批次已完成实施与验收，三位 Astra 最终审阅确认的 8 项问题已修复并交叉复验。按用户授权，当前构建已覆盖安装并重新启用，本机生产专用数据库已按当前 clean-v0 重建，旧 App 未保留，11 组模型配置保留。本轮未 stage／commit，不恢复实施前会话，不保留兼容路径。实际范围、命令、完整日志及保留的失败记录见 [D／E／F 验收报告](output/hardcut-20261116/coordinator/DEF_REPORT.md)、[最终修复验收](output/hardcut-20261116/final-fixes/REPORT.md)与[部署记录](output/hardcut-20261116/deployment/REPORT.md)。
+状态：A、B、C、D、E、F 批次已完成实施与验收，三位 Astra 最终审阅确认的 8 项问题已修复并交叉复验。按用户授权，当前构建已覆盖安装并重新启用，本机生产专用数据库已按当前 clean-v0 重建，旧 App 未保留，11 组模型配置保留。不恢复实施前会话，不保留兼容路径。实际范围、命令、完整日志及保留的失败记录见 [D／E／F 验收报告](../output/hardcut-20261116/coordinator/DEF_REPORT.md)、[最终修复验收](../output/hardcut-20261116/final-fixes/REPORT.md)与[部署记录](../output/hardcut-20261116/deployment/REPORT.md)。
 
 | 完成批次 | 实际接通范围 |
 | --- | --- |
@@ -18,7 +20,7 @@
 
 默认提示词沿旧结构删改，ROOT 与 Subagent 篇幅均缩短。23 个 JS API 的参数和完整返回声明仅在 bundled Code Mode Skill 的按需参考中提供，由实际参数与业务 owner 生成，不向原生工具描述／参数 schema 添加返回声明，不新增运行时已读门槛或输出校验器。
 
-MCP 初始服务目录增量按[实施规范](PULSARA_MCP_CATALOG_INCREMENTAL_IMPLEMENTATION_SPEC.zh.md)接入 collector／compiler／continuity，保留固定 native tools、按需查询及 meta 调用。该增量的测试与双协议真实 DeepSeek 记录见[报告](output/hardcut-20261116/mcp-catalog/REPORT.md)；本增量不构建、安装或操作运行中的应用，不修改生产配置或生产数据库。 本增量最终 205 项相关测试通过、无跳过；保存的 DeepSeek 两协议完成 19 次真实请求、6 次 SDK MCP 调用和 13 对同 epoch 前缀核验，冷／压缩目录及引用复用均通过。
+MCP 初始服务目录增量按[实施规范](PULSARA_MCP_CATALOG_INCREMENTAL_IMPLEMENTATION_SPEC.zh.md)接入 collector／compiler／continuity，保留固定 native tools、按需查询及 meta 调用。该增量的测试与双协议真实 DeepSeek 记录见[报告](../output/hardcut-20261116/mcp-catalog/REPORT.md)；本增量不构建、安装或操作运行中的应用，不修改生产配置或生产数据库。 本增量最终 205 项相关测试通过、无跳过；保存的 DeepSeek 两协议完成 19 次真实请求、6 次 SDK MCP 调用和 13 对同 epoch 前缀核验，冷／压缩目录及引用复用均通过。
 
 ## 1. 实施依据与范围
 
@@ -35,9 +37,9 @@ MCP 初始服务目录增量按[实施规范](PULSARA_MCP_CATALOG_INCREMENTAL_IM
 | [MCP meta-only 架构](PULSARA_MCP_META_ONLY_CALLING_ARCHITECTURE_DRAFT.zh.md) | 删除 MCP direct、当前目录、session 共用引用、权限、刷新和执行结算 |
 | [Runtime Observation 修订](PULSARA_RUNTIME_OBSERVATION_REVISION_DRAFT.zh.md) | source／body 数组、三个发送入口、能力净变化、记忆增量及压缩恢复 |
 | [Hook 独立消息修订](PULSARA_HOOK_CONTEXT_MESSAGE_REVISION_DRAFT.zh.md) | pulsara_hook_context、事件放置、后台文字、输入候选隔离及现有控制语义 |
-| [原生工具合同索引](PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)与 [native_tools/](native_tools/) | 各工具参数、返回类型、原生／JS 边界、业务范围、状态及使用示例 |
+| [原生工具合同索引](PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)与 [native_tools/](../native_tools) | 各工具参数、返回类型、原生／JS 边界、业务范围、状态及使用示例 |
 
-具体工具以相应分篇的已定合同为准。例如 MCP 关键词搜索按最新 [capabilities.md](native_tools/capabilities.md)接入；根目录架构中的三层精确查询示例不构成额外精确查询门槛。
+具体工具以相应分篇的已定合同为准。例如 MCP 关键词搜索按最新 [capabilities.md](../native_tools/capabilities.md)接入；根目录架构中的三层精确查询示例不构成额外精确查询门槛。
 
 [Motion 产品语义草案](PULSARA_MOTION_PRODUCT_SEMANTICS_DRAFT.zh.md)中明确延后的画布、采样等修订不纳入本次实施。多媒体及 unified 已确定的现行 motion 完整范围生产、保存和冻结分页仍须落实，不能一并延后。
 
@@ -156,13 +158,13 @@ flowchart TD
 
 | 工作包 | 依据 | 接入前的必要基础 | 内部顺序及重点验收 |
 | --- | --- | --- | --- |
-| 文件与终端 | [filesystem](native_tools/filesystem.md)、[terminal](native_tools/terminal.md) | C、相应 D1／D2 | 文件 PATH 与共同投影先行，再 NEXT、导出及完整搜索；进程先改待观察日志暂存，再接三个工具。行号从冻结请求／事实及正文推导；日志保存成功后才推进内部位置，状态随结果冻结；进程保持 session 隔离 |
-| 多媒体 | [media](native_tools/media.md) | 图片资产、C、相应 D1／D2 | 先 view_image，再视频三 action 和完整转录；删除全部旧 ASR 180 秒及展示装页导致的提前返回；annotate_media 可并行接内部绑定和前端。图文有序、JS 全值、坏图占位、完整转录、标注 NEXT 无副作用 |
-| 记忆与历史 | [memory](native_tools/memory.md)、[session_history](native_tools/session_history.md)、根目录记忆草案 | 记忆目标结构、C；历史依赖共同正文和 QA 投影 | CRUD／索引／用户页面可先做；历史先统一正文与 QA／QAQ，再接三个历史工具；隐式混合召回在两种来源均可用后合流。title／kind 固定、偏好正文为空、范围与并发准确；历史不误纳工具及思考；8 条偏好、20→5 召回及增量结算正确 |
-| 能力与 MCP | [capabilities](native_tools/capabilities.md)、[manage_capability](native_tools/manage_capability.md)、[mcp](native_tools/mcp.md)、根目录 MCP 架构 | 公共 Target、当前目录与引用 owner；完整结果及图片路径 | 本地来源与管理包装可先做；MCP 先删除 direct 并接当前目录、session 共用 REF，再接详情、调用及资源，最后 bm25s 搜索。搜索复用完整 schema／REF，描述摘录保存后冻结；管理复用安装、启停、信任、凭据和结算；只使实际受影响的引用失效 |
-| Agent、Code Mode 与判断 | [agents](native_tools/agents.md)、[code_mode](native_tools/code_mode.md)、[decide](native_tools/decide.md) | 队列／材料转移、C；JS 工具及输出依赖 D2 | 原生查询／消息／控制可先接；run_agent 的材料冻结与消费归属合流；wait_agent 保留 WORK／AGENT 两分支及 Cell 内通知位置；控制工具只改参数与结果，保持 stop 及晚到语义；decide 复用现有执行路径。完整结果、消息独立交付、依赖就绪及取消分别验收 |
-| Plan 与定时任务 | [plan](native_tools/plan.md)、[schedules](native_tools/schedules.md) | 相应 DDL、C、队列与 turn 边界 | 两者可独立推进。Plan 先唯一最终结算，再十分钟等待、Markdown、前端和自动续接；修订／取消／超时继续同一只读 turn。定时任务先冻结查询和内部 revision，再六 action；时间规则、用户页面修改、排队取消与运行中回复均按合同 |
-| 简单原生工具 | [todo](native_tools/todo.md)、[open_in_pulsara](native_tools/open_in_pulsara.md) | C、D1 | 适合作为早期工具接入样板。todo 10 项及状态计数；展示逐项接受、部分失败 ERROR、已发生效果准确。前端使用内部事实，不依赖被删除的公开字段 |
+| 文件与终端 | [filesystem](../native_tools/filesystem.md)、[terminal](../native_tools/terminal.md) | C、相应 D1／D2 | 文件 PATH 与共同投影先行，再 NEXT、导出及完整搜索；进程先改待观察日志暂存，再接三个工具。行号从冻结请求／事实及正文推导；日志保存成功后才推进内部位置，状态随结果冻结；进程保持 session 隔离 |
+| 多媒体 | [media](../native_tools/media.md) | 图片资产、C、相应 D1／D2 | 先 view_image，再视频三 action 和完整转录；删除全部旧 ASR 180 秒及展示装页导致的提前返回；annotate_media 可并行接内部绑定和前端。图文有序、JS 全值、坏图占位、完整转录、标注 NEXT 无副作用 |
+| 记忆与历史 | [memory](../native_tools/memory.md)、[session_history](../native_tools/session_history.md)、根目录记忆草案 | 记忆目标结构、C；历史依赖共同正文和 QA 投影 | CRUD／索引／用户页面可先做；历史先统一正文与 QA／QAQ，再接三个历史工具；隐式混合召回在两种来源均可用后合流。title／kind 固定、偏好正文为空、范围与并发准确；历史不误纳工具及思考；8 条偏好、20→5 召回及增量结算正确 |
+| 能力与 MCP | [capabilities](../native_tools/capabilities.md)、[manage_capability](../native_tools/manage_capability.md)、[mcp](../native_tools/mcp.md)、根目录 MCP 架构 | 公共 Target、当前目录与引用 owner；完整结果及图片路径 | 本地来源与管理包装可先做；MCP 先删除 direct 并接当前目录、session 共用 REF，再接详情、调用及资源，最后 bm25s 搜索。搜索复用完整 schema／REF，描述摘录保存后冻结；管理复用安装、启停、信任、凭据和结算；只使实际受影响的引用失效 |
+| Agent、Code Mode 与判断 | [agents](../native_tools/agents.md)、[code_mode](../native_tools/code_mode.md)、[decide](../native_tools/decide.md) | 队列／材料转移、C；JS 工具及输出依赖 D2 | 原生查询／消息／控制可先接；run_agent 的材料冻结与消费归属合流；wait_agent 保留 WORK／AGENT 两分支及 Cell 内通知位置；控制工具只改参数与结果，保持 stop 及晚到语义；decide 复用现有执行路径。完整结果、消息独立交付、依赖就绪及取消分别验收 |
+| Plan 与定时任务 | [plan](../native_tools/plan.md)、[schedules](../native_tools/schedules.md) | 相应 DDL、C、队列与 turn 边界 | 两者可独立推进。Plan 先唯一最终结算，再十分钟等待、Markdown、前端和自动续接；修订／取消／超时继续同一只读 turn。定时任务先冻结查询和内部 revision，再六 action；时间规则、用户页面修改、排队取消与运行中回复均按合同 |
+| 简单原生工具 | [todo](../native_tools/todo.md)、[open_in_pulsara](../native_tools/open_in_pulsara.md) | C、D1 | 适合作为早期工具接入样板。todo 10 项及状态计数；展示逐项接受、部分失败 ERROR、已发生效果准确。前端使用内部事实，不依赖被删除的公开字段 |
 | 输入、Hook 与交接 | 根目录 Runtime、Hook、记忆及 Plan 草案 | 公共输入形状；最终依赖真实领域事实、C 及输入安装边界 | 公共外壳／入口可先做，按第 7 节逐项合流；不得把全部 observation 塞到每次请求，也不得让 Hook 等待用户消息 |
 
 依赖区别：

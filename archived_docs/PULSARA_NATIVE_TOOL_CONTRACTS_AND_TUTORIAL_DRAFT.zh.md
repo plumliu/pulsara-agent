@@ -1,14 +1,16 @@
 # Pulsara 原生工具修订与使用教程草案
 
+> 已归档。当前工具参数和用法见 [native_tools/](../native_tools/)。
+
 MCP 首请求采用[非阻塞启动与不完整搜索合同](PULSARA_MCP_NONBLOCKING_STARTUP_IMPLEMENTATION_SPEC.zh.md)：后台发现不阻塞 provider；不完整搜索返回 ERROR 和已知可用结果，接受后的有效引用仍可调用。默认提示词只说明结果语义；ROOT 的 Code Mode 具体写法集中在 bundled Skill，Subagent 提示词不包含 Code Mode 内容。
 
 日期：2026-11-12。
 
-网页能力的当前合同见[网页工具草案](native_tools/web.md)：web_search、web_fetch 已接入原生工具、ROOT JS、用户级配置和设置页。默认无 Key 免费池为 Firecrawl → Tavily；可选四家之一＋API Key，自有 Key 按对应账户正常计费，额度不足等实际失败时静默回退；Exa／DeepSeek 不进入免费池。只读／Plan 与 Subagent 沿既有权限和结算；DeepSeek 支持显式自动引用首个已保存官方连接。实施及验证见[报告](output/web-20261117/REPORT.md)。
+网页能力的当前合同见[网页工具草案](../native_tools/web.md)：web_search、web_fetch 已接入原生工具、ROOT JS、用户级配置和设置页。默认无 Key 免费池为 Firecrawl → Tavily；可选四家之一＋API Key，自有 Key 按对应账户正常计费，额度不足等实际失败时静默回退；Exa／DeepSeek 不进入免费池。只读／Plan 与 Subagent 沿既有权限和结算；DeepSeek 支持显式自动引用首个已保存官方连接。实施及验证见[报告](../output/web-20261117/REPORT.md)。
 
-状态：各工具族的当前合同已接入生产代码，包含 read_file 原生 NEXT 续读与 write_file 完整结果导出，已完成 hardcut 跨层及真实 provider 验收；正常应用尚未重启，完成范围见实施计划。本文件记录已确定的参数、业务返回值、原生交付形状及 Code Mode 用法，也作为后续 bundled skill 的教程底稿。工具、数据库、SDK、提示词和 bundled skill 使用同一当前合同。
+状态：各工具族的当前合同已接入生产代码，包含 read_file 原生 NEXT 续读与 write_file 完整结果导出，已完成 hardcut 跨层及真实 provider 验收。本文件记录已确定的参数、业务返回值、原生交付形状及 Code Mode 用法，也作为后续 bundled skill 的教程底稿。工具、数据库、SDK、提示词和 bundled skill 使用同一当前合同。
 
-MCP 发现上下文遵循[MCP 初始服务目录规范](PULSARA_MCP_CATALOG_INCREMENTAL_IMPLEMENTATION_SPEC.zh.md)：合法新上下文在 Skill 目录后提供轻量已启用服务名称，接口与引用仍按任务查询；不增加工具数量或 API 边界。增量验收见[实施报告](output/hardcut-20261116/mcp-catalog/REPORT.md)。 本增量最终 205 项相关测试通过、无跳过；保存的 DeepSeek 两协议完成 19 次真实请求、6 次 SDK MCP 调用和 13 对同 epoch 前缀核验，冷／压缩目录及引用复用均通过。
+MCP 发现上下文遵循[MCP 初始服务目录规范](PULSARA_MCP_CATALOG_INCREMENTAL_IMPLEMENTATION_SPEC.zh.md)：合法新上下文在 Skill 目录后提供轻量已启用服务名称，接口与引用仍按任务查询；不增加工具数量或 API 边界。增量验收见[实施报告](../output/hardcut-20261116/mcp-catalog/REPORT.md)。 本增量最终 205 项相关测试通过、无跳过；保存的 DeepSeek 两协议完成 19 次真实请求、6 次 SDK MCP 调用和 13 对同 epoch 前缀核验，冷／压缩目录及引用复用均通过。
 
 ## 1. 范围与阅读方式
 
@@ -79,7 +81,7 @@ MCP 发现上下文遵循[MCP 初始服务目录规范](PULSARA_MCP_CATALOG_INCR
 | manage_capability，SET_PLUGIN_ENABLED | 仅 ROOT 原生、无 JS API；最小 PLUGIN target、action、必填 boolean enabled，内部安装条件由 runtime 核对；完整保留开启审阅（含重复 true）、关闭的组件退出范围及 Hook 信任，关闭不删包、配置、凭据或 OAuth；成功仅同一 Target、meta.status、简短 text，重复正常设置仍成功，不公开阶段枚举；已保存但必要采用失败按 ERROR 说明，原生冻结 12k／NEXT，补页不重新启停 |
 | manage_capability，REMOVE_PLUGIN | 仅 ROOT 原生、无 JS API；最小 PLUGIN target、action，内部安装条件由 runtime 核对；完整保留实例移除、包 GC、数据及源目录保留、凭据／OAuth 和运行组件退出语义，不立即删包或清数据；业务结果仅 meta.status／简短 text，无顶层插件 Target；部分清理失败按 ERROR，已发生删除仍让 runtime 照常处理；content 直接说明已完成操作和失败原因；原生冻结 12k／NEXT，补页不重做删除或 GC |
 
-`write_file` 的 tool_result_target 分支与 content 二选一，按完整 SESSION_ENTRY 结果 Target 导出全部保存内容，与模型已读页数无关；原生与 ROOT JS 共用参数、返回值和错误语义，详见[文件工具草案第 2 章](native_tools/filesystem.md#2-write_file创建文本或导出完整工具结果)。`read_file` 的 NEXT 分支仅原生，唯一 target 参数原样传递运行时返回的 NEXT，不公开内部定位；每次交付原冻结结果的一页，tool_result 指向原完整结果，next 指原结果再下一页，详见[第 1.10 节](native_tools/filesystem.md#110-next-target仅原生续读冻结结果)。JS 的 tools.read_file 只接受 PATH。
+`write_file` 的 tool_result_target 分支与 content 二选一，按完整 SESSION_ENTRY 结果 Target 导出全部保存内容，与模型已读页数无关；原生与 ROOT JS 共用参数、返回值和错误语义，详见[文件工具草案第 2 章](../native_tools/filesystem.md#2-write_file创建文本或导出完整工具结果)。`read_file` 的 NEXT 分支仅原生，唯一 target 参数原样传递运行时返回的 NEXT，不公开内部定位；每次交付原冻结结果的一页，tool_result 指向原完整结果，next 指原结果再下一页，详见[第 1.10 节](../native_tools/filesystem.md#110-next-target仅原生续读冻结结果)。JS 的 tools.read_file 只接受 PATH。
 
 实施先按[有序内容统一存储 hardcut](PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md#10-数据库优先与停用期间的分步实施)落实数据库结构与存储基础，允许停用 Pulsara 后先重建新库，再按已确定的各工具合同逐步接通并验收消费者。已接通路径的聚焦验证记录与完整产品验收状态见实施计划。
 
@@ -129,13 +131,13 @@ content 的每项统一为 type/value：文字项的 value 是字符串，图片
 
 exec_process、manage_process 的进程状态是独立业务事实：meta.status 表达工具调用是否成功，meta.process_status 与 exit_code 表达命令是否结束及怎样退出。正常启动、观察或完成控制动作并取得结果时，即使进程仍在运行或以非零退出码结束，工具调用均为 SUCCESS，JS 正常返回；不能因命令退出码非零而抛 ToolError。主动 kill 成功也为 SUCCESS，不将目标进程被终止等同于工具调用 CANCELLED。
 
-read_file 的 PATH 分支、write_file、edit_file、find_files、search_file_content 的业务错误沿异常通道返回；在 `catch (err)` 中，err 是 JS 异常对象，`err.result` 是它携带的完整失败业务值，不是枚举或错误代码。确实存在该业务值时，也使用 target/meta/content 结构，meta.status 为 ERROR 或 CANCELLED，全部内容保留且不分页。两个搜索工具的失败业务值包含原因及实际已取得的文件或业务记录，不把它截成程序页。query_processes 同样沿异常通道提供实际存在的完整失败业务值，但按[第 3 节](native_tools/terminal.md#3-query_processes进程清单与元数据)只使用 meta/content，不重复顶层 target。view_image 的实际失败业务值同样由 err.result 完整提供，具体形状见[多媒体工具草案](native_tools/media.md#17-错误取消及交付失败)，不生成假图片项。参数或运行时失败若没有业务结果，就不伪造 err.result。不把旧的重复结果 ID、读取指令、可用性布尔值或内部错误分类带回新的公开包装。
+read_file 的 PATH 分支、write_file、edit_file、find_files、search_file_content 的业务错误沿异常通道返回；在 `catch (err)` 中，err 是 JS 异常对象，`err.result` 是它携带的完整失败业务值，不是枚举或错误代码。确实存在该业务值时，也使用 target/meta/content 结构，meta.status 为 ERROR 或 CANCELLED，全部内容保留且不分页。两个搜索工具的失败业务值包含原因及实际已取得的文件或业务记录，不把它截成程序页。query_processes 同样沿异常通道提供实际存在的完整失败业务值，但按[第 3 节](../native_tools/terminal.md#3-query_processes进程清单与元数据)只使用 meta/content，不重复顶层 target。view_image 的实际失败业务值同样由 err.result 完整提供，具体形状见[多媒体工具草案](../native_tools/media.md#17-错误取消及交付失败)，不生成假图片项。参数或运行时失败若没有业务结果，就不伪造 err.result。不把旧的重复结果 ID、读取指令、可用性布尔值或内部错误分类带回新的公开包装。
 
-read_video_frames、read_transcript 的实际失败业务值同样通过 err.result 完整提供，具体形状见[多媒体工具草案](native_tools/media.md)第 2.7、3.6 节。转录失败保留已取得文字和真实未完成区间，不增加 partial 状态；原生 NEXT 只读冻结失败结果，不继续识别或重试 ASR。
+read_video_frames、read_transcript 的实际失败业务值同样通过 err.result 完整提供，具体形状见[多媒体工具草案](../native_tools/media.md)第 2.7、3.6 节。转录失败保留已取得文字和真实未完成区间，不增加 partial 状态；原生 NEXT 只读冻结失败结果，不继续识别或重试 ASR。
 
 ### 2.3 错误说明与提示统一进入 content
 
-query_capabilities 四个分支失败同样保留实际存在的完整 err.result，具体参数、来源观察及失败记录形状见[能力管理工具草案](native_tools/capabilities.md)。call_mcp_tool 及 read_mcp_resource 的实际完整失败值同样进入 err.result；后者的目录分支可保留已取得的 object 记录，具体读取保留有序 text／image 及真实错误说明，详见[MCP 接入草案](native_tools/mcp.md)。
+query_capabilities 四个分支失败同样保留实际存在的完整 err.result，具体参数、来源观察及失败记录形状见[能力管理工具草案](../native_tools/capabilities.md)。call_mcp_tool 及 read_mcp_resource 的实际完整失败值同样进入 err.result；后者的目录分支可保留已取得的 object 记录，具体读取保留有序 text／image 及真实错误说明，详见[MCP 接入草案](../native_tools/mcp.md)。
 
 错误展示使用相同的结果结构，不另造错误正文包装：
 
@@ -191,7 +193,7 @@ interface ObjectPart {
 type ResultPart<TTarget = PathTarget> = TextPart | ImagePart | TargetPart<TTarget> | ObjectPart;
 ```
 
-各工具声明具体的 content 类型：文件正文、创建说明与 diff 使用 TextPart[]；find_files 使用文字项与 PATH Target 项；search_file_content 按模式声明 object 的精确 value 字段或 PATH Target 项；PLUGIN 精确查询使用文字项与组件 Target 项，value 精确限定为 SkillTarget、HookSourceTarget 或 McpConnectionTarget，类型见[能力管理工具草案](native_tools/capabilities.md)。上面的默认 PathTarget 只供文件类用法，不把所有工具的引用都限制成路径，也不因此让任何工具接受任意种类 Target。object.value 的最外层是 JSON 对象，内部允许嵌套对象、数组及 JSON 基本值，不只声明为未知对象，也不新增 match 或 count 内容类型。输入参数中的 target、content 或 MCP 业务字段不因内容项统一而重命名。
+各工具声明具体的 content 类型：文件正文、创建说明与 diff 使用 TextPart[]；find_files 使用文字项与 PATH Target 项；search_file_content 按模式声明 object 的精确 value 字段或 PATH Target 项；PLUGIN 精确查询使用文字项与组件 Target 项，value 精确限定为 SkillTarget、HookSourceTarget 或 McpConnectionTarget，类型见[能力管理工具草案](../native_tools/capabilities.md)。上面的默认 PathTarget 只供文件类用法，不把所有工具的引用都限制成路径，也不因此让任何工具接受任意种类 Target。object.value 的最外层是 JSON 对象，内部允许嵌套对象、数组及 JSON 基本值，不只声明为未知对象，也不新增 match 或 count 内容类型。输入参数中的 target、content 或 MCP 业务字段不因内容项统一而重命名。
 
 Target 项展示引用，图片项按模型能力交付真实图片或明确的固定文字说明；导出只给图片引用，不声称已看图。object 的 value 整体按确定字段顺序、固定两空格缩进序列化为标准 JSON 文字，并带结束换行；保留花括号、方括号、引号和字段名，字符串及控制字符按 JSON 规则转义。原生和导出按这一文字规则处理；Cell 输出保留文字结构，并递归识别其中实际 image 内容项，在原位置交图或给失败说明。保存与 JS 返回仍为完整的原对象。
 
@@ -205,19 +207,19 @@ object.value 本身是唯一权威业务对象，完整 JSON 文字按需投影�
 
 | 文档 | 工具章节 |
 | --- | --- |
-| [文件系统工具](native_tools/filesystem.md) | 第 1–5 章：read_file、write_file、edit_file、find_files、search_file_content；第 1.10 节为仅原生 NEXT 续读、图文顺序及 object 跨页，JS read_file 只接受 PATH；第 2 章包含 content／tool_result_target 互斥输入、完整结果导出及原生／JS 示例 |
-| [网页工具](native_tools/web.md) | 第 1 章：web_search 六个参数、域名与日期条件、四家映射、精简返回值和原生／JS 示例；第 2 章：web_fetch 只传 URL Target，完整保存实际提取正文及可选标题，NEXT 不重新抓取；第 3 章：模型按需交错搜索与读取；第 4 章：默认 Firecrawl → Tavily 无 Key 免费池，可选四选一＋API Key、账户计费与静默回退，Exa／DeepSeek 不入免费池；只读／Plan 可用，ROOT／Subagent 原生、ROOT JS，共用权限与结算，已接入生产代码 |
-| [终端工具](native_tools/terminal.md) | 第 1–3 章：exec_process、manage_process、query_processes |
-| [Agent 协作工具](native_tools/agents.md) | 第 1 章：query_agents 三个查询分支；第 2 章：send_agent_message 交付语义及精简结果；二者支持 ROOT／Subagent 原生及 ROOT JS；第 3 章：stop_agent 参数、四个并列 Work 状态计数、逐项状态及原生／JS 示例，仅 ROOT；第 4 章：wait_message，Subagent 专用仅原生，超时 SUCCESS，正文独立交付；前四者沿冻结 12k／NEXT；第 5 章：tools.run_agent 参数、材料、同批引用与返回；第 6 章：tools.wait_agent 的 WORK／AGENT 双分支、完整快照、first／all、消息／超时／取消、返回类型及 JS 示例；后两者仅 ROOT JS、完整返回，无原生分页；第 7 章为实现参考 |
-| [语义判断工具](native_tools/decide.md) | 第 1 章：tools.decide 的两个参数、decisions object、available()、JS 示例、完整保存与错误语义；仅 ROOT JS、bypass 权限，无原生分页；第 2 章为实现参考 |
-| [历史会话工具](native_tools/session_history.md) | 第 1–3 章：search_sessions、search_session_content、read_session_content 的参数、返回类型及原生／JS 示例；单 ID 的 entry 定位、四种消息标签与正负 limit |
-| [Plan 工具](native_tools/plan.md) | 第 1–3 章：enter_plan、ask_plan_question、exit_plan 的参数、行为、返回值及原生示例；10 分钟交互期限、方案双份保存及顶层 PATH Target；仅原生，无 JS API |
-| [记忆工具](native_tools/memory.md) | 第 1–3 章：remember、query_memory、manage_memory 的参数、互斥分支、返回类型、原生示例及失败语义；runtime 自动取得并发条件；仅 ROOT 原生，无 JS API |
-| [进度清单工具](native_tools/todo.md) | 第 1 章：todo 的完整替换参数、10 项上限、meta.counts、返回类型、原生示例及错误语义；仅原生，无 JS API；第 2 章为生产实现参考 |
-| [定时会话工具](native_tools/schedules.md) | 第 1 章：共用 schedule 时间规则、创建默认值及完整规则类型；第 2 章：query_schedules；第 3–5 章：manage_schedule 的 create／switch、update、pause／resume／delete，含精简返回、原生示例、内部并发及队列语义；第 6 章为实现参考；仅 ROOT 原生，无 JS API |
-| [展示工具](native_tools/open_in_pulsara.md) | 第 1 章：open_in_pulsara 的参数、精简返回、原生示例及 ERROR 语义；合法展示项继续处理；第 2 章为实现参考；仅 ROOT 原生，无 JS API |
-| [Code Mode 控制工具](native_tools/code_mode.md) | 第 1 章：exec_cell 的 PATH target／code 互斥参数、简短启动结果及独立 steer；第 2 章：query_cells 的可选 target、列表与单查返回、空结果和错误语义；第 3 章：manage_cell 的 wait／stop 参数、pending_calls、精简返回及原生示例，保留已提交工具和各阶段 steer 的现行停止边界；均按冻结结果走 12k／NEXT；第 4 章为实现参考；仅 ROOT 原生，无 JS API |
-| [多媒体工具](native_tools/media.md) | 第 1 章：view_image；第 2 章：read_video_frames 五个参数，overview／detail／motion 的职责边界与问题驱动交错使用、最简索引与图文返回，cell_rect 沿现行角点坐标；布局与 motion 额外精确共享待实验；第 3 章：read_transcript 三个参数、逐段文字 object、原生／JS 示例及错误语义，删除累计 180 秒 ASR 限制和公开 media_version，完整取得保存后冻结 12k／NEXT；第 4 章：annotate_media 四个必填参数、仅原生、简短返回与错误语义，保留内部文件绑定，NEXT 不重复添加标注；第 5 章为实现参考 |
-| [能力查询与刷新工具](native_tools/capabilities.md) | 第 1–4 章：SKILL／HOOK／MCP／PLUGIN 查询及最小 Target，含原生／JS 示例和冻结 12k／NEXT；MCP 服务附已知资源／模板计数，未知省略、确认空才为 0，目录与读取交给 read_mcp_resource；第 5 章：reload_capabilities 无参数全量刷新、仅 ROOT 原生、精简返回及具体失败说明，部分失败为 ERROR；第 6 章为实现参考 |
-| [能力变更工具](native_tools/manage_capability.md) | 第 1 章：INSTALL_LOOSE_SKILL；第 2 章：SET_LOOSE_SKILL_ENABLED，保留开启与关闭；第 3 章：REMOVE_LOOSE_SKILL 删除范围、配置清理及部分失败 ERROR；第 4 章：TRUST_HOOK_SOURCE；第 5 章：REVOKE_HOOK_TRUST；第 6 章：SET_HOOK_SOURCE_ENABLED；六项均含参数、精简返回、原生示例、错误语义及冻结 12k／NEXT；第 7 章：MCP 的 ADD／UPDATE 共用 config，含字段、类型、新增默认、局部更新、映射替换及两类归属边界，保留局部更新中的用户配置，独立／Plugin 连接统一默认允许 ROOT 和子代理使用；第 8 章：ADD_LOCAL_MCP；第 9 章：UPDATE_MCP_CONNECTION，统一独立／Plugin 连接，含三项最简参数、两类修改边界、Plugin 恢复默认、编辑器分支、精简返回、错误及冻结分页；第 10 章：REMOVE_LOCAL_MCP，含最简参数、简短结果、原生示例、现有清理语义及部分清理失败 ERROR；第 11 章：AUTHORIZE_MCP；第 12 章：CLEAR_MCP_AUTHORIZATION，最小参数及精简结果共用独立／Plugin 连接，底层授权和前端语义保持；第 13 章：INSTALL_PLUGIN，统一源目录 PATH 参数、精简稳定 PLUGIN Target 结果，安装／替换及关闭状态保持现状，按 best effort 安装独立有效组件，未支持项不启用、局部失败不拖垮整包；第 14 章：SET_PLUGIN_ENABLED，最小参数、精简结果、原生示例和错误，保留开启审阅、组件退出及 Hook 信任；第 15 章：REMOVE_PLUGIN，保留现有包回收、数据、凭据及运行语义，部分失败按 ERROR，已发生删除仍正常处理；content 使用直白结果说明；第 16 章为实现参考；仅 ROOT 原生、无 JS API |
-| [MCP 接入工具](native_tools/mcp.md) | 第 1 章：call_mcp_tool 返回类型、正式 content 适配、原样 structuredContent、状态与派发事实；第 2 章：原生查询／准备 Cell 交付接口说明、同 session 引用、单工具变化及同目标重连复用；第 3 章：元工具参数和原生／JS 示例；第 4 章：read_mcp_resource 的连接目录／具体资源两分支、返回类型、原生／JS 示例、空结果及失败；第 5 章：冻结交付、发现刷新及实施核对；第 6 章为实现参考 |
+| [文件系统工具](../native_tools/filesystem.md) | 第 1–5 章：read_file、write_file、edit_file、find_files、search_file_content；第 1.10 节为仅原生 NEXT 续读、图文顺序及 object 跨页，JS read_file 只接受 PATH；第 2 章包含 content／tool_result_target 互斥输入、完整结果导出及原生／JS 示例 |
+| [网页工具](../native_tools/web.md) | 第 1 章：web_search 六个参数、域名与日期条件、四家映射、精简返回值和原生／JS 示例；第 2 章：web_fetch 只传 URL Target，完整保存实际提取正文及可选标题，NEXT 不重新抓取；第 3 章：模型按需交错搜索与读取；第 4 章：默认 Firecrawl → Tavily 无 Key 免费池，可选四选一＋API Key、账户计费与静默回退，Exa／DeepSeek 不入免费池；只读／Plan 可用，ROOT／Subagent 原生、ROOT JS，共用权限与结算，已接入生产代码 |
+| [终端工具](../native_tools/terminal.md) | 第 1–3 章：exec_process、manage_process、query_processes |
+| [Agent 协作工具](../native_tools/agents.md) | 第 1 章：query_agents 三个查询分支；第 2 章：send_agent_message 交付语义及精简结果；二者支持 ROOT／Subagent 原生及 ROOT JS；第 3 章：stop_agent 参数、四个并列 Work 状态计数、逐项状态及原生／JS 示例，仅 ROOT；第 4 章：wait_message，Subagent 专用仅原生，超时 SUCCESS，正文独立交付；前四者沿冻结 12k／NEXT；第 5 章：tools.run_agent 参数、材料、同批引用与返回；第 6 章：tools.wait_agent 的 WORK／AGENT 双分支、完整快照、first／all、消息／超时／取消、返回类型及 JS 示例；后两者仅 ROOT JS、完整返回，无原生分页；第 7 章为实现参考 |
+| [语义判断工具](../native_tools/decide.md) | 第 1 章：tools.decide 的两个参数、decisions object、available()、JS 示例、完整保存与错误语义；仅 ROOT JS、bypass 权限，无原生分页；第 2 章为实现参考 |
+| [历史会话工具](../native_tools/session_history.md) | 第 1–3 章：search_sessions、search_session_content、read_session_content 的参数、返回类型及原生／JS 示例；单 ID 的 entry 定位、四种消息标签与正负 limit |
+| [Plan 工具](../native_tools/plan.md) | 第 1–3 章：enter_plan、ask_plan_question、exit_plan 的参数、行为、返回值及原生示例；10 分钟交互期限、方案双份保存及顶层 PATH Target；仅原生，无 JS API |
+| [记忆工具](../native_tools/memory.md) | 第 1–3 章：remember、query_memory、manage_memory 的参数、互斥分支、返回类型、原生示例及失败语义；runtime 自动取得并发条件；仅 ROOT 原生，无 JS API |
+| [进度清单工具](../native_tools/todo.md) | 第 1 章：todo 的完整替换参数、10 项上限、meta.counts、返回类型、原生示例及错误语义；仅原生，无 JS API；第 2 章为生产实现参考 |
+| [定时会话工具](../native_tools/schedules.md) | 第 1 章：共用 schedule 时间规则、创建默认值及完整规则类型；第 2 章：query_schedules；第 3–5 章：manage_schedule 的 create／switch、update、pause／resume／delete，含精简返回、原生示例、内部并发及队列语义；第 6 章为实现参考；仅 ROOT 原生，无 JS API |
+| [展示工具](../native_tools/open_in_pulsara.md) | 第 1 章：open_in_pulsara 的参数、精简返回、原生示例及 ERROR 语义；合法展示项继续处理；第 2 章为实现参考；仅 ROOT 原生，无 JS API |
+| [Code Mode 控制工具](../native_tools/code_mode.md) | 第 1 章：exec_cell 的 PATH target／code 互斥参数、简短启动结果及独立 steer；第 2 章：query_cells 的可选 target、列表与单查返回、空结果和错误语义；第 3 章：manage_cell 的 wait／stop 参数、pending_calls、精简返回及原生示例，保留已提交工具和各阶段 steer 的现行停止边界；均按冻结结果走 12k／NEXT；第 4 章为实现参考；仅 ROOT 原生，无 JS API |
+| [多媒体工具](../native_tools/media.md) | 第 1 章：view_image；第 2 章：read_video_frames 五个参数，overview／detail／motion 的职责边界与问题驱动交错使用、最简索引与图文返回，cell_rect 沿现行角点坐标；布局与 motion 额外精确共享待实验；第 3 章：read_transcript 三个参数、逐段文字 object、原生／JS 示例及错误语义，删除累计 180 秒 ASR 限制和公开 media_version，完整取得保存后冻结 12k／NEXT；第 4 章：annotate_media 四个必填参数、仅原生、简短返回与错误语义，保留内部文件绑定，NEXT 不重复添加标注；第 5 章为实现参考 |
+| [能力查询与刷新工具](../native_tools/capabilities.md) | 第 1–4 章：SKILL／HOOK／MCP／PLUGIN 查询及最小 Target，含原生／JS 示例和冻结 12k／NEXT；MCP 服务附已知资源／模板计数，未知省略、确认空才为 0，目录与读取交给 read_mcp_resource；第 5 章：reload_capabilities 无参数全量刷新、仅 ROOT 原生、精简返回及具体失败说明，部分失败为 ERROR；第 6 章为实现参考 |
+| [能力变更工具](../native_tools/manage_capability.md) | 第 1 章：INSTALL_LOOSE_SKILL；第 2 章：SET_LOOSE_SKILL_ENABLED，保留开启与关闭；第 3 章：REMOVE_LOOSE_SKILL 删除范围、配置清理及部分失败 ERROR；第 4 章：TRUST_HOOK_SOURCE；第 5 章：REVOKE_HOOK_TRUST；第 6 章：SET_HOOK_SOURCE_ENABLED；六项均含参数、精简返回、原生示例、错误语义及冻结 12k／NEXT；第 7 章：MCP 的 ADD／UPDATE 共用 config，含字段、类型、新增默认、局部更新、映射替换及两类归属边界，保留局部更新中的用户配置，独立／Plugin 连接统一默认允许 ROOT 和子代理使用；第 8 章：ADD_LOCAL_MCP；第 9 章：UPDATE_MCP_CONNECTION，统一独立／Plugin 连接，含三项最简参数、两类修改边界、Plugin 恢复默认、编辑器分支、精简返回、错误及冻结分页；第 10 章：REMOVE_LOCAL_MCP，含最简参数、简短结果、原生示例、现有清理语义及部分清理失败 ERROR；第 11 章：AUTHORIZE_MCP；第 12 章：CLEAR_MCP_AUTHORIZATION，最小参数及精简结果共用独立／Plugin 连接，底层授权和前端语义保持；第 13 章：INSTALL_PLUGIN，统一源目录 PATH 参数、精简稳定 PLUGIN Target 结果，安装／替换及关闭状态保持现状，按 best effort 安装独立有效组件，未支持项不启用、局部失败不拖垮整包；第 14 章：SET_PLUGIN_ENABLED，最小参数、精简结果、原生示例和错误，保留开启审阅、组件退出及 Hook 信任；第 15 章：REMOVE_PLUGIN，保留现有包回收、数据、凭据及运行语义，部分失败按 ERROR，已发生删除仍正常处理；content 使用直白结果说明；第 16 章为实现参考；仅 ROOT 原生、无 JS API |
+| [MCP 接入工具](../native_tools/mcp.md) | 第 1 章：call_mcp_tool 返回类型、正式 content 适配、原样 structuredContent、状态与派发事实；第 2 章：原生查询／准备 Cell 交付接口说明、同 session 引用、单工具变化及同目标重连复用；第 3 章：元工具参数和原生／JS 示例；第 4 章：read_mcp_resource 的连接目录／具体资源两分支、返回类型、原生／JS 示例、空结果及失败；第 5 章：冻结交付、发现刷新及实施核对；第 6 章为实现参考 |

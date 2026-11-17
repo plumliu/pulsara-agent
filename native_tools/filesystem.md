@@ -1,8 +1,8 @@
 # Pulsara 文件系统工具修订与使用教程草案
 
-共用规则见[原生工具修订草案索引](../PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 1、2 章。
+共用规则见[原生工具修订草案索引](../archived_docs/PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 1、2 章。
 
-状态：当前合同已接入生产代码，正在完成 hardcut 跨层验收；正常使用仍按实施计划停用。
+状态：当前生效合同。
 
 ## 1. read_file：PATH／NEXT Target
 
@@ -163,7 +163,7 @@ content 是内容项数组，即使本次只有纯文字也不返回裸字符串
 
 `next:null` 只表示本次请求范围的保存结果已正常交付完，不表示文件已读到末尾，也不表示所有文件内容已经检查。是否读取了全文由调用范围和实际正文决定。
 
-大文件允许内部流式处理、分批准备，内容存储沿[数据库草案第 5.3 节](../PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md#53-现有-blob-承载与后续实验)的现有 blob 路径。JS 正常返回仍是完整业务值，不是第一页、读取句柄或懒加载代理。原生分页只读取这次已保存的正文，不重新打开源文件；原文件后来变化不改写该份结果。
+大文件允许内部流式处理、分批准备，内容存储沿[数据库草案第 5.3 节](../archived_docs/PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md#53-现有-blob-承载与后续实验)的现有 blob 路径。JS 正常返回仍是完整业务值，不是第一页、读取句柄或懒加载代理。原生分页只读取这次已保存的正文，不重新打开源文件；原文件后来变化不改写该份结果。
 
 负向 offset 仅在本次读取时，按该次文件的实际总行数解析一次并确定请求范围；next 继续读取这份固定保存结果，不重新按文件末尾定位，也不随文件后续增长或缩短移动范围。
 
@@ -352,7 +352,7 @@ tool_result: <完整错误结果的导出 Target>
 next: null
 ```
 
-该示意假定业务错误结果已完整保存、整条正常交付，因此同样返回 tool_result 和 next:null；这不表示文件读取成功。错误正文较长时仍可正常分页，保存或交付本身失败则沿统一草案报告真实情况，不能冒充正常交付完成。错误说明和提示按[第 2.3 节](../PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md#23-错误说明与提示统一进入-content)表达，不增加第二个错误分类字段。
+该示意假定业务错误结果已完整保存、整条正常交付，因此同样返回 tool_result 和 next:null；这不表示文件读取成功。错误正文较长时仍可正常分页，保存或交付本身失败则沿统一草案报告真实情况，不能冒充正常交付完成。错误说明和提示按[第 2.3 节](../archived_docs/PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md#23-错误说明与提示统一进入-content)表达，不增加第二个错误分类字段。
 
 JS 调用抛出既有 ToolError；在 catch (err) 中，确有完整失败业务值时，err.result 形如：
 
@@ -386,7 +386,7 @@ try {
 
 ### 1.9 实施核对点
 
-以下为共同验收要求；已执行范围及结果见[实施计划](../PULSARA_HARD_CUT_IMPLEMENTATION_PLAN.zh.md)与对应验证记录：
+以下为共同验收要求；已执行范围及结果见[实施计划](../archived_docs/PULSARA_HARD_CUT_IMPLEMENTATION_PLAN.zh.md)与对应验证记录：
 
 - 同一 PATH 请求的完整保存范围、JS 结果和原生逐页正文一致，原生 12k 不提前裁剪生产者返回值。
 - 默认第 1 行至末尾、正向和负向 offset、显式有限行范围、跨 EOF、空文件和超长单行均符合本节范围语义；超过 2,000 行的合法请求可执行。不新增 tail 参数。
@@ -724,7 +724,7 @@ try {
 
 ### 2.7 错误与取消
 
-错误使用[第 2 节](../PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md#2-本轮确定的结果表达)的同一合同：meta.status 仅为 ERROR 或 CANCELLED，原因、路径和确有帮助的提示进入 content，不返回 meta.error、`_hint` 或另一组公开错误代码。
+错误使用[第 2 节](../archived_docs/PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md#2-本轮确定的结果表达)的同一合同：meta.status 仅为 ERROR 或 CANCELLED，原因、路径和确有帮助的提示进入 content，不返回 meta.error、`_hint` 或另一组公开错误代码。
 
 例如 notes/demo.txt 已存在时，原生结果示意：
 
@@ -782,7 +782,7 @@ write_file 与 edit_file 使用同一提交边界结算取消：提交前取消�
 
 ### 2.8 实施核对点
 
-以下为共同验收要求；已执行范围及结果见[实施计划](../PULSARA_HARD_CUT_IMPLEMENTATION_PLAN.zh.md)与对应验证记录：
+以下为共同验收要求；已执行范围及结果见[实施计划](../archived_docs/PULSARA_HARD_CUT_IMPLEMENTATION_PLAN.zh.md)与对应验证记录：
 
 - 两个分支的原生与 JS 参数一致；content 与 tool_result_target 恰选一个，混填、都不填及额外字段被拒绝；空 content 可创建空文件。
 - tool_result_target 只导出可读完整工具结果，拒绝 NEXT、普通历史消息及 Cell steer；未读完分页、原业务 ERROR／CANCELLED 不妨碍完整导出，导出状态独立。
@@ -1050,7 +1050,7 @@ console.log({content: result.content});
 
 ### 3.9 实施核对点
 
-以下为共同验收要求；已执行范围及结果见[实施计划](../PULSARA_HARD_CUT_IMPLEMENTATION_PLAN.zh.md)与对应验证记录：
+以下为共同验收要求；已执行范围及结果见[实施计划](../archived_docs/PULSARA_HARD_CUT_IMPLEMENTATION_PLAN.zh.md)与对应验证记录：
 
 - 两个参数分支互斥且字段闭合，SDK 类型、工具参数 schema 与运行时接受形状一致；类型中的 never 排除项不作为模型可填参数。原生与 JS 使用相同业务参数，目标不存在时不隐式创建。
 - 精确唯一匹配覆盖换行、空白、重复及重叠匹配；无模糊回退、不按首个匹配猜测位置、不批量替换。
@@ -1282,7 +1282,7 @@ try {
 
 ### 4.8 实施核对点
 
-以下为共同验收要求；已执行范围及结果见[实施计划](../PULSARA_HARD_CUT_IMPLEMENTATION_PLAN.zh.md)与对应验证记录：
+以下为共同验收要求；已执行范围及结果见[实施计划](../archived_docs/PULSARA_HARD_CUT_IMPLEMENTATION_PLAN.zh.md)与对应验证记录：
 
 - 参数仅 target、glob，target 在参数表、SDK 声明及示例首位；省略时搜索工作区根。
 - target 表达搜索目录，content 中每个 type:target 项的 value 表达命中文件；返回路径以工作区为基准，内部相对、外部绝对，不相对搜索子目录重新编码。
@@ -1532,7 +1532,7 @@ JS 沿异常通道通过 err.result 提供实际存在的完整 SearchFileConten
 
 ### 5.8 实施核对点
 
-以下为共同验收要求；已执行范围及结果见[实施计划](../PULSARA_HARD_CUT_IMPLEMENTATION_PLAN.zh.md)与对应验证记录：
+以下为共同验收要求；已执行范围及结果见[实施计划](../archived_docs/PULSARA_HARD_CUT_IMPLEMENTATION_PLAN.zh.md)与对应验证记录：
 
 - 唯一公开名称为 search_file_content，参数只有 target、pattern、file_glob、output_mode；target 在参数表、类型和示例首位，默认根与单文件／目录行为明确。
 - 三模式使用同一文件筛选及正则语义，不 trim pattern，不用其他正则引擎回退，不引入跨行模式；LF 分行及原文件行号与 read_file 一致，孤立 CR 保留为行内字符；非法正则不因候选文件为空而被忽略。

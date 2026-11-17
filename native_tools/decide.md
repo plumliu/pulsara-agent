@@ -1,8 +1,8 @@
 # Pulsara 语义判断工具修订与使用教程草案
 
-共用规则见[工具索引](../PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 1、2 章；完整保存、JS 返回及 Cell 输出沿[统一交付草案](../PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)，存储沿[数据库 hardcut 草案](../PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md)。
+共用规则见[工具索引](../archived_docs/PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 1、2 章；完整保存、JS 返回及 Cell 输出沿[统一交付草案](../archived_docs/PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)，存储沿[数据库 hardcut 草案](../archived_docs/PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md)。
 
-状态：当前合同已接入生产代码，正在完成 hardcut 跨层验收；正常使用仍按实施计划停用。tools.decide 仅供 ROOT 在 bypass-permissions 的 Code Mode 中调用，不提供原生入口或 Subagent JS API。本文件规定当前参数与结果合同，其余底层产品语义沿原 owner。
+状态：当前生效合同。tools.decide 仅供 ROOT 在 bypass-permissions 的 Code Mode 中调用，不提供原生入口或 Subagent JS API。本文件规定当前参数与结果合同，其余底层产品语义沿原 owner。
 
 ## 1. tools.decide：逐项判断文本是否满足条件
 

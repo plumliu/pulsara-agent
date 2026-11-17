@@ -1,6 +1,6 @@
 # Pulsara 网页工具合同与使用教程草案
 
-共用规则见[原生工具索引](../PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 2 章；完整保存、原生 12k／NEXT、JS 完整返回与 Cell 输出沿[统一交付草案](../PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)，存储沿[数据库 hardcut 草案](../PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md)。
+共用规则见[原生工具索引](../archived_docs/PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 2 章；完整保存、原生 12k／NEXT、JS 完整返回与 Cell 输出沿[统一交付草案](../archived_docs/PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)，存储沿[数据库 hardcut 草案](../archived_docs/PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md)。
 
 状态：web_search、web_fetch 已接入原生工具、ROOT JS、用户级配置与设置页。默认使用 Firecrawl → Tavily 无 Key 免费池；可选配置四家之一及自有 API Key，账户计费与静默回退见第 4 章。实施与验证记录见[本轮报告](../output/web-20261117/REPORT.md)。
 

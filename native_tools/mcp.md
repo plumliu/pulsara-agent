@@ -2,11 +2,11 @@
 
 MCP 在后台连接和发现，首条模型请求不等待其完成。关键词搜索仅在当前 scope／parent 内判断目录覆盖；已启用服务尚无当前配置对应的已接纳目录时，返回 ERROR 并说明未完成范围，即使已有命中也保留已知记录和可用调用引用。ERROR 不代表这些部分无效。已禁用及作用域外服务不影响覆盖；同语义重连保留已接纳目录的可搜索性，物理不可用只影响调用准入。查询不会自动等待或重试。
 
-共用规则见[原生工具修订草案索引](../PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 1、2 章；完整保存、原生 12k／NEXT、JS 完整返回和 Cell 图文输出沿[统一交付草案](../PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)，存储沿[数据库 hardcut 草案](../PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md)。发现连接、工具目录及精确详情见[能力查询草案](capabilities.md)第 3 章。
+共用规则见[原生工具修订草案索引](../archived_docs/PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 1、2 章；完整保存、原生 12k／NEXT、JS 完整返回和 Cell 图文输出沿[统一交付草案](../archived_docs/PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)，存储沿[数据库 hardcut 草案](../archived_docs/PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md)。发现连接、工具目录及精确详情见[能力查询草案](capabilities.md)第 3 章。
 
-状态：当前合同已接入生产代码，正在完成 hardcut 跨层验收；正常使用仍按实施计划停用。本文件确定 call_mcp_tool 和 read_mcp_resource 的参数、精简返回值及原生／JS 用法，架构沿[统一 meta 调用草案](../PULSARA_MCP_META_ONLY_CALLING_ARCHITECTURE_DRAFT.zh.md)。ROOT 与子代理统一通过元工具调用远端工具，并可使用资源目录／读取入口；适用 Code Mode 时使用相同固定 API 的 JS 方法。工具调用引用按同 session 共用并在完整查询结果接纳后生效，权限、凭据、Hook、取消及副作用结算复用现有 owner。
+状态：当前生效合同。本文件确定 call_mcp_tool 和 read_mcp_resource 的参数、精简返回值及原生／JS 用法，架构沿[统一 meta 调用草案](../archived_docs/PULSARA_MCP_META_ONLY_CALLING_ARCHITECTURE_DRAFT.zh.md)。ROOT 与子代理统一通过元工具调用远端工具，并可使用资源目录／读取入口；适用 Code Mode 时使用相同固定 API 的 JS 方法。工具调用引用按同 session 共用并在完整查询结果接纳后生效，权限、凭据、Hook、取消及副作用结算复用现有 owner。
 
-合法新上下文的轻量 MCP 服务名称目录可引导按需发现：用 query_capabilities(kind:"MCP", query:任务关键词) 查找合适工具，使用返回的 input_schema 和 invocation.target 调用。名称目录不表示连接就绪，也不提供调用资格；已知合适接口及有效引用可直接复用，实际调用、资源、权限与结算合同保持本文件规则。见[初始目录规范](../PULSARA_MCP_CATALOG_INCREMENTAL_IMPLEMENTATION_SPEC.zh.md)。
+合法新上下文的轻量 MCP 服务名称目录可引导按需发现：用 query_capabilities(kind:"MCP", query:任务关键词) 查找合适工具，使用返回的 input_schema 和 invocation.target 调用。名称目录不表示连接就绪，也不提供调用资格；已知合适接口及有效引用可直接复用，实际调用、资源、权限与结算合同保持本文件规则。见[初始目录规范](../archived_docs/PULSARA_MCP_CATALOG_INCREMENTAL_IMPLEMENTATION_SPEC.zh.md)。
 
 ## 1. call_mcp_tool 的返回类型
 

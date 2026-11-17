@@ -1,8 +1,8 @@
 # Pulsara Agent 协作工具修订与使用教程草案
 
-共用规则见[原生工具修订草案索引](../PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 1、2 章；完整保存、原生 12k／NEXT、JS 完整返回及 Cell 输出沿[统一交付草案](../PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)，正文与业务字段存储沿[数据库 hardcut 草案](../PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md)。
+共用规则见[原生工具修订草案索引](../archived_docs/PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 1、2 章；完整保存、原生 12k／NEXT、JS 完整返回及 Cell 输出沿[统一交付草案](../archived_docs/PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)，正文与业务字段存储沿[数据库 hardcut 草案](../archived_docs/PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md)。
 
-状态：当前合同已接入生产代码，正在完成 hardcut 跨层验收；正常使用仍按实施计划停用。本文件确定 query_agents、send_agent_message、stop_agent、wait_message、tools.run_agent、tools.wait_agent 的参数、精简返回值及调用示例。query_agents、send_agent_message 支持 ROOT 和 Subagent 原生调用；stop_agent 只供 ROOT 使用，ROOT 的 Code Mode 提供这三个工具的对应 JS API。tools.run_agent、tools.wait_agent 为 ROOT 专用、仅 JS 调用；wait_message 为 Subagent 专用、仅原生调用，Subagent 无 JS API。继续沿现有 bypass-permissions 执行条件，不因查询只读而扩大权限。
+状态：当前生效合同。本文件确定 query_agents、send_agent_message、stop_agent、wait_message、tools.run_agent、tools.wait_agent 的参数、精简返回值及调用示例。query_agents、send_agent_message 支持 ROOT 和 Subagent 原生调用；stop_agent 只供 ROOT 使用，ROOT 的 Code Mode 提供这三个工具的对应 JS API。tools.run_agent、tools.wait_agent 为 ROOT 专用、仅 JS 调用；wait_message 为 Subagent 专用、仅原生调用，Subagent 无 JS API。继续沿现有 bypass-permissions 执行条件，不因查询只读而扩大权限。
 
 ## 1. query_agents：查询 Agent、Work 摘要与 Work 详情
 

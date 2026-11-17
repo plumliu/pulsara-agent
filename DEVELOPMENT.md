@@ -4,7 +4,7 @@
 
 Read [AGENTS.md](AGENTS.md) before changing code. Build native resources on the target OS; Windows uses a Linux payload built in WSL2 Ubuntu and an Electron shell built on Windows.
 
-MCP first-request preparation and real-model acceptance follow the [MCP nonblocking startup contract](PULSARA_MCP_NONBLOCKING_STARTUP_IMPLEMENTATION_SPEC.zh.md). MCP networking and optional resource-template discovery follow the [MCP host-network contract](archived_docs/PULSARA_MCP_HOST_NETWORK_AND_OPTIONAL_TEMPLATES_IMPLEMENTATION_SPEC.zh.md).
+MCP first-request preparation and real-model acceptance follow the [MCP nonblocking startup contract](archived_docs/PULSARA_MCP_NONBLOCKING_STARTUP_IMPLEMENTATION_SPEC.zh.md). MCP networking and optional resource-template discovery follow the [MCP host-network contract](archived_docs/PULSARA_MCP_HOST_NETWORK_AND_OPTIONAL_TEMPLATES_IMPLEMENTATION_SPEC.zh.md).
 
 ## Build tools
 

@@ -1,8 +1,8 @@
 # Pulsara 能力变更工具修订与使用教程草案
 
-共用规则见[原生工具修订草案索引](../PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 1、2 章；完整保存、原生 12k／NEXT 及导出沿[统一交付草案](../PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)，结果存储沿[数据库 hardcut 草案](../PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md)。能力查询、最小能力 Target 和刷新入口见[能力查询与刷新草案](capabilities.md)。
+共用规则见[原生工具修订草案索引](../archived_docs/PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 1、2 章；完整保存、原生 12k／NEXT 及导出沿[统一交付草案](../archived_docs/PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)，结果存储沿[数据库 hardcut 草案](../archived_docs/PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md)。能力查询、最小能力 Target 和刷新入口见[能力查询与刷新草案](capabilities.md)。
 
-状态：当前合同已接入生产代码，正在完成 hardcut 跨层验收；正常使用仍按实施计划停用。逐项记录 manage_capability 的修订，当前包含三个独立 Skill action、三个 Hook action、MCP 共用 config、独立连接新增／删除及独立／Plugin 连接统一修改、独立／Plugin MCP 的两个 OAuth action，以及 INSTALL_PLUGIN、SET_PLUGIN_ENABLED、REMOVE_PLUGIN 的参数、返回值、原生示例及错误语义。安装默认值、启停、信任及审阅流程保持现有产品语义；独立及 Plugin MCP 连接的默认使用范围按第 7 章调整。仅 ROOT 原生调用，不提供 JS API；TypeScript 只描述合同，不表示存在脚本入口。
+状态：当前生效合同。逐项记录 manage_capability 的修订，当前包含三个独立 Skill action、三个 Hook action、MCP 共用 config、独立连接新增／删除及独立／Plugin 连接统一修改、独立／Plugin MCP 的两个 OAuth action，以及 INSTALL_PLUGIN、SET_PLUGIN_ENABLED、REMOVE_PLUGIN 的参数、返回值、原生示例及错误语义。安装默认值、启停、信任及审阅流程保持现有产品语义；独立及 Plugin MCP 连接的默认使用范围按第 7 章调整。仅 ROOT 原生调用，不提供 JS API；TypeScript 只描述合同，不表示存在脚本入口。
 
 本文件所有 action 的模型可见 content 都直接说明对象、实际结果及必要失败原因。成功使用“已安装／已更新／已删除”等简短说明；部分失败先说已经完成的操作，再说失败步骤、路径和原因；无法确认时直接说“无法确认……是否已完成”。不向模型解释“采用、结算、状态切点”等内部术语，不重复内部枚举、处理阶段或无助于下一步操作的实现细节。下文实施说明仍可使用内部术语，但不把它们照搬进 content。
 
@@ -932,7 +932,7 @@ ROOT 与子代理均通过 call_mcp_tool 调用其范围内的远端工具，不
 
 默认使用范围不代表连接已启用、Plugin 已开启、Hook 已信任或 OAuth 已授权，具体调用仍沿现有权限及来源准入。显式保存的 ROOT_ONLY 不因普通局部更新、查询或刷新被重置。默认值在配置、Plugin 合成及用户编辑器中保持一致，不新增范围字段或并列状态。
 
-配置采用和重连后，调用引用按实际目标与该工具依据核对：换 endpoint、执行账户、来源或改变该工具策略时，受影响旧引用不能沿用；同目标普通重连完成发现且定义、策略未变时可复用。修改显示名称、其他工具的设置或刷新间隔，不仅因整份配置标识变化就使未变工具引用失效；复用配置和连接 owner 的实际事实，不新增身份体系。原生兼容、降级及恢复规则删除，现有发现与刷新保留，完整规则见[架构草案第 4 章](../PULSARA_MCP_META_ONLY_CALLING_ARCHITECTURE_DRAFT.zh.md#4-能力发现与模型上下文)。
+配置采用和重连后，调用引用按实际目标与该工具依据核对：换 endpoint、执行账户、来源或改变该工具策略时，受影响旧引用不能沿用；同目标普通重连完成发现且定义、策略未变时可复用。修改显示名称、其他工具的设置或刷新间隔，不仅因整份配置标识变化就使未变工具引用失效；复用配置和连接 owner 的实际事实，不新增身份体系。原生兼容、降级及恢复规则删除，现有发现与刷新保留，完整规则见[架构草案第 4 章](../archived_docs/PULSARA_MCP_META_ONLY_CALLING_ARCHITECTURE_DRAFT.zh.md#4-能力发现与模型上下文)。
 
 ### 7.5 config 片段示例与实施核对
 

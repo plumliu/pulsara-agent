@@ -1,8 +1,8 @@
 # Pulsara 多媒体工具修订与使用教程草案
 
-共用规则见[原生工具修订草案索引](../PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 1、2 章；完整保存、原生 12k／NEXT 和 JS 完整返回沿[统一交付草案](../PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)，有序内容、图片资产及引用读取沿[数据库 hardcut 草案](../PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md)。
+共用规则见[原生工具修订草案索引](../archived_docs/PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 1、2 章；完整保存、原生 12k／NEXT 和 JS 完整返回沿[统一交付草案](../archived_docs/PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)，有序内容、图片资产及引用读取沿[数据库 hardcut 草案](../archived_docs/PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md)。
 
-状态：当前合同已接入生产代码，正在完成 hardcut 跨层验收；正常使用仍按实施计划停用。本族四个工具的参数、完整业务值、原生示例及错误语义均在本文件确定。view_image、read_video_frames、read_transcript 提供 ROOT 原生入口和 Code Mode JS API；annotate_media 仅 ROOT 原生，不提供 JS API。本族不向 subagent 开放，不改变 Code Mode 的既有权限模式。
+状态：当前生效合同。本族四个工具的参数、完整业务值、原生示例及错误语义均在本文件确定。view_image、read_video_frames、read_transcript 提供 ROOT 原生入口和 Code Mode JS API；annotate_media 仅 ROOT 原生，不提供 JS API。本族不向 subagent 开放，不改变 Code Mode 的既有权限模式。
 
 ## 1. view_image：读取图片或静态渲染结果
 
@@ -392,7 +392,7 @@ motion 以持续运动为主要场景，适用于体育、影视、自然拍摄�
 
 一个清楚的可见对象可以支持相应出现事实，单张姿态不能独自证明先后、重复或整个范围的缺失。“首次”“第几次”“总次数”或完整区间的否定结论，需要覆盖支持它的过程和可见证据。motion 的范围由问题决定，必要时可长范围或全片读取，不因效率自动缩范围；不新增总时长或累计观察数上限。
 
-一次调用先完成并保存整个请求，后续少读 NEXT 只减少模型阅读，不节省本次已经完成的解码和渲染。JS 内存中的完整结果也不等于模型已读，实际交付的文字和图片才构成模型已取得的证据。完整流程及待实验方向见[三 action 与 motion 产品语义](../PULSARA_MOTION_PRODUCT_SEMANTICS_DRAFT.zh.md)。
+一次调用先完成并保存整个请求，后续少读 NEXT 只减少模型阅读，不节省本次已经完成的解码和渲染。JS 内存中的完整结果也不等于模型已读，实际交付的文字和图片才构成模型已取得的证据。完整流程及待实验方向见[三 action 与 motion 产品语义](../archived_docs/PULSARA_MOTION_PRODUCT_SEMANTICS_DRAFT.zh.md)。
 
 ### 2.2 最简返回值与索引类型
 
@@ -736,7 +736,7 @@ JS 返回完整类型化业务值，不携带原生 tool_result、next 或时间
 
 容器结束与视频结束须区分。选中视频轨终点元数据缺失，而执行中已确认实际视频展示先于请求结束时，overview／detail 应在计划冻结前按真实有效交集完成原有选择；detail 的两秒校验仍针对原始请求。有效证据取得完整后为 SUCCESS，并在 text 说明尾部缺口；不把末帧延长至容器终点，不只跳过失败末目标。motion 继续保留交集内全部实际展示观察。请求完全落在无视频尾部则 ERROR；无法确认展示终点、解码失败或源变化仍按真实错误结算。
 
-这项容器尾隙处理不改变参数和返回形状；有效交集、终点确认与验收要求见[motion 产品语义第 4.1 节](../PULSARA_MOTION_PRODUCT_SEMANTICS_DRAFT.zh.md#41-容器尾部与视频展示终点)。NEXT 仍只读取保存结果，不参与源终点探测。
+这项容器尾隙处理不改变参数和返回形状；有效交集、终点确认与验收要求见[motion 产品语义第 4.1 节](../archived_docs/PULSARA_MOTION_PRODUCT_SEMANTICS_DRAFT.zh.md#41-容器尾部与视频展示终点)。NEXT 仍只读取保存结果，不参与源终点探测。
 
 失败值可保留可解析的请求 target；已取得且属于真实失败业务值的文字、索引及图片继续完整保存，不能将原生错误页作为 JS 完整值。JS 失败沿既有异常通道，在确有业务值时通过 err.result 取得全部失败内容；没有业务值就不伪造。
 

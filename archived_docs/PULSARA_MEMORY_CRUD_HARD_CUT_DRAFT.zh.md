@@ -1,8 +1,10 @@
 # Pulsara 记忆增删查改 hardcut 草案
 
+> 已归档。当前工具参数和用法见 [native_tools/](../native_tools/)。
+
 日期：2026-11-13。
 
-状态：当前实现采用本文的三类别记忆对象、共享 CRUD、完整检索、用户级管理页面及按实际输入安装推进的 P／i 观察状态。数据库与集中 schema 由当前 clean-v0 baseline 建立；工具参数和返回值见[记忆工具草案](native_tools/memory.md)，完整应用的整体验收沿[实施计划](PULSARA_HARD_CUT_IMPLEMENTATION_PLAN.zh.md)。
+状态：当前实现采用本文的三类别记忆对象、共享 CRUD、完整检索、用户级管理页面及按实际输入安装推进的 P／i 观察状态。数据库与集中 schema 由当前 clean-v0 baseline 建立；工具参数和返回值见[记忆工具草案](../native_tools/memory.md)，完整应用的整体验收沿[实施计划](PULSARA_HARD_CUT_IMPLEMENTATION_PLAN.zh.md)。
 
 ## 1. 目标与文档边界
 
@@ -10,7 +12,7 @@
 
 本草案与[有序内容统一存储数据库 hardcut 草案](PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md)并列：本文确定记忆业务对象、数据库修订和管理行为；有序内容草案确定对话、工具结果及队列正文的存储归属。[统一工具结果交付与分页草案](PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)继续负责完整结果、12k 原生分页及 NEXT。
 
-[记忆工具草案](native_tools/memory.md)记录已确定的 remember、query_memory、manage_memory 三个 ROOT 原生工具的参数、完整返回类型、原生示例及失败语义。本文确定对象和底层业务语义，不保留旧关系字段或四类别合同。
+[记忆工具草案](../native_tools/memory.md)记录已确定的 remember、query_memory、manage_memory 三个 ROOT 原生工具的参数、完整返回类型、原生示例及失败语义。本文确定对象和底层业务语义，不保留旧关系字段或四类别合同。
 
 不再维护记忆之间的依赖、替代或冲突关系，不以关系图决定记忆删除、恢复或可用状态。四种旧类别收敛为 USER_PROFILE、RESPONSE_PREFERENCE、FACT；删除 DECISION 类别，决策和计划仍可作为 FACT 正文保存。
 
@@ -405,16 +407,16 @@ notices:
 
 ## 9. 当前生产接点
 
-- [数据库 baseline](src/pulsara_agent/storage/migrations/sql/0000_conversation_kernel_baseline.sql)：memory_facts、memory_relations、memory_embeddings 及相关约束。
-- [模型记忆工具](src/pulsara_agent/conversation_kernel/memory_tools.py)：当前保存、搜索、关系读取、推荐和偏好投影。
-- [记忆写入](src/pulsara_agent/conversation_kernel/_repository/memory.py)：去重、工具结果事务及关系结算。
-- [页面记忆管理](src/pulsara_agent/conversation_kernel/_repository/memory_management.py)：用户修改、删除及一致性检查。
-- [关系删除计算](src/pulsara_agent/conversation_kernel/memory/management.py)：待删除的依赖扩散和替代恢复逻辑。
-- [记忆检索](src/pulsara_agent/conversation_kernel/memory/recall.py)：正文检索、关系查询及偏好选择。
-- [向量维护](src/pulsara_agent/conversation_kernel/memory/embedding_maintainer.py)：现有派生向量更新路径。
-- [记忆输入编排](src/pulsara_agent/conversation_kernel/memory/dispatch.py)：偏好与混合召回来源、刷新及当前预算回退接点。
-- [上下文来源](src/pulsara_agent/conversation_kernel/context_sources.py)与[输入编译](src/pulsara_agent/model_input/compiler.py)：记忆来源的三档注册及降级接点。
-- [运行时观察投影](src/pulsara_agent/model_input/continuity.py)：现有 user role observation 外壳与前缀连续性。
-- [历史召回](src/pulsara_agent/conversation_kernel/history_search.py)与[历史摘录](src/pulsara_agent/conversation_kernel/history_excerpt.py)：混合召回中的 QA／QAQ 候选及摘录构造。
-- [工具目录](src/pulsara_agent/capability/builtin_catalog.py)与[记忆类型说明](src/pulsara_agent/memory/product_contract.py)：公开参数、描述及类别。
-- [用户记忆页面](frontend/components/memory-view.tsx)：现有条目编辑、删除和关系展示。
+- [数据库 baseline](../src/pulsara_agent/storage/migrations/sql/0000_conversation_kernel_baseline.sql)：memory_facts、memory_relations、memory_embeddings 及相关约束。
+- [模型记忆工具](../src/pulsara_agent/conversation_kernel/memory_tools.py)：当前保存、搜索、关系读取、推荐和偏好投影。
+- [记忆写入](../src/pulsara_agent/conversation_kernel/_repository/memory.py)：去重、工具结果事务及关系结算。
+- [页面记忆管理](../src/pulsara_agent/conversation_kernel/_repository/memory_management.py)：用户修改、删除及一致性检查。
+- [关系删除计算](../src/pulsara_agent/conversation_kernel/memory/management.py)：待删除的依赖扩散和替代恢复逻辑。
+- [记忆检索](../src/pulsara_agent/conversation_kernel/memory/recall.py)：正文检索、关系查询及偏好选择。
+- [向量维护](../src/pulsara_agent/conversation_kernel/memory/embedding_maintainer.py)：现有派生向量更新路径。
+- [记忆输入编排](../src/pulsara_agent/conversation_kernel/memory/dispatch.py)：偏好与混合召回来源、刷新及当前预算回退接点。
+- [上下文来源](../src/pulsara_agent/conversation_kernel/context_sources.py)与[输入编译](../src/pulsara_agent/model_input/compiler.py)：记忆来源的三档注册及降级接点。
+- [运行时观察投影](../src/pulsara_agent/model_input/continuity.py)：现有 user role observation 外壳与前缀连续性。
+- [历史召回](../src/pulsara_agent/conversation_kernel/history_search.py)与[历史摘录](../src/pulsara_agent/conversation_kernel/history_excerpt.py)：混合召回中的 QA／QAQ 候选及摘录构造。
+- [工具目录](../src/pulsara_agent/capability/builtin_catalog.py)与[记忆类型说明](../src/pulsara_agent/memory/product_contract.py)：公开参数、描述及类别。
+- [用户记忆页面](../frontend/components/memory-view.tsx)：现有条目编辑、删除和关系展示。

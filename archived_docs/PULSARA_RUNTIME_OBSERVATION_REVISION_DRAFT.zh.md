@@ -1,6 +1,8 @@
 # Pulsara Runtime Observation 修订草案
 
-状态：当前公共消息、Skill／MCP 通知、运行信息与 Plan 交接路径已接入生产代码，已完成 hardcut 跨层及真实 provider 验收；正常应用尚未重启。本文件确定 runtime observation 的公共展示形状、Skill 与 MCP 变化通知，本轮运行信息、规划状态、已批准计划和前轮中断说明的发送与压缩交接，以及 USER_ACTIONS 和 MEMORY_WRITE_HINT 提醒。记忆隐式召回已按[记忆 CRUD 草案第 6 节](PULSARA_MEMORY_CRUD_HARD_CUT_DRAFT.zh.md#6-搜索索引与自动召回)确定业务规则，采用本文件的公共外壳。Hook 附加文字使用[独立消息草案](PULSARA_HOOK_CONTEXT_MESSAGE_REVISION_DRAFT.zh.md)，不再作为本外壳的来源；Plugin 自身变化不单独通知。
+> 已归档。当前工具参数和用法见 [native_tools/](../native_tools/)。
+
+状态：当前公共消息、Skill／MCP 通知、运行信息与 Plan 交接路径已接入生产代码，已完成 hardcut 跨层及真实 provider 验收。本文件确定 runtime observation 的公共展示形状、Skill 与 MCP 变化通知，本轮运行信息、规划状态、已批准计划和前轮中断说明的发送与压缩交接，以及 USER_ACTIONS 和 MEMORY_WRITE_HINT 提醒。记忆隐式召回已按[记忆 CRUD 草案第 6 节](PULSARA_MEMORY_CRUD_HARD_CUT_DRAFT.zh.md#6-搜索索引与自动召回)确定业务规则，采用本文件的公共外壳。Hook 附加文字使用[独立消息草案](PULSARA_HOOK_CONTEXT_MESSAGE_REVISION_DRAFT.zh.md)，不再作为本外壳的来源；Plugin 自身变化不单独通知。
 
 ## 1. 公共模型展示形状
 
@@ -280,7 +282,7 @@ APPROVED_PLAN 使用本次获批调用中保存的完整 plan，不读取 Markdo
 
 首次成功 enter_plan 结束原 turn，自动开启冻结只读权限的规划 turn；不在原 turn 内改写权限。模型已能从该工具调用与结果得知进入规划，不再另发进入提示或持续规划提示。重复 enter_plan 保持原规划 turn。
 
-修订、取消一次审批及十分钟超时按 [Plan 工具草案](native_tools/plan.md)保持当前只读规划 turn；通过最终工具结果和真实用户反馈表达，不另造状态通知。在上述正常审批／退出分支中，只有批准或无方案退出才结束规划 turn，并自动开启恢复原权限的后继 turn。显式 Stop、强制退出和关闭会话仍按各自既有控制语义处理。批准时附 APPROVED_PLAN；无方案退出不附获批计划，也不把旧草案当成批准内容。
+修订、取消一次审批及十分钟超时按 [Plan 工具草案](../native_tools/plan.md)保持当前只读规划 turn；通过最终工具结果和真实用户反馈表达，不另造状态通知。在上述正常审批／退出分支中，只有批准或无方案退出才结束规划 turn，并自动开启恢复原权限的后继 turn。显式 Stop、强制退出和关闭会话仍按各自既有控制语义处理。批准时附 APPROVED_PLAN；无方案退出不附获批计划，也不把旧草案当成批准内容。
 
 runtime 自动开启规划轮、批准后的执行续接和无方案退出后的续接，都按新 turn 规则提供 TURN_CONTEXT，并可附筛选后的 Skill／MCP 净变化。它们不冒充用户输入触发 slash 激活或记忆观察。压缩恢复不重放激活和能力变化历史，也不额外触发记忆召回；真实用户消息／steer 仍沿自身规则处理。初始／压缩后的完整 Skill 目录按第 2 节建立，轻量 MCP 服务目录紧随其后；各自从同次冻结事实初始化新上下文的比较快照。
 
@@ -410,7 +412,7 @@ text 使用建议性语气：已确认的新增、停用或更新直接陈述；
 
 工具改名按旧名不再可见、新名出现处理，不建立别名。暴露设置、会话范围或定义接纳失败造成的工具不可见，也按已确认的目录／可用性变化说明，不一律称为远端删除。连接过程的中间状态不逐次推送，只在合格发送入口报告相对上次已汇报状态的当前净变化。同一服务同时发生几类变化时，合并成一项 text，避免重复通知。
 
-查询指引沿[能力查询草案](native_tools/capabilities.md)的真实参数，不向 query_capabilities 增加 action：kind 始终填 MCP；不填 target 查询服务记录，填 MCP_CONNECTION Target 查询服务内工具目录，填 MCP_TOOL Target 查询工具详情。这些是供模型按需选择的查询入口；已经持有所需工具 Target 时可以直接查详情，不强制从服务列表重新走一遍。通知不指定模型使用哪种调用方式，也不要求模型根据字段差异自行修改旧调用参数。
+查询指引沿[能力查询草案](../native_tools/capabilities.md)的真实参数，不向 query_capabilities 增加 action：kind 始终填 MCP；不填 target 查询服务记录，填 MCP_CONNECTION Target 查询服务内工具目录，填 MCP_TOOL Target 查询工具详情。这些是供模型按需选择的查询入口；已经持有所需工具 Target 时可以直接查详情，不强制从服务列表重新走一遍。通知不指定模型使用哪种调用方式，也不要求模型根据字段差异自行修改旧调用参数。
 
 输入／输出 schema 的任意层级增删或值变化仍由完整已接纳事实比较，不以本表代替检测或验证；对模型归并为“输入参数定义”“声明的返回结构”或更通用的“工具信息已更新”。通知不列 JSON Schema 关键字、完整差异或兼容性分析，不要求模型理解内部字段，也不在无法确定变化影响时猜测旧参数一定不能使用。可提示查询能够取得当前详情和调用引用，供模型自行判断是否需要；既定的引用失效规则保持。
 
@@ -463,7 +465,7 @@ Plugin 来源的 text 示例：“MCP 服务 docs（来自插件 knowledge-tools
 
 压缩本身不发送 MCP 变化通知，不跨上下文补报此前尚未发出的变化，也不注入完整工具目录或远端 schema。成功采用新上下文时，提供当前作用域已启用服务的轻量完整名称目录，并以同次冻结的状态快照初始化比较依据。若重建时无法可靠观察，不用空集伪造快照；后续首次成功观察按恢复通知规则诚实提供当前目录并接受快照，包括当前为空集的情况。仅准备但未采用的压缩候选不改变现有快照。Plan 自动续接与其他新 turn 一样，先与上次已告知快照比较，再按结果通知和替换快照。新上下文初始化比较快照不改变连接、工具定义或调用引用的实际有效性。
 
-通知不承担调用资格。引用仍按该工具实际定义、策略、范围及目标身份决定是否失效；未变工具不因同服务其他工具变化而失效。所有原生与 Cell 调用继续使用已确定的 meta 链路，规则沿[MCP 架构草案](PULSARA_MCP_META_ONLY_CALLING_ARCHITECTURE_DRAFT.zh.md)和[MCP 工具草案](native_tools/mcp.md)。
+通知不承担调用资格。引用仍按该工具实际定义、策略、范围及目标身份决定是否失效；未变工具不因同服务其他工具变化而失效。所有原生与 Cell 调用继续使用已确定的 meta 链路，规则沿[MCP 架构草案](PULSARA_MCP_META_ONLY_CALLING_ARCHITECTURE_DRAFT.zh.md)和[MCP 工具草案](../native_tools/mcp.md)。
 
 删除旧 MCP_CATALOG source 的全量自动摘要、presence 公开展示、FULL／COMPACT／REF_ONLY 三档目录投影和专用配额，以及 direct／meta 分类、降级例外、相关省略计数、资源数量和固定调用教学。不保留旧 source 别名，不将整份目录总摘要或总指纹代替本节的实际变化比较；此处不改变协议、发现、调用及 provider 的真实资源边界，也不新增通知总量 cap。
 
@@ -666,28 +668,28 @@ USER_ACTIONS 只报告当前既有范围内的工作区重建和用户进程控�
 
 P／i 只在既有 provider 输入安装成功后推进：P 为应用偏好追加／全量替换后的完整有效集合；i 先作废已通知的旧版本，再纳入本次新增／新版内容。不把 i 替换成本次 j，也不套用 Skill／MCP 的上次已告知快照替换规则；候选准备和模型回答都不是结算边界。
 
-正文沿[第 6.4 节](PULSARA_MEMORY_CRUD_HARD_CUT_DRAFT.zh.md#64-单一正文与条目限制)完整交付，删除 FULL／COMPACT／REF_ONLY 及记忆专属预算降级路径，不引入原生工具的 12k／NEXT 分页。显式记忆工具仍按[native_tools/memory.md](native_tools/memory.md)保存并返回完整业务结果，不套用隐式 i／j 去重。
+正文沿[第 6.4 节](PULSARA_MEMORY_CRUD_HARD_CUT_DRAFT.zh.md#64-单一正文与条目限制)完整交付，删除 FULL／COMPACT／REF_ONLY 及记忆专属预算降级路径，不引入原生工具的 12k／NEXT 分页。显式记忆工具仍按[native_tools/memory.md](../native_tools/memory.md)保存并返回完整业务结果，不套用隐式 i／j 去重。
 
 ## 12. 实施接点与核对
 
-相关合同：[能力查询](native_tools/capabilities.md)、[文件工具](native_tools/filesystem.md)、[Plan 工具](native_tools/plan.md)、[统一交付](PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)、[有序内容数据库](PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md)。Plan 工具按本文件的 turn 边界、三类说明和交接位置同步；其他文档的对应旧 Skill 叙述在后续同步时按本文件收敛，不据旧叙述恢复自动全文注入。
+相关合同：[能力查询](../native_tools/capabilities.md)、[文件工具](../native_tools/filesystem.md)、[Plan 工具](../native_tools/plan.md)、[统一交付](PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)、[有序内容数据库](PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md)。Plan 工具按本文件的 turn 边界、三类说明和交接位置同步；其他文档的对应旧 Skill 叙述在后续同步时按本文件收敛，不据旧叙述恢复自动全文注入。
 
 实施 hardcut 时必须删除旧的“每次模型请求或普通工具续跑都尝试推送 Skill／MCP 目录”规则，以及 MCP 按展示摘要文字判重的路径，改为第 1.3 节的发送入口和实际相关事实比较；不能只替换 source／body 外壳。底层发现、刷新、能力采用及实际调用准入仍及时运行，不因通知延后而冻结能力事实。
 
 | 当前接点 | 修订边界 |
 | --- | --- |
-| [runtime observation 编解码与 source heads](src/pulsara_agent/model_input/continuity.py) | 保留 source／body 外壳，body 改 text＋可选 target 数组；删除公开 presence，内部必要事实不从自然语言反解析 |
-| [来源采集](src/pulsara_agent/conversation_kernel/context_sources.py)及[编译器](src/pulsara_agent/model_input/compiler.py) | 初始目录与平时增量分开；按第 6 节合并本轮运行信息、限定 Plan 说明时机和位置；删除旧独立规划提示、Skill 的空 body 状态展示和全文激活注入，不重写已安装前缀 |
-| [Skill 渲染](src/pulsara_agent/capability/render.py)及[激活解析](src/pulsara_agent/capability/resolver.py) | 目录采用 name／description／SKILL Target；激活只认 slash，输出 read_file 优先提示；移除旧 16 项数量限制与全文载体专用预算 |
-| [原生与 JS 工具执行](src/pulsara_agent/conversation_kernel/tool_execution.py)及[文件读取](src/pulsara_agent/tools/builtins/filesystem.py) | 在共同读取事实边界识别合法 Skill；不将原生是否整页交付当纳入条件 |
-| [旧压缩技能保留](src/pulsara_agent/conversation_kernel/compaction/retained_skill.py)及[压缩后输入准备](src/pulsara_agent/conversation_kernel/provider_dispatch.py) | 删除独立正文 source 和旧全文证明，改在 TODO／PCA 旁交接待读 Target，并核对当前来源状态 |
-| [Plan 控制与续接](src/pulsara_agent/conversation_kernel/plan_runtime.py)、[Plan 事务](src/pulsara_agent/conversation_kernel/_repository/plans.py)及[Runtime 交接](src/pulsara_agent/conversation_kernel/compaction/runtime_handoff.py) | 每个新 turn 提供冻结运行信息，并可附相关能力净变化；新 turn 起始与压缩后的 TODO／PCA 状态交接分开；规划压缩引用进入前 turn A 最后一条已交付用户输入，执行压缩承接完整获批原文；自动续接不触发 slash 激活或记忆观察，空闲压缩不提供 Runtime 交接 |
-| [MCP 发现与定义事实](src/pulsara_agent/conversation_kernel/mcp/discovery.py)、[schema 接纳](src/pulsara_agent/conversation_kernel/mcp/schema.py)、[目录与连接 owner](src/pulsara_agent/conversation_kernel/mcp/supervisor.py)及[执行策略](src/pulsara_agent/conversation_kernel/tool_surface.py) | 复用完整已接纳 schema、说明、配置、范围与策略事实；按第 7 节比较变化，不新增协议解析器或刷新路径；不把 SDK 未纳入定义事实的元数据宣称为已有追踪能力 |
-| [MCP 旧展示](src/pulsara_agent/conversation_kernel/context_sources.py)、[摘要判重与 source heads](src/pulsara_agent/model_input/compiler.py)及[输入准备](src/pulsara_agent/conversation_kernel/provider_dispatch.py) | MCP_CATALOG 提供新上下文的轻量初始服务目录，MCP_CATALOG_CHANGES 提供后续净变化；只保存上次已告知快照，每个新 turn 首次输入或本次用户主动 steer 准备汇报时临时计算最新净 diff，有相关变化才通知，输入安装成功后用生成本次通知所依据的快照替换旧快照，ABA 不通知；采用新上下文时初始化比较快照，不保留跨上下文变化历史 |
-| [前轮事实读取](src/pulsara_agent/conversation_kernel/reader.py)、[正文采集](src/pulsara_agent/conversation_kernel/context_sources.py)、[输入编译](src/pulsara_agent/model_input/compiler.py)及[压缩事实承接](src/pulsara_agent/conversation_kernel/compaction/planner.py) | 按第 8 节只在新 turn 首次输入及活动 turn 压缩恢复时提供适用的简短中断说明；迟到结果沿原路径交付，不重复汇总；删除公开字段包装、presence、清空消息和双份正文，保留中断与工具结算事实 |
-| [用户控制与提醒暂存](src/pulsara_agent/conversation_kernel/host_controls.py)、[输入准备](src/pulsara_agent/conversation_kernel/provider_dispatch.py)及[来源投影](src/pulsara_agent/conversation_kernel/context_sources.py) | 按第 9 节只报告工作区重建与进程控制，合格入口才取出，text＋可选 PROCESS Target 替代旧公开包装；压缩不重放，保持既有尽力交付，进程控制及工作区恢复继续复用底层能力 |
-| [写入提示匹配](src/pulsara_agent/conversation_kernel/memory/hints.py)、[输入准备](src/pulsara_agent/conversation_kernel/provider_dispatch.py)及[记忆来源组装](src/pulsara_agent/conversation_kernel/memory/dispatch.py) | 按第 10 节复用既有写入门控；只检查本次新采用的 ROOT 用户输入，同批任一命中且最终策略允许时发送一条 text 提醒，不在普通续跑或压缩交接中重复触发 |
-| [记忆输入编排](src/pulsara_agent/conversation_kernel/memory/dispatch.py)、[输入准备](src/pulsara_agent/conversation_kernel/provider_dispatch.py)、[记忆投影与检索入口](src/pulsara_agent/conversation_kernel/memory_tools.py)及[输入编译](src/pulsara_agent/model_input/compiler.py) | 按第 11 节及记忆 CRUD 草案统一为 MEMORY_RECALL，body 使用 text＋可选 target 的对象数组承载三部分文字投影；仅在新采用 ROOT 真人消息／主动 steer 时检查，删除普通工具续跑的偏好刷新分支；保留独立偏好选择与混合召回，删除双份偏好消息及预算降级，复用输入安装边界推进 P／i |
+| [runtime observation 编解码与 source heads](../src/pulsara_agent/model_input/continuity.py) | 保留 source／body 外壳，body 改 text＋可选 target 数组；删除公开 presence，内部必要事实不从自然语言反解析 |
+| [来源采集](../src/pulsara_agent/conversation_kernel/context_sources.py)及[编译器](../src/pulsara_agent/model_input/compiler.py) | 初始目录与平时增量分开；按第 6 节合并本轮运行信息、限定 Plan 说明时机和位置；删除旧独立规划提示、Skill 的空 body 状态展示和全文激活注入，不重写已安装前缀 |
+| [Skill 渲染](../src/pulsara_agent/capability/render.py)及[激活解析](../src/pulsara_agent/capability/resolver.py) | 目录采用 name／description／SKILL Target；激活只认 slash，输出 read_file 优先提示；移除旧 16 项数量限制与全文载体专用预算 |
+| [原生与 JS 工具执行](../src/pulsara_agent/conversation_kernel/tool_execution.py)及[文件读取](../src/pulsara_agent/tools/builtins/filesystem.py) | 在共同读取事实边界识别合法 Skill；不将原生是否整页交付当纳入条件 |
+| [旧压缩技能保留](../src/pulsara_agent/conversation_kernel/compaction/retained_skill.py)及[压缩后输入准备](../src/pulsara_agent/conversation_kernel/provider_dispatch.py) | 删除独立正文 source 和旧全文证明，改在 TODO／PCA 旁交接待读 Target，并核对当前来源状态 |
+| [Plan 控制与续接](../src/pulsara_agent/conversation_kernel/plan_runtime.py)、[Plan 事务](../src/pulsara_agent/conversation_kernel/_repository/plans.py)及[Runtime 交接](../src/pulsara_agent/conversation_kernel/compaction/runtime_handoff.py) | 每个新 turn 提供冻结运行信息，并可附相关能力净变化；新 turn 起始与压缩后的 TODO／PCA 状态交接分开；规划压缩引用进入前 turn A 最后一条已交付用户输入，执行压缩承接完整获批原文；自动续接不触发 slash 激活或记忆观察，空闲压缩不提供 Runtime 交接 |
+| [MCP 发现与定义事实](../src/pulsara_agent/conversation_kernel/mcp/discovery.py)、[schema 接纳](../src/pulsara_agent/conversation_kernel/mcp/schema.py)、[目录与连接 owner](../src/pulsara_agent/conversation_kernel/mcp/supervisor.py)及[执行策略](../src/pulsara_agent/conversation_kernel/tool_surface.py) | 复用完整已接纳 schema、说明、配置、范围与策略事实；按第 7 节比较变化，不新增协议解析器或刷新路径；不把 SDK 未纳入定义事实的元数据宣称为已有追踪能力 |
+| [MCP 旧展示](../src/pulsara_agent/conversation_kernel/context_sources.py)、[摘要判重与 source heads](../src/pulsara_agent/model_input/compiler.py)及[输入准备](../src/pulsara_agent/conversation_kernel/provider_dispatch.py) | MCP_CATALOG 提供新上下文的轻量初始服务目录，MCP_CATALOG_CHANGES 提供后续净变化；只保存上次已告知快照，每个新 turn 首次输入或本次用户主动 steer 准备汇报时临时计算最新净 diff，有相关变化才通知，输入安装成功后用生成本次通知所依据的快照替换旧快照，ABA 不通知；采用新上下文时初始化比较快照，不保留跨上下文变化历史 |
+| [前轮事实读取](../src/pulsara_agent/conversation_kernel/reader.py)、[正文采集](../src/pulsara_agent/conversation_kernel/context_sources.py)、[输入编译](../src/pulsara_agent/model_input/compiler.py)及[压缩事实承接](../src/pulsara_agent/conversation_kernel/compaction/planner.py) | 按第 8 节只在新 turn 首次输入及活动 turn 压缩恢复时提供适用的简短中断说明；迟到结果沿原路径交付，不重复汇总；删除公开字段包装、presence、清空消息和双份正文，保留中断与工具结算事实 |
+| [用户控制与提醒暂存](../src/pulsara_agent/conversation_kernel/host_controls.py)、[输入准备](../src/pulsara_agent/conversation_kernel/provider_dispatch.py)及[来源投影](../src/pulsara_agent/conversation_kernel/context_sources.py) | 按第 9 节只报告工作区重建与进程控制，合格入口才取出，text＋可选 PROCESS Target 替代旧公开包装；压缩不重放，保持既有尽力交付，进程控制及工作区恢复继续复用底层能力 |
+| [写入提示匹配](../src/pulsara_agent/conversation_kernel/memory/hints.py)、[输入准备](../src/pulsara_agent/conversation_kernel/provider_dispatch.py)及[记忆来源组装](../src/pulsara_agent/conversation_kernel/memory/dispatch.py) | 按第 10 节复用既有写入门控；只检查本次新采用的 ROOT 用户输入，同批任一命中且最终策略允许时发送一条 text 提醒，不在普通续跑或压缩交接中重复触发 |
+| [记忆输入编排](../src/pulsara_agent/conversation_kernel/memory/dispatch.py)、[输入准备](../src/pulsara_agent/conversation_kernel/provider_dispatch.py)、[记忆投影与检索入口](../src/pulsara_agent/conversation_kernel/memory_tools.py)及[输入编译](../src/pulsara_agent/model_input/compiler.py) | 按第 11 节及记忆 CRUD 草案统一为 MEMORY_RECALL，body 使用 text＋可选 target 的对象数组承载三部分文字投影；仅在新采用 ROOT 真人消息／主动 steer 时检查，删除普通工具续跑的偏好刷新分支；保留独立偏好选择与混合召回，删除双份偏好消息及预算降级，复用输入安装边界推进 P／i |
 
 实施验证应覆盖六类来源、原生与 JS、部分读取、同名不同副本、终端读取不追踪、slash 与自然语言名称区分、目录新增启停移除及更新、压缩后目录刷新与待读强制提示、删除禁用过滤、来源失败不伪装空值，以及同 epoch 前缀不改写。保留实际来源、权限、读取、顺序和压缩连续性的行为验证；不新增只证明字段已删的测试。
 

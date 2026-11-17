@@ -2,9 +2,9 @@
 
 MCP 在后台连接和发现，首条模型请求不等待其完成。关键词搜索仅在当前 scope／parent 内判断目录覆盖；已启用服务尚无当前配置对应的已接纳目录时，返回 ERROR 并说明未完成范围，即使已有命中也保留已知记录和可用调用引用。ERROR 不代表这些部分无效。已禁用及作用域外服务不影响覆盖；同语义重连保留已接纳目录的可搜索性，物理不可用只影响调用准入。查询不会自动等待或重试。
 
-共用规则见[原生工具修订草案索引](../PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 1、2 章；完整保存、原生 12k／NEXT、JS 完整返回及 Cell 输出沿[统一交付草案](../PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)，唯一正文及业务字段归属沿[数据库 hardcut 草案](../PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md)。
+共用规则见[原生工具修订草案索引](../archived_docs/PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 1、2 章；完整保存、原生 12k／NEXT、JS 完整返回及 Cell 输出沿[统一交付草案](../archived_docs/PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)，唯一正文及业务字段归属沿[数据库 hardcut 草案](../archived_docs/PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md)。
 
-状态：当前合同已接入生产代码，正在完成 hardcut 跨层验收；正常使用仍按实施计划停用。本文件确定 query_capabilities 的 SKILL、HOOK、MCP、PLUGIN 四类必填 kind、最小 Target、参数、返回字段、原生／JS 用法和失败语义、MCP 关键词搜索，以及 reload_capabilities 的无参数原生调用和精简结果。manage_capability 单列在[能力变更工具草案](manage_capability.md)，已确定的管理 action 及参数、结果以该草案为准，其他 action 不由本文件推定。SKILL、HOOK、PLUGIN 沿 ROOT 原生及 Code Mode JS 的来源查询边界，不因分类调整开放子代理的本地来源查询；MCP 保留原调用者的来源及运行目录范围。reload_capabilities 保持仅 ROOT 原生、bypass 权限调用，不提供 JS API。call_mcp_tool 及 read_mcp_resource 的参数、原生／JS 返回和用法见[MCP 接入草案](mcp.md)。
+状态：当前生效合同。本文件确定 query_capabilities 的 SKILL、HOOK、MCP、PLUGIN 四类必填 kind、最小 Target、参数、返回字段、原生／JS 用法和失败语义、MCP 关键词搜索，以及 reload_capabilities 的无参数原生调用和精简结果。manage_capability 单列在[能力变更工具草案](manage_capability.md)，已确定的管理 action 及参数、结果以该草案为准，其他 action 不由本文件推定。SKILL、HOOK、PLUGIN 沿 ROOT 原生及 Code Mode JS 的来源查询边界，不因分类调整开放子代理的本地来源查询；MCP 保留原调用者的来源及运行目录范围。reload_capabilities 保持仅 ROOT 原生、bypass 权限调用，不提供 JS API。call_mcp_tool 及 read_mcp_resource 的参数、原生／JS 返回和用法见[MCP 接入草案](mcp.md)。
 
 ## 1. query_capabilities：SKILL 分支
 
@@ -606,7 +606,7 @@ NEXT 和导出只读冻结记录，不重新发现 Hook、读取当前配置、�
 
 ## 3. query_capabilities：MCP 分支
 
-合法新上下文在 Skill 目录后提供当前作用域已启用 MCP 服务的轻量名称目录及固定发现指引，见[初始目录规范](../PULSARA_MCP_CATALOG_INCREMENTAL_IMPLEMENTATION_SPEC.zh.md)。名称来自公开连接 Target 的 server_id，Plugin 只补来源名称；启用不等于就绪，同名也不代表同一连接。实际 Target、工具接口和 invocation.target 仍由本查询取得。可直接按任务关键词搜索匹配工具；已有足够接口说明和有效引用时直接调用，不必重新逐层列服务、列工具、查详情。查询参数及返回类型不变。
+合法新上下文在 Skill 目录后提供当前作用域已启用 MCP 服务的轻量名称目录及固定发现指引，见[初始目录规范](../archived_docs/PULSARA_MCP_CATALOG_INCREMENTAL_IMPLEMENTATION_SPEC.zh.md)。名称来自公开连接 Target 的 server_id，Plugin 只补来源名称；启用不等于就绪，同名也不代表同一连接。实际 Target、工具接口和 invocation.target 仍由本查询取得。可直接按任务关键词搜索匹配工具；已有足够接口说明和有效引用时直接调用，不必重新逐层列服务、列工具、查详情。查询参数及返回类型不变。
 
 ### 3.1 查询层次、搜索与范围
 
@@ -1064,7 +1064,7 @@ directory 的 object.value 为 McpToolListRecord，inspected 的 object.value �
 
 新查询和新调用引用解析使用当前已接纳、当前范围内的目录，不依附 provider 冻结工具视图。继续复用现有 SDK 通知、完整刷新、已配置周期刷新及重连发现；收到变动通知先按原 owner 暂挡新准入，完整刷新后才确认具体增删。刷新失败或部分目录不可读不确认删除，也不要求每次查询或调用都重新 listing。
 
-某工具的完整原始 description、input_schema、output_schema、实际执行策略或目标身份变化时，其旧引用按实际依据失效，模型重新查询；不计算原生 schema 兼容、降级或恢复。不同 query 或摘录位置不改变工具定义，也不使引用失效。其他工具未变则保留其引用。换 endpoint、账户或来源不能仅凭同名同 schema 继承旧调用资格；规则见[架构草案第 4 章](../PULSARA_MCP_META_ONLY_CALLING_ARCHITECTURE_DRAFT.zh.md#4-能力发现与模型上下文)。
+某工具的完整原始 description、input_schema、output_schema、实际执行策略或目标身份变化时，其旧引用按实际依据失效，模型重新查询；不计算原生 schema 兼容、降级或恢复。不同 query 或摘录位置不改变工具定义，也不使引用失效。其他工具未变则保留其引用。换 endpoint、账户或来源不能仅凭同名同 schema 继承旧调用资格；规则见[架构草案第 4 章](../archived_docs/PULSARA_MCP_META_ONLY_CALLING_ARCHITECTURE_DRAFT.zh.md#4-能力发现与模型上下文)。
 
 服务记录显示关闭、连接失败等可核实状态，不直接表示查询失败。精确目标不存在、无法完整取得请求的目录或参数分支错误时为 ERROR；取消为 CANCELLED。content 保留原因及实际已取得的业务记录，JS 通过实际存在的 err.result 取得完整失败值；不伪造结果、调用引用或 schema，不新增 partial、错误枚举或恢复任务。
 

@@ -1,8 +1,8 @@
 # Pulsara Code Mode 控制工具修订与使用教程草案
 
-共用规则见[原生工具修订草案索引](../PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 1、2 章；完整结果保存、原生 12k 分页及 NEXT 沿[统一交付草案](../PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)。
+共用规则见[原生工具修订草案索引](../archived_docs/PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 1、2 章；完整结果保存、原生 12k 分页及 NEXT 沿[统一交付草案](../archived_docs/PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)。
 
-状态：当前合同已接入生产代码，正在完成 hardcut 跨层验收；正常使用仍按实施计划停用。本族包括 exec_cell、query_cells、manage_cell，均为 ROOT 原生控制工具，不提供 JS API，继续沿现有 bypass_permissions 权限规则开放。本文件确定三个工具的参数、精简返回值、原生示例及错误边界。TypeScript 只描述合同，不表示存在脚本入口。
+状态：当前生效合同。本族包括 exec_cell、query_cells、manage_cell，均为 ROOT 原生控制工具，不提供 JS API，继续沿现有 bypass_permissions 权限规则开放。本文件确定三个工具的参数、精简返回值、原生示例及错误边界。TypeScript 只描述合同，不表示存在脚本入口。
 
 ## 1. exec_cell：启动独立 JavaScript 脚本
 
@@ -617,4 +617,4 @@ next: null
 
 Code Mode 当前物理 profile 为每 Cell 32MiB 在途数据、Host 合计 128MiB，最多四个活动 QuickJS VM；每个 VM 的 guest heap 为 64MiB。额度覆盖源码、参数、待返回传输和尚未确认入队的输出；图片先读全局资产 metadata 预留同一额度，再加载实际 payload。它们约束同时占用，不限制累计输出、调用次数、任务历史或脚本寿命；没有余量时明确报告实际资源失败，不能截断成功返回或偷偷分页。
 
-接纳确认、永久拒绝与停止释放原 reservation；未知接纳结果保留原输出直至确认。完整 JS 返回与 ROOT 独立 steer 交付保持分离。资源实验和实测峰值见[统一交付合同第 9.1 节](../PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md#91-code-mode-的执行内存与暂存数据)。
+接纳确认、永久拒绝与停止释放原 reservation；未知接纳结果保留原输出直至确认。完整 JS 返回与 ROOT 独立 steer 交付保持分离。资源实验和实测峰值见[统一交付合同第 9.1 节](../archived_docs/PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md#91-code-mode-的执行内存与暂存数据)。

@@ -1,8 +1,10 @@
 # Pulsara 统一工具结果交付与分页 hard cut 草案
 
+> 已归档。当前工具参数和用法见 [native_tools/](../native_tools/)。
+
 日期：2026-11-12。
 
-状态：完整结果接受、保存、读取、原生分页、NEXT、JS／Cell 交付和逐工具消费者已按[实施计划](PULSARA_HARD_CUT_IMPLEMENTATION_PLAN.zh.md)接通，已完成跨层及真实 provider 验收。Pulsara 正常应用尚未重启。实施采用单一 hardcut 路径，同步代码、模型接口、clean-v0、协议、测试、Skills 与相关规格。
+状态：完整结果接受、保存、读取、原生分页、NEXT、JS／Cell 交付和逐工具消费者已按[实施计划](PULSARA_HARD_CUT_IMPLEMENTATION_PLAN.zh.md)接通，已完成跨层及真实 provider 验收。实施采用单一 hardcut 路径，同步代码、模型接口、clean-v0、协议、测试、Skills 与相关规格。
 
 数据库层优先按[有序内容统一存储 hardcut 草案](PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md)明确并实现存储基础；允许停用 Pulsara 后先重建新库，按已定工具合同逐步接通消费者，验收后恢复使用。本文件负责完整结果、分页与模型投影合同，不要求建库时全部交付链路已经可用。各工具及 read_file 原生 NEXT 分支的具体合同见工具分篇文档，资源阈值实验单列。
 
@@ -101,7 +103,7 @@ find_files 将命中文件保存为 type:target 内容项，value 保存 PATH Ta
 
 工具结果可以与原文件或原会话包含相同文字：QA 摘录、匹配行或历史阅读正文都是本次查询取得的业务结果，按该结果完整保存，不强行改成原文引用。正文不重复维护约束同一结果的平行权威副本，不禁止不同业务发生出现相同文字；NEXT 补页不另存正文的规则不扩展为所有查询结果去重。
 
-exit_plan 另按 [Plan 工具草案](native_tools/plan.md#33-数据库与-markdown-两份保存)保留数据库方案调用参数，并自动尝试另存 .pulsara/plans/ Markdown。可选 summary 用作文件名标题，默认方案.md，重名用 (2)、(3) 顺延。提交方案后阻塞等待审批，打开卡片不先返回 SUCCESS；用户决定或十分钟超时后才产生一次最终工具结果。修订为 SUCCESS，取消本次审批或超时为 CANCELLED，三者均将结果交给当前只读轮继续，规划保持活动；由模型决定是否退出，不恢复权限、不创建修订后继轮。只有批准或无方案退出才结束规划及原轮、恢复保存的权限并自动续接。修订结果仅简短说明决定，完整有序图文及批注反馈另沿已有用户输入路径交付一次，保留来源和图片引用，不复制进工具结果；最终结果先交付，反馈及已接纳补充按已有安全点输入顺序处理。
+exit_plan 另按 [Plan 工具草案](../native_tools/plan.md#33-数据库与-markdown-两份保存)保留数据库方案调用参数，并自动尝试另存 .pulsara/plans/ Markdown。可选 summary 用作文件名标题，默认方案.md，重名用 (2)、(3) 顺延。提交方案后阻塞等待审批，打开卡片不先返回 SUCCESS；用户决定或十分钟超时后才产生一次最终工具结果。修订为 SUCCESS，取消本次审批或超时为 CANCELLED，三者均将结果交给当前只读轮继续，规划保持活动；由模型决定是否退出，不恢复权限、不创建修订后继轮。只有批准或无方案退出才结束规划及原轮、恢复保存的权限并自动续接。修订结果仅简短说明决定，完整有序图文及批注反馈另沿已有用户输入路径交付一次，保留来源和图片引用，不复制进工具结果；最终结果先交付，反馈及已接纳补充按已有安全点输入顺序处理。
 
 文件写入失败不阻止审批，也不单独改变最终状态；原因进入最终 content，不返回未保存文件的 PATH Target。文件完整保存成功时，最终结果可返回顶层 PATH Target，审批及执行仍以数据库中的本次参数为准。结果不回传方案全文；tool_result 导出的仍是最终简短结果，等待中不生成工具结果页或 NEXT。无方案退出不等待审批、不创建文件。提交或决议状态未确认时如实说明，不宣称失败或自动重做。数据库约束须允许 OPEN 审批原轮 RUNNING、尚无结果，结算时关联唯一最终结果；修订不要求后继 entry，具体见数据库 hardcut 草案。
 
@@ -187,7 +189,7 @@ next: <本次返回的完整 NEXT Target>
 
 ## 5. read_file 续读与稳定性
 
-模型调用原生工具 `read_file`，将上一条原生结果中 `next` 的完整值原样填入唯一参数 `target`，不自行拼装 Target。NEXT 只用于原生结果续读，不进入 Code Mode；PATH 读取仍支持原生及 JS。具体参数、返回形状、图文及跨页示例见[文件工具草案第 1.10 节](native_tools/filesystem.md#110-next-target仅原生续读冻结结果)。
+模型调用原生工具 `read_file`，将上一条原生结果中 `next` 的完整值原样填入唯一参数 `target`，不自行拼装 Target。NEXT 只用于原生结果续读，不进入 Code Mode；PATH 读取仍支持原生及 JS。具体参数、返回形状、图文及跨页示例见[文件工具草案第 1.10 节](../native_tools/filesystem.md#110-next-target仅原生续读冻结结果)。
 
 原生 `read_file` 接受返回的 NEXT Target，读取同一次已保存工具结果的未交付内容，每次按共同 12k 交付一页，支持纯文本和图文页面；不回到原业务工具。结果只用 meta.status 表达本次读取状态，content 为实际续读正文，不额外回显输入 NEXT、顶层业务 target 或文件属性。正常后续页面继续返回同一份被读取结果的完整 `tool_result` Target；next 指向原结果在本页之后的位置，末页为 null，不为 read_file 自己建立另一条分页链。原业务状态与本次读取状态分开。NEXT 失败按第 3.1 节处理。
 
@@ -203,7 +205,7 @@ JS 原工具调用直接取得完整业务值进入内存，不分页、不产�
 
 ## 6. write_file 导出
 
-write_file 的原生与 ROOT JS 入口共用两个闭合参数分支：target＋content 创建文本，或 target＋tool_result_target 导出完整工具结果；content 与 tool_result_target 必须且只能提供一个。完整类型、原生／JS 示例及失败语义见[文件工具草案第 2 章](native_tools/filesystem.md#2-write_file创建文本或导出完整工具结果)。以下为原生调用示意：
+write_file 的原生与 ROOT JS 入口共用两个闭合参数分支：target＋content 创建文本，或 target＋tool_result_target 导出完整工具结果；content 与 tool_result_target 必须且只能提供一个。完整类型、原生／JS 示例及失败语义见[文件工具草案第 2 章](../native_tools/filesystem.md#2-write_file创建文本或导出完整工具结果)。以下为原生调用示意：
 
 ```text
 工具：write_file
@@ -342,9 +344,9 @@ provider 可能按模型和 detail 再缩放或切块；原样发送不承诺模
 
 MCP SDK 拥有协议解析和内容类型。当前依赖的 `CallToolResult.content` 是有序列表，正式 `TextContent` 与 `ImageContent` 可以交错；Pulsara 不复制 MCP 解析器或根据正文外形猜图片。
 
-远端 MCP 工具统一通过 call_mcp_tool 调用，ROOT 与子代理均使用该入口；适用 Code Mode 时使用 tools.call_mcp_tool。删除远端工具的 provider 原生安装、Cell 独立方法和 DIRECT 分支，内置工具的原生安装及前缀冻结机制保留。架构边界见[统一 meta 调用草案](PULSARA_MCP_META_ONLY_CALLING_ARCHITECTURE_DRAFT.zh.md)。该元工具业务返回为：meta 只含 status:SUCCESS／ERROR／CANCELLED，content 为转换后的有序 text／image 数组，structuredContent 仅在服务提供时原样保留。不返回业务层面的顶层 target、调用引用或专属 result 包装。原生时间、tool_result 及 next 沿共用外壳；JS 只取得完整业务值，不带原生外壳或展示分页。target／arguments 参数与原生／JS 示例见[MCP 接入草案](native_tools/mcp.md)。
+远端 MCP 工具统一通过 call_mcp_tool 调用，ROOT 与子代理均使用该入口；适用 Code Mode 时使用 tools.call_mcp_tool。删除远端工具的 provider 原生安装、Cell 独立方法和 DIRECT 分支，内置工具的原生安装及前缀冻结机制保留。架构边界见[统一 meta 调用草案](PULSARA_MCP_META_ONLY_CALLING_ARCHITECTURE_DRAFT.zh.md)。该元工具业务返回为：meta 只含 status:SUCCESS／ERROR／CANCELLED，content 为转换后的有序 text／image 数组，structuredContent 仅在服务提供时原样保留。不返回业务层面的顶层 target、调用引用或专属 result 包装。原生时间、tool_result 及 next 沿共用外壳；JS 只取得完整业务值，不带原生外壳或展示分页。target／arguments 参数与原生／JS 示例见[MCP 接入草案](../native_tools/mcp.md)。
 
-read_mcp_resource 使用独立固定入口，参数仅 target：MCP_CONNECTION 列当前已接纳资源／模板目录，MCP_RESOURCE 读取具体 URI，不经 tools/call 或工具调用引用。目录使用 text／object，具体资源记录给 MCP_RESOURCE Target，模板给实际 server_id／uri_template；读取将正式 ReadResourceResult.contents 按原顺序转为 URI／MIME 说明及 text／image，不新增 structuredContent。文本保持原样，图片 blob 逐项解码保存为实际资产，坏图原位 text 并以 ERROR 保留其余内容；其他二进制按确定性文字保留完整公开载荷，不隐式解析文档、播放媒体或读取链接。ROOT／子代理和原生／JS 沿现有调用范围，原生模型能力不足及图片读取失败使用第 8.2 节投影，JS 业务值不因模型能力改变。两个分支都完整保存后再原生 12k／NEXT，JS 取得完整值；NEXT 不重新 listing 或请求 resources/read。具体类型和示例见[MCP 接入草案第 4 章](native_tools/mcp.md#4-read_mcp_resource按需列目录与读取资源)。
+read_mcp_resource 使用独立固定入口，参数仅 target：MCP_CONNECTION 列当前已接纳资源／模板目录，MCP_RESOURCE 读取具体 URI，不经 tools/call 或工具调用引用。目录使用 text／object，具体资源记录给 MCP_RESOURCE Target，模板给实际 server_id／uri_template；读取将正式 ReadResourceResult.contents 按原顺序转为 URI／MIME 说明及 text／image，不新增 structuredContent。文本保持原样，图片 blob 逐项解码保存为实际资产，坏图原位 text 并以 ERROR 保留其余内容；其他二进制按确定性文字保留完整公开载荷，不隐式解析文档、播放媒体或读取链接。ROOT／子代理和原生／JS 沿现有调用范围，原生模型能力不足及图片读取失败使用第 8.2 节投影，JS 业务值不因模型能力改变。两个分支都完整保存后再原生 12k／NEXT，JS 取得完整值；NEXT 不重新 listing 或请求 resources/read。具体类型和示例见[MCP 接入草案第 4 章](../native_tools/mcp.md#4-read_mcp_resource按需列目录与读取资源)。
 
 资源 blob 缺 MIME 时，复用现有图片 owner 识别及校验；有效图片保存为真实资产，无法识别为图片的内容按未知二进制完整保留 Base64 文字，省略 MIME 说明，不误报为坏图。服务明确声明图片类型或已可靠识别为图片后，验证失败才按局部图片接入 ERROR 处理。
 
@@ -385,7 +387,7 @@ MCP 只多一层从 SDK 类型到共同结果内容的适配，call_mcp_tool 的
 
 ### 8.6 read_video_frames 的三个 action
 
-公开参数只保留 target、from、to、action、crop，按此顺序声明；action 使用 overview／detail／motion，默认 overview。删除 mode 和源 continuation，不保留参数别名。overview／motion 可省略端点并在本次调用内解析为 0 到媒体结束；detail 必须明确端点且 0 < to-from ≤ 2 秒。crop 沿现行 [left,top,right,bottom] 边界坐标及校验。三个 action 的内容选择由视频 owner 决定，公共层不猜工具名、action 或正文 JSON 来重新选帧。完整参数、类型与原生／JS 示例见[多媒体工具草案](native_tools/media.md#2-read_video_frames取得视频图像证据与时间索引)。
+公开参数只保留 target、from、to、action、crop，按此顺序声明；action 使用 overview／detail／motion，默认 overview。删除 mode 和源 continuation，不保留参数别名。overview／motion 可省略端点并在本次调用内解析为 0 到媒体结束；detail 必须明确端点且 0 < to-from ≤ 2 秒。crop 沿现行 [left,top,right,bottom] 边界坐标及校验。三个 action 的内容选择由视频 owner 决定，公共层不猜工具名、action 或正文 JSON 来重新选帧。完整参数、类型与原生／JS 示例见[多媒体工具草案](../native_tools/media.md#2-read_video_frames取得视频图像证据与时间索引)。
 
 | action | 本次图文组织 | 保留的业务语义 |
 | --- | --- | --- |
@@ -463,7 +465,7 @@ overview、motion 的每个格子均向模型提供编号、真实时刻和归�
 
 读取任何后续页均不再次打开原视频、不重新解码、不重新渲染。原视频在完整结果接受后被修改或移除，不改变已经保存的结果；结果可读性由保存内容及既有访问边界决定。`write_file(tool_result_target=tool_result)` 同样导出整个已保存结果的正文，不止当前交付页。
 
-三种 action 按“稀疏总体认识／局部状态辨认／连续过程核对”分工，可按未解问题交错使用，详见[三 action 与 motion 产品语义](PULSARA_MOTION_PRODUCT_SEMANTICS_DRAFT.zh.md)及[多媒体工具合同](native_tools/media.md#2-read_video_frames取得视频图像证据与时间索引)。画布布局与 motion 额外精确共享只作待实验方向，不改变本节选帧、质量、完整生成、保存和分页合同，不引入降 FPS 或变化检测筛帧。
+三种 action 按“稀疏总体认识／局部状态辨认／连续过程核对”分工，可按未解问题交错使用，详见[三 action 与 motion 产品语义](PULSARA_MOTION_PRODUCT_SEMANTICS_DRAFT.zh.md)及[多媒体工具合同](../native_tools/media.md#2-read_video_frames取得视频图像证据与时间索引)。画布布局与 motion 额外精确共享只作待实验方向，不改变本节选帧、质量、完整生成、保存和分页合同，不引入降 FPS 或变化检测筛帧。
 
 ### 8.7 Code Mode：JS 取得完整的类型化业务值
 
@@ -504,7 +506,7 @@ interface ImageResult {
 ]
 ```
 
-Target 内容项统一使用 `{"type":"target","value":<该工具声明的具体 Target>}`。文件搜索的 value 为 PATH Target；PLUGIN 精确查询的 value 为 SKILL、HOOK_SOURCE 或 MCP_CONNECTION Target，精确字段见[能力管理工具草案](native_tools/capabilities.md)。各工具分别限定合法 Target，不将共同类型误作接受任意引用的工具参数。它的文字投影只展示 value 中的紧凑 JSON 引用并带结束换行，字段和路径特殊字符按 JSON 转义；该换行属于引用自身的投影，不改变普通文字项不自动插入分隔符的规则。Target 项只展示定位信息，不隐式调用文件、能力或媒体工具；image 项按当前模型能力及读取结果投递真实图片或明确说明，text 项直接投影字符串 value。图片二进制仍不进入 value。Cell 实际输出值中的 image 内容项对象不论嵌套位置均按第 8.8 节识别；裸 Target、引用字符串和仅同名普通字段不触发读取，工具输入及其他业务字段不因此改名。
+Target 内容项统一使用 `{"type":"target","value":<该工具声明的具体 Target>}`。文件搜索的 value 为 PATH Target；PLUGIN 精确查询的 value 为 SKILL、HOOK_SOURCE 或 MCP_CONNECTION Target，精确字段见[能力管理工具草案](../native_tools/capabilities.md)。各工具分别限定合法 Target，不将共同类型误作接受任意引用的工具参数。它的文字投影只展示 value 中的紧凑 JSON 引用并带结束换行，字段和路径特殊字符按 JSON 转义；该换行属于引用自身的投影，不改变普通文字项不自动插入分隔符的规则。Target 项只展示定位信息，不隐式调用文件、能力或媒体工具；image 项按当前模型能力及读取结果投递真实图片或明确说明，text 项直接投影字符串 value。图片二进制仍不进入 value。Cell 实际输出值中的 image 内容项对象不论嵌套位置均按第 8.8 节识别；裸 Target、引用字符串和仅同名普通字段不触发读取，工具输入及其他业务字段不因此改名。
 
 object 的 value 是 JSON 对象，内部可含数组、嵌套对象和 JSON 基本值。原生与导出的文字投影按确定键顺序、固定两空格缩进序列化整个 value，并带结束换行；保留花括号、方括号、引号及全部字段名，字符串和控制字符按 JSON 转义，空对象显示 {}。Cell 输出保留相同文字结构，同时按第 8.8 节递归识别其内的实际 image 内容项对象，在该位置形成图片或失败说明；不要求整条混合图文成为可重新解析的单段 JSON。target、targets 等普通字段仍不触发路径或图片读取，不设置字段名专属排版器。
 
@@ -598,7 +600,7 @@ console.log({
 
 一次 `console.log` 是一条独立 Cell 正式输出，连续两次调用仍是两条，保持现有来源、次序、取消与活动 turn/idle 路由。组合内容沿现有 Cell 输出存储、队列和对话记录生命周期处理，不是原工具结果的改写。Cell steer 不生成工具结果读取或导出 Target，也不新增分页实体、持久任务或提前建立对话 entry 的要求。正常接纳只表示进入既有输入链路，不表示 ROOT 已收到或阅读。
 
-保留既有异常诊断和晚到工具结果补发：非显式停止时，脚本异常结束等原因使已提交工具结果未能交付 JS，runtime 仍沿原 Cell 输出链路将相应结果交给 ROOT，不要求已经结束的脚本再调用 console.log。保留原接纳、来源及披露边界，不扩展为正常工具调用自动输出全部中间值，不冒充成功 return。显式 stop 或 Host 关闭仍抑制这类补发；已发生效果与原工具结果照常结算保存。此例外不引入恢复任务、工具重放、另一份原工具结果权威或 Cell steer 的读取／导出入口。具体停止阶段见[Code Mode 工具草案](native_tools/code_mode.md#33-停止对工具调用的影响)。
+保留既有异常诊断和晚到工具结果补发：非显式停止时，脚本异常结束等原因使已提交工具结果未能交付 JS，runtime 仍沿原 Cell 输出链路将相应结果交给 ROOT，不要求已经结束的脚本再调用 console.log。保留原接纳、来源及披露边界，不扩展为正常工具调用自动输出全部中间值，不冒充成功 return。显式 stop 或 Host 关闭仍抑制这类补发；已发生效果与原工具结果照常结算保存。此例外不引入恢复任务、工具重放、另一份原工具结果权威或 Cell steer 的读取／导出入口。具体停止阶段见[Code Mode 工具草案](../native_tools/code_mode.md#33-停止对工具调用的影响)。
 
 Cell 输出中的 IMAGE_REF 只要对应资产仍存在，就可交给 view_image 再读；不检查 session／workspace、来源 entry、消费或已读状态。未消费、取消或拒绝队列中的图片同样按资产存在性读取。普通引用字符串不自动投图，但可由模型显式填入 view_image 参数；手写 image 项也按相同读取与占位规则处理。
 
@@ -641,7 +643,7 @@ Cell 的有序内容项直接构成模型接收的图文内容。Cell、源 turn
 
 ### 8.10 read_transcript：完整范围文字与冻结分页
 
-参数只保留 target、from、to，target 放首位；from 默认 0，to 默认媒体结束，时长未知时必须明确 to，范围满足 0 ≤ from < to 且不超过已知时长。删除 continuation，不新增模式、页长或后续识别参数。完整类型、原生及 JS 示例见[多媒体工具草案第 3 章](native_tools/media.md#3-read_transcript取得带时间的字幕或语音文字)。
+参数只保留 target、from、to，target 放首位；from 默认 0，to 默认媒体结束，时长未知时必须明确 to，范围满足 0 ≤ from < to 且不超过已知时长。删除 continuation，不新增模式、页长或后续识别参数。完整类型、原生及 JS 示例见[多媒体工具草案第 3 章](../native_tools/media.md#3-read_transcript取得带时间的字幕或语音文字)。
 
 优先读取内嵌文字字幕，没有可用文字字幕时复用 ASR 缓存并识别缺失音频；保留现有轨道选择和时间粒度。选中了可用字幕轨后，字幕空白不自动触发 ASR；空文字不证明静音。删除单次累计新增尝试 180 秒 ASR 的总量限制，不因原生页面已满停止业务。内部可以分批执行并遵守实际上传、服务、取消和超时边界，但成功结果必须覆盖本次请求的业务处理并完整保存，再交付原生第一页或 JS 完整值；不增加替代总量 cap 或恢复任务。
 
@@ -657,7 +659,7 @@ Cell 的有序内容项直接构成模型接收的图文内容。Cell、源 turn
 
 ### 8.11 annotate_media：仅原生的时间标注
 
-仅 ROOT 原生调用，不提供 JS API，不因同族其他媒体工具接入 JS 而自动开放。参数保持 target、from、to、text，全部必填，target 放首位；沿现有 PATH、有限时间范围和非空白文字校验，时长未知时失败，不增加文字长度 cap 或已读资格。具体类型及原生示例见[多媒体工具草案第 4 章](native_tools/media.md#4-annotate_media添加时间标注)。
+仅 ROOT 原生调用，不提供 JS API，不因同族其他媒体工具接入 JS 而自动开放。参数保持 target、from、to、text，全部必填，target 放首位；沿现有 PATH、有限时间范围和非空白文字校验，时长未知时失败，不增加文字长度 cap 或已读资格。具体类型及原生示例见[多媒体工具草案第 4 章](../native_tools/media.md#4-annotate_media添加时间标注)。
 
 业务结果保留实际媒体 PATH target、meta.status 和 text 内容项。成功只说明“已添加时间标注。”，删除公开 media_annotation 标记，不回传提交全文、时间范围、计数或标注 ID；ERROR／CANCELLED 的原因、必要路径和已知效果放 content，不增加另一组状态或错误字段。
 
@@ -699,7 +701,7 @@ guest heap 管理 JS 对象的执行内存；暂存数据计费管理源码、�
 
 图片输出在加载 payload 前，经全局资产 metadata owner 取得实际 encoded_bytes、尺寸及身份，按文字模型投影和每次图片出现的字节预 quote，再在既有输出 reservation 上预留额度；hydrate 后按实际内容补齐差额。重复图片共用一次 immutable payload 读取，出现项保持原有次序及次数。queue 接纳确认、永久拒绝及显式停止沿原输出 owner 释放对应额度；未知写入结果仍保留同一 lease 供确认，不提前释放确认所需正文。完整移交 queue/content owner 的正文不继续占 Cell 缓冲。
 
-资源实验通过真实 Node/QuickJS 路径验证 6MiB 源码、8MiB 参数、8MiB 完整返回、5MiB 显式输出及四个并发 5MiB 返回；实际 PostgreSQL/Pillow 路径验证约 18MiB 的重复图片组合完整入队与转移。另用 20MiB 合成 immutable 图片 payload 单独测量暂存计费：32/128MiB profile 完整接纳并释放，16MiB/Cell profile 在读取 payload 前明确拒绝。后者是计费实验，不作为图片解码证据。所有场景结束后 Cell、lease 及 reservation 均回收；详细输入、逐项 charge/release 及采样 RSS 见 [资源实验](output/hardcut-20261116/code-mode-agents/resource-results.json)。
+资源实验通过真实 Node/QuickJS 路径验证 6MiB 源码、8MiB 参数、8MiB 完整返回、5MiB 显式输出及四个并发 5MiB 返回；实际 PostgreSQL/Pillow 路径验证约 18MiB 的重复图片组合完整入队与转移。另用 20MiB 合成 immutable 图片 payload 单独测量暂存计费：32/128MiB profile 完整接纳并释放，16MiB/Cell profile 在读取 payload 前明确拒绝。后者是计费实验，不作为图片解码证据。所有场景结束后 Cell、lease 及 reservation 均回收；详细输入、逐项 charge/release 及采样 RSS 见 [资源实验](../output/hardcut-20261116/code-mode-agents/resource-results.json)。
 
 10ms 采样中单次 8MiB 返回的 Node RSS 峰值约 560MiB，四并发 5MiB 返回约 430MiB；Python 峰值约 179MiB。RSS 包含编码副本、Node/WASM 运行时及分配器驻留，既不等于 quota，也不保证所有瞬时峰值均被采到。32/128MiB 是经上述代表性工作集验证的当前物理 profile，不是结果大小合同；真实 heap、IPC 或 provider 无法承载时仍准确失败，已确定的业务效果与此前已接纳输出保留。实验不改变 JS 完整返回、不分页，以及 console.log / 顶层 return 整条交付的语义。
 
@@ -713,7 +715,7 @@ runtime 完整保存本次观察结果后推进内部位置，并可释放对应
 
 底层 terminal owner 与物理资源调度继续共享；模型工具的进程归属、查询、日志观察和控制按调用上下文的 session_id 隔离。ROOT 与 subagent session 等价，各自只访问本 session 进程，持有其他 session 的 PROCESS Target 不赋予访问权。同一 session 内跨 turn、原生与 JS 共用该进程的内部观察位置，不新增模型可填的 session_id、跨 session 接管或独立读者机制。
 
-write_file 导出读取已保存的完整工具结果，不依赖原临时日志继续存在，也不自动包含后续进程输出。真实存储失败沿既有错误通道说明原因、已知缺失和业务效果，不把残缺内容当作完整结果，不自动重做命令。exec_process、manage_process 的具体合同见[原生工具修订草案第 1、2 节](native_tools/terminal.md#1-exec_process启动命令与首次观察)：wait／write 共用内部位置并返回全部待观察增量，close_stdin／kill 不推进位置；原样 write 的交互内容由模型决定。
+write_file 导出读取已保存的完整工具结果，不依赖原临时日志继续存在，也不自动包含后续进程输出。真实存储失败沿既有错误通道说明原因、已知缺失和业务效果，不把残缺内容当作完整结果，不自动重做命令。exec_process、manage_process 的具体合同见[原生工具修订草案第 1、2 节](../native_tools/terminal.md#1-exec_process启动命令与首次观察)：wait／write 共用内部位置并返回全部待观察增量，close_stdin／kill 不推进位置；原样 write 的交互内容由模型决定。
 
 ## 10. 实施前必须闭合的事项
 
@@ -790,23 +792,23 @@ write_file 导出读取已保存的完整工具结果，不依赖原临时日志
 
 ## 12. 当前实现与相关规格参考
 
-- [当前工具输出与分页实施合同](archived_docs/PULSARA_TOOL_OUTPUT_AND_PAGINATION_REFACTOR_PLAN.zh.md)
-- [共享身份层](src/pulsara_agent/identity.py)
-- [现有 SESSION_ENTRY Target](src/pulsara_agent/ports/session_content.py)
-- [现有精确正文读取边界](src/pulsara_agent/ports/tool_output.py)
-- [结果正文存储、冻结分页与投影 owner](src/pulsara_agent/conversation_kernel/tool_outputs.py)
-- [现有文件读取与导出实现](src/pulsara_agent/tools/builtins/filesystem.py)
-- [完整页面预算](src/pulsara_agent/primitives/tool_result_budget.py)
-- [唯一 v3 estimator](src/pulsara_agent/llm/estimator.py)
-- [现有图文附件投递](src/pulsara_agent/model_input/compiler.py)
-- [MCP SDK 适配入口](src/pulsara_agent/conversation_kernel/mcp/sdk_facade.py)
-- [当前 MCP 结果序列化](src/pulsara_agent/conversation_kernel/mcp/supervisor.py)
-- [当前图片校验 owner](src/pulsara_agent/conversation_kernel/image_validation.py)
-- [现有图文内容及图片身份绑定](src/pulsara_agent/conversation_kernel/prompt_content.py)
-- [视频三种模式参数](src/pulsara_agent/tools/builtins/media.py)
-- [视频观察与拼图实现](src/pulsara_agent/media/frames.py)
-- [detail 原帧精确共享](src/pulsara_agent/media/frames_detail_render.py)
-- [现行 detail 产品规格](archived_docs/PULSARA_VIDEO_DETAIL_AND_REVIEW_STRATEGY_REVISION_SPEC.zh.md)
+- [当前工具输出与分页实施合同](PULSARA_TOOL_OUTPUT_AND_PAGINATION_REFACTOR_PLAN.zh.md)
+- [共享身份层](../src/pulsara_agent/identity.py)
+- [现有 SESSION_ENTRY Target](../src/pulsara_agent/ports/session_content.py)
+- [现有精确正文读取边界](../src/pulsara_agent/ports/tool_output.py)
+- [结果正文存储、冻结分页与投影 owner](../src/pulsara_agent/conversation_kernel/tool_outputs.py)
+- [现有文件读取与导出实现](../src/pulsara_agent/tools/builtins/filesystem.py)
+- [完整页面预算](../src/pulsara_agent/primitives/tool_result_budget.py)
+- [唯一 v3 estimator](../src/pulsara_agent/llm/estimator.py)
+- [现有图文附件投递](../src/pulsara_agent/model_input/compiler.py)
+- [MCP SDK 适配入口](../src/pulsara_agent/conversation_kernel/mcp/sdk_facade.py)
+- [当前 MCP 结果序列化](../src/pulsara_agent/conversation_kernel/mcp/supervisor.py)
+- [当前图片校验 owner](../src/pulsara_agent/conversation_kernel/image_validation.py)
+- [现有图文内容及图片身份绑定](../src/pulsara_agent/conversation_kernel/prompt_content.py)
+- [视频三种模式参数](../src/pulsara_agent/tools/builtins/media.py)
+- [视频观察与拼图实现](../src/pulsara_agent/media/frames.py)
+- [detail 原帧精确共享](../src/pulsara_agent/media/frames_detail_render.py)
+- [现行 detail 产品规格](PULSARA_VIDEO_DETAIL_AND_REVIEW_STRATEGY_REVISION_SPEC.zh.md)
 - [三 action 的职责、交错使用与 motion 待实验方向](PULSARA_MOTION_PRODUCT_SEMANTICS_DRAFT.zh.md)
 
 这些链接用于核对现状与复用边界，不表示生产代码已实现本草案。

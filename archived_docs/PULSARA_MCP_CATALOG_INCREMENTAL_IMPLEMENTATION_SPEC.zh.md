@@ -1,6 +1,8 @@
 # Pulsara MCP 初始服务目录增量实施规范
 
-状态：已接入生产代码，合同测试及真实 provider 验收记录见[实施报告](output/hardcut-20261116/mcp-catalog/REPORT.md)。本增量不修改生产配置或生产数据库，不构建、安装或操作运行中的 Pulsara。
+> 已归档。当前工具参数和用法见 [native_tools/](../native_tools/)。
+
+状态：已接入生产代码，合同测试及真实 provider 验收记录见[实施报告](../output/hardcut-20261116/mcp-catalog/REPORT.md)。本增量不修改生产配置或生产数据库，不构建、安装或操作运行中的 Pulsara。
 
 本文件补充 [MCP 统一 Meta 架构](PULSARA_MCP_META_ONLY_CALLING_ARCHITECTURE_DRAFT.zh.md)和 [Runtime Observation 修订草案](PULSARA_RUNTIME_OBSERVATION_REVISION_DRAFT.zh.md)：新上下文提供一份轻量的已启用 MCP 服务目录，后续继续发送既定净变化。涉及初始服务目录的口径以本文件为准；查询、调用引用、权限、工具结果和变化检测沿现有合同。
 
@@ -220,17 +222,17 @@ MCP 初始目录不放入 TODO／PCA，也不扩充 runtime observation 已确�
 
 | 文件／接点 | 当前实现 | 保持的边界 |
 | --- | --- | --- |
-| [MCP supervisor](src/pulsara_agent/conversation_kernel/mcp/supervisor.py)，`freeze_capability_source_snapshot_set`、`_catalog_from_candidates_locked` | 同一次锁内冻结配置目录及工具事实；目录包含配置声明和公开连接 Target | 直接复用。通常不需修改发现、连接或 supervisor；确认 scope、enabled 和公开连接筛选 |
-| [能力冻结载体](src/pulsara_agent/conversation_kernel/capability_composition.py)，`PreparedMcpCapabilitySourceSnapshotSet` | 已携带目录及 inspection inputs | 继续携带完整值，不加目录副本、DTO fingerprint 或版本字段 |
-| [Dispatch 准备](src/pulsara_agent/conversation_kernel/provider_dispatch.py)，MCP owner 冻结及 `new_context` 传递 | 已将同次 MCP owner 和上下文边界传给 collector | 沿现有冻结与边界传递，禁止为目录另调一次查询或重新读取配置 |
-| [来源定义](src/pulsara_agent/model_input/contracts.py)，`ContextSourceKind` | `MCP_CATALOG` 提供初始说明，`MCP_CATALOG_CHANGES` 提供后续通知 | 初始说明使用 `CONTEXT_MESSAGE` 和既有 MUST_KEEP 类别 |
-| [来源采集](src/pulsara_agent/conversation_kernel/context_sources.py)，`complete_frozen_sources` | `new_context` 独立生成 Skill 与 MCP 两份初始目录 | MCP placement 紧随 Skill；目录及比较候选状态来自同一 MCP owner，MCP 目录不依赖 Skill 采集成功 |
+| [MCP supervisor](../src/pulsara_agent/conversation_kernel/mcp/supervisor.py)，`freeze_capability_source_snapshot_set`、`_catalog_from_candidates_locked` | 同一次锁内冻结配置目录及工具事实；目录包含配置声明和公开连接 Target | 直接复用。通常不需修改发现、连接或 supervisor；确认 scope、enabled 和公开连接筛选 |
+| [能力冻结载体](../src/pulsara_agent/conversation_kernel/capability_composition.py)，`PreparedMcpCapabilitySourceSnapshotSet` | 已携带目录及 inspection inputs | 继续携带完整值，不加目录副本、DTO fingerprint 或版本字段 |
+| [Dispatch 准备](../src/pulsara_agent/conversation_kernel/provider_dispatch.py)，MCP owner 冻结及 `new_context` 传递 | 已将同次 MCP owner 和上下文边界传给 collector | 沿现有冻结与边界传递，禁止为目录另调一次查询或重新读取配置 |
+| [来源定义](../src/pulsara_agent/model_input/contracts.py)，`ContextSourceKind` | `MCP_CATALOG` 提供初始说明，`MCP_CATALOG_CHANGES` 提供后续通知 | 初始说明使用 `CONTEXT_MESSAGE` 和既有 MUST_KEEP 类别 |
+| [来源采集](../src/pulsara_agent/conversation_kernel/context_sources.py)，`complete_frozen_sources` | `new_context` 独立生成 Skill 与 MCP 两份初始目录 | MCP placement 紧随 Skill；目录及比较候选状态来自同一 MCP owner，MCP 目录不依赖 Skill 采集成功 |
 | 同文件的 `_mcp_comparison_snapshot`、`_mcp_changes` | 负责当前比较事实、净变化及未知起点恢复正文 | 保留完整定义、策略及暂不可用处理；未知恢复不伪称新增 |
-| [输入编译](src/pulsara_agent/model_input/compiler.py)，`catalogue`／`remaining` 分区 | 将 `SKILL_CATALOG` 与 `MCP_CATALOG` 一起放到新上下文前部 | 保持 Skill 后接 MCP 的顺序；已有 epoch 出现任何初始目录时拒绝前缀冲突 |
-| [消息编码及状态](src/pulsara_agent/model_input/continuity.py)，`encode_runtime_observation`、`InstalledObservationState` | 两份初始目录都不使用 observation 编码；MCP 比较状态使用既有落点 | 不新增单独“目录已发送”状态 |
-| [输入安装](src/pulsara_agent/conversation_kernel/input_continuity.py)，`install` | 候选消息和 `resulting_observation_state` 一起进入 epoch view | 保持现有接受边界，验证失败候选和未采用 successor 不改变已安装状态 |
-| [冷上下文装配](src/pulsara_agent/conversation_kernel/cold_epoch.py)及 [压缩链路](src/pulsara_agent/conversation_kernel/compaction/) | 共用输入编译和候选采用 | 通过公共来源及编译接线得到目录，不新增第二份压缩专用目录拼接 |
-| [默认提示词](src/pulsara_agent/ports/system_prompt.py)，ROOT／Subagent | 外部需求先发现合适 MCP 工具，已知接口可复用，无合适工具可采用其他范围内方式 | 按第 7 节局部修改，保留当前调用、用户指定方式及权限规则 |
+| [输入编译](../src/pulsara_agent/model_input/compiler.py)，`catalogue`／`remaining` 分区 | 将 `SKILL_CATALOG` 与 `MCP_CATALOG` 一起放到新上下文前部 | 保持 Skill 后接 MCP 的顺序；已有 epoch 出现任何初始目录时拒绝前缀冲突 |
+| [消息编码及状态](../src/pulsara_agent/model_input/continuity.py)，`encode_runtime_observation`、`InstalledObservationState` | 两份初始目录都不使用 observation 编码；MCP 比较状态使用既有落点 | 不新增单独“目录已发送”状态 |
+| [输入安装](../src/pulsara_agent/conversation_kernel/input_continuity.py)，`install` | 候选消息和 `resulting_observation_state` 一起进入 epoch view | 保持现有接受边界，验证失败候选和未采用 successor 不改变已安装状态 |
+| [冷上下文装配](../src/pulsara_agent/conversation_kernel/cold_epoch.py)及 [压缩链路](../src/pulsara_agent/conversation_kernel/compaction) | 共用输入编译和候选采用 | 通过公共来源及编译接线得到目录，不新增第二份压缩专用目录拼接 |
+| [默认提示词](../src/pulsara_agent/ports/system_prompt.py)，ROOT／Subagent | 外部需求先发现合适 MCP 工具，已知接口可复用，无合适工具可采用其他范围内方式 | 按第 7 节局部修改，保留当前调用、用户指定方式及权限规则 |
 
 初始目录的采集逻辑可放在 `context_sources.py` 的小型纯投影函数中。无需新建通用目录框架、额外 service owner 或注册表。
 
@@ -274,9 +276,9 @@ For web search, page reading, or external-service tasks, discover suitable insta
 | --- | --- |
 | [Runtime Observation 草案](PULSARA_RUNTIME_OBSERVATION_REVISION_DRAFT.zh.md) §1.3、§6.4、§7.4 | 初始能力区域包含轻量 MCP 服务目录；同次冻结初始化比较点；失败恢复按本规范；观察入口和后续净 diff 不变 |
 | [Meta-only 架构](PULSARA_MCP_META_ONLY_CALLING_ARCHITECTURE_DRAFT.zh.md) §4.1、§4.4 | 接入轻量初始服务目录；保留按需接口发现、不注入全量工具 schema；压缩新目录与新比较点一起采用 |
-| [能力查询](native_tools/capabilities.md) MCP 章节 | 说明名称目录用于发现提示，实际 Target、工具说明及引用仍来自既定查询；参数与返回类型不变 |
-| [MCP 工具](native_tools/mcp.md) | 发现入口可由初始目录引导；调用和资源合同不变 |
-| [Plan 草案](native_tools/plan.md)涉及压缩排列的段落 | 如列出完整初始上下文顺序，将 MCP 服务目录与 Skill 目录并列；Plan 新 turn 本身不重发完整目录 |
+| [能力查询](../native_tools/capabilities.md) MCP 章节 | 说明名称目录用于发现提示，实际 Target、工具说明及引用仍来自既定查询；参数与返回类型不变 |
+| [MCP 工具](../native_tools/mcp.md) | 发现入口可由初始目录引导；调用和资源合同不变 |
+| [Plan 草案](../native_tools/plan.md)涉及压缩排列的段落 | 如列出完整初始上下文顺序，将 MCP 服务目录与 Skill 目录并列；Plan 新 turn 本身不重发完整目录 |
 | [工具索引](PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)及 [实施计划](PULSARA_HARD_CUT_IMPLEMENTATION_PLAN.zh.md) | 加入本规范依据和实际验收结果；不改变工具数量或 API 边界 |
 
 统一交付和数据库 hardcut 的正文结构、分页及业务存储不因本项改变；复审其中初始上下文的描述，若有排斥轻量服务名称目录的措辞则一并同步。
@@ -311,12 +313,12 @@ For web search, page reading, or external-service tasks, discover suitable insta
 
 可复用的测试接点：
 
-- [runtime observation 当前合同](tests/test_hardcut_runtime_observations.py)
-- [provider 前缀连续性](tests/test_round3_1_provider_input_prefix_continuity.py)
-- [压缩首调用来源](tests/test_compaction_first_call_source_boundary.py)
-- [压缩后续输入边界](tests/test_compaction_suffix_boundary_integration.py)
-- [ROOT MCP 非阻塞首请求](tests/test_mcp_first_request_readiness.py)和 [Subagent 非阻塞首请求](tests/test_agent_mcp_first_readiness.py)
-- [meta-only 集成](tests/test_mcp_meta_only_integration.py)
+- [runtime observation 当前合同](../tests/test_hardcut_runtime_observations.py)
+- [provider 前缀连续性](../tests/test_round3_1_provider_input_prefix_continuity.py)
+- [压缩首调用来源](../tests/test_compaction_first_call_source_boundary.py)
+- [压缩后续输入边界](../tests/test_compaction_suffix_boundary_integration.py)
+- [ROOT MCP 非阻塞首请求](../tests/test_mcp_first_request_readiness.py)和 [Subagent 非阻塞首请求](../tests/test_agent_mcp_first_readiness.py)
+- [meta-only 集成](../tests/test_mcp_meta_only_integration.py)
 
 ### 11.2 真实模型验证
 

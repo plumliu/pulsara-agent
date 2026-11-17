@@ -1,5 +1,7 @@
 # Pulsara 视频三种 action 的职责与 motion 产品语义
 
+> 已归档。当前工具参数和用法见 [native_tools/](../native_tools/)。
+
 日期：2026-11-17。本文确定 overview、detail、motion 的职责边界与交错使用流程，沿用现有参数、选帧、清晰度及完整结果交付合同。第 4.1 节规定视频展示终点与容器尾部的处理。motion 以持续运动为主要场景；画布布局和额外精确共享只列为实验方向，不作为已采用的渲染方案。
 
 ## 1. 三种 action 的职责
@@ -62,7 +64,7 @@ motion 保留全部实际源展示观察及既定质量时，证据量随实际�
 
 容器时长、选中视频轨的终点元数据、解码确认的最后展示区间是不同事实。容器可以包含视频结束后的范围；这本身不是文件错误，也不能用容器终点延长末帧。
 
-本地《Spring》素材的容器时长为 464.134 秒，视频轨终点元数据缺失；顺序解码确认末帧 PTS 为 464.049 秒、展示时长为 0.041 秒，因此视频展示终点为 464.090 秒，存在 44 毫秒尾隙。默认 overview、detail [463.5,464.134) 与跨尾 motion 均按有效视频范围取得证据并明确说明尾部缺口；不把末帧延长到容器终点。静态媒体执行和独立源观察核对见[Spring 验证结果](output/video-tail-fix-20261117/spring-results.json)，不涉及真实 provider。
+本地《Spring》素材的容器时长为 464.134 秒，视频轨终点元数据缺失；顺序解码确认末帧 PTS 为 464.049 秒、展示时长为 0.041 秒，因此视频展示终点为 464.090 秒，存在 44 毫秒尾隙。默认 overview、detail [463.5,464.134) 与跨尾 motion 均按有效视频范围取得证据并明确说明尾部缺口；不把末帧延长到容器终点。静态媒体执行和独立源观察核对见[Spring 验证结果](../output/video-tail-fix-20261117/spring-results.json)，不涉及真实 provider。
 
 视频有效交集沿现有选帧和拼图算法处理，不属于布局或共享实验：
 
@@ -99,7 +101,7 @@ motion 保留全部实际源展示观察及既定质量时，证据量随实际�
   或 → JS 返回全部已保存的类型化业务值
 ```
 
-完整业务值保持 target、meta.status 和有序 content。范围和真实缺口用 text；overview／motion 使用 {frames:[本张拼图的格子索引]} object → image；detail 使用观察时间 object → image。参数、类型与原生／JS 示例以[多媒体工具合同](native_tools/media.md#2-read_video_frames取得视频图像证据与时间索引)为准。
+完整业务值保持 target、meta.status 和有序 content。范围和真实缺口用 text；overview／motion 使用 {frames:[本张拼图的格子索引]} object → image；detail 使用观察时间 object → image。参数、类型与原生／JS 示例以[多媒体工具合同](../native_tools/media.md#2-read_video_frames取得视频图像证据与时间索引)为准。
 
 原生 next 是同一已保存结果的 NEXT Target，交给 read_file；tool_result 始终定位原完整结果。分页可跨文字和 object 的 JSON 文字，图片保持完整，索引和图片可以分属两页。一页不限定一张拼图，交付页与内部渲染批次不是同一边界。
 
@@ -132,12 +134,12 @@ JS 不带原生分页外壳。完整值在 Cell 内存中存在不等于模型�
 
 ## 8. 当前合同与实现参考
 
-- [多媒体工具合同](native_tools/media.md)
+- [多媒体工具合同](../native_tools/media.md)
 - [统一结果与冻结分页](PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)
 - [规范结果与图片资产存储](PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md)
-- [源展示观察解码](src/pulsara_agent/media/frames_decode.py)
-- [观察计划与拼图渲染](src/pulsara_agent/media/frames.py)
-- [detail 目标范围](src/pulsara_agent/media/frames_detail.py)
-- [detail 精确图片共享](src/pulsara_agent/media/frames_detail_render.py)
-- [完整媒体业务值执行](src/pulsara_agent/media/execution.py)
-- [视频审看 Skill](src/pulsara_agent/bundled_skills/pulsara-video-review/SKILL.md)
+- [源展示观察解码](../src/pulsara_agent/media/frames_decode.py)
+- [观察计划与拼图渲染](../src/pulsara_agent/media/frames.py)
+- [detail 目标范围](../src/pulsara_agent/media/frames_detail.py)
+- [detail 精确图片共享](../src/pulsara_agent/media/frames_detail_render.py)
+- [完整媒体业务值执行](../src/pulsara_agent/media/execution.py)
+- [视频审看 Skill](../src/pulsara_agent/bundled_skills/pulsara-video-review/SKILL.md)

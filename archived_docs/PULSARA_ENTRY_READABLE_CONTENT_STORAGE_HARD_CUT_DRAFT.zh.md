@@ -1,14 +1,16 @@
 # Pulsara 有序内容统一存储数据库 hardcut 草案
 
+> 已归档。当前工具参数和用法见 [native_tools/](../native_tools/)。
+
 日期：2026-11-12。
 
-状态：共同存储基础、逐工具业务值映射和分页交付已按[实施计划](PULSARA_HARD_CUT_IMPLEMENTATION_PLAN.zh.md)接通，已完成跨层及真实 provider 验收；Pulsara 正常应用尚未重启。本文确定单一存储路径、归属及删除边界；完整工具交付合同与[统一工具结果交付与分页草案](PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)共同适用。不能以旧路径兜底宣称消费者已经完成。
+状态：共同存储基础、逐工具业务值映射和分页交付已按[实施计划](PULSARA_HARD_CUT_IMPLEMENTATION_PLAN.zh.md)接通，已完成跨层及真实 provider 验收。本文确定单一存储路径、归属及删除边界；完整工具交付合同与[统一工具结果交付与分页草案](PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)共同适用。不能以旧路径兜底宣称消费者已经完成。
 
 ## 1. 目标与实施范围
 
 数据库直接承载有序、交错的文字与图片，以及必要的结构化内容。用户输入、排队消息、steer、批注、助手正文与 commentary、工具结果、Cell 显式输出复用共同内容结构。前端、历史检索、原生工具消息、JS 完整业务值及导出从它投影，不各自保存一份正文。
 
-数据库设计和存储实施优先，允许先停止 Pulsara 的正常使用、重建为新库，按各工具已确定合同逐步实现消费者；不要求停用期间维持应用可用。具体顺序及恢复条件见第 10 节。[会话工具草案](native_tools/session_history.md)已确定 search_sessions、search_session_content 和 read_session_content 的参数、完整返回值及原生／JS 用法，包括 QA／QAQ 摘录、单 ID 的 Q₁ Target 和按正负 limit 可选展开原文。blob 阈值实验单列，视频独立采样、画布和 motion 产品修订不纳入。
+数据库设计和存储实施优先，允许先停止 Pulsara 的正常使用、重建为新库，按各工具已确定合同逐步实现消费者；不要求停用期间维持应用可用。具体顺序及恢复条件见第 10 节。[会话工具草案](../native_tools/session_history.md)已确定 search_sessions、search_session_content 和 read_session_content 的参数、完整返回值及原生／JS 用法，包括 QA／QAQ 摘录、单 ID 的 Q₁ Target 和按正负 limit 可选展开原文。blob 阈值实验单列，视频独立采样、画布和 motion 产品修订不纳入。
 
 本次覆盖当前 clean-v0、存储生产者、读取者、前端实时／历史接续、模型投影、fork、检索投影、导出及 GC。PATH、历史等工具保持各自既定权限及范围；图片引用按第 5.2 节凭已知 IMAGE_REF 直接读取，不再检查 session、workspace 或来源资格。工具参数和业务字段沿各分篇已确定的合同，存储基础完成不等于这些消费者已经实现或通过验收。
 
@@ -34,7 +36,7 @@
 
 查询返回的 QA 摘录、文件匹配行或历史阅读正文，属于本次工具结果，即使文字与原会话或文件相同，也按本次业务范围完整保存，不强行改为对原文位置的引用。禁止的是同一结果同时维护整份 JSON、全文和预览等平行正文；第 6.3 节 NEXT 对原已保存结果的补页规则是特定交付路径，不扩展为所有查询结果去重。
 
-exit_plan 提交的方案保留数据库调用参数，并自动尝试另存工作区 .pulsara/plans/ Markdown，正常情况下为两份，具体合同见 [Plan 工具草案](native_tools/plan.md#33-数据库与-markdown-两份保存)。文件按可选 summary 命名，默认方案.md，重名用 (2)、(3) 顺延；写入失败不阻止审批，原因进入 content，仅文件完整保存成功时返回 PATH Target。审批和执行使用本次调用参数，不另存第三份数据库方案正文，也不以文件变化替换已提交内容；提交状态未确认时如实说明，不冒充提交失败或自动重做。
+exit_plan 提交的方案保留数据库调用参数，并自动尝试另存工作区 .pulsara/plans/ Markdown，正常情况下为两份，具体合同见 [Plan 工具草案](../native_tools/plan.md#33-数据库与-markdown-两份保存)。文件按可选 summary 命名，默认方案.md，重名用 (2)、(3) 顺延；写入失败不阻止审批，原因进入 content，仅文件完整保存成功时返回 PATH Target。审批和执行使用本次调用参数，不另存第三份数据库方案正文，也不以文件变化替换已提交内容；提交状态未确认时如实说明，不冒充提交失败或自动重做。
 
 exit_plan 提交方案后阻塞等待审批，打开卡片时保留 RUNNING 原轮及待决调用，不产生“已提交审批”的工具结果。修订为 SUCCESS，取消本次审批及十分钟超时为 CANCELLED；三者均将唯一最终结果交给当前只读轮继续，工作流保持 ACTIVE，不恢复权限、不新建修订后继轮。只有批准或无方案退出才结束规划及原轮、恢复保存的权限并自动续接，具体按 Plan 合同处理。
 
@@ -145,7 +147,7 @@ Plan 审阅期间将队列消息明确用作修订反馈时，仍提交 REVISE �
 
 排队历史与已取得的材料／依赖正文统一进入 content_parts，消费时按各份材料创建独立 AGENT_MATERIAL entry。队列不保存 initial_context 文字数组或 work_inputs[].body，不把嵌套正文留作另一份权威。
 
-tools.run_agent 的公开参数统一由 materials 数组选择材料，支持 {kind:"CONTEXT_MATERIAL",turns:1|2|3} 和 WORK Target；与 depends_on 同源的 WORK 先按依赖处理，只交付一次，其余独立 WORK 材料须已结束。删除顶层 context 及 mode 字段。没有 CONTEXT_MATERIAL 项就不带 ROOT 历史，新建和复用 Agent 均可在每次分派中显式选择。CONTEXT_MATERIAL 不分配独立材料 ID，也不是新正文实体；ROOT 正文仍沿现有对话分组投影，从本次分派对应的已接纳输入快照选取，并随本次 Work 接受、保存，不等排队工作启动后再读取最新 ROOT 对话。具体参数与返回类型见 [Agent 工具草案第 5 章](native_tools/agents.md#5-toolsrun_agentroot-批量分派工作仅-js)。
+tools.run_agent 的公开参数统一由 materials 数组选择材料，支持 {kind:"CONTEXT_MATERIAL",turns:1|2|3} 和 WORK Target；与 depends_on 同源的 WORK 先按依赖处理，只交付一次，其余独立 WORK 材料须已结束。删除顶层 context 及 mode 字段。没有 CONTEXT_MATERIAL 项就不带 ROOT 历史，新建和复用 Agent 均可在每次分派中显式选择。CONTEXT_MATERIAL 不分配独立材料 ID，也不是新正文实体；ROOT 正文仍沿现有对话分组投影，从本次分派对应的已接纳输入快照选取，并随本次 Work 接受、保存，不等排队工作启动后再读取最新 ROOT 对话。具体参数与返回类型见 [Agent 工具草案第 5 章](../native_tools/agents.md#5-toolsrun_agentroot-批量分派工作仅-js)。
 
 本次 Work 的初始业务输入统一按以下顺序组装并消费：
 
@@ -241,17 +243,17 @@ public_fields 使用 PostgreSQL json 承载，并以 json_typeof 校验顶层对
 
 字段合同由原生工具修订文档或工具已有明确返回类型约束，不作为任意字段兜底。保留缺失与显式 null、JSON 数值类型、数组顺序、失败业务值、MCP structuredContent 等适用语义。当前返回值不是 meta/content 对象的工具，实施前必须明确无损映射，不能为套表擅自改变返回类型。
 
-write_file 的 tool_result_target 分支从原结果的公开业务字段与有序 content 生成完整确定性文字导出，不读取当前页或内部执行事实，不重新执行来源业务。导出完整写入 UTF-8 投影，不套用 content 输入分支的 NUL 或二进制扩展名拒绝规则；目标授权、原子不覆盖发布及取消结算共用。输入中的来源引用留在调用参数；新结果只保存目标 PATH、状态、成功时实际 bytes_written 和简短说明，不复制原工具结果正文，不新建导出正文实体或映射。来源操作失败与文件导出是否成功分开；原生返回的 tool_result 指向本次写入结果，NEXT 只读该冻结结果，不再次导出。参数与示例见[文件工具草案第 2 章](native_tools/filesystem.md#2-write_file创建文本或导出完整工具结果)。
+write_file 的 tool_result_target 分支从原结果的公开业务字段与有序 content 生成完整确定性文字导出，不读取当前页或内部执行事实，不重新执行来源业务。导出完整写入 UTF-8 投影，不套用 content 输入分支的 NUL 或二进制扩展名拒绝规则；目标授权、原子不覆盖发布及取消结算共用。输入中的来源引用留在调用参数；新结果只保存目标 PATH、状态、成功时实际 bytes_written 和简短说明，不复制原工具结果正文，不新建导出正文实体或映射。来源操作失败与文件导出是否成功分开；原生返回的 tool_result 指向本次写入结果，NEXT 只读该冻结结果，不再次导出。参数与示例见[文件工具草案第 2 章](../native_tools/filesystem.md#2-write_file创建文本或导出完整工具结果)。
 
 tools.run_agent 为 ROOT 专用、仅 JS，完整接纳结果沿同一工具结果路径保存。meta 只投影本次 status，content 每项 object 保存 agent、work、work_status，顺序与分派输入一致；不重复保存 agents／works／details 数组、inspect、回显指令或材料正文。该结果与原 Work 输入是不同业务发生，之后 Work 的状态变化不回写已保存接纳结果。JS 完整返回，不生成原生页或 NEXT；准备阶段的同批引用继续由现有进程内 owner 承担，不新增持久批次或材料实体。
 
-tools.wait_agent 同为 ROOT 专用、仅 JS，works／agents 两分支互斥。正常成功观察按一次批量状态读取覆盖全部输入目标并保持输入顺序，first 只改变返回条件，不裁剪结果；WORK 直接读确切队列／entry／turn 的 request_execution 状态，AGENT all 判断同一快照中全部 idle，不累积曾经空闲。结果的 wait_reason、消息返回时的 message_sources 进入已声明 public_fields，逐项 agent／work／work_status 或 agent／is_idle 为共同 object 内容；meta.status 仍从原结算状态投影。实际消息检查沿现有路径，不把消息与工作状态伪装成同一事务快照。失败或取消保留已取得事实，不为凑齐完整最新快照强制额外读取；已确定正常结果不因后来停止改写。结果完整保存后 JS 完整返回，不生成原生页或 NEXT，之后历史展示／导出不重查状态或重新等待。具体合同见 [Agent 工具草案第 6 章](native_tools/agents.md#6-toolswait_agent等待指定-work-或-agent-空闲仅-js)。
+tools.wait_agent 同为 ROOT 专用、仅 JS，works／agents 两分支互斥。正常成功观察按一次批量状态读取覆盖全部输入目标并保持输入顺序，first 只改变返回条件，不裁剪结果；WORK 直接读确切队列／entry／turn 的 request_execution 状态，AGENT all 判断同一快照中全部 idle，不累积曾经空闲。结果的 wait_reason、消息返回时的 message_sources 进入已声明 public_fields，逐项 agent／work／work_status 或 agent／is_idle 为共同 object 内容；meta.status 仍从原结算状态投影。实际消息检查沿现有路径，不把消息与工作状态伪装成同一事务快照。失败或取消保留已取得事实，不为凑齐完整最新快照强制额外读取；已确定正常结果不因后来停止改写。结果完整保存后 JS 完整返回，不生成原生页或 NEXT，之后历史展示／导出不重查状态或重新等待。具体合同见 [Agent 工具草案第 6 章](../native_tools/agents.md#6-toolswait_agent等待指定-work-或-agent-空闲仅-js)。
 
 AGENT 等待的通知位置继续只归当前 Cell 的进程内 owner：顺序调用抑制已报告通知，重叠调用允许共同报告，不消费正文、不表示模型已读，也不跨 Cell 排他或持久化。仅成功消息观察实际交付 JS 后沿已有可等待交付回调推进本次来源位置；保存／交付失败及 ERROR／CANCELLED 不推进。等待期限、通知位置和来源序号不成为数据库列、消息回执或新实体，实际消息正文仍沿正常输入队列与共同内容路径独立交付。
 
 MCP 查询详情及调用结果沿同一业务字段／有序内容路径保存。MCP_TOOL_REF 由进程内 owner 按 session 管理，原生与各个 Cell 共用；引用可调用性从查询结果完整保存、接纳后成立，不依赖原生详情读完或 JS 交付回调。保存引用文字不形成持久调用资格，NEXT 只读冻结内容，不刷新或激活引用，不新增引用表。实际观察范围和交付记录继续承担原职责。
 
-read_mcp_resource 同样使用共同结果路径：连接 Target 分支把本次资源／模板目录保存为 object 内容行，具体资源 Target 分支把正式 contents 转为依次排列的 URI／MIME 说明与 text／image。图片 blob 经验证保存为真实图片资产后以外键引用，不保留另一份 Base64 图片正文或原始 ReadResourceResult；其他二进制的完整文字投影按工具合同保存一次。该工具只返回 meta.status／content，不新增 structuredContent、资源正文表、模板实体或持久读取资格。SDK 协议及连接准入继续由原 owner 承担，目录查询不要求工具调用引用。参数和返回形状见[MCP 接入草案第 4 章](native_tools/mcp.md#4-read_mcp_resource按需列目录与读取资源)。
+read_mcp_resource 同样使用共同结果路径：连接 Target 分支把本次资源／模板目录保存为 object 内容行，具体资源 Target 分支把正式 contents 转为依次排列的 URI／MIME 说明与 text／image。图片 blob 经验证保存为真实图片资产后以外键引用，不保留另一份 Base64 图片正文或原始 ReadResourceResult；其他二进制的完整文字投影按工具合同保存一次。该工具只返回 meta.status／content，不新增 structuredContent、资源正文表、模板实体或持久读取资格。SDK 协议及连接准入继续由原 owner 承担，目录查询不要求工具调用引用。参数和返回形状见[MCP 接入草案第 4 章](../native_tools/mcp.md#4-read_mcp_resource按需列目录与读取资源)。
 
 缺 MIME 的资源 blob 复用现有图片 owner 识别及校验：有效图片保存为资产，无法识别为图片的内容按未知二进制完整保存 Base64 文字，不误报为坏图；明确声明或已可靠识别为图片后的验证失败按局部 ERROR 保存说明及其余内容。MCP 工具调用和资源读取按真实结果结算，仅实际取消才保存 CANCELLED；取消请求到达不覆盖已确定的 SUCCESS／ERROR 或已接受内容。
 
@@ -292,7 +294,7 @@ annotate_media 的内部文件绑定同样复用 tool_results.result_facts，保
 
 ### 6.3 原生交付范围与 NEXT 读取
 
-原生首屏和 read_file(NEXT) 续页都从已保存完整结果产生，不重新保存原全文、当前页面或剩余后缀作为第二份正文。NEXT 分支仅原生可用，参数只有 target；每次按共同 12k 交付一页，meta.status 表达本次读取状态，content 为实际续读正文，不回显输入 NEXT、顶层业务 target 或文件属性。正常解析并读取原结果时，tool_result 指向该原完整结果，不改指续读调用的新观察 entry；next 指向原结果再下一页，末页为 null，不为 read_file 自己建立另一条分页链。本次读取不覆盖原操作事实。参数与原生示例见[文件工具草案第 1.10 节](native_tools/filesystem.md#110-next-target仅原生续读冻结结果)。
+原生首屏和 read_file(NEXT) 续页都从已保存完整结果产生，不重新保存原全文、当前页面或剩余后缀作为第二份正文。NEXT 分支仅原生可用，参数只有 target；每次按共同 12k 交付一页，meta.status 表达本次读取状态，content 为实际续读正文，不回显输入 NEXT、顶层业务 target 或文件属性。正常解析并读取原结果时，tool_result 指向该原完整结果，不改指续读调用的新观察 entry；next 指向原结果再下一页，末页为 null，不为 read_file 自己建立另一条分页链。本次读取不覆盖原操作事实。参数与原生示例见[文件工具草案第 1.10 节](../native_tools/filesystem.md#110-next-target仅原生续读冻结结果)。
 
 每次原生交付复用既有调用／观察及投影记录，保留已解析的原结果身份和当时实际交付的起止范围。范围定位同一保存结果的确定正文投影，能表达内容项之间及文字／object 投影内部的停读处；图片不可拆，不预设或向模型暴露内部位置字段。首屏同样记录实际范围。不能仅记起点、以后按新的预算重新分页，导致历史工具消息包含当时未交付的内容；实际交付及失败仍沿既有回调处理，不增加 ACK 或第二套已读集合。
 
@@ -507,19 +509,19 @@ tool 消息：本页文字、object 的 JSON 文字、原图片位置的 IMAGE_R
 
 ## 12. 当前生产接点
 
-- [数据库 baseline](src/pulsara_agent/storage/migrations/sql/0000_conversation_kernel_baseline.sql)
-- [用户图文 codec](src/pulsara_agent/conversation_kernel/prompt_content.py)
-- [当前图片引用读取实现](src/pulsara_agent/conversation_kernel/prompt_storage.py)
-- [队列和 steer](src/pulsara_agent/conversation_kernel/_repository/prompts.py)
-- [助手块写入](src/pulsara_agent/conversation_kernel/_repository/kernel.py)
-- [助手接受、可视化及回放写入](src/pulsara_agent/conversation_kernel/_repository/conversation.py)
-- [工具全文和预览](src/pulsara_agent/conversation_kernel/tool_outputs.py)
-- [历史文字解码](src/pulsara_agent/conversation_kernel/session_text.py)
-- [历史阅读](src/pulsara_agent/conversation_kernel/session_content.py)
-- [QA／QAQ](src/pulsara_agent/conversation_kernel/history_projection.py)
-- [fork 历史](src/pulsara_agent/conversation_kernel/fork_history.py)
-- [blob 与 GC](src/pulsara_agent/conversation_kernel/blob.py)
-- [provider 回放与思考投影](src/pulsara_agent/llm/provider_replay.py)
-- [批注类型](src/pulsara_agent/llm/input.py)
+- [数据库 baseline](../src/pulsara_agent/storage/migrations/sql/0000_conversation_kernel_baseline.sql)
+- [用户图文 codec](../src/pulsara_agent/conversation_kernel/prompt_content.py)
+- [当前图片引用读取实现](../src/pulsara_agent/conversation_kernel/prompt_storage.py)
+- [队列和 steer](../src/pulsara_agent/conversation_kernel/_repository/prompts.py)
+- [助手块写入](../src/pulsara_agent/conversation_kernel/_repository/kernel.py)
+- [助手接受、可视化及回放写入](../src/pulsara_agent/conversation_kernel/_repository/conversation.py)
+- [工具全文和预览](../src/pulsara_agent/conversation_kernel/tool_outputs.py)
+- [历史文字解码](../src/pulsara_agent/conversation_kernel/session_text.py)
+- [历史阅读](../src/pulsara_agent/conversation_kernel/session_content.py)
+- [QA／QAQ](../src/pulsara_agent/conversation_kernel/history_projection.py)
+- [fork 历史](../src/pulsara_agent/conversation_kernel/fork_history.py)
+- [blob 与 GC](../src/pulsara_agent/conversation_kernel/blob.py)
+- [provider 回放与思考投影](../src/pulsara_agent/llm/provider_replay.py)
+- [批注类型](../src/pulsara_agent/llm/input.py)
 
-真实样本参考 [reasoning entry 实验](output/reasoning-entry-probe-20261112/README.zh.md)。它是本地证据，不作为生产协议或旧会话兼容依据。
+真实样本参考 [reasoning entry 实验](../output/reasoning-entry-probe-20261112/README.zh.md)。它是本地证据，不作为生产协议或旧会话兼容依据。

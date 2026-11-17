@@ -1,8 +1,10 @@
 # Pulsara MCP 统一 Meta 调用架构草案
 
+> 已归档。当前工具参数和用法见 [native_tools/](../native_tools/)。
+
 MCP 在后台连接和发现，首条模型请求不等待其完成。关键词搜索仅在当前 scope／parent 内判断目录覆盖；已启用服务尚无当前配置对应的已接纳目录时，返回 ERROR 并说明未完成范围，即使已有命中也保留已知记录和可用调用引用。ERROR 不代表这些部分无效。已禁用及作用域外服务不影响覆盖；同语义重连保留已接纳目录的可搜索性，物理不可用只影响调用准入。查询不会自动等待或重试。
 
-状态：统一 meta 调用已接入生产代码，已完成 hardcut 跨层及真实 provider 验收；正常应用尚未重启。本文件记录统一 meta 的架构决定，与 MCP 接入、能力查询、能力管理、统一交付、数据库及原生工具索引共同适用。MCP 变化通知沿[Runtime Observation 修订草案](PULSARA_RUNTIME_OBSERVATION_REVISION_DRAFT.zh.md)第 7 节。
+状态：统一 meta 调用已接入生产代码，已完成 hardcut 跨层及真实 provider 验收。本文件记录统一 meta 的架构决定，与 MCP 接入、能力查询、能力管理、统一交付、数据库及原生工具索引共同适用。MCP 变化通知沿[Runtime Observation 修订草案](PULSARA_RUNTIME_OBSERVATION_REVISION_DRAFT.zh.md)第 7 节。
 
 ## 1. 目标与范围
 
@@ -14,7 +16,7 @@ MCP 在后台连接和发现，首条模型请求不等待其完成。关键词�
 
 这样未使用的 MCP 工具无需常驻完整 schema，模型也不必判断远端工具是否进入当前冻结目录。代价是：首次使用不熟悉的工具时，需要先发现工具并阅读其接口说明，可能产生多次往返。本方案接受这个取舍，不以“脚本运行时查到 schema”代替模型实际取得说明。
 
-资源使用独立的固定入口 read_mcp_resource：传 MCP_CONNECTION 按需列资源及模板目录，传 MCP_RESOURCE 读取具体 URI，不通过 tools/call 或 MCP_TOOL_REF。参数、精简返回和原生／JS 示例见[MCP 接入草案第 4 章](native_tools/mcp.md#4-read_mcp_resource按需列目录与读取资源)。用户通过 slash 使用 MCP Prompt 的产品语义保持；连接管理、凭据和执行框架继续复用。
+资源使用独立的固定入口 read_mcp_resource：传 MCP_CONNECTION 按需列资源及模板目录，传 MCP_RESOURCE 读取具体 URI，不通过 tools/call 或 MCP_TOOL_REF。参数、精简返回和原生／JS 示例见[MCP 接入草案第 4 章](../native_tools/mcp.md#4-read_mcp_resource按需列目录与读取资源)。用户通过 slash 使用 MCP Prompt 的产品语义保持；连接管理、凭据和执行框架继续复用。
 
 ## 2. 编写业务 Cell 前的信息准备
 
@@ -97,7 +99,7 @@ JS 使用 `tools.call_mcp_tool({target, arguments})`。本轮不改变参数校�
 - JS 取得完整类型化业务值，不做展示分页；只有显式 console.log／return 的组合结果沿独立 steer 交付，首版不额外设置 steer 预算。
 - 状态、完整失败业务值 `err.result`、图片接入失败及模型能力投影，沿已经确定的统一交付语义，不因改名或改入口改变。
 
-这里只收敛调用方式；完整结果合同由 [MCP 接入草案](native_tools/mcp.md)与[统一交付草案](PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)共同承担。
+这里只收敛调用方式；完整结果合同由 [MCP 接入草案](../native_tools/mcp.md)与[统一交付草案](PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)共同承担。
 
 ### 3.3 错误说明与已发生效果
 
@@ -201,23 +203,23 @@ MCP 权限判断保持现有 meta 语义，使用当前 turn 冻结的权限模�
 
 当前实现接点如下：
 
-- [tool_runtime_surface.py](src/pulsara_agent/conversation_kernel/tool_runtime_surface.py) 负责内置工具安装、固定 Code Mode 方法目录及 MCP 当前运行时的 safe point 采用。远端工具不安装为独立原生定义或独立方法。
-- [capability_query.py](src/pulsara_agent/conversation_kernel/capability_query.py) 和 [mcp_search.py](src/pulsara_agent/capability/mcp_search.py) 负责服务、工具详情与 BM25 搜索；按当前来源和已接纳目录判断覆盖，未知目录不冒充完整无匹配。
-- [tool_runtime.py](src/pulsara_agent/conversation_kernel/tool_runtime.py) 的 `_query_capabilities_result` 负责查询值、引用准备和接受后结算；公开 ERROR 映射为既有内部 APPLICATION_ERROR，SUCCESS／CANCELLED 保持原义。
-- [planner.py](src/pulsara_agent/capability/planner.py) 生成内置工具投影，MCP 工具按需查询，不参与 direct 选择、预算分流或完整交付资格判断。
-- [tool_runtime_authorization.py](src/pulsara_agent/conversation_kernel/tool_runtime_authorization.py) 与 tool_runtime 负责 meta 权限矩阵、确认、执行准入及共同结算。
-- [provider_dispatch.py](src/pulsara_agent/conversation_kernel/provider_dispatch.py)、[能力合同](src/pulsara_agent/capability/contracts.py)及[前缀连续性](src/pulsara_agent/model_input/continuity.py) 负责固定 provider 输入与候选采用；动态 MCP 目录不改变同 epoch 的 SYSTEM、tools 或已安装消息前缀。
-- [mcp/meta.py](src/pulsara_agent/conversation_kernel/mcp/meta.py) 管理同 session 共用的调用引用、完整查询结果接纳与实际依据核对；NEXT 及 Cell 输出不承担引用激活。
-- [supervisor.py](src/pulsara_agent/conversation_kernel/mcp/supervisor.py)、[slots.py](src/pulsara_agent/conversation_kernel/mcp/slots.py)和[SDK facade](src/pulsara_agent/conversation_kernel/mcp/sdk_facade.py) 负责异步连接、通知、完整目录刷新、SDK 缓存更新及物理准入。首个模型请求不等待全部 MCP，实际调用仍核对当前执行许可与物理 owner。
-- [builtin_catalog.py](src/pulsara_agent/capability/builtin_catalog.py) 定义固定元工具参数及描述；原生与 JS 调用使用同一参数及业务结果合同。
+- [tool_runtime_surface.py](../src/pulsara_agent/conversation_kernel/tool_runtime_surface.py) 负责内置工具安装、固定 Code Mode 方法目录及 MCP 当前运行时的 safe point 采用。远端工具不安装为独立原生定义或独立方法。
+- [capability_query.py](../src/pulsara_agent/conversation_kernel/capability_query.py) 和 [mcp_search.py](../src/pulsara_agent/capability/mcp_search.py) 负责服务、工具详情与 BM25 搜索；按当前来源和已接纳目录判断覆盖，未知目录不冒充完整无匹配。
+- [tool_runtime.py](../src/pulsara_agent/conversation_kernel/tool_runtime.py) 的 `_query_capabilities_result` 负责查询值、引用准备和接受后结算；公开 ERROR 映射为既有内部 APPLICATION_ERROR，SUCCESS／CANCELLED 保持原义。
+- [planner.py](../src/pulsara_agent/capability/planner.py) 生成内置工具投影，MCP 工具按需查询，不参与 direct 选择、预算分流或完整交付资格判断。
+- [tool_runtime_authorization.py](../src/pulsara_agent/conversation_kernel/tool_runtime_authorization.py) 与 tool_runtime 负责 meta 权限矩阵、确认、执行准入及共同结算。
+- [provider_dispatch.py](../src/pulsara_agent/conversation_kernel/provider_dispatch.py)、[能力合同](../src/pulsara_agent/capability/contracts.py)及[前缀连续性](../src/pulsara_agent/model_input/continuity.py) 负责固定 provider 输入与候选采用；动态 MCP 目录不改变同 epoch 的 SYSTEM、tools 或已安装消息前缀。
+- [mcp/meta.py](../src/pulsara_agent/conversation_kernel/mcp/meta.py) 管理同 session 共用的调用引用、完整查询结果接纳与实际依据核对；NEXT 及 Cell 输出不承担引用激活。
+- [supervisor.py](../src/pulsara_agent/conversation_kernel/mcp/supervisor.py)、[slots.py](../src/pulsara_agent/conversation_kernel/mcp/slots.py)和[SDK facade](../src/pulsara_agent/conversation_kernel/mcp/sdk_facade.py) 负责异步连接、通知、完整目录刷新、SDK 缓存更新及物理准入。首个模型请求不等待全部 MCP，实际调用仍核对当前执行许可与物理 owner。
+- [builtin_catalog.py](../src/pulsara_agent/capability/builtin_catalog.py) 定义固定元工具参数及描述；原生与 JS 调用使用同一参数及业务结果合同。
 
 以下文档共同约束实施，职责如下：
 
 | 文档 | 同步内容 |
 | --- | --- |
-| [MCP 接入](native_tools/mcp.md) | call_mcp_tool 原生／JS 用法、共同返回；移除远端 direct 调用教程，明确先取得接口再编写业务 Cell |
-| [能力查询](native_tools/capabilities.md) | 删除 DIRECT 和直接工具名，统一参数／返回说明；引用同 session 共用，完整接纳后可调用，不要求详情全部交付 |
-| [能力管理](native_tools/manage_capability.md) | ROOT／子代理默认范围与统一 meta 调用；区分调用引用和物理使用引用，保留安装、启停、信任、授权等底层合同 |
+| [MCP 接入](../native_tools/mcp.md) | call_mcp_tool 原生／JS 用法、共同返回；移除远端 direct 调用教程，明确先取得接口再编写业务 Cell |
+| [能力查询](../native_tools/capabilities.md) | 删除 DIRECT 和直接工具名，统一参数／返回说明；引用同 session 共用，完整接纳后可调用，不要求详情全部交付 |
+| [能力管理](../native_tools/manage_capability.md) | ROOT／子代理默认范围与统一 meta 调用；区分调用引用和物理使用引用，保留安装、启停、信任、授权等底层合同 |
 | [统一交付](PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md) | 删除混合入口表述，保持唯一结果、原生分页、JS 完整值和独立 steer |
 | [数据库](PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md) | 详情与结果的唯一存储路径；调用引用仍由进程内 owner 管理，观察范围不承担激活职责 |
 | [原生工具索引](PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md) | 工具改名及覆盖范围 |

@@ -1,6 +1,8 @@
 # Pulsara MCP 非阻塞启动与不完整搜索合同
 
-状态：当前实施合同。与 [MCP 初始目录规范](PULSARA_MCP_CATALOG_INCREMENTAL_IMPLEMENTATION_SPEC.zh.md)共同定义非阻塞首请求、轻量服务目录和不完整搜索；前缀、调用及结算合同保持。本轮不构建、安装或操作运行中的应用，不修改生产设置或生产数据库。
+> 已归档。当前工具参数和用法见 [native_tools/](../native_tools/)。
+
+状态：已完成实施并归档。与 [MCP 初始目录规范](PULSARA_MCP_CATALOG_INCREMENTAL_IMPLEMENTATION_SPEC.zh.md)共同定义非阻塞首请求、轻量服务目录和不完整搜索；前缀、调用及结算合同保持。本轮不构建、安装或操作运行中的应用，不修改生产设置或生产数据库。
 
 ## 1. 启动与所有权
 
