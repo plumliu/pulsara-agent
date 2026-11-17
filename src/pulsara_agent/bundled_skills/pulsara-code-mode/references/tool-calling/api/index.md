@@ -53,3 +53,8 @@ Use console.log or a top-level return to disclose selected values to ROOT. Value
 - [tools.exec_process](exec_process.md)
 - [tools.manage_process](manage_process.md)
 - [tools.query_processes](query_processes.md)
+
+## web
+
+- [tools.web_fetch](web_fetch.md)
+- [tools.web_search](web_search.md)

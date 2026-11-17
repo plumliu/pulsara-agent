@@ -21,6 +21,7 @@ const evidenceTools = new Set([
   'read_file', 'write_file', 'edit_file', 'find_files', 'search_file_content',
   'exec_process', 'manage_process', 'view_image', 'read_video_frames',
   'read_transcript', 'open_in_pulsara', 'call_mcp_tool',
+  'web_search', 'web_fetch',
 ]);
 
 export function isUserFacingToolResult(trace: ToolTrace): boolean {

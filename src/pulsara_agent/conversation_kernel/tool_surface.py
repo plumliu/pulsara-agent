@@ -217,6 +217,7 @@ class PreparedKernelToolSurface:
 
 
 CODE_MODE_SHARED_TOOL_NAMES = frozenset({
+    "web_search", "web_fetch",
     "read_file", "write_file", "edit_file", "find_files", "search_file_content",
     "exec_process", "query_processes", "manage_process",
     "search_sessions", "search_session_content", "read_session_content",

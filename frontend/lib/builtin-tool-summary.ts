@@ -11,6 +11,8 @@ const labels: Record<string, [title: string, pending: string, completed: string]
   annotate_media: ['标注媒体', '正在添加媒体标注', '已添加媒体标注'],
   search_file_content: ['搜索内容', '正在搜索内容', '搜索已结束'],
   find_files: ['查找文件', '正在查找文件', '查找已结束'],
+  web_search: ['搜索网页', '正在搜索网页', '网页搜索已结束'],
+  web_fetch: ['读取网页', '正在读取网页', '已读取网页'],
   edit_file: ['修改文件', '正在修改文件', '已修改文件'],
   write_file: ['写入文件', '正在写入文件', '已写入文件'],
   exec_process: ['运行命令', '命令正在执行', '已执行命令'],
@@ -99,6 +101,8 @@ export function builtinToolSummary(trace: ToolTrace): {title:string;subtitle:str
     if (name === 'search_file_content' || name === 'find_files') target=[text(name === 'find_files' ? args.glob : args.pattern),target].filter(Boolean).join(' · ');
   } else if (name === 'exec_process') target=trace.command ?? text(args.command);
   else if (name === 'query_memory') target=text(args.query);
+  else if (name === 'web_search') target=text(args.query);
+  else if (name === 'web_fetch') target=text(meta.title) || text(targetValue.url) || text(object(args.target).url);
   let detail=label[1];
   if (trace.status === 'running') {
     if (name === 'wait_agent') detail=Array.isArray(args.works) ? '正在等待指定任务结束' : '正在等待指定代理空闲或发来消息';
@@ -111,6 +115,9 @@ export function builtinToolSummary(trace: ToolTrace): {title:string;subtitle:str
   else if (trace.status === 'completed') {
     detail=label[2];
     switch(name) {
+      case 'web_search':
+        detail=`本次找到 ${content.filter(part=>part.type === 'object').length} 个网页来源`;
+        break;
       case 'read_file': {
         const total=number(meta.total_lines);
         if (total !== undefined) detail=`已读取文件 · 共 ${total} 行`;

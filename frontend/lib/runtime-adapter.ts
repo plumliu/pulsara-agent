@@ -258,11 +258,26 @@ export interface AsrConnection { endpoint: string; model_id: string; credential_
 export interface AsrModelInput { connection: Pick<AsrConnection, 'endpoint' | 'model_id'>; key_action: 'keep' | 'replace' | 'clear'; api_key?: string }
 export interface AsrTestResult { status: 'ready'; granularity: 'word' | 'segment'; elapsed_ms: number }
 
+export type WebProvider = 'deepseek' | 'firecrawl' | 'tavily' | 'exa';
+export interface WebSettingsStatus {
+  mode: 'account' | 'free';
+  connection: {
+    provider: WebProvider; has_api_key: boolean;
+    credential_source: 'api_key' | 'model_connection';
+    model_connection_id: string | null; model_connection_label: string | null;
+  } | null;
+  deepseek_candidate: { model_connection_id: string; label: string } | null;
+}
+export type WebSettingsInput = { provider: WebProvider } & (
+  { key_action: 'replace'; api_key: string } | { key_action: 'keep' }
+);
+
 export interface LocalSettingsSummary {
   state?: 'ready' | 'unavailable';
   pulsara_home?: string;
   memory_retrieval: MemoryRetrievalSettings;
   asr?: AsrConnection | null;
+  web?: WebSettingsStatus;
   input_suggestions_enabled: boolean;
   cache_warming_enabled: boolean;
 }
@@ -603,6 +618,10 @@ export interface RuntimeAdapter {
   clearAsrModel(): Promise<null>;
   testAsrModel(input: AsrModelInput): Promise<AsrTestResult>;
   clearOldAsrCache(): Promise<{ deleted_blocks: number; message: string }>;
+  webSettings(): Promise<WebSettingsStatus>;
+  saveWebSettings(input: WebSettingsInput): Promise<WebSettingsStatus>;
+  useDeepSeekWebConnection(): Promise<WebSettingsStatus>;
+  clearWebSettings(): Promise<WebSettingsStatus>;
   saveMemoryModel(slot: MemoryModelSlot, input: RetrievalModelInput): Promise<MemoryRetrievalSettings>;
   clearMemoryModel(slot: MemoryModelSlot): Promise<MemoryRetrievalSettings>;
   testMemoryModel(slot: MemoryModelSlot, input: RetrievalModelInput): Promise<RetrievalTestResult>;
@@ -1397,6 +1416,19 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
   }
   async clearOldAsrCache(): Promise<{ deleted_blocks: number; message: string }> {
     return apiRequest('/api/local-settings/asr/clear-old-cache', { method: 'POST' });
+  }
+
+  async webSettings(): Promise<WebSettingsStatus> {
+    return apiRequest('/api/local-settings/web');
+  }
+  async saveWebSettings(input: WebSettingsInput): Promise<WebSettingsStatus> {
+    return apiRequest('/api/local-settings/web', { method: 'PUT', body: JSON.stringify(input) });
+  }
+  async useDeepSeekWebConnection(): Promise<WebSettingsStatus> {
+    return apiRequest('/api/local-settings/web/use-deepseek', { method: 'POST', body: '{}' });
+  }
+  async clearWebSettings(): Promise<WebSettingsStatus> {
+    return apiRequest('/api/local-settings/web', { method: 'DELETE' });
   }
 
   async saveMemoryModel(slot: MemoryModelSlot, input: RetrievalModelInput): Promise<MemoryRetrievalSettings> {
@@ -5305,6 +5337,8 @@ function reasoningKind(value: string): ReasoningBlock['kind'] {
 
 function toolDisplayName(name: string, argumentsJson?: string): string {
   const normalized = name.toLowerCase();
+  if (normalized === 'web_search') return '搜索网页';
+  if (normalized === 'web_fetch') return '读取网页';
   if (normalized === 'reload_capabilities') return '刷新能力';
   if (normalized === 'query_capabilities') {
     try {
@@ -5360,6 +5394,11 @@ function toolArgumentSummary(name: string, content: string): string {
     }
     if (normalized === 'call_mcp_tool') return '调用 MCP 工具';
     if (normalized === 'read_mcp_resource') return '读取 MCP 资源';
+    if (normalized === 'web_search' && typeof value.query === 'string') return value.query;
+    if (normalized === 'web_fetch') {
+      const target = value.target && typeof value.target === 'object' ? value.target as Record<string, unknown> : {};
+      return typeof target.url === 'string' ? target.url : '正在准备读取网页';
+    }
 
     if (normalized === 'wait_message') return '等待 ROOT 或其他代理发来的消息';
     if (normalized === 'wait_agent') return Array.isArray(value.works)
@@ -5724,6 +5763,7 @@ function formatRelativeTime(value: string): string {
 
 function toolKind(name: string): ToolTrace['kind'] {
   const lower = name.toLowerCase();
+  if (lower === 'web_fetch') return 'read';
   if (['exec_cell', 'query_cells', 'manage_cell'].includes(lower)) return 'tool';
   if (['exec_process', 'query_processes', 'manage_process'].includes(lower)) return 'terminal';
   if (lower.includes('terminal') || lower.includes('exec')) return 'terminal';

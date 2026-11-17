@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pulsara_agent.tools.builtins.media import MEDIA_TOOL_NAMES, media_parameters_schema
+from pulsara_agent.web.contracts import WEB_TOOL_NAMES, web_parameters_schema
 
 from pulsara_agent.scheduling.requests import manage_schedule_schema, query_schedules_schema
 from pulsara_agent.capability.source_query import query_input_schema, capability_target_schema
@@ -125,6 +126,12 @@ def _descriptor(
 
 
 _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
+    **{name: _descriptor(name=name, description=description,
+        input_schema=web_parameters_schema(name), is_read_only=True,
+        permission_category="external_read") for name, description in (
+        ("web_search", "Search webpages for sources and relevant summaries. Pass query, optional count (1–20, default 10), include_domains, exclude_domains, after and before (YYYY-MM-DD). Domains include their subdomains; exclusions take precedence. Returns ranked URL Targets with available title, snippet and date. Search summaries are not page contents; use web_fetch to read selected sources."),
+        ("web_fetch", "Read extracted Markdown from one HTTP(S) webpage. Pass target:URL. Returns the requested URL Target, available title and extracted text."),
+    )},
     **{name: _descriptor(name=name, description=description,
         input_schema=media_parameters_schema(name), is_read_only=True,
         permission_category="filesystem_read") for name, description in (
@@ -577,6 +584,7 @@ _SCRIPT_API_DESCRIPTORS["read_file"] = replace(
 class BuiltinToolBindingKind(StrEnum):
     SESSION_QUERY = "session_query"
     FILESYSTEM = "filesystem"
+    WEB = "web"
     MEMORY_MUTATION = "memory_mutation"
     MEMORY_QUERY = "memory_query"
     PLAN_WORKFLOW = "plan_workflow"
@@ -656,6 +664,7 @@ class BuiltinToolCatalogEntry:
     tool_family: Literal[
         "session_query",
         "filesystem",
+        "web",
         "memory_read",
         "memory_write",
         "terminal",
@@ -858,6 +867,8 @@ def _catalog_shape(name: str):
         ToolInvocationOwnerKind.HOST_MAIN_RUN,
         ToolInvocationOwnerKind.SUBAGENT,
     )
+    if name in WEB_TOOL_NAMES:
+        return (BuiltinToolBindingKind.WEB, BuiltinToolAvailabilityKind.ALWAYS, both, "web")
     if name in SESSION_QUERY_TOOL_NAMES:
         return (BuiltinToolBindingKind.SESSION_QUERY,
                 BuiltinToolAvailabilityKind.REQUIRES_SESSION_QUERY_PORT,
@@ -1015,7 +1026,7 @@ def _recovery_contract(name: str) -> BuiltinToolRecoveryContract:
         severity = "terminal"
     elif name in {"edit_file", "write_file"}:
         severity = "bounded_write"
-    elif name in MEDIA_TOOL_NAMES or name in SESSION_QUERY_TOOL_NAMES or name in {
+    elif name in WEB_TOOL_NAMES or name in MEDIA_TOOL_NAMES or name in SESSION_QUERY_TOOL_NAMES or name in {
         "open_in_pulsara",
         "query_capabilities",
         "query_agents",

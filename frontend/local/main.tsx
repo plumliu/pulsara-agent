@@ -13,6 +13,7 @@ import '../app/styles/workbench.css';
 import '../app/styles/inspector.css';
 import '../app/styles/overview.css';
 import '../app/styles/settings.css';
+import '../app/styles/web-settings.css';
 import '../app/styles/capabilities.css';
 import '../app/styles/memory.css';
 import '../app/styles/overlays.css';

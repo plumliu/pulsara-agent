@@ -1,7 +1,8 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { SettingsView } from '../../frontend/components/settings-view';
-import type { LocalSettingsReadModel, ModelCatalogReadModel, ModelConfigurationDetail, ModelConfigurationInput, ModelConfigurationSummary, RuntimeAdapter } from '../../frontend/lib/runtime-adapter';
+import type { LocalSettingsReadModel, ModelCatalogReadModel, ModelConfigurationDetail, ModelConfigurationInput, ModelConfigurationSummary, RuntimeAdapter, WebSettingsStatus } from '../../frontend/lib/runtime-adapter';
+import { randomIdentity } from '../../frontend/lib/identity';
 
 beforeEach(() => {
   Object.defineProperty(HTMLDialogElement.prototype, 'showModal', { configurable: true, value: function (this: HTMLDialogElement) { this.setAttribute('open', ''); } });
@@ -24,9 +25,9 @@ function modelConfiguration(index: number): ModelConfigurationSummary {
   };
 }
 
-function setup(configurations: ModelConfigurationSummary[] = [], detail?: ModelConfigurationDetail, catalog: ModelCatalogReadModel = { status: 'ready', routes: [] }) {
+function setup(configurations: ModelConfigurationSummary[] = [], detail?: ModelConfigurationDetail, catalog: ModelCatalogReadModel = { status: 'ready', routes: [] }, web?: WebSettingsStatus) {
   let settings: LocalSettingsReadModel = {
-    local_settings: { input_suggestions_enabled: true, cache_warming_enabled: false, pulsara_home: '/custom/pulsara-home', memory_retrieval: { embedding: null, embedding_enabled: false, history_enabled: true, rerank: null, decision: null, ranking_mode: 'off' } },
+    local_settings: { web, input_suggestions_enabled: true, cache_warming_enabled: false, pulsara_home: '/custom/pulsara-home', memory_retrieval: { embedding: null, embedding_enabled: false, history_enabled: true, rerank: null, decision: null, ranking_mode: 'off' } },
     database_state: 'database_reset_required', model_configurations: configurations,
   };
   const reset = vi.fn(async () => {
@@ -38,6 +39,11 @@ function setup(configurations: ModelConfigurationSummary[] = [], detail?: ModelC
   const check = vi.fn(async () => ({database_name:'pulsara'}));
   const deleteModel = vi.fn(async (id: string) => {
     settings = { ...settings, model_configurations: settings.model_configurations.filter((connection) => connection.id !== id) };
+    const selectedWeb = settings.local_settings.web;
+    if (selectedWeb?.connection?.model_connection_id === id) settings.local_settings.web = {
+      ...selectedWeb, mode: 'free', deepseek_candidate: null,
+      connection: { ...selectedWeb.connection, has_api_key: false, model_connection_label: null },
+    };
     return { deleted: true, model_configurations: settings.model_configurations };
   });
   const addModel = vi.fn(async (_input: ModelConfigurationInput) => {
@@ -491,4 +497,27 @@ it('keeps both optional toggles last and saves warming independently', async () 
   fireEvent.click(warming);
   await waitFor(() => expect(notify).toHaveBeenCalledWith('缓存保温设置未能完成', '保存失败', 'warning'));
   expect(warming.getAttribute('aria-checked')).toBe('true');
+});
+
+it('places optional web service settings between model configuration and ASR', async () => {
+  setup();
+  fireEvent.click(screen.getByRole('button', { name: '模型' }));
+  const web = await screen.findByRole('heading', { name: '网页搜索与读取', exact: true });
+  const models = screen.getByRole('heading', { name: '模型配置', exact: true });
+  const asr = screen.getByRole('heading', { name: 'ASR 配置', exact: true });
+  expect(models.compareDocumentPosition(web) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(web.compareDocumentPosition(asr) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(screen.getByText('自动免费')).toBeTruthy();
+});
+
+it('refreshes web credential availability after its saved model connection is deleted', async () => {
+  const model = { ...modelConfiguration(1), id: randomIdentity('connection') };
+  setup([model], undefined, undefined, { mode: 'account', deepseek_candidate: { model_connection_id: model.id, label: 'Saved DeepSeek' }, connection: { provider: 'deepseek', has_api_key: true, credential_source: 'model_connection', model_connection_id: model.id, model_connection_label: 'Saved DeepSeek' } });
+  fireEvent.click(screen.getByRole('button', { name: '模型' }));
+  await screen.findByText('使用模型连接：Saved DeepSeek');
+  fireEvent.click(screen.getByRole('button', { name: /删除模型配置 Test · Model 1/ }));
+  fireEvent.click(screen.getByRole('button', { name: '确认删除' }));
+  await screen.findByText('账户密钥不可用 · 当前免费使用');
+  expect(screen.getByText('自动免费')).toBeTruthy();
+  expect(screen.queryByText('使用模型连接：Saved DeepSeek')).toBeNull();
 });

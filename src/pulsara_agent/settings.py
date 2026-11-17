@@ -14,6 +14,7 @@ from uuid import uuid4
 import yaml
 
 from pulsara_agent.media.asr_config import AsrConnection, asr_connection_from_dict
+from pulsara_agent.web.config import WebConnection, deepseek_candidate, web_connection_from_dict
 from pulsara_agent.retrieval.config import MemoryRetrievalSettings, connection_from_dict
 from pulsara_agent.capability.pulsara_home import require_pulsara_home
 from pulsara_agent.llm.model_connections import (
@@ -93,6 +94,7 @@ class LocalSettings:
         default_factory=MemoryRetrievalSettings
     )
     asr: AsrConnection | None = None
+    web: WebConnection | None = None
     mcp_credentials: tuple[LocalMcpCredential, ...] = field(default=(), repr=False)
     mcp_oauth: tuple[LocalMcpOAuthRecord, ...] = field(default=(), repr=False)
 
@@ -119,6 +121,8 @@ class LocalSettings:
                 "local settings model API keys do not match bearer connections"
             )
 
+        if self.web is not None and not isinstance(self.web, WebConnection):
+            raise ValueError("网页配置类型无效。")
         if self.asr is not None:
             scrub = self.credential_scrub_set()
             if scrub.contains(self.asr.endpoint) or scrub.contains(self.asr.model_id):
@@ -164,6 +168,8 @@ class LocalSettings:
             scrub.observe(item.value)
         if self.asr is not None:
             scrub.observe(self.asr.api_key)
+        if self.web is not None and self.web.api_key is not None:
+            scrub.observe(self.web.api_key)
         for slot in ("embedding", "rerank", "decision"):
             connection = getattr(self.memory_retrieval, slot)
             if connection is not None:
@@ -223,6 +229,7 @@ def local_settings_to_dict(settings: LocalSettings) -> dict[str, object]:
         ],
         "memory_retrieval": settings.memory_retrieval.private(),
         "asr": None if settings.asr is None else settings.asr.private(),
+        "web": None if settings.web is None else settings.web.private(),
         "mcp_credentials": [
             {"binding": binding_to_dict(item.binding), "value": item.value}
             for item in settings.mcp_credentials
@@ -252,7 +259,7 @@ def local_settings_from_dict(value: object) -> LocalSettings:
     if isinstance(value, dict):
         value = {key: item for key, item in value.items() if key != "postgres"}
     # Optional user preferences have their product defaults when absent.
-    if not isinstance(value, dict) or set(value) - {"input_suggestions_enabled", "cache_warming_enabled", "asr"} != {
+    if not isinstance(value, dict) or set(value) - {"input_suggestions_enabled", "cache_warming_enabled", "asr", "web"} != {
         "model_connections",
         "memory_retrieval",
         "mcp_credentials",
@@ -283,6 +290,7 @@ def local_settings_from_dict(value: object) -> LocalSettings:
         model_api_keys=tuple(model_api_keys),
         memory_retrieval=MemoryRetrievalSettings.from_dict(value["memory_retrieval"]),
         asr=asr_connection_from_dict(value.get("asr")),
+        web=web_connection_from_dict(value.get("web")),
         mcp_credentials=_mcp_credentials_from_dict(value["mcp_credentials"]),
         mcp_oauth=_mcp_oauth_from_dict(value["mcp_oauth"]),
     )
@@ -586,16 +594,10 @@ class LocalSettingsStore:
             raise ModelConnectionIdentityConflict("IDENTITY_CONFLICT: model connection ID already exists")
         key = () if api_key is None else (LocalModelApiKey(connection.id, api_key),)
         return (
-            LocalSettings(
-                postgres=current.postgres,
-                input_suggestions_enabled=current.input_suggestions_enabled,
-                cache_warming_enabled=current.cache_warming_enabled,
+            replace(
+                current,
                 model_connections=(*current.model_connections, connection),
                 model_api_keys=(*current.model_api_keys, *key),
-                memory_retrieval=current.memory_retrieval,
-                asr=current.asr,
-                mcp_credentials=current.mcp_credentials,
-                mcp_oauth=current.mcp_oauth,
             ),
             None,
         )
@@ -605,10 +607,8 @@ class LocalSettingsStore:
     ) -> tuple[LocalSettings, bool]:
         return await self._run_mutation(
             lambda current: (
-                LocalSettings(
-                    postgres=current.postgres,
-                    input_suggestions_enabled=current.input_suggestions_enabled,
-                    cache_warming_enabled=current.cache_warming_enabled,
+                replace(
+                    current,
                     model_connections=tuple(
                         item
                         for item in current.model_connections
@@ -619,10 +619,6 @@ class LocalSettingsStore:
                         for item in current.model_api_keys
                         if item.connection_id != connection_id
                     ),
-                    memory_retrieval=current.memory_retrieval,
-                    asr=current.asr,
-                    mcp_credentials=current.mcp_credentials,
-                    mcp_oauth=current.mcp_oauth,
                 ),
                 current.connection(connection_id) is not None,
             ),
@@ -676,6 +672,51 @@ class LocalSettingsStore:
 
         updated, _ = await self._run_mutation(
             mutation, name="update-model-connection", repair=False
+        )
+        return updated
+
+    @staticmethod
+    def web_draft(current: LocalSettings, body: object) -> WebConnection:
+        if (
+            not isinstance(body, dict)
+            or not {"provider", "key_action"} <= set(body)
+            or set(body) - {"provider", "key_action", "api_key"}
+        ):
+            raise ValueError("网页配置提交字段无效。")
+        action = body["key_action"]
+        if not isinstance(action, str) or action not in {"keep", "replace"} or (action == "replace") != ("api_key" in body):
+            raise ValueError("请选择有效的密钥操作。")
+        key = body.get("api_key")
+        if action == "keep":
+            previous = current.web
+            if previous is None or previous.provider != body["provider"] or previous.api_key is None:
+                raise ValueError("供应商或凭据来源已改变，请重新填写 API key。")
+            key = previous.api_key
+        return WebConnection(provider=body["provider"], api_key=key)
+
+    async def save_web_connection(self, body: object) -> LocalSettings:
+        updated, _ = await self._run_mutation(
+            lambda current: (replace(current, web=self.web_draft(current, body)), None),
+            name="save-web-connection", repair=False,
+        )
+        return updated
+
+    async def use_saved_deepseek_web_connection(self) -> LocalSettings:
+        def mutation(current: LocalSettings) -> tuple[LocalSettings, None]:
+            candidate = deepseek_candidate(current)
+            if candidate is None:
+                raise ValueError("没有可用的已保存官方 DeepSeek 模型凭据。")
+            return replace(current, web=WebConnection("deepseek", model_connection_id=candidate.id)), None
+
+        updated, _ = await self._run_mutation(
+            mutation, name="use-saved-deepseek-web-connection", repair=False,
+        )
+        return updated
+
+    async def clear_web_connection(self) -> LocalSettings:
+        updated, _ = await self._run_mutation(
+            lambda current: (replace(current, web=None), None),
+            name="clear-web-connection", repair=False,
         )
         return updated
 

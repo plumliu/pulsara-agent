@@ -88,3 +88,41 @@ it('retains formal MCP content beside structuredContent and omits absent structu
  expect(screen.getByText('formal text only')).toBeTruthy();
  expect(screen.queryByText('查看结构化结果')).toBeNull();
 });
+
+it('renders web search sources as actionable links with original snippets and dates',()=>{
+ const value:ToolBusinessValue={meta:{status:'SUCCESS'},content:[{type:'object',value:{target:{kind:'URL',url:'https://example.com/docs'},title:'API reference',snippet:'Exact snippet\nwith line break',date:'2026-11-17'}}]};
+ const {container}=render(<ToolBusinessContent toolName="web_search" value={value}/>);
+ const link=screen.getByRole('link',{name:'API reference'});
+ expect(link.getAttribute('href')).toBe('https://example.com/docs');
+ expect(screen.getByText('2026-11-17')).toBeTruthy();
+ expect(container.querySelector('pre')?.textContent).toBe('Exact snippet\nwith line break');
+ expect(screen.queryByText('查看结构化结果')).toBeNull();
+ expect(container.textContent).not.toContain('SUCCESS');
+});
+
+it('keeps fetched markdown literal without loading its remote media or rendering page HTML',()=>{
+ const body='# Actual page\n![remote](https://example.com/image.png)\n<script>bad()</script>\n[link](https://example.com/next)';
+ const value:ToolBusinessValue={target:{kind:'URL',url:'https://example.com/page'},meta:{status:'SUCCESS',title:'Page title'},content:[{type:'text',value:body}]};
+ const {container}=render(<ToolBusinessContent toolName="web_fetch" value={value}/>);
+ expect(screen.getByText('Page title')).toBeTruthy();
+ expect(screen.getByRole('link',{name:'https://example.com/page'}).getAttribute('href')).toBe('https://example.com/page');
+ expect(container.querySelector('pre')?.textContent).toBe(body);
+ expect(container.querySelector('img, script')).toBeNull();
+ expect(screen.queryByText('查看结果信息')).toBeNull();
+});
+
+it('shows explicit empty web outcomes and retains failure text separately',()=>{
+ const {rerender}=render(<ToolBusinessContent toolName="web_search" value={{meta:{status:'SUCCESS'},content:[]}}/>);
+ expect(screen.getByText('没有找到匹配的网页来源。')).toBeTruthy();
+ rerender(<ToolBusinessContent toolName="web_fetch" value={{meta:{status:'SUCCESS'},content:[]}}/>);
+ expect(screen.getByText('网页未返回正文。')).toBeTruthy();
+ rerender(<ToolBusinessContent toolName="web_search" value={{meta:{status:'ERROR'},content:[{type:'text',value:'服务额度不足，免费服务也暂时不可用'}]}}/>);
+ expect(screen.queryByText('没有找到匹配的网页来源。')).toBeNull();
+ expect(screen.getByText('服务额度不足，免费服务也暂时不可用')).toBeTruthy();
+});
+
+it('does not make unsafe web addresses actionable',()=>{
+ const {container}=render(<ToolBusinessContent toolName="web_search" value={{meta:{status:'SUCCESS'},content:[{type:'object',value:{target:{kind:'URL',url:'javascript:alert(1)'},title:'unsafe'}}]}}/>);
+ expect(screen.queryByRole('link')).toBeNull();
+ expect(container.querySelector('details')?.open).toBe(false);
+});

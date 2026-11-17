@@ -2,6 +2,7 @@ import {describe,expect,it} from 'vitest';
 import type {ToolTrace} from '../../frontend/lib/pulsara-types';
 import type {ToolBusinessValue} from '../../frontend/lib/tool-business-value';
 import {builtinToolSummary} from '../../frontend/lib/builtin-tool-summary';
+import {toolResultCanExpand} from '../../frontend/lib/tool-result-display';
 function trace(name:string,value?:ToolBusinessValue,args:unknown={},extra:Partial<ToolTrace>={}):ToolTrace {
  return {id:'call',kind:'tool',toolName:name,title:name,subtitle:'',status:'completed',resultState:'SUCCESS',
   argumentsJson:JSON.stringify(args),businessValue:value,...extra};
@@ -81,4 +82,15 @@ describe('builtin summaries from saved typed business values',()=>{
  it('distinguishes exiting planning from submitting a plan',()=>{
   expect(builtinToolSummary(trace('exit_plan',value(),{}))).toEqual({title:'退出规划',subtitle:'已退出规划模式'});
  });
+});
+
+it('summarizes web query and page title from public results without service routing details',()=>{
+ const search=trace('web_search',value({},[{type:'object',value:{target:{kind:'URL',url:'https://example.com'}}}]),{query:'current release'}, {resultFacts:{provider:'internal-provider',attempts:3}});
+ expect(toolResultCanExpand(search,false)).toBe(true);
+ expect(builtinToolSummary(search)).toEqual({title:'搜索网页',subtitle:'本次找到 1 个网页来源 · current release'});
+ const fetch=trace('web_fetch',value({title:'API reference'},[{type:'text',value:'RAW PAGE'}],{target:{kind:'URL',url:'https://example.com'}}),{target:{kind:'URL',url:'https://example.com'}});
+ expect(toolResultCanExpand(fetch,false)).toBe(true);
+ expect(toolResultCanExpand(trace('query_capabilities',value()),false)).toBe(false);
+ expect(builtinToolSummary(fetch)).toEqual({title:'读取网页',subtitle:'已读取网页 · API reference'});
+ expect(builtinToolSummary({...fetch,status:'running',businessValue:undefined})?.subtitle).toBe('正在读取网页 · https://example.com');
 });

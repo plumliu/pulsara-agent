@@ -29,6 +29,7 @@ from pulsara_agent.ports.tool_execution import (
 )
 from pulsara_agent.tools.builtins.filesystem_contracts import file_tool_result_schema
 from pulsara_agent.tools.builtins.media import media_business_output_schema
+from pulsara_agent.web.contracts import WEB_TOOL_NAMES, web_result_schema
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,6 +38,8 @@ OUTPUT = ROOT / "src/pulsara_agent/bundled_skills/pulsara-code-mode/references/t
 
 def _business_schema(name: str) -> tuple[str, dict[str, object]]:
     """Build-time routing to existing business owners; never an execution surface."""
+    if name in WEB_TOOL_NAMES:
+        return "web", web_result_schema(name)
     if name in {"read_file", "write_file", "edit_file", "find_files", "search_file_content"}:
         return "files", file_tool_result_schema(name)
     if name in {"exec_process", "query_processes", "manage_process"}:

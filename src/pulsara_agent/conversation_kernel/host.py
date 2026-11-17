@@ -471,6 +471,7 @@ class KernelHostSession(
         scheduled_tasks,
         media_cache=None,
         media_asr_runtime=None,
+        web_service=None,
         control_monotonic: Callable[[], float] = monotonic,
     ) -> None:
         self._model_runtime = model_runtime
@@ -599,6 +600,7 @@ class KernelHostSession(
             media_cache=media_cache,
             media_asr_runtime=media_asr_runtime,
             read_media_settings=model_runtime.settings.read,
+            web_service=web_service,
         )
         self._tools.bind_interaction_port(self._interactions)
         self._tools.bind_capability_reload_port(self)
@@ -2426,6 +2428,8 @@ class KernelHostCore(_HostCoreManagementOperations):
         )
         self._bundled_skill_binding = BundledSkillDistributionBindingOwner()
         self._credential_boundary = credential_boundary or ProcessCredentialBoundary()
+        from pulsara_agent.web.service import WebService
+        self._web_service = WebService(model_runtime.settings, credential_boundary=self._credential_boundary)
         from pulsara_agent.scheduling.service import ScheduledTaskService
         self._scheduled_tasks = ScheduledTaskService(self)
         self.mcp_management = LocalMcpManagementService(
@@ -3423,6 +3427,7 @@ class KernelHostCore(_HostCoreManagementOperations):
                 scheduled_tasks=self.scheduled_tasks,
                 media_cache=self._asr_cache,
                 media_asr_runtime=self._media_asr_runtime,
+                web_service=self._web_service,
             )
             attempt.candidate_session = session
             await session.start_mcp()
@@ -3785,6 +3790,7 @@ class KernelHostCore(_HostCoreManagementOperations):
         # Unconfirmed physical work retains the resources it can still use.
         # This does not prevent independent maintenance owners from stopping.
         if sessions_stopped:
+            await close(self._web_service.aclose)
             if self._media_asr_runtime is not None:
                 owner = self._media_asr_runtime
                 await close(lambda: owner.aclose(deadline_monotonic=self._canonical_deadline()))

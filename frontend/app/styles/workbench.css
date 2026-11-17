@@ -438,12 +438,13 @@
 .trace-chevron { color: var(--faint); transition: transform .16s ease; }
 .trace-card.is-expanded > .trace-card__summary .trace-chevron,
 .trace-card.is-expanded > .trace-card__heading > .trace-card__result-toggle .trace-chevron { transform: rotate(90deg); }
-/* Nested tool details must share the outer process drawer's pixel grid;
+/* Nested details must share the outer process drawer's pixel grid;
    fractional intrinsic heights otherwise move its anchored content each frame. */
-@property --tool-reveal { syntax: '<number>'; inherits: false; initial-value: 0; }
-.trace-card__disclosure.animated-disclosure { --tool-reveal: 0; grid-template-rows: minmax(0, 1fr); height: calc-size(auto, round(nearest, size * var(--tool-reveal), 1px)); overflow: clip; transition: --tool-reveal .22s cubic-bezier(.2,.7,.2,1), opacity .16s ease, visibility 0s .22s; }
-.trace-card__disclosure.animated-disclosure.is-open { --tool-reveal: 1; transition: --tool-reveal .22s cubic-bezier(.2,.7,.2,1), opacity .18s ease, visibility 0s; }
-.trace-card__disclosure > .animated-disclosure__content { display: flow-root; overflow: visible; border-top: 1px solid var(--line); background: var(--paper-deep); }
+@property --detail-reveal { syntax: '<number>'; inherits: false; initial-value: 0; }
+:is(.trace-card__disclosure, .reasoning-row__disclosure).animated-disclosure { --detail-reveal: 0; grid-template-rows: minmax(0, 1fr); height: calc-size(auto, round(nearest, size * var(--detail-reveal), 1px)); overflow: clip; transition: --detail-reveal .22s cubic-bezier(.2,.7,.2,1), opacity .16s ease, visibility 0s .22s; }
+:is(.trace-card__disclosure, .reasoning-row__disclosure).animated-disclosure.is-open { --detail-reveal: 1; transition: --detail-reveal .22s cubic-bezier(.2,.7,.2,1), opacity .18s ease, visibility 0s; }
+:is(.trace-card__disclosure, .reasoning-row__disclosure) > .animated-disclosure__content { display: flow-root; overflow: visible; }
+.trace-card__disclosure > .animated-disclosure__content { border-top: 1px solid var(--line); background: var(--paper-deep); }
 .trace-card__disclosure > .animated-disclosure__content > .trace-node { margin: 8px 8px 8px 24px; }
 .tool-result-images { padding: 12px; }
 .tool-image-content { display: grid; gap: 12px; }

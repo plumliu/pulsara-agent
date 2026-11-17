@@ -497,7 +497,7 @@ function TraceCard({
           {!trace.businessValue && <MediaEvidenceIndex trace={trace} />}
           {diagnosticText ? <section className="tool-result-raw tool-result-images" aria-label="工具执行说明"><pre>{diagnosticText}</pre></section>
             : trace.toolName === 'exec_cell' && userFacing && trace.programCalls?.length ? null
-            : trace.businessValue && !terminalTool && !diffText ? <ToolBusinessContent value={trace.businessValue} toolName={trace.toolName} onCopy={copyOutput} inspectFields={!userFacing}/> : trace.resultContent ? (
+            : trace.businessValue && !terminalTool && !diffText ? <ToolBusinessContent value={trace.businessValue} toolName={trace.toolName} onCopy={copyOutput} inspectFields={!userFacing} onNotify={onNotify}/> : trace.resultContent ? (
             <section className="tool-result-images" aria-label="工具读取的图片">
               <PromptContentView
                 content={trace.resultContent}
@@ -783,7 +783,7 @@ function ReasoningRow({ block, ownerId, onNotify }: { block: ReasoningBlock; own
         {running && <span className="reasoning-row__live"><i />思考中</span>}
         <ChevronRight className="reasoning-row__chevron" size={13} />
       </button>
-      <AnimatedDisclosure unmountOnClose open={expanded}>
+      <AnimatedDisclosure unmountOnClose open={expanded} className="reasoning-row__disclosure">
         <div className="reasoning-row__body assistant-markdown"><MarkdownBody body={block.body} onNotify={onNotify} streaming={running} /></div>
       </AnimatedDisclosure>
     </section>

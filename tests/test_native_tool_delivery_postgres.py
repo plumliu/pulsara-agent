@@ -31,11 +31,11 @@ def repo(stage2_migrated_postgres_database):
     return ConversationKernelRepository(verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn))
 
 
-def save(repo, lease, turn, *, value, arguments=None, source=None, page=None, images=(), state="SUCCESS"):
+def save(repo, lease, turn, *, value, arguments=None, source=None, page=None, images=(), state="SUCCESS", tool_name="read_file"):
     cut = repo.prepare_provider_input_cut(lease.guard, turn_id=turn, deadline_monotonic=monotonic()+30)
     assistant, call = random_id("entry"), random_id("call")
     repo.commit_assistant_message(lease.guard, cut=cut, entry_id=assistant,
-        blocks=(AssistantToolCallBlock(random_id("block"),call,"read_file",freeze_json(arguments or {"target":{"kind":"PATH","path":"result.txt"}})),),
+        blocks=(AssistantToolCallBlock(random_id("block"),call,tool_name,freeze_json(arguments or {"target":{"kind":"PATH","path":"result.txt"}})),),
         complete_turn=False, occurred_at=datetime.now(timezone.utc), actor_id="model:test", deadline_monotonic=monotonic()+30)
     with repo.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR, row_factory=dict_row, deadline_monotonic=monotonic()+30) as connection:
         row = connection.execute("SELECT workspace_id,permission_snapshot_fingerprint FROM pulsara_v3.turns WHERE id=%s",(turn,)).fetchone()
@@ -49,7 +49,7 @@ def save(repo, lease, turn, *, value, arguments=None, source=None, page=None, im
         public_fields=value.public_fields,content_parts=value.content,
         source_result_entry_id=source,native_projection=None,result_facts={} if page is None else {"native_start":page.range.start.value()},pending_images=images,
         observed_at=datetime.now(timezone.utc),observation_duration_microseconds=1234,
-        observation_origin_kind=ToolObservationOrigin.BUILTIN,trusted_tool_reported_duration_microseconds=None,actor_id="read_file")
+        observation_origin_kind=ToolObservationOrigin.BUILTIN,trusted_tool_reported_duration_microseconds=None,actor_id=tool_name)
     accepted = repo.accept_tool_result(lease.guard,candidate=candidate,deadline_monotonic=monotonic()+30)
     assert repo.confirm_tool_result_winner(lease.guard,candidate=candidate,deadline_monotonic=monotonic()+30) == accepted
     return candidate

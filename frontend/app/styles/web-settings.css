@@ -1,0 +1,22 @@
+.web-settings-dialog { width: min(560px,calc(100vw - 32px)); }
+.web-settings-fields { border: 0; margin: 0; padding: 0; }
+.web-settings-auto { position: relative; display: inline-flex; }
+.web-settings-auto button { transition: background-color .16s ease, border-color .16s ease, color .16s ease; }
+.web-settings-auto button:not(:disabled):hover { background: var(--paper-deep); }
+.web-settings-auto-tooltip { position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 1; width: 240px; padding: 9px 11px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--paper-solid); color: var(--ink-soft); box-shadow: var(--shadow-md); font: var(--type-caption)/1.6 var(--sans); text-align: left; white-space: normal; pointer-events: none; opacity: 0; visibility: hidden; transform: translateY(4px); transition: opacity .16s ease, transform .2s ease, visibility 0s .16s; }
+.web-settings-auto:is(:hover, :focus-within) .web-settings-auto-tooltip { opacity: 1; visibility: visible; transform: translateY(0); transition-delay: .16s; }
+.web-settings-reference { margin: 0 15px 15px; color: var(--muted); font-size: var(--type-caption); line-height: 1.6; }
+.web-settings-retry { margin: 0 15px 15px; }
+.web-settings-loading { display: flex; align-items: center; gap: 7px; margin: 0 15px 15px; color: var(--muted); font-size: var(--type-small); }
+.web-settings-dialog footer { padding: 12px 15px 15px; border-top: 1px solid var(--line); }
+.web-settings-dialog .form-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; }
+.web-settings-dialog .web-settings-reset { margin-right: auto; }
+.tool-web-source { min-width: 0; }
+.tool-web-source header { display: flex; align-items: baseline; gap: 10px; }
+.tool-web-source a, .tool-web-target a { color: var(--ink-soft); text-decoration: underline; text-underline-offset: 3px; overflow-wrap: anywhere; }
+.tool-web-source small, .tool-web-source p { color: var(--muted); font-size: var(--type-caption); }
+.tool-web-source p { margin: 4px 0; overflow-wrap: anywhere; }
+.tool-web-source pre { color: var(--ink-soft); }
+.tool-web-target { display: grid; gap: 4px; }
+@media (max-width: 620px) { .web-settings-dialog .settings-form-grid { grid-template-columns: 1fr; } }
+@media (prefers-reduced-motion: reduce) { .web-settings-auto button, .web-settings-auto-tooltip { transition: none; transform: none; } }

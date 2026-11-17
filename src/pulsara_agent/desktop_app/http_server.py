@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pulsara_agent.settings import ModelConnectionIdentityConflict
+from pulsara_agent.web.config import web_settings_public
 from pulsara_agent.conversation_kernel.session_deletion import SessionDeleteRejected
 from pulsara_agent.conversation_kernel.repository_errors import SessionWriterConflict
 from pulsara_agent.workspace_identity import WorkspaceUnavailable
@@ -504,6 +505,10 @@ class LocalHttpServer:
         self._app.router.add_post(
             "/api/local-settings/postgres/reset", self._reset_postgres
         )
+        self._app.router.add_get("/api/local-settings/web", self._read_web)
+        self._app.router.add_put("/api/local-settings/web", self._put_web)
+        self._app.router.add_delete("/api/local-settings/web", self._delete_web)
+        self._app.router.add_post("/api/local-settings/web/use-deepseek", self._use_deepseek_web)
         self._app.router.add_get("/api/local-settings/asr", self._read_asr)
         self._app.router.add_put("/api/local-settings/asr", self._put_asr)
         self._app.router.add_delete("/api/local-settings/asr", self._delete_asr)
@@ -1389,6 +1394,30 @@ class LocalHttpServer:
             await self.sessions.invalidate_cache_warming()
         return web.json_response({"enabled": updated.cache_warming_enabled})
 
+    async def _read_web(self, _request):
+        return web.json_response(web_settings_public(self.settings.read()))
+
+    async def _put_web(self, request):
+        try:
+            updated = await self.settings.save_web_connection(await self._json_body(request))
+        except ValueError as exc:
+            raise HttpPublicError("INVALID_WEB_CONFIGURATION", str(exc), status=400) from None
+        return web.json_response(web_settings_public(updated))
+
+    async def _delete_web(self, _request):
+        updated = await self.settings.clear_web_connection()
+        return web.json_response(web_settings_public(updated))
+
+    async def _use_deepseek_web(self, request):
+        body = await self._json_body(request)
+        if body:
+            raise HttpPublicError("INVALID_WEB_CONFIGURATION", "网页配置提交字段无效。", status=400)
+        try:
+            updated = await self.settings.use_saved_deepseek_web_connection()
+        except ValueError as exc:
+            raise HttpPublicError("INVALID_WEB_CONFIGURATION", str(exc), status=400) from None
+        return web.json_response(web_settings_public(updated))
+
     async def _read_asr(self, _request):
         config = self.settings.read().asr
         return web.json_response(None if config is None else config.public())
@@ -1575,6 +1604,7 @@ class LocalHttpServer:
                 "pulsara_home": str(require_pulsara_home()),
                 "memory_retrieval": settings.memory_retrieval.public(),
                 "asr": None if settings.asr is None else settings.asr.public(),
+                "web": web_settings_public(settings),
                 "input_suggestions_enabled": settings.input_suggestions_enabled,
                 "cache_warming_enabled": settings.cache_warming_enabled,
             },

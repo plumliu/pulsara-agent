@@ -2,7 +2,7 @@
 
 共用规则见[原生工具索引](../PULSARA_NATIVE_TOOL_CONTRACTS_AND_TUTORIAL_DRAFT.zh.md)第 2 章；完整保存、原生 12k／NEXT、JS 完整返回与 Cell 输出沿[统一交付草案](../PULSARA_UNIFIED_TOOL_RESULT_DELIVERY_AND_PAGINATION_HARD_CUT_DRAFT.zh.md)，存储沿[数据库 hardcut 草案](../PULSARA_ENTRY_READABLE_CONTENT_STORAGE_HARD_CUT_DRAFT.zh.md)。
 
-状态：本文件是新增能力的文档合同，尚未接入生产代码。当前确定 web_search、web_fetch 的参数、返回值和原生／JS 用法，以及模型按需交错搜索与阅读的使用方式。默认使用 Firecrawl → Tavily 无 Key 免费池；可选配置四家之一及自有 API Key，账户计费与静默回退见第 4 章。
+状态：web_search、web_fetch 已接入原生工具、ROOT JS、用户级配置与设置页。默认使用 Firecrawl → Tavily 无 Key 免费池；可选配置四家之一及自有 API Key，账户计费与静默回退见第 4 章。实施与验证记录见[本轮报告](../output/web-20261117/REPORT.md)。
 
 ## 1. web_search：搜索网页来源与相关摘要
 
@@ -10,7 +10,7 @@
 
 按查询词搜索网页，返回有序的来源地址、标题和相关摘要。搜索结果用于选择来源，不表示已经读取页面正文。摘要可能是服务生成的摘要或页面摘录，不承诺可直接作为逐字引文。
 
-web_search 是固定的 Pulsara 内置接口，拟支持 ROOT／Subagent 原生调用，以及 ROOT Code Mode 的 tools.web_search。四家后端为 DeepSeek、Firecrawl、Tavily、Exa；免费池与可选自有 Key 由用户级服务管理，模型每次使用相同参数和返回类型，无须先发现 MCP 工具或取得调用引用。web_search、web_fetch 均为外部只读操作，可在只读权限与 Plan 中使用，继续经过既有工具准入与权限判断，不因供应商切换另设审批；Subagent 不提供 JS API。
+web_search 是固定的 Pulsara 内置接口，支持 ROOT／Subagent 原生调用，以及 ROOT Code Mode 的 tools.web_search。四家后端为 DeepSeek、Firecrawl、Tavily、Exa；免费池与可选自有 Key 由用户级服务管理，模型每次使用相同参数和返回类型，无须先发现 MCP 工具或取得调用引用。web_search、web_fetch 均为外部只读操作，可在只读权限与 Plan 中使用，继续经过既有工具准入与权限判断，不因供应商切换另设审批；Subagent 不提供 JS API；Code Mode 沿 ROOT 完全权限的既有 Cell 准入。
 
 适配层负责请求映射、结果归一化和实际错误说明；搜索引擎负责检索、排名及摘要生成。网络、认证与请求生命周期复用适合的维护中 SDK 或现有 HTTP 客户端，工具准入、取消和结果结算继续使用 Pulsara 的共同 owner。一次逻辑调用接纳时固定参数、供应商／凭据选择与候选顺序；后端配置变化影响后续调用，不改写既有 epoch 的 SYSTEM、provider tools 或已安装消息前缀。
 
@@ -252,7 +252,7 @@ try {
 
 ### 2.1 参数与调用边界
 
-读取一个指定 HTTP(S) 地址，返回服务实际提取的 Markdown／Markdown 风格正文。与 web_search 复用用户级供应商／凭据管理和共同执行边界，拟支持 ROOT／Subagent 原生调用，以及 ROOT Code Mode 的 tools.web_fetch。可直接使用搜索结果中的 URL Target，也可读取用户或模型已经知道的链接。
+读取一个指定 HTTP(S) 地址，返回服务实际提取的 Markdown／Markdown 风格正文。与 web_search 复用用户级供应商／凭据管理和共同执行边界，支持 ROOT／Subagent 原生调用，以及 ROOT Code Mode 的 tools.web_fetch。可直接使用搜索结果中的 URL Target，也可读取用户或模型已经知道的链接。
 
 | 参数 | 类型 | 必填与含义 |
 | --- | --- | --- |
@@ -468,7 +468,7 @@ if (first) {
 
 供应商选择决定协议与适配器，不通过 Key 外形猜测供应商，也不把一份 Key 发给多个服务。无需用户填写模型名、协议类型、请求头、代理地址或高级检索／提取参数。搜索与读取可以由不同免费候选完成，不要求它们固定落到同一家。
 
-用户选择使用 DeepSeek 自有 Key 时，可以识别已保存的官方 DeepSeek 模型连接，供用户选用其凭据引用；不复制或展示秘密，不把自定义兼容端点的 Key 当作官方 Key。默认免费模式不因本地存在模型 Key 就自动使用该账户。凭据沿现有用户级设置与秘密管理 owner 保存，不进入工具参数、结果、模型上下文或诊断日志。
+设置页在模型配置与 ASR 之间提供“网页搜索与读取”卡片，默认显示“自动免费”，账户配置使用现有模型弹窗样式。选择 DeepSeek 时提供“自动配置”按钮：检查 models.dev 的 DeepSeek 配置和自定义模型配置，使用规范化后属于 https://api.deepseek.com 官方 origin、带有可用 Key 的第一条已保存连接；模型路径不另设白名单。按钮悬停说明候选名称与按保存顺序取第一条的规则，没有候选时禁用。仅在用户点击后保存该连接的凭据引用，不复制或展示秘密；后续调用读取该引用当前的 Key。引用已删除或地址不再属于官方 origin 时使用免费池，设置页如实显示。默认免费模式不因本地存在模型 Key 就自动使用该账户。凭据沿现有用户级设置与秘密管理 owner 保存，不进入工具参数、结果、模型上下文或诊断日志。
 
 自有 Key 按对应账户的正常计费规则使用，可能消耗赠送额度、已购余额，或触发用户在供应商处设置的按量计费／自动充值；额度不足时才回退不等于只使用该账户的免费额度。Pulsara 不替用户购买额度或开启充值，也不自动借用其他已保存的付费 Key。
 
@@ -522,6 +522,6 @@ if (first) {
 
 正常免费使用、缺少自有 Key 和成功回退不弹窗、不请求配置／升级、不主动唤醒模型，也不发送 runtime observation 或 steer。候选均失败时只沿本次工具结果说明实际失败，不额外制造提醒；不增加 provider、计费、尝试次数等公开结果字段。
 
-两个工具均按外部只读请求准入：ROOT／Subagent 原生以及 ROOT JS 共用相同参数、路由与结算；只读模式和 Plan 中可用，仍遵守既有权限与取消 owner。实际请求会将查询或目标 URL 交给本次选中的供应商，回退可涉及下一家；更换候选不扩张用户请求的业务范围，不另建信任／启停／审批流程。
+两个工具均按外部只读请求准入：ROOT／Subagent 原生以及 ROOT JS 共用相同参数、路由与结算；原生在只读模式和 Plan 中可用，ROOT JS 在合法启动的 Cell 中使用，遵守既有权限与取消 owner。实际请求会将查询或目标 URL 交给本次选中的供应商，回退可涉及下一家；更换候选不扩张用户请求的业务范围，不另建信任／启停／审批流程。
 
 工具定义固定，不因 Key、免费额度或后端可用性变化改写同 epoch 的 SYSTEM／provider tools 或已有消息。冷启动首个模型请求不等待免费池预连接或探测，实际调用再按上述边界请求服务；不增加目录、调用引用或启动握手门槛。

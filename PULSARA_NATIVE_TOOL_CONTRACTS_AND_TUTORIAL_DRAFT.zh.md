@@ -4,7 +4,7 @@ MCP 首请求采用[非阻塞启动与不完整搜索合同](PULSARA_MCP_NONBLOC
 
 日期：2026-11-12。
 
-新增网页能力的合同见[网页工具草案](native_tools/web.md)：已确定 web_search、web_fetch 的参数、四家后端映射、精简返回值及原生／JS 用法，以及模型按需交错搜索与阅读的方式。默认无 Key 免费池为 Firecrawl → Tavily；可选四家之一＋API Key，自有 Key 按对应账户正常计费，额度不足等实际失败时静默回退；Exa／DeepSeek 不进入免费池。两工具可用于只读／Plan，支持 ROOT／Subagent 原生及 ROOT JS，沿既有权限与结算，尚未实施。下文已实施状态指原有工具族。
+网页能力的当前合同见[网页工具草案](native_tools/web.md)：web_search、web_fetch 已接入原生工具、ROOT JS、用户级配置和设置页。默认无 Key 免费池为 Firecrawl → Tavily；可选四家之一＋API Key，自有 Key 按对应账户正常计费，额度不足等实际失败时静默回退；Exa／DeepSeek 不进入免费池。只读／Plan 与 Subagent 沿既有权限和结算；DeepSeek 支持显式自动引用首个已保存官方连接。实施及验证见[报告](output/web-20261117/REPORT.md)。
 
 状态：各工具族的当前合同已接入生产代码，包含 read_file 原生 NEXT 续读与 write_file 完整结果导出，已完成 hardcut 跨层及真实 provider 验收；正常应用尚未重启，完成范围见实施计划。本文件记录已确定的参数、业务返回值、原生交付形状及 Code Mode 用法，也作为后续 bundled skill 的教程底稿。工具、数据库、SDK、提示词和 bundled skill 使用同一当前合同。
 
@@ -24,8 +24,8 @@ MCP 发现上下文遵循[MCP 初始服务目录规范](PULSARA_MCP_CATALOG_INCR
 | edit_file，PATH Target | 精确唯一替换、整文件替换、空文件规则、diff 返回、原生与 JS 示例、错误语义 |
 | find_files，目录 PATH Target | target 在先的最简参数、Target 内容项、无匹配说明、原生与 JS 示例、扫描失败及取消 |
 | search_file_content，PATH Target | target 在先的参数、三种输出模式、匹配行及非重叠匹配次数、object 内容项、原生与 JS 示例 |
-| web_search（新增合同，待实施） | query、可选 count／include_domains／exclude_domains／after／before；域名排除优先并核对返回 URL，日期为引擎检索条件；四家共用 meta.status 和逐条 URL Target／标题／摘要／可选日期 object；自有 Key 优先，否则 Firecrawl → Tavily 免费池，回退保留全部条件，成功空结果不补搜；只读／Plan 可用，ROOT／Subagent 原生冻结 12k／NEXT、ROOT JS 完整返回 |
-| web_fetch（新增合同，待实施） | 只传 URL target；返回请求目标、meta.status／可选 title 与实际提取的 Markdown text；复用网页免费池与可选自有 Key；完整保存实际提取结果，不保证覆盖网页全部原文，回退不拼接多家正文；只读／Plan 可用，ROOT／Subagent 原生冻结 12k／NEXT 不重新抓取、ROOT JS 完整返回；模型按需交错搜索与读取，不自动抓取全部搜索命中 |
+| web_search | query、可选 count／include_domains／exclude_domains／after／before；域名排除优先并核对返回 URL，日期为引擎检索条件；四家共用 meta.status 和逐条 URL Target／标题／摘要／可选日期 object；自有 Key 优先，否则 Firecrawl → Tavily 免费池，回退保留全部条件，成功空结果不补搜；只读／Plan 可用，ROOT／Subagent 原生冻结 12k／NEXT、ROOT JS 完整返回 |
+| web_fetch | 只传 URL target；返回请求目标、meta.status／可选 title 与实际提取的 Markdown text；复用网页免费池与可选自有 Key；完整保存实际提取结果，不保证覆盖网页全部原文，回退不拼接多家正文；只读／Plan 可用，ROOT／Subagent 原生冻结 12k／NEXT 不重新抓取、ROOT JS 完整返回；模型按需交错搜索与读取，不自动抓取全部搜索命中 |
 | exec_process | 四个启动参数、工具状态与进程状态分离、运行／退出结果、实际输出及原生与 JS 示例；删除 observe 和公开游标；待观察日志透明暂存 |
 | manage_process | wait、write、close_stdin、kill 四个动作；内部观察位置、完整待观察增量、控制动作、原生与 JS 示例及输入小实验 |
 | query_processes | 可选 PROCESS Target、单查与列表共用的 object 记录、原生与 JS 示例，以及列表无记录与单查未找到的不同状态和说明 |
@@ -206,7 +206,7 @@ object.value 本身是唯一权威业务对象，完整 JSON 文字按需投影�
 | 文档 | 工具章节 |
 | --- | --- |
 | [文件系统工具](native_tools/filesystem.md) | 第 1–5 章：read_file、write_file、edit_file、find_files、search_file_content；第 1.10 节为仅原生 NEXT 续读、图文顺序及 object 跨页，JS read_file 只接受 PATH；第 2 章包含 content／tool_result_target 互斥输入、完整结果导出及原生／JS 示例 |
-| [网页工具](native_tools/web.md) | 第 1 章：web_search 六个参数、域名与日期条件、四家映射、精简返回值和原生／JS 示例；第 2 章：web_fetch 只传 URL Target，完整保存实际提取正文及可选标题，NEXT 不重新抓取；第 3 章：模型按需交错搜索与读取；第 4 章：默认 Firecrawl → Tavily 无 Key 免费池，可选四选一＋API Key、账户计费与静默回退，Exa／DeepSeek 不入免费池；只读／Plan 可用，ROOT／Subagent 原生、ROOT JS，共用权限与结算，尚未实施 |
+| [网页工具](native_tools/web.md) | 第 1 章：web_search 六个参数、域名与日期条件、四家映射、精简返回值和原生／JS 示例；第 2 章：web_fetch 只传 URL Target，完整保存实际提取正文及可选标题，NEXT 不重新抓取；第 3 章：模型按需交错搜索与读取；第 4 章：默认 Firecrawl → Tavily 无 Key 免费池，可选四选一＋API Key、账户计费与静默回退，Exa／DeepSeek 不入免费池；只读／Plan 可用，ROOT／Subagent 原生、ROOT JS，共用权限与结算，已接入生产代码 |
 | [终端工具](native_tools/terminal.md) | 第 1–3 章：exec_process、manage_process、query_processes |
 | [Agent 协作工具](native_tools/agents.md) | 第 1 章：query_agents 三个查询分支；第 2 章：send_agent_message 交付语义及精简结果；二者支持 ROOT／Subagent 原生及 ROOT JS；第 3 章：stop_agent 参数、四个并列 Work 状态计数、逐项状态及原生／JS 示例，仅 ROOT；第 4 章：wait_message，Subagent 专用仅原生，超时 SUCCESS，正文独立交付；前四者沿冻结 12k／NEXT；第 5 章：tools.run_agent 参数、材料、同批引用与返回；第 6 章：tools.wait_agent 的 WORK／AGENT 双分支、完整快照、first／all、消息／超时／取消、返回类型及 JS 示例；后两者仅 ROOT JS、完整返回，无原生分页；第 7 章为实现参考 |
 | [语义判断工具](native_tools/decide.md) | 第 1 章：tools.decide 的两个参数、decisions object、available()、JS 示例、完整保存与错误语义；仅 ROOT JS、bypass 权限，无原生分页；第 2 章为实现参考 |

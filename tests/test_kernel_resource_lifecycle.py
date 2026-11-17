@@ -244,6 +244,7 @@ def test_independent_session_close_failures_keep_only_necessary_dependencies(mon
                 await core.shutdown()
             assert observed.value is failure
             assert not core._closed and not leases[0].released
+            assert not core._web_service._client.is_closed
             assert core._close_attempts[first.host_session_id].state is host.HostSessionCloseState.CLOSE_FAILED_QUARANTINED
             assert core.session_runtime_closing(first.session_id)
         elif not settled:
@@ -255,6 +256,7 @@ def test_independent_session_close_failures_keep_only_necessary_dependencies(mon
             await core.shutdown()
             assert core._closed and leases[0].released
             assert not core._close_attempts and not core._sessions
+        assert core._web_service._client.is_closed is stopped
         second.aclose.assert_awaited_once()
         assert second.host_session_id not in core._sessions
         if not stopped:

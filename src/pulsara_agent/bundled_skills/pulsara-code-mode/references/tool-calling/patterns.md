@@ -18,6 +18,12 @@ const reads = await Promise.all(["README.md","pyproject.toml"].map(path=>
 console.log({content:reads.flatMap(result=>result.content)});
 ```
 
+Use `tools.web_search` to find sources and `tools.web_fetch` to read a chosen URL.
+Both are built-in APIs with fixed arguments; no MCP discovery or invocation
+reference is needed. Independent searches or reads can run in parallel. Output
+the search records before asking ROOT to select a source; an explicit selection
+rule such as "read the first result" can run within the same Cell.
+
 For MCP, first obtain the needed input schema, available return description and
 invocation reference through native query_capabilities or a preparation Cell:
 

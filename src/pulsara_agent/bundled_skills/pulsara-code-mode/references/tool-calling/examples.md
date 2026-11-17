@@ -21,6 +21,29 @@ await tools.write_file({target:{kind:"PATH",path:"notes.txt"},content:"Evidence 
 return "Saved notes.txt";
 ```
 
+## Search sources and read a selected page
+
+```js
+const sources = await tools.web_search({
+  query:"Python asyncio task cancellation",
+  include_domains:["docs.python.org"], count:5
+});
+console.log(sources);
+```
+
+After ROOT has seen the records, use a selected URL Target in a later Cell:
+
+```js
+const page = await tools.web_fetch({
+  target:{kind:"URL",url:"https://docs.python.org/3/library/asyncio-task.html"}
+});
+console.log({target:page.target,title:page.meta.title,content:page.content});
+```
+
+Search records are object items with `target`, optional `title`, `snippet` and
+`date`. Fetch returns text items containing the actual extracted Markdown.
+Each call returns its complete saved value; native NEXT is not a JS argument.
+
 ## Judge explicit material
 
 ```js

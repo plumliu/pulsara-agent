@@ -4,6 +4,7 @@ import type { ToolBusinessValue, ToolResultPart } from '../lib/tool-business-val
 import { fileUrl } from '../lib/file-preview';
 import { FileLinkContext, FileMediaContext } from './file-link-context';
 import { SavedImage } from './saved-image';
+import { MarkdownLink, type MarkdownNotify } from './markdown-body';
 
 function ToolImage({reference}: {reference: string}) {
   const context = useContext(FileLinkContext);
@@ -63,30 +64,52 @@ function isSearchResult(value: Record<string, unknown>): boolean {
 function StructuredPart({value}: {value: Record<string, unknown>}) {
   return <details className="tool-result-details"><summary>查看结构化结果</summary><pre className="tool-output-scroll">{JSON.stringify(value,null,2)}</pre></details>;
 }
-function ObjectPart({part,toolName,path}: {part: Extract<ToolResultPart,{type:'object'|'target'}>;toolName?:string;path?:string}) {
+function webUrl(target: unknown): string | undefined {
+  if (!object(target) || target.kind !== 'URL' || typeof target.url !== 'string') return undefined;
+  try {
+    const url = new URL(target.url);
+    return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password ? target.url : undefined;
+  } catch { return undefined; }
+}
+const quietNotify: MarkdownNotify = () => {};
+function WebSearchResult({value, onNotify}: {value: Record<string, unknown>; onNotify: MarkdownNotify}) {
+  const url = webUrl(value.target);
+  if (!url) return <StructuredPart value={value}/>;
+  return <article className="tool-web-source">
+    <header><MarkdownLink href={url} onNotify={onNotify}>{typeof value.title === 'string' && value.title ? value.title : url}</MarkdownLink>{typeof value.date === 'string' && <small>{value.date}</small>}</header>
+    {typeof value.title === 'string' && value.title && <p>{url}</p>}
+    {typeof value.snippet === 'string' && <pre>{value.snippet}</pre>}
+  </article>;
+}
+function ObjectPart({part,toolName,path,onNotify}: {part: Extract<ToolResultPart,{type:'object'|'target'}>;toolName?:string;path?:string;onNotify:MarkdownNotify}) {
   if(part.type === 'target') return part.value.kind === 'PATH' && typeof part.value.path === 'string'
     ? <ResultTarget value={part.value}/> : <StructuredPart value={part.value}/>;
   if(toolName === 'search_file_content' && isSearchResult(part.value)) return <SearchResult value={part.value}/>;
+  if(toolName === 'web_search') return <WebSearchResult value={part.value} onNotify={onNotify}/>;
   if(toolName === 'read_video_frames') return <VideoIndex value={part.value} path={path}/>;
   if(toolName === 'read_transcript') return <TranscriptSegment value={part.value} path={path}/>;
   return <StructuredPart value={part.value}/>;
 }
 
 /** Public values stay inspectable; normal reading shows content and actions. */
-export function ToolBusinessContent({value,toolName,onCopy,inspectFields=false}: {value: ToolBusinessValue;toolName?:string;onCopy?:(text:string)=>void;inspectFields?:boolean}) {
+export function ToolBusinessContent({value,toolName,onCopy,inspectFields=false,onNotify=quietNotify}: {value: ToolBusinessValue;toolName?:string;onCopy?:(text:string)=>void;inspectFields?:boolean;onNotify?:MarkdownNotify}) {
   const target=object(value.target) ? value.target : undefined;
   const path=target?.kind === 'PATH' && typeof target.path === 'string' ? target.path : undefined;
   const source=toolName === 'read_transcript' ? value.meta.source === 'subtitle' ? '字幕原文' : value.meta.source === 'asr' ? '语音识别原文' : undefined : undefined;
+  const pageUrl=toolName === 'web_fetch' ? webUrl(target) : undefined;
   const structuredText=Object.hasOwn(value,'structuredContent') ? JSON.stringify(value.structuredContent,null,2) : undefined;
   const fieldsText=inspectFields ? JSON.stringify(Object.fromEntries(Object.entries(value).filter(([key])=>key !== 'content' && key !== 'structuredContent')),null,2) : undefined;
   const emptyMcp = ['call_mcp_tool','read_mcp_resource'].includes(toolName ?? '') && value.content.length === 0
     && !Object.hasOwn(value,'structuredContent') && !path && !source && !inspectFields;
   return <section className="tool-result-raw tool-result-images" aria-label="工具完整结果">
+    {pageUrl && <header className="tool-web-target">{typeof value.meta.title === 'string' && <strong>{value.meta.title}</strong>}<MarkdownLink href={pageUrl} onNotify={onNotify}>{pageUrl}</MarkdownLink></header>}
     {(path || source) && <header>{target && <ResultTarget value={target}/>} {source && <span>{source}</span>}</header>}
     {value.content.map((part, index) => part.type === 'image'
       ? <ToolImage key={index} reference={part.value.image_ref}/>
       : part.type === 'text' ? <pre key={index}>{part.value}</pre>
-      : <ObjectPart key={index} part={part} toolName={toolName} path={path}/>)}
+      : <ObjectPart key={index} part={part} toolName={toolName} path={path} onNotify={onNotify}/>)}
+    {toolName === 'web_search' && value.content.length === 0 && value.meta.status === 'SUCCESS' && <span className="empty-result">没有找到匹配的网页来源。</span>}
+    {toolName === 'web_fetch' && value.content.length === 0 && value.meta.status === 'SUCCESS' && <span className="empty-result">网页未返回正文。</span>}
     {emptyMcp && <span className="empty-result">本次调用未返回内容。</span>}
     {structuredText !== undefined && <details className="tool-result-details">
       <summary>查看结构化结果</summary>

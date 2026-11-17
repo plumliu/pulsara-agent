@@ -14,6 +14,7 @@ import type {
 } from '../lib/runtime-adapter';
 import type { RuntimeStatus, SessionSummary } from '../lib/pulsara-types';
 import { AsrSettingsPanel } from './asr-settings';
+import { WebSettingsPanel } from './web-settings';
 import { MemoryRetrievalSettingsPanel } from './memory-retrieval-settings';
 import { ArchivedSessions } from './archived-sessions';
 import { AvatarSetting, UserAvatar } from './user-avatar';
@@ -482,6 +483,7 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
         'success',
       );
       try {
+        setSettings(await adapter.localSettings());
         await onConfigurationChanged();
       } catch (refreshError) {
         onNotify(
@@ -635,6 +637,9 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
               <div className="model-confirmation"><strong>用户声明的连接事实</strong>{customDeclarationReady && <dl><div><dt>配置</dt><dd>{configurationName.trim()}</dd></div><div><dt>模型</dt><dd>{modelId.trim()}</dd></div><div><dt>协议</dt><dd>{wireApi ? wireLabel(wireApi) : '未选择'}</dd></div><div><dt>Endpoint</dt><dd>{baseUrl.trim()}</dd></div><div><dt>推理形状</dt><dd>{reasoningProfileLabel(customReasoning)}</dd></div><div><dt>上下文</dt><dd>{formatTokens(parsedContextTokens)}</dd></div><div><dt>输入模态</dt><dd>{formatModalities(inputModalities)}</dd></div><div><dt>认证</dt><dd>{authentication === 'none' ? '无需认证' : 'Bearer API key'}</dd></div></dl>}<p>这些能力由你直接声明，不会根据服务商或模型名称自动判断，也不会在失败后偷偷换参数重试。Pulsara 只使用通用 Chat / Responses adapter。</p><p>上下文窗口大小 至少为 256,000。拿不准请求形状时请选择“由服务端决定”。</p><div className="form-actions"><button onClick={closeModelForm}>取消</button><button disabled={!draftReady || savingModel || testingModel} onClick={() => void testModel()}>{testingModel ? <LoaderCircle size={13} /> : <RefreshCw size={13} />}测试连接</button><button className="primary-action" disabled={!draftReady || savingModel || testingModel} onClick={() => void saveModel()}>{savingModel ? <LoaderCircle size={13} /> : <Check size={13} />}{editingConfiguration ? '保存修改' : '保存配置'}</button></div></div>
             </>}
           </section></ModelFormContainer>}
+          {settings && <WebSettingsPanel adapter={adapter} value={settings.local_settings.web} onNotify={onNotify} onChanged={(web) => {
+            setSettings(current => current ? { ...current, local_settings: { ...current.local_settings, web } } : current);
+          }} />}
           {settings && <AsrSettingsPanel adapter={adapter} value={settings.local_settings.asr ?? null} onNotify={onNotify} onChanged={(asr) => {
             setSettings(current => current ? { ...current, local_settings: { ...current.local_settings, asr } } : current);
           }} />}

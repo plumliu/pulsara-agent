@@ -262,7 +262,7 @@ function ImageReference({ reference, title, children }: { reference: string; tit
   return <SavedImage key={context?.imageOwnerKey} read={read} title={title}>{children}</SavedImage>;
 }
 
-function MarkdownLink({ href = '', children, onNotify }: { href?: string; children?: ReactNode; onNotify: MarkdownNotify }) {
+export function MarkdownLink({ href = '', children, onNotify }: { href?: string; children?: ReactNode; onNotify: MarkdownNotify }) {
   const context = useContext(FileLinkContext);
   const assistantChat = useContext(AssistantChatContext);
   const workspace = useDesktopWorkspace();

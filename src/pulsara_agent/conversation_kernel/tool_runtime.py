@@ -234,6 +234,8 @@ from .tool_runtime_schema import (
 )
 
 from .tool_runtime_management import _ToolManagementOperations
+from .tool_runtime_web import _WebToolOperations
+from pulsara_agent.web.contracts import WEB_TOOL_NAMES
 
 from .tool_runtime_authorization import (
     _ToolAuthorizationOperations,
@@ -555,7 +557,7 @@ class _DirectMcpCatalogTool:
 
 
 class DirectKernelToolPort(
-    _ToolSurfaceOperations, _ToolAuthorizationOperations, _ToolManagementOperations
+    _ToolSurfaceOperations, _ToolAuthorizationOperations, _ToolManagementOperations, _WebToolOperations
 ):
     """Permission-before-attempt and process-local physical execution owner."""
 
@@ -578,6 +580,7 @@ class DirectKernelToolPort(
         media_cache=None,
         read_media_settings=None,
         media_asr_runtime=None,
+        web_service=None,
         shared_terminal_owner: "DirectKernelToolPort | None" = None,
     ) -> None:
         root = workspace_root.expanduser().resolve()
@@ -594,6 +597,8 @@ class DirectKernelToolPort(
         self._read_media_settings = read_media_settings
         self._media_asr_runtime = media_asr_runtime
         self._media_tasks = set()
+        self._web_service = web_service
+        self._web_tasks = set()
         self._deadlines = deadline_factory or KernelExecutionDeadlineFactory()
         self._image_validator = image_validator
         self._image_reference_read_port = image_reference_read_port
@@ -650,6 +655,7 @@ class DirectKernelToolPort(
             _DirectMcpCatalogTool("query_capabilities"),
             _DirectMcpCatalogTool("call_mcp_tool"),
             _DirectMcpCatalogTool("read_mcp_resource"),
+            *(_DirectCapabilityControlTool(name) for name in sorted(WEB_TOOL_NAMES)),
         )
         self._scheduled_tasks = scheduled_tasks
         self._session_content_query = session_content_query
@@ -1456,6 +1462,10 @@ class DirectKernelToolPort(
         observation_origin = tool_observation_origin_for_binding(binding)
         from pulsara_agent.ports.session_content import SESSION_QUERY_TOOL_NAMES
 
+        if tool_name in WEB_TOOL_NAMES:
+            return await self._invoke_web(tool_name=tool_name, arguments=arguments,
+                invocation_context=invocation_context, invocation_started=invocation_started,
+                observation_origin=observation_origin)
         if tool_name in {"exec_cell", "query_cells", "manage_cell"}:
             return await self._invoke_code_mode_control(tool_name, arguments, invocation_context)
         if tool_name in SESSION_QUERY_TOOL_NAMES:
@@ -1977,7 +1987,7 @@ class DirectKernelToolPort(
         return (self._terminal_physically_closed
                 and self._physical_io.physical_close_complete
                 and self._visualization_screenshots.local_children_stopped
-                and self._media_worker.physical_close_complete)
+                and self._media_worker.physical_close_complete and not self._web_tasks)
 
     def stop_local_process_admission(self) -> None:
         self._physical_io.stop_admission()
@@ -2005,7 +2015,7 @@ class DirectKernelToolPort(
                     and not self._surface_borrows and not self._execution_borrows
                     and self._visualization_screenshots.local_children_stopped
                     and self._physical_io.physical_close_complete
-                    and self._media_worker.physical_close_complete)
+                    and self._media_worker.physical_close_complete and not self._web_tasks)
 
     async def aclose(self, *, timeout_seconds: float = 5.0) -> None:
         if timeout_seconds <= 0:
@@ -2027,6 +2037,7 @@ class DirectKernelToolPort(
             # same borrow deadline and are never replaced or detached.
             close_error: BaseException | None = None
             try:
+                await self._stop_web_physical_owners()
                 await self._stop_media_physical_owners()
                 await self._visualization_screenshots.aclose()
                 await self._stop_terminal_physical_owners_locked(deadline)
