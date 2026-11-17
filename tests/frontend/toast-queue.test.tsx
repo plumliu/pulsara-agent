@@ -72,7 +72,7 @@ it('retains more than three real application notifications until their own expir
   adapter.sessions = [];
   adapter.openCapabilityRoot.mockRejectedValue(new Error('fixture目录不可用'));
   render(<PulsaraApp adapter={adapter} />);
-  fireEvent.click(await screen.findByRole('button', { name: '能力' }));
+  fireEvent.click(within(screen.getByRole('navigation', { name: '主要功能' })).getByRole('button', { name: '能力' }));
   await waitFor(() => expect(adapter.inspectUserCapabilities).toHaveBeenCalled());
   vi.useFakeTimers();
   Object.defineProperty(HTMLElement.prototype, 'animate', {configurable:true,value:vi.fn((_frames, options) => {

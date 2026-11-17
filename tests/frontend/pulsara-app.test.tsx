@@ -43,7 +43,8 @@ describe('PulsaraApp', () => {
       'SESSION_RECOVERY_CLOSE_FAILED', '连接恢复未完成。\nOSError: scope join failed', false,
     ));
     renderWorkbench(<PulsaraApp adapter={adapter} />);
-    expect(await screen.findByText('连接恢复未完成')).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: '会话未能打开' })).toBeTruthy();
+    expect(screen.getByRole('alert').textContent).toContain('连接恢复未完成');
     const details = screen.getByText('技术详情').closest('details')!;
     expect(details.open).toBe(false);
     expect(details.textContent).toContain('SESSION_RECOVERY_CLOSE_FAILED');
@@ -211,34 +212,41 @@ describe('PulsaraApp', () => {
     expect(adapter.deleteArchivedSession).toHaveBeenCalledTimes(3);
   });
 
-  it('stays on overview while restoring a saved live session and opens it only on navigation', async () => {
+  it('opens the saved session directly and presents its loading state before connection completes', async () => {
     const adapter = new FakeAdapter();
-    adapter.sessions = [{ ...initialSession, live: true }];
+    adapter.sessions = [{ ...initialSession, id: 'session:other', title: '最近的其他会话' }, { ...initialSession, live: true }];
     uiPreferences.setItem('pulsara-active-session', initialSession.id);
-    const pending = deferred<RuntimeBootstrap>();
-    vi.spyOn(adapter, 'bootstrap').mockImplementation(() => pending.promise);
-    render(<PulsaraApp adapter={adapter} />);
-    expect(screen.getByRole('button', { name: '总览', exact: true }).getAttribute('aria-current')).toBe('page');
-    expect(screen.queryByRole('region', { name: '会话工作台' })).toBeNull();
-    await act(async () => pending.resolve(bootstrap));
-    await screen.findByText('本地服务已连接');
-    expect(adapter.connectCalls.map(call => call.sessionId)).toEqual([initialSession.id]);
-    expect(screen.getByRole('button', { name: '总览', exact: true }).getAttribute('aria-current')).toBe('page');
-    expect(screen.queryByRole('region', { name: '会话工作台' })).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: '会话', exact: true }));
-    await screen.findByLabelText('发送给 Pulsara');
-    expect(adapter.connectCalls).toHaveLength(1);
+    const boot = deferred<RuntimeBootstrap>(), pending = deferred<void>();
+    vi.spyOn(adapter, 'bootstrap').mockImplementation(() => boot.promise);
+    const connect = adapter.connect.bind(adapter);
+    vi.spyOn(adapter, 'connect').mockImplementation(async (...args) => { await pending.promise; return connect(...args); });
+    const startup = vi.fn();
+    render(<PulsaraApp adapter={adapter} onStartupSettled={startup} />);
+    expect(screen.getByRole('button', { name: '会话', exact: true }).getAttribute('aria-current')).toBe('page');
+    expect(startup).not.toHaveBeenCalled();
+    await act(async () => boot.resolve(bootstrap));
+    expect(adapter.connect).toHaveBeenCalledExactlyOnceWith(initialSession.id, false);
+    expect(startup).toHaveBeenCalledOnce();
+    expect(screen.getByRole('region', { name: '会话加载页' })).toHaveProperty('textContent', expect.stringContaining(initialSession.title));
+    expect(screen.queryByRole('textbox', { name: '发送给 Pulsara' })).toBeNull();
+    expect(screen.queryByText('当前没有活动会话')).toBeNull();
+    expect(adapter.createSession).not.toHaveBeenCalled();
+    await act(async () => pending.resolve());
+    expect(await screen.findByLabelText('发送给 Pulsara')).toBeTruthy();
+    expect(screen.getByRole('heading', { name: initialSession.title })).toBeTruthy();
+    expect(adapter.connect).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps startup failures on overview', async () => {
+  it('releases the startup cover into the conversation error state when initialization fails', async () => {
     const adapter = new FakeAdapter();
     const onStartupSettled = vi.fn();
     vi.spyOn(adapter, 'bootstrap').mockRejectedValue(new RuntimeApiError('START_FAILED', '本地服务启动失败', false));
     render(<PulsaraApp adapter={adapter} onStartupSettled={onStartupSettled} />);
-    await screen.findByText('连接失败');
-    expect(onStartupSettled).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole('button', { name: '总览', exact: true }).getAttribute('aria-current')).toBe('page');
-    expect(screen.queryByRole('region', { name: '会话工作台' })).toBeNull();
+    await screen.findByText('本地服务启动失败');
+    expect(onStartupSettled).toHaveBeenCalledOnce();
+    expect(screen.getByRole('button', { name: '会话', exact: true }).getAttribute('aria-current')).toBe('page');
+    expect(screen.getByRole('region', { name: '会话工作台' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '重新连接' })).toBeTruthy();
     expect(adapter.connectCalls).toHaveLength(0);
   });
 
@@ -2056,8 +2064,10 @@ describe('PulsaraApp', () => {
   it('navigates between the major product surfaces', async () => {
     renderWorkbench(<PulsaraApp adapter={new FakeAdapter()} />);
     await screen.findByRole('heading', { name: '准备发布' });
-    fireEvent.click(screen.getByRole('button', { name: '总览' }));
-    expect(screen.getByRole('heading', { level: 1, name: /准备好继续/ })).toBeTruthy();
+    fireEvent.click(within(screen.getByRole('navigation', { name: '主要功能' })).getByRole('button', { name: '能力' }));
+    expect(screen.getByRole('heading', { name: '能力' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '返回 Pulsara 会话' }));
+    expect(screen.getByRole('heading', { name: '准备发布' })).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: '设置' }));
     expect(screen.getByRole('heading', { name: '设置' })).toBeTruthy();
@@ -2068,8 +2078,7 @@ describe('PulsaraApp', () => {
     adapter.sessions = [];
     render(<PulsaraApp adapter={adapter} />);
 
-    await screen.findByRole('heading', { level: 1, name: /准备好继续/ });
-    fireEvent.click(screen.getByRole('button', { name: '会话' }));
+    await waitFor(() => expect((screen.getByRole('button', { name: '创建会话' }) as HTMLButtonElement).disabled).toBe(false));
 
     expect(await screen.findByText('创建或选择会话后开始')).toBeTruthy();
     expect(screen.getByText('当前没有活动会话')).toBeTruthy();
@@ -2104,8 +2113,7 @@ describe('PulsaraApp', () => {
     expect(adapter.searchSessions).not.toHaveBeenCalled();
     expect(screen.queryByRole('dialog', { name: '命令面板' })).toBeNull();
     fireEvent.keyDown(window, { key: 'Escape' });
-    fireEvent.click(screen.getByRole('button', { name: '总览' }));
-    expect((screen.getByRole('button', { name: '开始新任务' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: '创建会话' }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: '记忆' }));
     expect(screen.getByRole('heading', { name: retryable ? '本地服务连接已中断' : '本地服务连接失败' })).toBeTruthy();
     expect(adapter.createSession).not.toHaveBeenCalled();
@@ -2120,15 +2128,15 @@ describe('PulsaraApp', () => {
     vi.spyOn(adapter, 'listSessions').mockImplementation(() => new Promise(resolve => { finishList = resolve; }));
     render(<PulsaraApp adapter={adapter} onStartupSettled={onStartupSettled} />);
     expect(onStartupSettled).not.toHaveBeenCalled();
-    expect((screen.getByRole('button', { name: '开始新任务' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: /新建会话/ }) as HTMLButtonElement).disabled).toBe(true);
     await act(async () => finishBootstrap(bootstrap));
     expect(onStartupSettled).not.toHaveBeenCalled();
-    expect((screen.getByRole('button', { name: '开始新任务' }) as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.queryByRole('region', { name: '会话工作台' })).toBeNull();
+    expect((screen.getByRole('button', { name: /新建会话/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole('region', { name: '会话工作台' })).toBeTruthy();
     await act(async () => finishList([]));
     expect(onStartupSettled).toHaveBeenCalledTimes(1);
-    expect(screen.queryByRole('region', { name: '会话工作台' })).toBeNull();
-    expect((screen.getByRole('button', { name: '开始新任务' }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByRole('region', { name: '会话工作台' })).toBeTruthy();
+    expect((screen.getByRole('button', { name: /新建会话/ }) as HTMLButtonElement).disabled).toBe(false);
     fireEvent.keyDown(window, { key: 'n', metaKey: true });
     expect(screen.getByRole('dialog', { name: '新建会话' })).toBeTruthy();
   });
@@ -2145,10 +2153,10 @@ describe('PulsaraApp', () => {
     render(<PulsaraApp adapter={adapter} onStartupSettled={onStartupSettled} />);
     await waitFor(() => expect(adapter.connect).toHaveBeenCalled());
     expect(onStartupSettled).toHaveBeenCalledTimes(1);
-    expect((screen.getByRole('button', { name: '开始新任务' }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole('button', { name: /新建会话/ }) as HTMLButtonElement).disabled).toBe(false);
     await act(async () => pending.resolve());
     expect(onStartupSettled).toHaveBeenCalledTimes(1);
-    expect((screen.getByRole('button', { name: '开始新任务' }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole('button', { name: /新建会话/ }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it('releases the startup cover for database setup instead of waiting for readiness forever', async () => {
@@ -2247,7 +2255,7 @@ describe('PulsaraApp', () => {
     expect(screen.queryByRole('button', { name: '本地服务' })).toBeNull();
   });
 
-  it('replaces overview session content with PostgreSQL setup guidance while unavailable', async () => {
+  it('shows PostgreSQL setup guidance on the conversation page without reading sessions', async () => {
     class UnavailableDatabaseAdapter extends FakeAdapter {
       override listSessions = vi.fn(async (): Promise<SessionSummary[]> => {
         throw new Error('session data plane must not be called');
@@ -2265,14 +2273,11 @@ describe('PulsaraApp', () => {
     const adapter = new UnavailableDatabaseAdapter();
     renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: 'PostgreSQL 当前无法连接' });
-    fireEvent.click(screen.getByRole('button', { name: '总览' }));
+    fireEvent.click(screen.getByRole('button', { name: '会话' }));
 
-    expect(await screen.findByRole('heading', { level: 1, name: /先准备好/ })).toBeTruthy();
     expect(screen.getByRole('heading', { name: 'PostgreSQL 当前无法连接' })).toBeTruthy();
     expect(screen.queryByText('保存连接')).toBeNull();
     expect(screen.getByText('Pulsara 暂时无法连接应用管理的数据服务，请查看启动诊断并重试。')).toBeTruthy();
-    expect(screen.queryByRole('heading', { name: '最近会话' })).toBeNull();
-    expect(screen.queryByRole('button', { name: '开始新任务' })).toBeNull();
     expect(adapter.listSessions).not.toHaveBeenCalled();
   });
 
@@ -2616,7 +2621,7 @@ describe('PulsaraApp', () => {
     expect(await screen.findByRole('heading', { name: '模型配置' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '模型' }).classList.contains('is-active')).toBe(true);
     expect(screen.queryByRole('heading', { name: '外观' })).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: '总览' }));
+    fireEvent.click(screen.getByRole('button', { name: '会话' }));
     fireEvent.click(screen.getByRole('button', { name: '设置' }));
     expect(await screen.findByRole('heading', { name: '外观' })).toBeTruthy();
   });
@@ -2692,84 +2697,9 @@ describe('PulsaraApp', () => {
     expect(screen.getByRole('button', { name: /推理 medium/ })).toBeTruthy();
   });
 
-  it('uses shared session presence and shows useful local configuration facts', async () => {
-    const adapter = new FakeAdapter();
-    adapter.sessions = [
-      initialSession,
-      {
-        id: 'session:xtpjbedcqqrduabsmnw7cmuehi',
-        title: '后台检查',
-        subtitle: '8 条记录',
-        status: 'waiting',
-        updatedAt: '2 分钟前',
-        live: true,
-      },
-      {
-        id: 'session:rwuinpszanxoixj2vggg73xnqi',
-        title: '历史会话',
-        subtitle: '21 条记录',
-        status: 'completed',
-        updatedAt: '昨天',
-        live: false,
-      },
-    ];
-    const { container } = renderWorkbench(<PulsaraApp adapter={adapter} />);
-    await screen.findByRole('heading', { name: '准备发布' });
 
-    fireEvent.click(screen.getByRole('button', { name: '总览' }));
 
-    expect(screen.getByRole('heading', { name: /^最近会话/ })).toBeTruthy();
-    expect(screen.getByText('共 3 个会话')).toBeTruthy();
-    expect(screen.queryByText('最近工作')).toBeNull();
-    const runtimeHealth = container.querySelector('.runtime-health');
-    expect(runtimeHealth?.textContent).toBe('本地服务已连接');
-    expect(runtimeHealth?.querySelector('small')).toBeNull();
-    expect(screen.queryByText('正在发生')).toBeNull();
-    expect(screen.queryByText('本地运行')).toBeNull();
-    expect(container.querySelector('.active-mission-card')).toBeNull();
-    expect(container.querySelector('.activity-card')).toBeNull();
-    expect(container.querySelectorAll('.recent-table .session-presence--current')).toHaveLength(0);
-    expect(container.querySelectorAll('.recent-table .session-presence--loaded')).toHaveLength(2);
-    expect(container.querySelectorAll('.recent-table .session-presence--resumable')).toHaveLength(1);
-    expect(Array.from(container.querySelectorAll('.recent-table .table-state'), (node) => node.textContent))
-      .toEqual(['已载入', '已载入', '可恢复']);
-    const systemCard = container.querySelector('.system-card');
-    expect(systemCard?.textContent).toContain('模型配置1 组可用');
-    expect(systemCard?.textContent).toContain('记忆检索Embedding已关闭');
-    expect(systemCard?.textContent).toContain('结果重排Rerank已关闭');
-    expect(systemCard?.querySelector('footer')).toBeNull();
-  });
 
-  it('reports configured retrieval services and the exact model configuration count', async () => {
-    const adapter = new FakeAdapter();
-    adapter.modelConfigurations = [
-      ...adapter.modelConfigurations,
-      {
-        ...adapter.modelConfigurations[0],
-        id: 'model-connection:11111111111111111111111111111111',
-        route_id: 'backup',
-        model_id: 'backup-model',
-        display_name: 'backup-model',
-      },
-    ];
-    adapter.bootstrap = vi.fn(async () => ({
-      ...bootstrap,
-      local_settings: {
-        ...bootstrap.local_settings,
-        memory_retrieval: { embedding: { endpoint: 'https://provider.example/embeddings', model_id: 'embedding-fixture', shape: 'openai_embedding', authentication: 'none', credential_configured: false }, embedding_enabled: true, history_enabled: true, rerank: { endpoint: 'https://provider.example/rerank', model_id: 'rerank-fixture', shape: 'flat_rerank', authentication: 'none', credential_configured: false }, decision: null, ranking_mode: 'rerank' },
-      },
-      model_configurations: adapter.modelConfigurations,
-    }));
-
-    renderWorkbench(<PulsaraApp adapter={adapter} />);
-    await screen.findByRole('heading', { name: '准备发布' });
-    fireEvent.click(screen.getByRole('button', { name: '总览' }));
-
-    const systemCard = screen.getByRole('heading', { name: '当前配置' }).closest('.system-card');
-    expect(systemCard?.textContent).toContain('模型配置2 组可用');
-    expect(systemCard?.textContent).toContain('记忆检索embedding-fixture已开启');
-    expect(systemCard?.textContent).toContain('结果重排Rerank已开启');
-  });
 
   it('refreshes loaded session facts and distinguishes the current page connection', async () => {
     const adapter = new FakeAdapter();
@@ -4736,7 +4666,7 @@ describe('user capability synchronization', () => {
       expect(adapter.inspectUserCapabilities.mock.calls.length).toBe(before + 1);
       await act(async () => vi.advanceTimersByTimeAsync(30_000 - 650));
       expect(adapter.inspectUserCapabilities.mock.calls.length).toBe(before + 2);
-      fireEvent.click(screen.getByRole('button', {name: '总览'}));
+      fireEvent.click(screen.getByRole('button', {name: '会话'}));
       await act(async () => vi.advanceTimersByTimeAsync(60_000));
       expect(adapter.inspectUserCapabilities.mock.calls.length).toBe(before + 2);
     } finally { cleanup(); vi.useRealTimers(); }
@@ -4863,8 +4793,7 @@ describe('user capability synchronization', () => {
     vi.spyOn(adapter.memory, 'catalog').mockResolvedValue({items: [], next_cursor: null});
     const scheduled = vi.spyOn(LocalScheduledTasksApi.prototype, 'list').mockResolvedValue({tasks: [], next_cursor: null});
     render(<PulsaraApp adapter={adapter} />);
-    await screen.findByText('本地服务已连接');
-    expect((screen.getByRole('button', {name: '开始新任务'}) as HTMLButtonElement).disabled).toBe(false);
+    await waitFor(() => expect((screen.getByRole('button', {name: /新建会话/}) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('button', {name: '记忆', exact: true}));
     await waitFor(() => expect(projects).toHaveBeenCalled());
     expect(screen.queryByText('本地服务连接失败')).toBeNull();

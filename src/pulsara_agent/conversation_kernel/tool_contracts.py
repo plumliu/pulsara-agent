@@ -93,6 +93,7 @@ class KernelToolResult:
     result_facts: Mapping[str, object] = field(default_factory=dict)
     pending_images: tuple[LLMImagePart, ...] = ()
     acceptance_succeeded: Callable[[], None | Awaitable[None]] | None = field(default=None, repr=False, compare=False)
+    acceptance_finished: Callable[[], None] | None = field(default=None, repr=False, compare=False)
     native_continuation: NativeToolContinuation | None = None
     process_local_settlement: ProcessLocalEffectSettlementToken | None = None
     physical_timing: str = "ON_TIME"

@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 import asyncio
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -789,6 +790,101 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
             [{"target": work_target(historical), "work_status": "completed"}],
         )
         self.assertEqual(terminal["meta"]["completed_work_count"], 1)
+
+    async def test_stop_failure_preserves_committed_queue_cancellation(self):
+        agent, running = self.add_work(status="running")
+        _, queued = self.add_work(agent=agent, status="queued")
+
+        async def fail_stop(**kwargs):
+            raise OSError("stop failed")
+
+        self.runtime.stop_active_work = fail_stop
+        result = await self.call("stop_agent", {"target": agent_target(agent)})
+        self.assertEqual(result["meta"], {"status": "ERROR"})
+        self.assertIn("stop failed", result["content"][0]["value"])
+        self.assertEqual(self.records(result), [
+            {"target": work_target(running), "work_status": "running"},
+            {"target": work_target(queued), "work_status": "stopped"},
+        ])
+        self.assertEqual(self.repo.rows[queued]["status"], "stopped")
+
+    async def test_stop_read_failure_keeps_new_and_transaction_observations(self):
+        agent, running = self.add_work(status="running")
+        _, queued = self.add_work(agent=agent, status="queued")
+        original = self.api._work_status
+
+        async def read_with_failure(work_id):
+            if work_id == queued:
+                raise OSError("read failed")
+            return await original(work_id)
+
+        self.api._work_status = read_with_failure
+        result = await self.call("stop_agent", {"target": agent_target(agent)})
+        self.assertEqual(result["meta"], {"status": "ERROR"})
+        self.assertIn("read failed", result["content"][0]["value"])
+        self.assertEqual(self.records(result), [
+            {"target": work_target(running), "work_status": "stopped"},
+            {"target": work_target(queued), "work_status": "stopped"},
+        ])
+
+    async def test_stop_cancel_after_commit_reports_known_effects(self):
+        agent, running = self.add_work(status="running")
+        _, queued = self.add_work(agent=agent, status="queued")
+        entered = asyncio.Event()
+
+        async def pending_stop(**kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+
+        self.runtime.stop_active_work = pending_stop
+        task = asyncio.create_task(self.api.invoke(
+            tool_name="stop_agent",
+            arguments={"target": agent_target(agent)},
+            invocation_context=self.context,
+        ))
+        await entered.wait()
+        task.cancel()
+        outcome = await task
+        self.assertTrue(outcome.caller_cancelled_while_running)
+        self.assertEqual(outcome.physical_timing, "ON_TIME")
+        self.assertIsNotNone(outcome.physical_observation)
+        result = outcome.public_value()
+        self.assertEqual(result["meta"], {"status": "CANCELLED"})
+        self.assertEqual(self.records(result), [
+            {"target": work_target(running), "work_status": "running"},
+            {"target": work_target(queued), "work_status": "stopped"},
+        ])
+        self.assertEqual(self.repo.rows[queued]["status"], "stopped")
+
+    async def test_stop_cancellation_during_transaction_drains_exact_result(self):
+        agent, queued = self.add_work(status="queued")
+        started = asyncio.Event()
+        release = threading.Event()
+        loop = asyncio.get_running_loop()
+        cancel_requests = self.repo.cancel_agent_requests
+
+        def delayed_cancel(*args, **kwargs):
+            loop.call_soon_threadsafe(started.set)
+            release.wait()
+            return cancel_requests(*args, **kwargs)
+
+        self.repo.cancel_agent_requests = delayed_cancel
+        task = asyncio.create_task(self.api.invoke(
+            tool_name="stop_agent",
+            arguments={"target": agent_target(agent)},
+            invocation_context=self.context,
+        ))
+        await started.wait()
+        task.cancel()
+        release.set()
+        result = await task
+        self.assertTrue(result.caller_cancelled_while_running)
+        self.assertEqual(result.physical_timing, "LATE_AFTER_WATCHDOG")
+        self.assertIsNotNone(result.physical_observation)
+        self.assertEqual(result.public_value()["meta"]["status"], "SUCCESS")
+        self.assertEqual(self.records(result.public_value()), [
+            {"target": work_target(queued), "work_status": "stopped"},
+        ])
 
     async def test_work_wait_uses_exact_snapshot_order_including_queued_and_historical(
         self,

@@ -988,6 +988,7 @@ class ToolBatchExecutor:
         admission_held = False
         source_context_token = None
         unsettled_process_local_effect: ProcessLocalEffectSettlementToken | None = None
+        unfinished_acceptance = None
         pending_hook_context_reservations = []
         source = current_tool_invocation.get()
         code_call = source is not None and source.kind is ToolInvocationSourceKind.CODE_MODE_CALL
@@ -1663,6 +1664,7 @@ class ToolBatchExecutor:
                                 invocation_context=invocation_context,
                                 live_sink=live_sink,
                             )
+                            unfinished_acceptance = result.acceptance_finished
                     except asyncio.CancelledError:
                         if live_sink is not None:
                             await asyncio.shield(live_sink.close())
@@ -1836,6 +1838,8 @@ class ToolBatchExecutor:
             )
 
         finally:
+            if unfinished_acceptance is not None:
+                unfinished_acceptance()
             if source_context_token is not None:
                 current_tool_invocation.reset(source_context_token)
             if admission_held:
@@ -2251,10 +2255,14 @@ class ToolBatchExecutor:
                     "canonical ToolResult did not install its process-local effect"
                 )
             effect_committed = True
-        if result.acceptance_succeeded is not None:
-            returned = await asyncio.to_thread(result.acceptance_succeeded)
-            if returned is not None:
-                await returned
+        try:
+            if result.acceptance_succeeded is not None:
+                returned = await asyncio.to_thread(result.acceptance_succeeded)
+                if returned is not None:
+                    await returned
+        finally:
+            if result.acceptance_finished is not None:
+                result.acceptance_finished()
         projection_error = None
         try:
             if native:

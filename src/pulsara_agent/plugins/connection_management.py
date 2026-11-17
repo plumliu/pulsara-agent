@@ -16,6 +16,8 @@ from pulsara_agent.plugins.contracts import (
     PluginInstanceIdentity,
     PreparedPluginInstanceObservation,
     NeverCancelPluginOperation,
+    PluginDiagnostic,
+    PluginDiagnosticCode,
 )
 from pulsara_agent.plugins.mcp_adapter import materialize_plugin_mcp_definition
 from pulsara_agent.plugins.mcp_connection import (
@@ -40,6 +42,21 @@ async def install_plugin_package(store, connections, observation, request, scrub
     if set(dict(request.mcp_scope_policies)) - {item.local_server_id for item in observation.summary.mcp.mcp_servers}:
         raise ValueError("Plugin MCP scope choice refers to an absent component")
     invalidated = []
+    result = None
+
+    def report_failure(value, step, error):
+        prior = value.prior if isinstance(value, StoreCleanupFailure) else value
+        if not isinstance(prior, StoreInstallResult):
+            return None
+        diagnostic = PluginDiagnostic(
+            PluginDiagnosticCode.CLEANUP_UNAVAILABLE,
+            scrub_set.scrub_text(f"{step}：{type(error).__name__}: {error}"),
+            str(prior.package_root),
+        )
+        prior = replace(prior, cleanup_attention=True,
+            connection_diagnostics=(*prior.connection_diagnostics, diagnostic))
+        return replace(value, prior=prior) if isinstance(value, StoreCleanupFailure) else prior
+
     try:
         async with connections.lane:
             lock = store.edit_instance(
@@ -126,7 +143,6 @@ async def install_plugin_package(store, connections, observation, request, scrub
                     configs[
                         plugin_connection_owner(identity, server.local_server_id)
                     ] = config
-                attention = False
                 for owner in owners:
                     config = configs.get(owner)
                     refs = managed_bindings(config) if config is not None else ()
@@ -148,16 +164,16 @@ async def install_plugin_package(store, connections, observation, request, scrub
                             await connections.settings.replace_mcp_authorization(
                                 owner, None, expected=grant
                             )
-                    except Exception:
-                        attention = True
-                published = replace(published, cleanup_attention=attention)
-                return (
-                    replace(result, prior=published)
-                    if isinstance(result, StoreCleanupFailure)
-                    else published
-                )
+                    except Exception as error:
+                        result = report_failure(result, f"MCP {owner.server_id} 凭据或授权清理失败", error)
+                return result
             finally:
                 await asyncio.to_thread(lock.__exit__, None, None, None)
+    except Exception as error:
+        reported = report_failure(result, "安装后的连接处理或锁释放失败", error)
+        if reported is None:
+            raise
+        return reported
     finally:
         await asyncio.gather(*invalidated, return_exceptions=True)
 

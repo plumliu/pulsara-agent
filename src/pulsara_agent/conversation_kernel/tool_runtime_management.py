@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from .capability_management_execution import CapabilityManagementOutcome
+from .capability_management_execution import CapabilityManagementOutcome, _REMOVAL_ACTIONS
 from pulsara_agent.capability.mcp_management import McpManagementConflict
 from pulsara_agent.ports.tool_execution import ToolBusinessValue
 from pulsara_agent.tools.builtins.todo import parse_todo_replacement
@@ -90,7 +90,7 @@ class _ToolManagementOperations:
         except (McpManagementConflict, ValueError, OSError) as error:
             message = call._public_scrub(call.prepared).scrub_text(str(error))
             target = dict(call.prepared.intent.to_dict()["target"])
-            if target["kind"] == "PATH":
+            if target["kind"] == "PATH" or call.prepared.intent.action in _REMOVAL_ACTIONS:
                 target = None
             outcome = CapabilityManagementOutcome("APPLICATION_ERROR", ToolBusinessValue(
                 {} if target is None else {"target": target}, (ResultPart("text", message),)),False,{})

@@ -10,7 +10,7 @@ afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.resto
 async function openCapabilities(adapter: FakeAdapter) {
   adapter.sessions = [];
   render(<PulsaraApp adapter={adapter} />);
-  fireEvent.click(await screen.findByRole('button', { name: '能力' }));
+  fireEvent.click(await within(screen.getByRole('navigation', { name: '主要功能' })).findByRole('button', { name: '能力' }));
   await waitFor(() => expect(adapter.inspectUserCapabilities).toHaveBeenCalled());
   await waitFor(() => expect((screen.getByRole('button', { name: '刷新能力' }) as HTMLButtonElement).disabled).toBe(false));
 }
@@ -81,10 +81,10 @@ it('aborts a real HTTP inventory GET on navigation and reads fresh user inventor
   expect(fetcher).toHaveBeenCalledTimes(before + 1);
   expect(slowSignal).toBeInstanceOf(AbortSignal);
   expect(screen.getByRole('button', {name:'刷新能力'}).hasAttribute('disabled')).toBe(true);
-  await act(async () => { fireEvent.click(screen.getByRole('button', {name:'总览'})); await aborted.promise; });
+  await act(async () => { fireEvent.click(screen.getByRole('button', {name:'会话'})); await aborted.promise; });
   expect(slowSignal?.aborted).toBe(true);
   await act(async () => {
-    fireEvent.click(screen.getByRole('button', {name:'能力'}));
+    fireEvent.click(within(screen.getByRole('navigation', { name: '主要功能' })).getByRole('button', { name: '能力' }));
     await vi.advanceTimersByTimeAsync(20);
   });
   expect(fetcher).toHaveBeenCalledTimes(before + 2);
@@ -146,8 +146,8 @@ it('reports a real HTTP MCP mutation once in the existing toast without keeping 
   await act(async () => vi.advanceTimersByTimeAsync(4200));
   expect(document.querySelector('.toast')).toBeNull();
   await act(async () => fireEvent.click(screen.getByRole('button', { name: '刷新能力' })));
-  await act(async () => fireEvent.click(screen.getByRole('button', { name: '总览' })));
-  await act(async () => fireEvent.click(screen.getByRole('button', { name: '能力' })));
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: '会话' })));
+  await act(async () => fireEvent.click(within(screen.getByRole('navigation', { name: '主要功能' })).getByRole('button', { name: '能力' })));
   await act(async () => fireEvent.focus(window));
   expect(screen.queryByText(new RegExp(pendingText))).toBeNull();
   expect(document.querySelector('.toast')).toBeNull();

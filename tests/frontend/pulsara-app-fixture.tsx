@@ -1,5 +1,5 @@
 import { uiPreferences } from '../../frontend/lib/ui-preferences';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, vi } from 'vitest';
 import { LocalMemoryApi } from '../../frontend/lib/memory-api';
@@ -870,11 +870,8 @@ class FakeAdapter implements RuntimeAdapter {
   }
 }
 
-// Session interaction tests explicitly enter the workbench from the overview.
 function renderWorkbench(ui: Parameters<typeof render>[0]) {
-  const view = render(ui);
-  fireEvent.click(screen.getByRole('button', { name: '会话', exact: true }));
-  return view;
+  return render(ui);
 }
 
 export { isWelcomeHeading, deferred, textPrompt, stubClipboard, typeComposer, composerIsDisabled, bootstrap, initialSession, SOURCE_FIDELITY_MARKDOWN, SOURCE_FIDELITY_USER_TEXT, capabilitySnapshot, userCapabilitySnapshot, projection, FakeConnection, FakeAdapter, renderWorkbench, sessionMenuClipping };

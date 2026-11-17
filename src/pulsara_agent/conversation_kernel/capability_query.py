@@ -288,10 +288,10 @@ class CapabilitySourceQuery:
         if server.sanitized_instructions:
             record["instructions"] = server.sanitized_instructions
         config = self._matching_config(server)
-        candidate = self._current_candidate(server.server_id) if config is not None else None
+        candidate = self._accepted_directory(server.server_id) if config is not None else None
         if config is not None and not config.enabled:
             record["status"] = "已禁用。"
-        elif server.status.value == "READY" and candidate is None:
+        elif server.status.value == "READY" and (candidate is None or self._current_candidate(server.server_id) is None):
             record["status"] = "连接或目录暂不可用。"
         if candidate is not None:
             record["resource_count"] = len(candidate.discovery_snapshot.resources)

@@ -307,3 +307,83 @@ def test_same_public_plugin_name_keeps_separate_coverage_and_parent(tmp_path):
         finally:
             runtime.release();await owner.aclose()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('replacement_case', ['disabled', 'changed', 'source', 'root_only', 'removed'])
+def test_resource_snapshot_survives_reconnect_only_for_current_visible_configuration(tmp_path, replacement_case):
+    async def run():
+        fail = False
+        class Session(_FakeMcpSession):
+            async def list_resources(self, *, params=None):
+                return types.ListResourcesResult(resultType='complete', resources=[
+                    types.Resource(name='guide', uri='fixture://guide')])
+            async def list_resource_templates(self, *, params=None):
+                return types.ListResourceTemplatesResult(resultType='complete', resourceTemplates=[
+                    types.ResourceTemplate(name='item', uriTemplate='fixture://items/{id}')])
+        class Client(_FakeMcpClient):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.session = Session()
+            async def open(self):
+                if fail:
+                    raise TimeoutError('controlled reconnect failure')
+        original = config('known')
+        owner = McpHostSupervisor(workspace_root=tmp_path, configs=(original,),
+            credential_boundary=ProcessCredentialBoundary(), client_factory=Client)
+        port = _port(tmp_path, owner)
+        try:
+            await owner.start()
+            await finish_connection_attempts(owner)
+            port.prepare_tool_surface_safe_point()
+            listed = await invoke(port, 'query_capabilities', {'kind': 'MCP'})
+            record = next(p['value'] for p in listed['content'] if p['type'] == 'object')
+            connection = record['target']
+            assert (record['resource_count'], record['resource_template_count']) == (1, 1)
+            fail = True
+            owner.reconnect('known')
+            await finish_connection_attempts(owner)
+            from pulsara_agent.conversation_kernel.tool_contracts import KernelToolAuthorizationKind
+            from pulsara_agent.identity import random_id
+            from pulsara_agent.primitives.permission import PermissionMode
+            from pulsara_agent.primitives.run_permission import build_run_permission_snapshot, RunPermissionAdmissionSource
+            from tests.support.round3 import prepare_test_direct_tool_surface
+            permission = build_run_permission_snapshot(snapshot_id=random_id('permission'),
+                requested_mode=PermissionMode.BYPASS_PERMISSIONS, effective_mode=PermissionMode.BYPASS_PERMISSIONS,
+                admission_source=RunPermissionAdmissionSource.USER_SUBMISSION)
+            surface = prepare_test_direct_tool_surface(port, effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
+            borrow = port.borrow_tool_surface(surface)
+            try:
+                auth = await port.authorize(tool_name='read_mcp_resource',
+                    arguments={'target': {'kind': 'MCP_RESOURCE', 'server_id': 'known', 'uri': 'fixture://guide'}},
+                    tool_call_id=random_id('call'), turn_id=random_id('turn'), assistant_entry_id=random_id('entry'),
+                    permission_snapshot=permission, surface_borrow=borrow, memory_context=None)
+                assert auth.kind is KernelToolAuthorizationKind.TOOL_UNAVAILABLE
+            finally:
+                borrow.close()
+            for scope in (ModelInputScopeKind.ROOT, ModelInputScopeKind.SUBAGENT):
+                listing = await invoke(port, 'query_capabilities', {'kind': 'MCP'}, scope=scope)
+                record = next(p['value'] for p in listing['content'] if p['type'] == 'object')
+                assert (record['resource_count'], record['resource_template_count']) == (1, 1)
+                directory = await invoke(port, 'read_mcp_resource', {'target': connection}, scope=scope)
+                assert directory['meta']['status'] == 'SUCCESS', directory
+                records = [p['value'] for p in directory['content'] if p['type'] == 'object']
+                assert records == [
+                    {'target': {'kind': 'MCP_RESOURCE', 'server_id': 'known', 'uri': 'fixture://guide'}, 'name': 'guide'},
+                    {'server_id': 'known', 'uri_template': 'fixture://items/{id}', 'name': 'item'},
+                ]
+            replacements = {
+                'disabled': (config('known', enabled=False),),
+                'changed': (config('known', display_name='Changed semantics'),),
+                'source': (config('known', source='WORKSPACE'),),
+                'root_only': (config('known', scope_policy='ROOT_ONLY'),),
+                'removed': (),
+            }
+            owner.reload_configs(replacements[replacement_case])
+            scope = ModelInputScopeKind.SUBAGENT if replacement_case == 'root_only' else ModelInputScopeKind.ROOT
+            directory = await invoke(port, 'read_mcp_resource', {'target': connection}, scope=scope)
+            assert directory['meta']['status'] == 'ERROR', directory
+            assert not any(p['type'] == 'object' for p in directory['content'])
+        finally:
+            await port.aclose(timeout_seconds=10)
+            await owner.aclose()
+    asyncio.run(run())

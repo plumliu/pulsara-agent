@@ -7,11 +7,12 @@ afterEach(cleanup);
 it('keeps every desktop destination directly accessible', () => {
   const navigate = vi.fn();
   render(<ActivityRail activeView="workbench" onNavigate={navigate} />);
-  for (const [name, view] of [['总览', 'overview'], ['会话', 'workbench'], ['能力', 'capabilities'], ['记忆', 'memory'], ['定时任务', 'scheduled'], ['设置', 'settings']]) {
+  for (const [name, view] of [['会话', 'workbench'], ['能力', 'capabilities'], ['记忆', 'memory'], ['定时任务', 'scheduled'], ['设置', 'settings']]) {
     fireEvent.click(screen.getByRole('button', { name, exact: true }));
     expect(navigate).toHaveBeenLastCalledWith(view);
   }
-  expect(screen.queryByRole('button', { name: '更多', exact: true })).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: '返回 Pulsara 会话' }));
+  expect(navigate).toHaveBeenLastCalledWith('workbench');
 });
 
 it('opens settings from the profile and marks the settings gear as current', () => {

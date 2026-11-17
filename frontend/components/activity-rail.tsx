@@ -2,7 +2,6 @@ import {
   CalendarClock,
   Blocks,
   Brain,
-  Gauge,
   MessageCircle,
   Settings,
 } from 'lucide-react';
@@ -11,7 +10,6 @@ import { BrandMark } from './brand-mark';
 import { UserAvatar } from './user-avatar';
 
 const navigation = [
-  { id: 'overview' as const, label: '总览', icon: Gauge },
   { id: 'workbench' as const, label: '会话', icon: MessageCircle },
   { id: 'capabilities' as const, label: '能力', icon: Blocks },
   { id: 'memory' as const, label: '记忆', icon: Brain },
@@ -26,7 +24,7 @@ interface ActivityRailProps {
 export function ActivityRail({ activeView, onNavigate }: ActivityRailProps) {
   return (
     <nav className="activity-rail" aria-label="主要功能">
-      <button className="rail-logo" onClick={() => onNavigate('overview')} aria-label="返回 Pulsara 总览">
+      <button className="rail-logo" onClick={() => onNavigate('workbench')} aria-label="返回 Pulsara 会话">
         <BrandMark compact />
       </button>
 

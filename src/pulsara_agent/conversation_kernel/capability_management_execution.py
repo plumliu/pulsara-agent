@@ -1054,6 +1054,15 @@ class CapabilityManagementOutcome:
     result_facts: Mapping[str, object]
 
 
+_REMOVAL_ACTIONS = frozenset(
+    {
+        Action.REMOVE_LOOSE_SKILL,
+        Action.REMOVE_LOCAL_MCP,
+        Action.REMOVE_PLUGIN,
+    }
+)
+
+
 def management_outcome(prepared, native, *, result_facts=None):
     """Project known owner facts once; no management envelope becomes body."""
     from pulsara_agent.conversation_kernel.content_parts import ResultPart
@@ -1074,7 +1083,7 @@ def management_outcome(prepared, native, *, result_facts=None):
         else "APPLICATION_ERROR"
     )
     target = native.get("target")
-    fields = {} if target is None else {"target": target}
+    fields = {} if target is None or action in _REMOVAL_ACTIONS else {"target": target}
     original = thaw_json(prepared.intent.target)
     name = (
         Path(target["skill_path"]).parent.name
@@ -1086,6 +1095,9 @@ def management_outcome(prepared, native, *, result_facts=None):
         )
     )
     enabled = thaw_json(prepared.intent.fields).get("enabled")
+    plugin_install_status = current.get(
+        "prior_operation_status", current.get("operation_status")
+    )
     messages = {
         Action.INSTALL_LOOSE_SKILL: f"已安装技能 {name}。",
         Action.SET_LOOSE_SKILL_ENABLED: f"已{'启用' if enabled else '停用'}技能 {name}。",
@@ -1098,7 +1110,7 @@ def management_outcome(prepared, native, *, result_facts=None):
         Action.REMOVE_LOCAL_MCP: f"已删除 MCP 连接 {name}。",
         Action.AUTHORIZE_MCP: f"已完成 MCP 连接 {name} 的登录。",
         Action.CLEAR_MCP_AUTHORIZATION: f"已清除 MCP 连接 {name} 的本地 OAuth 授权。",
-        Action.INSTALL_PLUGIN: f"已安装插件 {name}。",
+        Action.INSTALL_PLUGIN: f"已{'替换' if plugin_install_status == 'REPLACED' else '安装'}插件 {name}，当前未启用。",
         Action.SET_PLUGIN_ENABLED: f"已{'启用' if enabled else '停用'}插件 {name}。",
         Action.REMOVE_PLUGIN: f"已删除插件 {name}。",
     }

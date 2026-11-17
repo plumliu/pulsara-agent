@@ -10,6 +10,7 @@ import shlex
 import sys
 from time import monotonic
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from jsonschema import Draft202012Validator, ValidationError
@@ -293,7 +294,14 @@ def test_query_source_is_complete_and_capture_survives_retirement_without_consum
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("failure", [None, OSError("frozen source blob is missing")])
+@pytest.mark.parametrize(
+    "failure", [
+        None,
+        OSError("frozen source blob is missing"),
+        RuntimeError("source reader failed"),
+        UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
+    ]
+)
 def test_missing_source_is_error_and_preserves_unconsumed_output(failure):
     async def run():
         host = CodeModeHost()
@@ -309,12 +317,14 @@ def test_missing_source_is_error_and_preserves_unconsumed_output(failure):
         try:
             cell = await _start(host, "console.log('retained');")
             await _terminal(host, cell)
+            target = cell_target(cell)
             result = await port._invoke_code_mode_control(
-                "query_cells", {"target": cell_target(cell)}, _context()
+                "query_cells", {"target": target}, _context()
             )
             value = result.public_value()
+            assert value["target"] == target
             assert value["meta"] == {"status": "ERROR"}
-            assert ("blob is missing" if failure else "frozen source") in value[
+            assert (str(failure) if failure else "frozen source") in value[
                 "content"
             ][0]["value"]
             lease = await host.lease_output(cell)
@@ -323,6 +333,47 @@ def test_missing_source_is_error_and_preserves_unconsumed_output(failure):
                 "values": [{"type": "text", "value": "retained"}],
             }
             assert await host.lease_output(cell) is lease
+        finally:
+            await host.aclose()
+
+    asyncio.run(run())
+
+
+def test_query_missing_cell_does_not_claim_target_or_read_source():
+    async def run():
+        host = CodeModeHost()
+        port = object.__new__(DirectKernelToolPort)
+        port._code_mode = host
+        read_source = AsyncMock()
+        port._code_mode_read_source = read_source
+        try:
+            target = cell_target(random_id("cell"))
+            result = await port._invoke_code_mode_control(
+                "query_cells", {"target": target}, _context()
+            )
+            value = result.public_value()
+            assert value["meta"] == {"status": "ERROR"}
+            assert "target" not in value
+            read_source.assert_not_awaited()
+        finally:
+            await host.aclose()
+
+    asyncio.run(run())
+
+
+def test_query_source_memory_error_propagates():
+    async def run():
+        host = CodeModeHost()
+        port = object.__new__(DirectKernelToolPort)
+        port._code_mode = host
+        port._code_mode_read_source = AsyncMock(side_effect=MemoryError("exhausted"))
+        try:
+            cell = await _start(host, "console.log('retained');")
+            await _terminal(host, cell)
+            with pytest.raises(MemoryError, match="exhausted"):
+                await port._invoke_code_mode_control(
+                    "query_cells", {"target": cell_target(cell)}, _context()
+                )
         finally:
             await host.aclose()
 

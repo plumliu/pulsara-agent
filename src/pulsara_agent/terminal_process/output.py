@@ -11,6 +11,7 @@ from __future__ import annotations
 from pulsara_agent.identity import random_id, require_id
 
 from base64 import urlsafe_b64decode, urlsafe_b64encode
+import asyncio
 import codecs
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -327,6 +328,7 @@ class TerminalOutputOwner:
         process_id: str,
         maximum_bytes: int = TERMINAL_OUTPUT_MEMORY_BYTES,
         retained_bytes_changed: Callable[["TerminalOutputOwner"], None] | None = None,
+        initial_observation: asyncio.Event | None = None,
     ) -> None:
         if maximum_bytes <= 0 or maximum_bytes > TERMINAL_OUTPUT_MEMORY_BYTES:
             raise ValueError("terminal retained output bound is invalid")
@@ -351,6 +353,8 @@ class TerminalOutputOwner:
         self._retained_bytes_changed = retained_bytes_changed
         self._lock = RLock()
         self._condition = Condition(self._lock)
+        self.initial_observation = initial_observation
+        self.model_observation_lock = asyncio.Lock()
 
     @property
     def retained_utf8_bytes(self) -> int:
@@ -507,20 +511,31 @@ class TerminalOutputOwner:
             ):
                 raise InvalidTerminalOutputCursor()
             through = max(self._observed_through, frozen.sanitized_utf8_offset)
+            # Canonical acceptance has already succeeded. Reclaiming the spool
+            # is optional; a disk error must not make accepted bytes unread.
+            self._observed_through = through
             if through <= self._retained_from or self._reads_closed:
-                self._observed_through = through
                 return
-            suffix = SpooledTemporaryFile(max_size=self.maximum_bytes, mode="w+b")
+            try:
+                suffix = SpooledTemporaryFile(max_size=self.maximum_bytes, mode="w+b")
+            except OSError:
+                return
             try:
                 self._retained.seek(through - self._retained_from)
                 copyfileobj(self._retained, suffix, length=64 * 1024)
+            except OSError:
+                suffix.close()
+                return
             except BaseException:
                 suffix.close()
                 raise
-            self._retained.close()
+            previous = self._retained
             self._retained = suffix
             self._retained_from = through
-            self._observed_through = through
+            try:
+                previous.close()
+            except OSError:
+                pass  # The installed suffix remains the readable owner.
 
     def _read_retained(self, offset=0) -> bytes:
         self._retained.seek(offset)

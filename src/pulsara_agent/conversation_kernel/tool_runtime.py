@@ -365,6 +365,7 @@ class _DirectTerminalTool:
         decision_attempt_id,
         decision_deadline_monotonic,
         effective_permission_mode,
+        initial_observation=None,
     ):
         if origin.session_id != self.session_id:
             raise ValueError("Terminal source does not belong to this session")
@@ -388,6 +389,7 @@ class _DirectTerminalTool:
             cwd_scope=TerminalCwdScope.WORKSPACE
             if effective_permission_mode is PermissionMode.READ_ONLY
             else TerminalCwdScope.HOST_LOCAL,
+            initial_observation=initial_observation,
         )
         return _terminal_execution_result(
             call,
@@ -1153,11 +1155,12 @@ class DirectKernelToolPort(
         if runtime is None:
             return KernelToolResult(state="APPLICATION_ERROR", content=ToolBusinessValue(
                 content=(ResultPart("text", "当前 MCP 目录不可用；本次未向服务发送请求。"),)))
-        server = next((item for item in runtime.catalog_for_scope(scope).servers
+        query = CapabilitySourceQuery(self._capability_management, runtime=runtime, scope=scope,
+            inspect_tool=None, mcp_configs=self._mcp_supervisor.configs)
+        server = next((item for item in query._visible_runtime_servers({})
             if item.connection_target is not None and dict(item.connection_target) == target), None)
-        candidate = runtime.candidates.get(server.server_id) if server is not None else None
-        if candidate is not None and not candidate.slot_lease._slot.lease_is_current(candidate.slot_lease):
-            candidate = None
+        candidate = (query._accepted_directory(server.server_id)
+            if server is not None and query._matching_config(server) is not None else None)
         if candidate is None:
             return KernelToolResult(state="APPLICATION_ERROR", content=ToolBusinessValue(
                 content=(ResultPart("text", "未找到该连接的可靠资源目录；本次未向服务发送请求。"),)))
@@ -1293,15 +1296,22 @@ class DirectKernelToolPort(
         return {"cell": snapshot.public_value(), "participation_coverage": observed["participation_coverage"],
                 "section": section, "items": items, "next_cursor": next_cursor}
 
-    async def _query_cells(self, arguments, context):
+    async def _query_cells(self, arguments, context, *, capture=None):
+        from pulsara_agent.code_mode.contracts import CodeModeError
         from pulsara_agent.conversation_kernel.content_parts import ResultPart
         from pulsara_agent.ports.tool_execution import ToolBusinessValue
         if 'target' not in arguments:
             rows = self._code_mode.list_cell_snapshots(max_items=None)['cells']
             parts = [ResultPart('object', {key:row[key] for key in ('target','state','pending_calls')}) for row in rows]
             return ToolBusinessValue(content=tuple(parts or [ResultPart('text', '没有当前仍持有的 Cell。')]))
-        capture = self.capture_code_cell(arguments['target']['cell_id'])
-        source = await self._code_mode_read_source(session_id=context.session_id, attempt_id=capture.source_exec_attempt_id)
+        if capture is None:
+            capture = self.capture_code_cell(arguments['target']['cell_id'])
+        try:
+            source = await self._code_mode_read_source(session_id=context.session_id, attempt_id=capture.source_exec_attempt_id)
+        except MemoryError:
+            raise
+        except Exception as error:
+            raise CodeModeError('unavailable', str(error)) from error
         if source is None:
             raise LookupError('The frozen source for this Cell is unavailable')
         parts = []
@@ -1370,7 +1380,11 @@ class DirectKernelToolPort(
             if self._code_mode is None:
                 raise CodeModeError('unavailable', 'Code Mode Host is unavailable')
             if tool_name == 'query_cells':
-                business = await self._query_cells(arguments, context)
+                capture = None
+                if 'target' in arguments:
+                    capture = self.capture_code_cell(arguments['target']['cell_id'])
+                    target = arguments['target']
+                business = await self._query_cells(arguments, context, capture=capture)
             elif tool_name == 'exec_cell':
                 if self._code_mode_invoke is None or context.code_mode_snapshot is None:
                     raise RuntimeError('exec_cell lost its common execution snapshot')
@@ -1767,6 +1781,59 @@ class DirectKernelToolPort(
     async def _invoke_physical_tool(
         self, *, tool, call, tool_name, arguments, turn_id, attempt_id, invocation_context, live_sink, observation_origin, cancel_requested,
     ) -> KernelToolResult:
+        if not isinstance(tool, (_DirectTerminalTool, _DirectTerminalProcessTool)):
+            return await self._invoke_physical_tool_uncoordinated(
+                tool=tool, call=call, tool_name=tool_name, arguments=arguments,
+                turn_id=turn_id, attempt_id=attempt_id, invocation_context=invocation_context,
+                live_sink=live_sink, observation_origin=observation_origin,
+                cancel_requested=cancel_requested,
+            )
+        initial = asyncio.Event() if isinstance(tool, _DirectTerminalTool) else None
+        lock = None
+        if isinstance(tool, _DirectTerminalProcessTool):
+            request = parse_manage_process_input(arguments)
+            if request.action in {"wait", "write"}:
+                try:
+                    info = tool.manager.get_process_info(request.target.process_id, owner_host_session_id=tool.owner_host_session_id)
+                    if info.origin.session_id == tool.session_id:
+                        output = tool.manager.process_registry.output_owner(request.target.process_id, owner_host_session_id=tool.owner_host_session_id)
+                        if output.initial_observation is not None:
+                            await output.initial_observation.wait()
+                        await output.model_observation_lock.acquire()
+                        lock = output.model_observation_lock
+                except KeyError:
+                    pass  # The normal terminal path reports an unavailable process.
+        released = False
+
+        def release():
+            nonlocal released
+            if released:
+                return
+            released = True
+            if initial is not None:
+                initial.set()
+            if lock is not None:
+                lock.release()
+
+        handed_off = False
+        try:
+            result = await self._invoke_physical_tool_uncoordinated(
+                tool=tool, call=call, tool_name=tool_name, arguments=arguments,
+                turn_id=turn_id, attempt_id=attempt_id, invocation_context=invocation_context,
+                live_sink=live_sink, observation_origin=observation_origin,
+                cancel_requested=cancel_requested, initial_observation=initial,
+            )
+            result = replace(result, acceptance_finished=release)
+            handed_off = True
+            return result
+        finally:
+            if not handed_off:
+                release()
+
+    async def _invoke_physical_tool_uncoordinated(
+        self, *, tool, call, tool_name, arguments, turn_id, attempt_id, invocation_context, live_sink, observation_origin, cancel_requested,
+        initial_observation=None,
+    ) -> KernelToolResult:
         if isinstance(tool, (_DirectTerminalTool, _DirectTerminalProcessTool)):
             origin = TerminalProcessOrigin(
                 turn_id=turn_id,
@@ -1786,6 +1853,7 @@ class DirectKernelToolPort(
                 origin,
                 attempt_id,
                 invocation_context.effective_permission_mode,
+                initial_observation,
                 deadline_monotonic=self._deadlines.deadline(owner),
                 on_caller_cancelled=(
                     lambda: (
@@ -2262,6 +2330,7 @@ def _execute_terminal_tool_call(
     origin: TerminalProcessOrigin,
     decision_attempt_id: str,
     effective_permission_mode: PermissionMode,
+    initial_observation=None,
     *,
     deadline_monotonic: float,
 ) -> ToolExecutionResult:
@@ -2276,6 +2345,7 @@ def _execute_terminal_tool_call(
                 decision_attempt_id=decision_attempt_id,
                 decision_deadline_monotonic=deadline_monotonic,
                 effective_permission_mode=effective_permission_mode,
+                initial_observation=initial_observation,
             )
         return tool.execute(call, live_sink=live_sink)
     except (ProcessInputClosedError,KeyError,OSError,ValueError) as error:

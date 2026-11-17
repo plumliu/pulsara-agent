@@ -374,6 +374,7 @@ class PluginManagementService:
                 source_path,
                 diagnostics=(_diagnostic(PluginDiagnosticCode.SOURCE_UNAVAILABLE),),
             ), scrub_set=scrub_set)
+        outcome = None
         try:
             identity = store.identity(
                 scope=request.scope,
@@ -398,7 +399,7 @@ class PluginManagementService:
                 result = StoreMutationFailure(
                     _diagnostic(PluginDiagnosticCode.STATE_UNAVAILABLE)
                 )
-            return replace(_install_outcome(
+            outcome = replace(_install_outcome(
                 result,
                 source_path=source_path,
                 package_parent=store.layout(identity).plugin_package_parent,
@@ -407,7 +408,22 @@ class PluginManagementService:
                 scrub_set=scrub_set,
             ), scrub_set=scrub_set)
         finally:
-            observation.close()
+            try:
+                observation.close()
+            except OSError as error:
+                prior = getattr(outcome, "prior", outcome)
+                if not isinstance(prior, SuccessfulPluginInstallOutcome):
+                    raise
+                diagnostic = PluginDiagnostic(
+                    PluginDiagnosticCode.CLEANUP_UNAVAILABLE,
+                    scrub_set.scrub_text(f"安装源关闭失败：{type(error).__name__}: {error}"),
+                    str(source_path),
+                )
+                wrapped = prior is not outcome
+                prior = replace(prior, cleanup_attention=True,
+                    diagnostics=(*prior.diagnostics, diagnostic))
+                outcome = replace(outcome, prior=prior) if wrapped else prior
+        return outcome
 
     def set_local_plugin_enabled(self, request: SetLocalPluginEnabledRequest):
         identity = _request_identity(

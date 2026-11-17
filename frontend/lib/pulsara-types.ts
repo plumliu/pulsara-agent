@@ -1,7 +1,6 @@
 import type { CanonicalPromptContent } from './prompt-content';
 
 export type AppView =
-  | 'overview'
   | 'workbench'
   | 'capabilities'
   | 'memory'

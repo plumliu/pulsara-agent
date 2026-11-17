@@ -382,28 +382,7 @@ class CollaborationToolPort:
                 state="SUCCESS" if success else "APPLICATION_ERROR",
             )
         if tool_name == "stop_agent":
-            rows, outcome, message = await self._stop(arguments["target"], context)
-            meta = {
-                state + "_work_count": sum(row["status"] == state for row in rows)
-                for state in ("queued", "running", "completed", "stopped")
-            }
-            return _business(
-                [
-                    ResultPart("text", message),
-                    *[
-                        ResultPart(
-                            "object",
-                            {
-                                "target": work_target(row["work_id"]),
-                                "work_status": row["status"],
-                            },
-                        )
-                        for row in rows
-                    ],
-                ],
-                meta=meta,
-                outcome=outcome,
-            )
+            return await self._stop(arguments["target"], context)
         if tool_name == "wait_agent":
             return await self._wait_agents(arguments, context)
         state = await self._wait_message(arguments, context)
@@ -441,7 +420,7 @@ class CollaborationToolPort:
             identity, work_id = work["agent_id"], work["work_id"]
             self._observe_cell(context, ((identity, work_id, "stop"),))
             if work["status"] in TERMINAL:
-                return [work], None, "工作已结束，本次未执行停止。"
+                return self._stop_result([work], "工作已结束，本次未执行停止。")
         else:
             identity, work_id = target_id(target, "AGENT"), None
             await self._require_agent(identity)
@@ -459,18 +438,69 @@ class CollaborationToolPort:
         )
         if outcome.error is not None:
             raise outcome.error
-        for row in outcome.value:
-            if row["status"] == "running":
-                await self.runtime.stop_active_work(
-                    agent_id=identity, work_id=row["work_id"]
-                )
-        actual = [await self._work_status(row["work_id"]) for row in outcome.value]
-        return (
-            actual,
-            outcome,
-            "已请求停止工作，结果反映实际结算。"
-            if actual
-            else "Agent 没有未结束工作。",
+        # These rows are the confirmed transaction snapshot. A later stop or
+        # read can fail after queued cancellations have already committed.
+        known = [dict(row) for row in outcome.value]
+        try:
+            for row in known:
+                if row["status"] == "running":
+                    await self.runtime.stop_active_work(
+                        agent_id=identity, work_id=row["work_id"]
+                    )
+            for index, row in enumerate(known):
+                known[index] = await self._work_status(row["work_id"])
+        except asyncio.CancelledError:
+            caller = asyncio.current_task()
+            return replace(
+                self._stop_result(
+                    known,
+                    "本次停止调用已取消。排队取消已按事务结果生效；所列状态为已确认的观察，未完成的停止和后续状态尚未确认。",
+                    state="CANCELLED",
+                    outcome=outcome,
+                ),
+                caller_cancelled_while_running=(
+                    outcome.caller_cancelled or (caller is not None and caller.cancelling() > 0)
+                ),
+            )
+        except MemoryError:
+            raise
+        except Exception as error:
+            return self._stop_result(
+                known,
+                f"停止处理或状态读取失败：{error}。排队取消已按事务结果生效；所列状态为已确认的观察，未完成的停止和后续状态尚未确认。",
+                state="APPLICATION_ERROR",
+                outcome=outcome,
+            )
+        return self._stop_result(
+            known,
+            "已请求停止工作，结果反映实际结算。" if known else "Agent 没有未结束工作。",
+            outcome=outcome,
+        )
+
+    @staticmethod
+    def _stop_result(rows, message, *, state="SUCCESS", outcome=None):
+        meta = (
+            {
+                status + "_work_count": sum(row["status"] == status for row in rows)
+                for status in ("queued", "running", "completed", "stopped")
+            }
+            if state == "SUCCESS"
+            else None
+        )
+        return _business(
+            [
+                ResultPart("text", message),
+                *(
+                    ResultPart(
+                        "object",
+                        {"target": work_target(row["work_id"]), "work_status": row["status"]},
+                    )
+                    for row in rows
+                ),
+            ],
+            meta=meta,
+            state=state,
+            outcome=outcome,
         )
 
     @asynccontextmanager

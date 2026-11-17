@@ -21,7 +21,6 @@ import { ScheduledTasksView } from '../components/scheduled-tasks-view';
 import { MemoryView } from '../components/memory-view';
 import { InspectorPanel } from '../components/inspector-panel';
 import { NewSessionDialog, ToastStack } from '../components/overlays';
-import { OverviewView } from '../components/overview-view';
 import { SessionSidebar } from '../components/session-sidebar';
 import { SessionOpeningView } from '../components/session-opening-view';
 import { SessionSearchDialog } from '../components/session-search-dialog';
@@ -246,7 +245,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   const [promptDraftStore] = useState(() => new PromptDraftStore());
   const [suggestionCache] = useState(() => new SessionSuggestionCache());
   const scheduledApi = useMemo(() => new LocalScheduledTasksApi(), []);
-  const [activeView, setActiveView] = useState<AppView>('overview');
+  const [activeView, setActiveView] = useState<AppView>('workbench');
   const stopView = useRef(activeView);
   stopView.current = activeView;
   const [capabilityTab, setCapabilityTab] = useState<CapabilityTab>('plugins');
@@ -1181,6 +1180,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
       if (!background) await readSessionList(ownsRead);
       if (!ownsRead()) return;
       setUserServiceStatus('online');
+      if (!requestedSession.current) setRuntimeStatus('online');
     } catch (error) {
       if (!ownsRead()) return;
       setUserServiceStatus(error instanceof RuntimeApiError && error.retryable ? 'offline' : 'failed');
@@ -1236,8 +1236,10 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
         setUserServiceStatus('online');
         const savedSessionId = readSavedSessionId();
         const initialSession = sessions?.find((session) => session.id === savedSessionId) ?? sessions?.[0];
-        // Restore the session in the background; startup never owns navigation.
+        // Present the selected session's loading state before releasing the
+        // startup cover. Restoration never takes over later user navigation.
         if (initialSession) {
+          setOpeningSessionId(initialSession.id);
           void openRuntimeSession(initialSession.id);
         }
         else {
@@ -2914,29 +2916,20 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
       )}
 
       </div>
-      {activeView === 'overview' && (
-        <OverviewView
-          sessions={sessionList}
-          runtimeStatus={userServiceStatus}
-          databaseState={databaseState}
-          localSettings={bootstrap?.local_settings}
-          modelConfigurations={bootstrap?.model_configurations ?? []}
-          modelCatalogLoading={bootstrap?.model_catalog_loading}
-          onNavigate={navigate}
-          onOpenSession={openSession}
-          onNewSession={openNewSession}
-          canCreateSession={canCreateSession}
-        />
-      )}
       {activeView === 'workbench' && !databaseBlocked && loadingSession && (
         <SessionOpeningView
           session={loadingSession}
           workspace={loadingSession.workspace ?? emptyWorkspace}
           error={openingSession ? runtimeError : projection.history?.initialError}
+          failure={openingSession ? runtimeFailure : undefined}
+          onRestart={desktopHost() ? () => {
+            void desktopHost()!.restartWorkbench().catch(error => notify('工作台未能重启',
+              error instanceof Error ? error.message : '请重新打开 Pulsara。', 'warning'));
+          } : undefined}
           onRetry={() => { if (openingSession) openSession(openingSession.id); else void loadHistory().catch(() => {}); }}
         />
       )}
-      {activeView === 'workbench' && !databaseBlocked && !initialHistoryPending && (
+      {activeView === 'workbench' && !databaseBlocked && !initialHistoryPending && (!openingSession || Boolean(activeSessionId)) && (
         <div className="session-connected-views" hidden={Boolean(openingSession)}>
         <WorkbenchView
           onCompletePaths={(prefix, cursor, signal) => adapter.completeWorkspacePaths(activeSession.id, prefix, cursor, signal)}

@@ -30,21 +30,21 @@ it.each(['database_unavailable', 'database_restart_required', 'error'] as const)
     const boot = vi.spyOn(adapter, 'bootstrap').mockResolvedValue(bootstrap)
       .mockResolvedValueOnce(bootstrap).mockImplementationOnce(() => stale.promise);
     render(<PulsaraApp adapter={adapter} />);
-    await screen.findByText('本地服务已连接');
+    await screen.findByText('已连接本地服务');
     const toggle = await openRetrievalSettings();
     fireEvent.click(toggle);
     await waitFor(() => expect(boot).toHaveBeenCalledTimes(2));
     await waitFor(() => expect((toggle as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(toggle);
     await waitFor(() => expect(boot).toHaveBeenCalledTimes(3));
-    fireEvent.click(screen.getByRole('button', { name: '总览', exact: true }));
-    await screen.findByText('本地服务已连接');
+    fireEvent.click(screen.getByRole('button', { name: '会话', exact: true }));
+    await screen.findByText('已连接本地服务');
     await act(async () => {
       if (outcome === 'error') stale.reject(new RuntimeApiError('UNAVAILABLE', '旧失败', true));
       else stale.resolve({ ...bootstrap, database_state: outcome });
     });
-    expect(screen.getByText('本地服务已连接')).toBeTruthy();
-    expect((screen.getByRole('button', { name: '开始新任务' }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByText('已连接本地服务')).toBeTruthy();
+    expect((screen.getByRole('button', { name: '创建会话' }) as HTMLButtonElement).disabled).toBe(false);
     expect(screen.queryByRole('region', { name: 'PostgreSQL 配置引导' })).toBeNull();
     expect(adapter.connectCalls).toHaveLength(0);
   },
@@ -60,13 +60,13 @@ it.each(['success', 'error'] as const)('a superseded startup %s cannot publish o
   const toggle = await openRetrievalSettings();
   fireEvent.click(toggle);
   await waitFor(() => expect(settled).toHaveBeenCalledOnce());
-  fireEvent.click(screen.getByRole('button', { name: '总览', exact: true }));
-  await screen.findByText('本地服务已连接');
+  fireEvent.click(screen.getByRole('button', { name: '会话', exact: true }));
+  await screen.findByText('已连接本地服务');
   await act(async () => {
     if (outcome === 'error') stale.reject(new RuntimeApiError('UNAVAILABLE', '旧启动失败', true));
     else stale.resolve({ ...bootstrap, database_state: 'database_restart_required' });
   });
-  expect((screen.getByRole('button', { name: '开始新任务' }) as HTMLButtonElement).disabled).toBe(false);
+  expect((screen.getByRole('button', { name: '创建会话' }) as HTMLButtonElement).disabled).toBe(false);
   expect(screen.queryByRole('region', { name: 'PostgreSQL 配置引导' })).toBeNull();
   expect(adapter.connectCalls).toHaveLength(0);
   expect(settled).toHaveBeenCalledOnce();
@@ -111,8 +111,8 @@ it('an accepted restart cleanup cannot detach a new connection after its old clo
   await waitFor(() => expect((toggle as HTMLButtonElement).disabled).toBe(false));
   fireEvent.click(toggle);
   await waitFor(() => expect(boot).toHaveBeenCalledTimes(3));
-  fireEvent.click(screen.getByRole('button', { name: '总览', exact: true }));
-  await screen.findByText('本地服务已连接');
+  fireEvent.click(screen.getByRole('button', { name: '会话', exact: true }));
+  await screen.findByText('已连接本地服务');
   fireEvent.click(screen.getByRole('button', { name: new RegExp(initialSession.title) }));
   await screen.findByRole('heading', { name: initialSession.title });
   const replacement = adapter.lastConnection!;
@@ -128,7 +128,7 @@ it('a newer current list can finish global recovery while the superseded list re
   adapter.sessions = [];
   writableRetrieval(adapter);
   render(<PulsaraApp adapter={adapter} />);
-  await screen.findByText('本地服务已连接');
+  await screen.findByText('已连接本地服务');
   const toggle = await openRetrievalSettings();
   const stale = deferred<SessionSummary[]>();
   const lists = vi.spyOn(adapter, 'listSessions').mockImplementationOnce(() => stale.promise);
@@ -136,11 +136,11 @@ it('a newer current list can finish global recovery while the superseded list re
   await waitFor(() => expect(lists).toHaveBeenCalled());
   fireEvent.focus(window);
   await waitFor(() => expect(lists.mock.calls.length).toBeGreaterThan(1));
-  fireEvent.click(screen.getByRole('button', { name: '总览', exact: true }));
-  await screen.findByText('本地服务已连接');
-  expect((screen.getByRole('button', { name: '开始新任务' }) as HTMLButtonElement).disabled).toBe(false);
+  fireEvent.click(screen.getByRole('button', { name: '会话', exact: true }));
+  await screen.findByText('已连接本地服务');
+  expect((screen.getByRole('button', { name: '创建会话' }) as HTMLButtonElement).disabled).toBe(false);
   await act(async () => stale.reject(new RuntimeApiError('UNAVAILABLE', '过期列表失败', true)));
-  expect(screen.getByText('本地服务已连接')).toBeTruthy();
+  expect(screen.getByText('已连接本地服务')).toBeTruthy();
   expect(adapter.connectCalls).toHaveLength(0);
 });
 

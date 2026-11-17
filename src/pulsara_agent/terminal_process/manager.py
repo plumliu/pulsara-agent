@@ -191,6 +191,7 @@ class ProcessRegistry:
         decision_deadline_monotonic: float | None = None,
         initial_result_reader: Callable[[_ProcessState], None] | None = None,
         before_spawn: Callable[[TerminalResult], None] | None = None,
+        initial_observation=None,
     ) -> tuple[_ProcessState, bool]:
         decision_handle = TerminalForegroundDecisionAttemptHandle(
             attempt_id=decision_attempt_id or random_id("terminal-decision"),
@@ -279,6 +280,7 @@ class ProcessRegistry:
                     )
                 ),
                 before_spawn=before_spawn,
+                initial_observation=initial_observation,
             )
         except BaseException as error:
             scope = decision.interop_scope
@@ -561,6 +563,7 @@ class ProcessRegistry:
         env: dict[str, str],
         origin: TerminalProcessOrigin,
         before_spawn: Callable[[TerminalResult], None] | None = None,
+        initial_observation=None,
     ) -> _ProcessState:
         with self._lock:
             process_id = random_id("process")
@@ -585,6 +588,7 @@ class ProcessRegistry:
             owner_epoch=owner_host_session_id,
             process_id=process_id,
             retained_bytes_changed=self._retained_bytes_changed,
+            initial_observation=initial_observation,
         )
         master_fd: int | None = None
         process: subprocess.Popen[bytes] | None = None
@@ -1528,6 +1532,7 @@ class TerminalManager:
         decision_deadline_monotonic: float | None = None,
         cwd_scope: TerminalCwdScope = TerminalCwdScope.WORKSPACE,
         before_spawn: Callable[[TerminalResult], None] | None = None,
+        initial_observation=None,
     ) -> TerminalResult:
         # A command's cwd is an input, never process-local session memory.
         try:
@@ -1572,6 +1577,7 @@ class TerminalManager:
                     decision_deadline_monotonic=decision_deadline_monotonic,
                     initial_result_reader=read_initial_result,
                     before_spawn=before_spawn,
+                    initial_observation=initial_observation,
                 )
             except ProcessDecisionIdentityConflict:
                 # Only this unpublished local allocation may change. Admission

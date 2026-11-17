@@ -1,6 +1,7 @@
 """Real model query dispatch leaves process and Cell output owners untouched."""
 
 import asyncio
+import inspect
 from types import SimpleNamespace
 from pulsara_agent.code_mode import CodeModeHost, CodeModeToolResult
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
@@ -33,7 +34,7 @@ def runtime(tmp_path, host=None, read_source=None):
     return port
 
 
-async def dispatch(port, name, arguments):
+async def dispatch(port, name, arguments, *, accept=True):
     call, attempt, turn, entry = (
         random_id("call"),
         random_id("attempt"),
@@ -49,6 +50,7 @@ async def dispatch(port, name, arguments):
         turn_id=turn,
         assistant_entry_id=entry,
     )
+    result = None
     try:
         result = await port.invoke(
             tool_name=name,
@@ -64,8 +66,14 @@ async def dispatch(port, name, arguments):
             from tests.support.tool_result_schemas import validate_business_result
 
             validate_business_result(terminal_result_schema(name), result.content, result.state)
+        if accept and result.acceptance_succeeded is not None:
+            returned = await asyncio.to_thread(result.acceptance_succeeded)
+            if inspect.isawaitable(returned):
+                await returned
         return result
     finally:
+        if result is not None and result.acceptance_finished is not None:
+            result.acceptance_finished()
         borrow.close()
 
 
@@ -193,6 +201,7 @@ def test_process_query_dispatch_reuses_the_live_owner_without_consuming_logs(tmp
                     "command": "printf 'kept log\\n'; read query_input",
                     "yield_time_ms": 100,
                 },
+                accept=False,
             )
             target = started.content.public_fields["target"]
             detail = await dispatch(port, "query_processes", {"target": target})

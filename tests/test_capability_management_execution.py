@@ -187,6 +187,11 @@ def test_plugin_install_returns_published_identity_for_followup_management(
                 result = await call.execute()
                 assert result.state == "SUCCESS", result
                 assert result.changed
+                verb = "替换" if replace else "安装"
+                assert (
+                    result.business_value.content[0].value
+                    == f"已{verb}插件 published-plugin，当前未启用。"
+                )
                 assert result.business_value.public_fields["target"] == plugin_target(
                     service, "published-plugin", scope=scope
                 )
@@ -208,6 +213,7 @@ def test_plugin_install_returns_published_identity_for_followup_management(
             ).execute()
             assert remove.state == "SUCCESS", remove
             assert remove.changed
+            assert "target" not in remove.business_value.public_fields
         finally:
             await service.mcp.aclose()
 
@@ -362,5 +368,367 @@ def test_oauth_cell_stop_detaches_only_conversation_wait_and_shared_sdk_flow_com
                     *(task for task in (work, callback) if task is not None),
                     return_exceptions=True,
                 )
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "action,target",
+    [
+        (
+            "REMOVE_LOOSE_SKILL",
+            {"kind": "SKILL", "skill_path": "/private/tmp/example/SKILL.md"},
+        ),
+        (
+            "REMOVE_LOCAL_MCP",
+            {
+                "kind": "MCP_CONNECTION",
+                "config_path": "/private/tmp/mcp.json",
+                "server_id": "docs",
+            },
+        ),
+        ("REMOVE_PLUGIN", {"kind": "PLUGIN", "plugin_path": "/private/tmp/example"}),
+    ],
+)
+@pytest.mark.parametrize("status", ["APPLIED", "REJECTED", "CANCELLED"])
+def test_remove_public_projection_omits_target_for_all_outcomes(action, target, status):
+    from types import SimpleNamespace
+    from pulsara_agent.capability.management_intent import (
+        parse_capability_management_intent,
+    )
+    from pulsara_agent.conversation_kernel.capability_management_execution import (
+        management_outcome,
+    )
+
+    prepared = SimpleNamespace(
+        intent=parse_capability_management_intent({"action": action, "target": target})
+    )
+    result = management_outcome(
+        prepared, {"status": status, "target": target, "current": {}}
+    )
+    assert "target" not in result.business_value.public_fields
+    assert (
+        result.state
+        == {
+            "APPLIED": "SUCCESS",
+            "REJECTED": "APPLICATION_ERROR",
+            "CANCELLED": "CANCELLED",
+        }[status]
+    )
+    assert result.changed == (status == "APPLIED")
+
+
+@pytest.mark.parametrize(
+    "disposition,verb", [("INSTALLED", "安装"), ("REPLACED", "替换")]
+)
+def test_plugin_install_cleanup_failure_preserves_published_effect(disposition, verb):
+    from types import SimpleNamespace
+    from pulsara_agent.capability.management_intent import (
+        parse_capability_management_intent,
+    )
+    from pulsara_agent.conversation_kernel.capability_management_execution import (
+        management_outcome,
+    )
+
+    prepared = SimpleNamespace(
+        intent=parse_capability_management_intent(
+            {
+                "action": "INSTALL_PLUGIN",
+                "scope": "USER",
+                "target": {"kind": "PATH", "path": "/private/tmp/source"},
+            }
+        )
+    )
+    target = {"kind": "PLUGIN", "plugin_path": "/private/tmp/example"}
+    result = management_outcome(
+        prepared,
+        {
+            "status": "APPLIED",
+            "target": target,
+            "current": {
+                "operation_status": "CLEANUP_UNAVAILABLE",
+                "prior_operation_status": disposition,
+                "cleanup_attention": True,
+            },
+            "diagnostics": [
+                {"path": "/private/tmp/staging", "message": "cleanup failed"}
+            ],
+        },
+    )
+    assert result.state == "APPLICATION_ERROR" and result.changed
+    assert result.business_value.public_fields["target"] == target
+    assert (
+        result.business_value.content[0].value == f"已{verb}插件 example，当前未启用。"
+    )
+    assert any("cleanup failed" in part.value for part in result.business_value.content)
+
+
+@pytest.mark.parametrize(
+    "action,target",
+    [
+        (
+            "REMOVE_LOOSE_SKILL",
+            {"kind": "SKILL", "skill_path": "/private/tmp/example/SKILL.md"},
+        ),
+        (
+            "REMOVE_LOCAL_MCP",
+            {
+                "kind": "MCP_CONNECTION",
+                "config_path": "/private/tmp/mcp.json",
+                "server_id": "docs",
+            },
+        ),
+        ("REMOVE_PLUGIN", {"kind": "PLUGIN", "plugin_path": "/private/tmp/example"}),
+    ],
+)
+def test_caught_removal_error_does_not_expose_target(action, target):
+    from types import SimpleNamespace
+    from pulsara_agent.capability.management_intent import (
+        parse_capability_management_intent,
+    )
+    from pulsara_agent.conversation_kernel.tool_runtime_management import (
+        _ToolManagementOperations,
+    )
+
+    async def run():
+        service = object()
+        intent = parse_capability_management_intent(
+            {"action": action, "target": target}
+        )
+        prepared = SimpleNamespace(
+            intent=intent, effects=SimpleNamespace(read_only=False)
+        )
+
+        class Call:
+            subject = ("session", "turn", "entry", "call")
+
+            def __init__(self):
+                self.service, self.prepared = service, prepared
+
+            async def execute(self, **kwargs):
+                raise ValueError("actual failure")
+
+            def _public_scrub(self, prepared):
+                return SimpleNamespace(scrub_text=lambda text: text)
+
+        runtime = _ToolManagementOperations()
+        runtime._session_id, runtime._capability_management = "session", service
+        context = SimpleNamespace(
+            capability_call=Call(),
+            conversation_scope_kind="ROOT",
+            cell_cancel_event=None,
+        )
+        result = await runtime._invoke_capability_management(
+            turn_id="turn",
+            assistant_entry_id="entry",
+            tool_call_id="call",
+            invocation_context=context,
+            invocation_started=0,
+            observation_origin="test",
+        )
+        assert result.state == "APPLICATION_ERROR"
+        assert "target" not in result.content.public_fields
+        assert result.content.content[0].value == "actual failure"
+
+    asyncio.run(run())
+
+
+def test_plugin_replacement_cleanup_failure_reports_real_published_result(
+    tmp_path, monkeypatch
+):
+    from pulsara_agent.plugins.contracts import (
+        CleanupUnavailablePluginInstallOutcome,
+        PluginCleanupLocationStatus,
+        PluginDiagnostic,
+        PluginDiagnosticCode,
+    )
+
+    async def run():
+        service = preparation(tmp_path)
+        await install_plugin(service, tmp_path)
+        install = service.plugins.install_local_plugin
+
+        async def install_with_cleanup_failure(*args, **kwargs):
+            prior = await install(*args, **kwargs)
+            return CleanupUnavailablePluginInstallOutcome(
+                prior=prior,
+                attempted_path=tmp_path / "staging",
+                location_status=PluginCleanupLocationStatus.UNKNOWN,
+                diagnostic=PluginDiagnostic(
+                    PluginDiagnosticCode.SOURCE_UNAVAILABLE,
+                    "staging cleanup failed",
+                    str(tmp_path / "staging"),
+                ),
+            )
+
+        monkeypatch.setattr(
+            service.plugins, "install_local_plugin", install_with_cleanup_failure
+        )
+        try:
+            result = await CapabilityManagementCall(
+                service,
+                await service.prepare(
+                    {
+                        "action": "INSTALL_PLUGIN",
+                        "scope": "USER",
+                        "replace": True,
+                        "target": {"kind": "PATH", "path": str(tmp_path / "source")},
+                    }
+                ),
+            ).execute()
+            assert result.state == "APPLICATION_ERROR" and result.changed
+            assert result.business_value.public_fields["target"] == plugin_target(
+                service, "example", scope="USER"
+            )
+            assert (
+                result.business_value.content[0].value
+                == "已替换插件 example，当前未启用。"
+            )
+            assert any(
+                "staging cleanup failed" in part.value
+                for part in result.business_value.content
+            )
+            assert not (await service._plugin(None, "example")).enabled
+        finally:
+            await service.mcp.aclose()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "failure", ["credentials", "lock_exit", "materialize", "source_close"]
+)
+def test_real_plugin_replacement_post_publication_failure_keeps_effect_and_adopts(
+    tmp_path, monkeypatch, failure
+):
+    from time import monotonic
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from pulsara_agent.conversation_kernel.tool_runtime_management import (
+        _ToolManagementOperations,
+    )
+    from pulsara_agent.mcp_credentials import McpCredentialBinding
+    from pulsara_agent.plugins import connection_management
+    from pulsara_agent.plugins.contracts import PluginScopeKind
+    from pulsara_agent.plugins.management import _request_identity
+    from pulsara_agent.plugins.mcp_connection import plugin_connection_owner
+    from pulsara_agent.plugins.package_store import ManagedPluginStore
+
+    async def run():
+        service = preparation(tmp_path)
+        await install_plugin(service, tmp_path)
+        identity = _request_identity(PluginScopeKind.USER, "example", None)
+        owner = plugin_connection_owner(identity, "docs")
+        binding = McpCredentialBinding(owner, "bearer")
+        secret = "private-test-credential"
+        await service.mcp.settings.replace_mcp_secrets(owner, ((binding, secret),))
+        prepared = await service.prepare(
+            {
+                "action": "INSTALL_PLUGIN",
+                "scope": "USER",
+                "replace": True,
+                "target": {"kind": "PATH", "path": str(tmp_path / "source")},
+            }
+        )
+        call = CapabilityManagementCall(service, prepared)
+        call.subject = ("session", "turn", "entry", "call")
+        if failure == "credentials":
+
+            async def fail_cleanup(*args, **kwargs):
+                raise OSError(f"credential cleanup failure {secret}")
+
+            monkeypatch.setattr(
+                service.mcp.settings, "replace_mcp_secrets", fail_cleanup
+            )
+        elif failure == "materialize":
+
+            def fail_materialize(**kwargs):
+                raise OSError(f"MCP materialize failure {secret}")
+
+            monkeypatch.setattr(
+                connection_management,
+                "materialize_plugin_mcp_definition",
+                fail_materialize,
+            )
+        elif failure == "source_close":
+            from pulsara_agent.plugins.package_core import HeldPluginPackageObservation
+
+            original_install = connection_management.install_plugin_package
+            original_close = HeldPluginPackageObservation.close
+            published = False
+
+            async def install_then_mark(*args, **kwargs):
+                nonlocal published
+                result = await original_install(*args, **kwargs)
+                published = True
+                return result
+
+            def fail_source_close(observation):
+                original_close(observation)
+                if published and observation.source_path == tmp_path / "source":
+                    raise OSError(f"source close failure {secret}")
+
+            monkeypatch.setattr(
+                connection_management, "install_plugin_package", install_then_mark
+            )
+            monkeypatch.setattr(
+                HeldPluginPackageObservation, "close", fail_source_close
+            )
+        else:
+            original_edit = ManagedPluginStore.edit_instance
+
+            def failing_edit(self, *args, **kwargs):
+                wrapped = original_edit(self, *args, **kwargs)
+
+                class Lock:
+                    def __enter__(self):
+                        return wrapped.__enter__()
+
+                    def __exit__(self, *exc):
+                        wrapped.__exit__(*exc)
+                        raise OSError(f"lock release failure {secret}")
+
+                return Lock()
+
+            monkeypatch.setattr(ManagedPluginStore, "edit_instance", failing_edit)
+        runtime = _ToolManagementOperations()
+        runtime._session_id, runtime._capability_management = "session", service
+        adoption = AsyncMock(return_value={"status": "RELOADED"})
+        runtime._capability_reload = SimpleNamespace(
+            adopt_capability_management_change=adoption
+        )
+        context = SimpleNamespace(
+            capability_call=call, conversation_scope_kind="ROOT", cell_cancel_event=None
+        )
+        try:
+            result = await runtime._invoke_capability_management(
+                turn_id="turn",
+                assistant_entry_id="entry",
+                tool_call_id="call",
+                invocation_context=context,
+                invocation_started=monotonic(),
+                observation_origin="test",
+            )
+            assert result.state == "APPLICATION_ERROR"
+            assert result.content.public_fields["target"] == plugin_target(
+                service, "example", scope="USER"
+            )
+            text = "\n".join(part.value for part in result.content.content)
+            assert "已替换插件 example，当前未启用。" in text
+            assert {
+                "credentials": "credential cleanup failure",
+                "lock_exit": "lock release failure",
+                "materialize": "MCP materialize failure",
+                "source_close": "source close failure",
+            }[failure] in text
+            assert secret not in text
+            adoption.assert_awaited_once_with(workspace_root=None)
+            assert not (await service._plugin(None, "example")).enabled
+            assert service.mcp.settings.read().mcp_secret(binding) == (
+                secret if failure in {"credentials", "materialize"} else None
+            )
+        finally:
+            await service.mcp.aclose()
 
     asyncio.run(run())

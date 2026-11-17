@@ -3,7 +3,7 @@ import type { DatabaseDataPlaneState } from '../lib/runtime-adapter';
 
 interface DatabaseSetupGuideProps {
   state: Exclude<DatabaseDataPlaneState, 'ready'>;
-  variant: 'overlay' | 'overview';
+  variant: 'overlay' | 'page';
   onOpenSettings: () => void;
 }
 

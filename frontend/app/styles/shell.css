@@ -183,9 +183,6 @@
 
 .surface-view { min-width: 0; min-height: 0; overflow: hidden; background: var(--paper); }
 .surface-view::before { content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none; background-image: radial-gradient(color-mix(in srgb, var(--ink) 8%, transparent) .65px, transparent .65px); background-size: 19px 19px; mask-image: linear-gradient(to bottom, black, transparent 42%); opacity: .5; }
-.runtime-health { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: var(--type-label); }
-.runtime-health > span { width: 6px; height: 6px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 12%, transparent); }
-.runtime-health strong { color: var(--ink); font-weight: 650; }
 
 .database-workbench-mask {
   position: fixed;
@@ -215,7 +212,7 @@
   padding: 29px;
   border-radius: 18px;
 }
-.database-setup-guide--overview {
+.database-setup-guide--page {
   grid-template-columns: 42px minmax(0, 1fr) auto;
   column-gap: 15px;
   width: min(1188px, 100%);
@@ -282,7 +279,7 @@
   gap: 7px;
   margin-top: 20px;
 }
-.database-setup-guide--overview .primary-action {
+.database-setup-guide--page .primary-action {
   grid-column: 3;
   grid-row: 1;
   align-self: center;

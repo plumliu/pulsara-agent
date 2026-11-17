@@ -25,7 +25,7 @@ it('shares the original background attempt with early navigation without publish
   const view = render(<PulsaraApp adapter={adapter} onStartupSettled={startup}/>);
   await waitFor(() => expect(startup).toHaveBeenCalledTimes(1));
   expect(connect.mock.calls).toEqual([[initialSession.id, false]]);
-  expect(screen.getByRole('button', {name:'总览',exact:true}).getAttribute('aria-current')).toBe('page');
+  expect(screen.getByRole('button', {name:'会话',exact:true}).getAttribute('aria-current')).toBe('page');
   selectSession();
   await act(async () => {});
   expect(connect.mock.calls).toEqual([[initialSession.id, false]]);
