@@ -640,6 +640,31 @@ class RendererBridge:
         # point. Directory/database reads above can yield to a takeover.
         await self._require_browser_controller(connection_id, generation)
 
+    async def session_close_work(self, session_id: str, connection_id: str, generation: int) -> dict[str, object]:
+        await self.require_chat_controller(connection_id, generation, session_id=session_id, require_directory=False)
+        connection = await self._connection(connection_id)
+        host = await self.sessions.require_tab_close_host(session_id, connection.host_session_id)
+        work = await host.observe_session_close_work()
+        await self.require_chat_controller(connection_id, generation, session_id=session_id, require_directory=False)
+        observation_id = random_id("operation") if work.requires_confirmation else None
+        connection.close_work_observation = None if observation_id is None else (observation_id, work)
+        return {"requires_confirmation": work.requires_confirmation,
+                "has_terminal_processes": work.has_terminal_processes,
+                "observation_id": observation_id}
+
+    async def stop_session_close_work(self, session_id: str, connection_id: str, generation: int, observation_id: str) -> None:
+        await self.require_chat_controller(connection_id, generation, session_id=session_id, require_directory=False)
+        connection = await self._connection(connection_id)
+        host = await self.sessions.require_tab_close_host(session_id, connection.host_session_id)
+        await self._require_browser_controller(connection_id, generation)
+        observation = connection.close_work_observation
+        if observation is None or observation[0] != observation_id:
+            raise ProtocolBridgeError("SESSION_CLOSE_WORK_CHANGED", "任务状态已变化，请重新检查后再关闭。")
+        connection.close_work_observation = None
+        task = asyncio.create_task(host.stop_session_close_work(observation[1]))
+        # A disconnected HTTP waiter cannot cancel an admitted stop.
+        await asyncio.shield(task)
+
     async def restore_workspace(self, session_id: str, connection_id: str | None, generation: int):
         async with self._session_gate(session_id):
             async with self._lock:

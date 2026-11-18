@@ -1,17 +1,16 @@
-import { session, WebContentsView, type BrowserWindow, type Session, type WebContents } from 'electron';
-import { randomUUID } from 'node:crypto';
+import { app, session, type BrowserWindow, type Session, type WebContents } from 'electron';
 import { isCanonicalIdentity, randomIdentity, type IdentityKind } from './identity';
-import type { BrowserCommand, BrowserEvent, BrowserHide, BrowserLayout, BrowserPresentation, BrowserState } from './browser-contract';
-import { allowBrowserRequest, browserBounds, browserURL, networkPort } from './browser-policy';
+import { browserGuestSource, type BrowserCommand, type BrowserEvent, type BrowserState } from './browser-contract';
+import { allowBrowserRequest, browserURL, networkPort } from './browser-policy';
 
 interface Partition { session: Session; port: string; retired: boolean; contents: Map<WebContents, Promise<void>>; retiring?: Promise<void> }
 interface Navigation { url: string; stopped: boolean; awaitingStart: boolean; programmatic: boolean }
 interface Page {
   state: BrowserState;
   partition: Partition;
-  view: WebContentsView;
-  live: boolean;
-  visible: boolean;
+  contents?: WebContents;
+  attaching: boolean;
+  attached: boolean;
   navigation: Navigation | null;
   firstCommit: boolean;
 }
@@ -23,20 +22,63 @@ function identity(value: unknown, kind: IdentityKind): asserts value is string {
 export class BrowserOwner {
   private partitionState?: Partition;
   private pages = new Map<string, Page>();
-  private presentation: BrowserPresentation | null = null;
-  private accepting = true;
+  private accepting: boolean;
 
-  constructor(private host: BrowserWindow, private origin: () => string | undefined,
+  constructor(host: BrowserWindow, private origin: () => string | undefined,
     private emit: (event: BrowserEvent) => void = event => {
       if (!host.webContents.isDestroyed()) host.webContents.send('desktop:browser-event', event);
     }) {
-    host.webContents.on('did-start-navigation', (_event, _url, inPlace, main) => { if (main && !inPlace) void this.retireHost().catch(error => console.error('Could not retire browser resources', error)); });
-    host.webContents.on('did-finish-load', () => {
-      try { const url = new URL(host.webContents.getURL()); this.accepting = url.origin === this.origin() && url.pathname === '/'; }
-      catch { this.accepting = false; }
+    const contents = host.webContents;
+    this.accepting = this.isWorkbench(contents.getURL());
+    contents.on('did-start-navigation', (_event, _url, inPlace, main) => { if (main && !inPlace) void this.retireHost().catch(error => console.error('Could not retire browser resources', error)); });
+    contents.on('did-navigate', (_event, url) => { this.accepting = this.isWorkbench(url); });
+    contents.on('will-attach-webview', (event, preferences, params) => {
+      const marker = typeof params.src === 'string' && params.src.slice('about:blank#'.length);
+      const page = marker && this.pages.get(marker);
+      // Electron's will-attach event identifies the embedder, not its calling frame.
+      // Only the trusted main-frame IPC can reserve the one-use, unguessable source.
+      if (!page || page.attaching || page.partition.retired || params.src !== browserGuestSource(page.state.instanceId)
+        || !this.accepting || !this.isWorkbench(contents.mainFrame.url)) {
+        event.preventDefault();
+        return;
+      }
+      page.attaching = true;
+      // Drop every attribute-derived preference. In particular, no preload or
+      // renderer-selected partition survives; the owner has already secured this Session.
+      for (const key of Object.keys(preferences)) delete preferences[key as keyof Electron.WebPreferences];
+      Object.assign(preferences, { session: page.partition.session, zoomFactor: contents.getZoomFactor(), sandbox: true,
+        contextIsolation: true, nodeIntegration: false, nodeIntegrationInWorker: false, nodeIntegrationInSubFrames: false,
+        webSecurity: true, webviewTag: false, plugins: false, allowRunningInsecureContent: false,
+        navigateOnDragDrop: false, disableDialogs: true });
+      // The source attribute starts Electron's attach. Only the owner loads a document.
+      params.src = '';
+      const created = (_event: Electron.Event, guest: WebContents) => {
+        if (guest.getType() !== 'webview' || guest.hostWebContents !== contents) return;
+        app.off('web-contents-created', created);
+        this.bind(page, guest);
+      };
+      app.on('web-contents-created', created);
+      // Electron creates the guest synchronously after will-attach returns.
+      queueMicrotask(() => app.off('web-contents-created', created));
+    });
+    contents.on('did-attach-webview', (_event, guest) => {
+      const page = this.pageFor(guest);
+      if (!page || !this.live(page)) { if (!guest.isDestroyed()) guest.close({ waitForBeforeUnload: false }); return; }
+      page.attached = true;
+      const op = page.navigation;
+      if (op && !op.stopped) this.load(page, guest, op);
     });
     host.webContents.on('render-process-gone', () => { void this.retireHost().catch(error => console.error('Could not retire browser resources', error)); });
     host.once('closed', () => { void this.retireHost().catch(error => console.error('Could not retire browser resources', error)); });
+  }
+
+  private isWorkbench(value: string): boolean {
+    try { const url = new URL(value); return url.origin === this.origin() && url.pathname === '/'; }
+    catch { return false; }
+  }
+
+  private pageFor(contents: WebContents): Page | undefined {
+    for (const page of this.pages.values()) if (page.contents === contents) return page;
   }
 
   private partition(): Partition {
@@ -47,7 +89,7 @@ export class BrowserOwner {
     }
     const origin = this.origin();
     if (!origin) throw new Error('工作台尚未就绪。');
-    const part: Partition = { session: session.fromPartition(`pulsara-browser-${randomUUID()}`), port: networkPort(new URL(origin)), retired: false, contents: new Map() };
+    const part: Partition = { session: session.fromPartition(randomIdentity('browser-partition')), port: networkPort(new URL(origin)), retired: false, contents: new Map() };
     const ses = part.session;
     ses.setPermissionRequestHandler((_wc, _permission, done) => done(false));
     ses.setPermissionCheckHandler(() => false);
@@ -57,7 +99,7 @@ export class BrowserOwner {
     ses.webRequest.onBeforeRequest((details, done) => done({ cancel: !allowBrowserRequest(details.url, details.resourceType, part.port, part.retired) }));
     ses.on('will-download', (event, _item, wc) => {
       event.preventDefault();
-      const page = [...this.pages.values()].find(page => page.live && page.view.webContents === wc);
+      const page = this.pageFor(wc);
       if (page) this.notice(page, '内嵌网页不支持下载；可在系统浏览器中继续。');
     });
     this.partitionState = part;
@@ -69,34 +111,33 @@ export class BrowserOwner {
     if (!this.accepting || !this.origin()) throw new Error('工作台正在切换，不能创建网页。');
     if ([...this.pages.values()].some(page => page.state.tabId === input.tabId)) throw new Error('网页标签已有原生实例。');
     const part = this.partition();
-    const view = new WebContentsView({ webPreferences: { session: part.session, sandbox: true, contextIsolation: true,
-      nodeIntegration: false, nodeIntegrationInWorker: false, nodeIntegrationInSubFrames: false, webSecurity: true,
-      webviewTag: false, plugins: false, allowRunningInsecureContent: false, navigateOnDragDrop: false, disableDialogs: true } });
     let instanceId: string;
     do { instanceId = randomIdentity('browser-instance'); } while (this.pages.has(instanceId));
-    const page: Page = { partition: part, view, live: true, visible: false, navigation: null, firstCommit: true,
+    const page: Page = { partition: part, attaching: false, attached: false, navigation: null, firstCommit: true,
       state: { instanceId, tabId: input.tabId, url: '', pendingUrl: null,
         title: '', loading: false, canGoBack: false, canGoForward: false, error: null, crashed: false } };
     this.pages.set(page.state.instanceId, page);
-    const wc = view.webContents;
-    part.contents.set(wc, new Promise(resolve => wc.once('destroyed', () => {
-      part.contents.delete(wc);
-      resolve();
-    })));
-    try {
-      view.setVisible(false);
-      this.listen(page);
-      this.host.contentView.addChildView(view);
-      return { ...page.state };
-    } catch (error) { this.close(page.state.instanceId); throw error; }
+    return { ...page.state };
   }
 
-  private active(page: Page): boolean { return page.live && this.pages.get(page.state.instanceId) === page && !page.partition.retired && !page.view.webContents.isDestroyed(); }
+  private bind(page: Page, wc: WebContents): void {
+    page.contents = wc;
+    page.partition.contents.set(wc, new Promise(resolve => wc.once('destroyed', () => {
+      page.partition.contents.delete(wc);
+      resolve();
+    })));
+    this.listen(page, wc);
+  }
+
+  private live(page: Page): boolean { return this.pages.get(page.state.instanceId) === page && !page.partition.retired; }
+  private active(page: Page): boolean { return this.live(page) && page.contents?.isDestroyed() === false; }
   private publish(page: Page) {
-    if (!this.active(page)) return;
-    const wc = page.view.webContents;
-    page.state.canGoBack = wc.navigationHistory.canGoBack();
-    page.state.canGoForward = wc.navigationHistory.canGoForward();
+    if (!this.live(page)) return;
+    const wc = page.contents;
+    if (wc && !wc.isDestroyed()) {
+      page.state.canGoBack = wc.navigationHistory.canGoBack();
+      page.state.canGoForward = wc.navigationHistory.canGoForward();
+    }
     this.emit({ kind: 'state', state: { ...page.state } });
   }
   private notice(page: Page, message: string) { if (this.active(page)) this.emit({ kind: 'notice', instanceId: page.state.instanceId, message }); }
@@ -109,8 +150,7 @@ export class BrowserOwner {
     if (!this.active(page) || page.navigation !== op || op.stopped || code === -3) return;
     page.state.error = { url, message }; page.state.loading = false; page.state.pendingUrl = null; this.publish(page);
   }
-  private listen(page: Page) {
-    const wc = page.view.webContents;
+  private listen(page: Page, wc: WebContents) {
     wc.setWindowOpenHandler(details => {
       if (!this.active(page)) return { action: 'deny' };
       try {
@@ -130,21 +170,17 @@ export class BrowserOwner {
     });
     wc.on('login', (event, _details, _auth, done) => { event.preventDefault(); done(); this.notice(page, '内嵌网页不支持 HTTP 身份验证；可在系统浏览器中继续。'); });
     wc.on('before-input-event', (event, input) => {
-      if (!this.active(page) || !page.visible || input.type !== 'keyDown' || input.isAutoRepeat || input.isComposing || input.alt || input.shift || !(process.platform === 'darwin' ? input.meta : input.control)) return;
+      if (!this.active(page) || !wc.isFocused() || input.type !== 'keyDown' || input.isAutoRepeat || input.isComposing || input.alt || input.shift || !(process.platform === 'darwin' ? input.meta : input.control)) return;
       const key = input.key.toLowerCase();
       if (key === 'k' || key === 'n') {
         event.preventDefault();
-        // Leave the guest before sending the application command: renderer IPC
-        // and React rendering must not let immediately following text reach it.
-        // Visibility remains presentation-owned, so a rejected/no-op command
-        // cannot strand the native page hidden.
-        this.host.webContents.focus();
-        this.emit({ kind: 'shortcut', command: key === 'k' ? 'search' : 'new-session' });
+        // The host dialog takes DOM focus in its layout effect.
+        this.emit({ kind: 'shortcut', instanceId: page.state.instanceId, command: key === 'k' ? 'search' : 'new-session' });
       }
     });
     wc.on('did-start-navigation', (_event, url, inPlace, main) => {
       if (!main || !this.active(page)) return;
-      if (inPlace) return;
+      if (inPlace || !this.validURL(page, url)) return;
       if (page.navigation?.awaitingStart && page.navigation.url === url) page.navigation.awaitingStart = false;
       else this.begin(page, url);
       this.publish(page);
@@ -173,32 +209,38 @@ export class BrowserOwner {
       // during a newer same-URL request, so only native navigations use this event.
       if (main && op && !op.programmatic && op.url === url) this.failure(page, op, url, description, code);
     });
-    wc.on('render-process-gone', (_event, details) => {
-      if (!this.active(page)) return;
-      const state = { ...page.state, crashed: true, loading: false, pendingUrl: null, error: { url: page.state.pendingUrl || page.state.url, message: `网页进程已退出：${details.reason}` } };
-      this.close(page.state.instanceId);
-      this.emit({ kind: 'state', state });
-    });
-    wc.once('destroyed', () => { if (page.live) this.close(page.state.instanceId); });
+    wc.on('render-process-gone', (_event, details) => this.guestLost(page, `网页进程已退出：${details.reason}`));
+    wc.once('destroyed', () => this.guestLost(page, '网页已关闭。'));
   }
   private validURL(page: Page, url: string): boolean { try { browserURL(url, page.partition.port); return !page.partition.retired; } catch { return false; } }
+
+  private guestLost(page: Page, message: string) {
+    if (!this.live(page)) return;
+    const state = { ...page.state, crashed: true, loading: false, pendingUrl: null, error: { url: page.state.pendingUrl || page.state.url, message } };
+    this.close(page.state.instanceId);
+    this.emit({ kind: 'state', state });
+  }
+
+  private load(page: Page, wc: WebContents, op: Navigation) {
+    void wc.loadURL(op.url).catch((error: Error & { errno?: number }) => this.failure(page, op, op.url, error.message, error.errno));
+  }
 
   command(input: BrowserCommand): void {
     identity(input?.instanceId, 'browser-instance');
     const page = this.pages.get(input.instanceId);
-    if (!page || !this.active(page)) return;
-    const wc = page.view.webContents;
-    if (input.kind === 'focus') { if (page.visible && this.presentation?.instanceId === input.instanceId) wc.focus(); return; }
+    if (!page || !this.live(page)) return;
+    const wc = page.attached && this.active(page) ? page.contents : undefined;
     if (input.kind === 'stop') {
       if (page.navigation) page.navigation.stopped = true;
-      wc.stop(); page.state.loading = false; page.state.pendingUrl = null; this.publish(page); return;
+      wc?.stop(); page.state.loading = false; page.state.pendingUrl = null; this.publish(page); return;
     }
     if (input.kind === 'navigate') {
       const url = browserURL(input.url, page.partition.port);
       const op = this.begin(page, url, true); this.publish(page);
-      void wc.loadURL(url).catch((error: Error & { errno?: number }) => this.failure(page, op, op.url, error.message, error.errno));
+      if (wc) this.load(page, wc, op);
       return;
     }
+    if (!wc) return;
     if (input.kind === 'back' || input.kind === 'forward') {
       const history = wc.navigationHistory;
       const offset = input.kind === 'back' ? -1 : 1;
@@ -212,62 +254,21 @@ export class BrowserOwner {
     throw new Error('不支持的网页命令。');
   }
 
-  activate(input: BrowserPresentation): void {
-    identity(input?.presentationId, 'presentation');
-    if (input.instanceId !== null) identity(input.instanceId, 'browser-instance');
-    for (const page of this.pages.values()) this.hidePage(page);
-    this.presentation = { ...input };
-  }
-  private matches(input: { instanceId: string; presentationId: string }): Page | undefined {
-    identity(input?.instanceId, 'browser-instance');
-    identity(input?.presentationId, 'presentation');
-    if (this.presentation?.instanceId !== input.instanceId || this.presentation.presentationId !== input.presentationId) return;
-    const page = this.pages.get(input.instanceId);
-    return page && this.active(page) ? page : undefined;
-  }
-  layout(input: BrowserLayout): void {
-    const page = this.matches(input);
-    if (!page) return;
-    if (typeof input.visible !== 'boolean') throw new Error('无效的网页可见性。');
-    if (!input.visible) { this.hidePage(page); return; }
-    const bounds = browserBounds(input.bounds, this.host.webContents.getZoomFactor());
-    page.view.setBounds(bounds); page.view.setVisible(true); page.visible = true;
-  }
-  hide(input: BrowserHide): void {
-    const page = this.matches(input);
-    if (!page) return;
-    this.hidePage(page);
-  }
-  private hidePage(page: Page) {
-    page.visible = false;
-    if (!page.view.webContents.isDestroyed()) {
-      if (page.view.webContents.isFocused() && !this.host.webContents.isDestroyed()) this.host.webContents.focus();
-      page.view.setVisible(false);
-    }
-  }
   close(instanceId: string): void {
     identity(instanceId, 'browser-instance');
     const page = this.pages.get(instanceId);
     if (!page) return;
-    page.live = false; page.navigation = null; this.hidePage(page);
     this.pages.delete(instanceId);
-    if (this.presentation?.instanceId === instanceId) this.presentation = null;
-    if (!this.host.isDestroyed()) this.host.contentView.removeChildView(page.view);
-    const wc = page.view.webContents;
-    if (!wc.isDestroyed()) {
-      wc.once('destroyed', () => wc.removeAllListeners());
-      wc.close({ waitForBeforeUnload: false });
-    } else if (!page.partition.contents.has(wc)) wc.removeAllListeners();
+    const wc = page.contents;
+    if (wc && !wc.isDestroyed()) wc.close({ waitForBeforeUnload: false });
   }
   async clear(): Promise<void> {
-    this.presentation = null;
     const part = this.partitionState;
     if (!part) return;
     part.retired = true;
     part.retiring ??= Promise.resolve().then(async () => {
       for (const page of [...this.pages.values()]) this.close(page.state.instanceId);
-      // Closing a tab removes its presentation before native destruction.
-      // The user browser owner joins those exact resources before clearing data.
+      // Join the user partition's exact guests, including a tab already closing.
       await Promise.all(part.contents.values());
       await part.session.closeAllConnections();
       await part.session.clearData();

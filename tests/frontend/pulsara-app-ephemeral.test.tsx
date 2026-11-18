@@ -92,6 +92,7 @@ describe('PulsaraApp ephemeral integration', () => {
     await screen.findByText('如何验证刚才的结论？');
     const pending = deferred<CommandReceipt>();
     adapter.lastConnection!.compactContext = vi.fn(() => pending.promise);
+    fireEvent.click(screen.getByRole('button', { name: '更多会话操作' }));
     fireEvent.click(screen.getByRole('button', { name: '压缩上下文' }));
     expect(screen.queryByText('如何验证刚才的结论？')).toBeNull();
     await act(async () => pending.resolve({ commandId: 'compact', status: 'rejected', publicCode: 'COMPACTION_FAILED' }));

@@ -4,12 +4,16 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Check, Info, LoaderCircle, MessageSquareText, X } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import { InteractionCardHeader } from './interaction-card-header';
+import { useSessionCanvasWindow } from './session-canvas';
 import type { McpPrompt, McpPromptPreview, PreviewMcpPrompt } from '../lib/mcp-prompts';
 
 interface Selection { prompt: McpPrompt; range: Range; doc: Editor['state']['doc'] }
 type Preview = McpPromptPreview | {state: 'loading'} | {state: 'incomplete'; fields: string[]};
 
 export function useMcpPromptPanel(editor: Editor, unavailable: boolean, previewPrompt?: PreviewMcpPrompt) {
+  const { focused, visible } = useSessionCanvasWindow();
+  const windowActive = useRef(true);
+  windowActive.current = focused && visible;
   const [selection, setSelection] = useState<Selection>();
   const [args, setArgs] = useState<Record<string, string>>({});
   const [preview, setPreview] = useState<Preview>({state: 'loading'});
@@ -29,7 +33,9 @@ export function useMcpPromptPanel(editor: Editor, unavailable: boolean, previewP
       ...(index ? [{type: 'hardBreak'}] : []), ...(line ? [{type: 'text', text: line}] : []),
     ]);
     editor.view.dispatch(closeHistory(editor.state.tr));
-    editor.chain().insertContentAt(value.range, content).focus().run();
+    const chain = editor.chain().insertContentAt(value.range, content);
+    if (windowActive.current) chain.focus();
+    chain.run();
     editor.view.dispatch(closeHistory(editor.state.tr));
     close();
   }, [close, editor]);
@@ -71,7 +77,7 @@ export function useMcpPromptPanel(editor: Editor, unavailable: boolean, previewP
     setPreview({state: 'loading'});
     setArgs(current => ({...current, [name]: value}));
   };
-  const closeAndFocus = () => { close(); if (!editor.isDestroyed) editor.commands.focus(); };
+  const closeAndFocus = () => { close(); if (windowActive.current && !editor.isDestroyed) editor.commands.focus(); };
   const panel = selection && !unavailable ? selection.prompt.arguments.length === 0 ? <section
     className="interaction-card mcp-prompt-instant" role="status" aria-busy={preview.state === 'loading'}>
     <span>{preview.state === 'loading' ? '正在读取提示词…' : 'message' in preview ? preview.message : ''}</span>
@@ -79,7 +85,7 @@ export function useMcpPromptPanel(editor: Editor, unavailable: boolean, previewP
       {preview.state !== 'loading' && <button type="button" onClick={() => setRetry({})}>重试</button>}
     </div></section> : <section className="interaction-card mcp-prompt-panel" role="dialog"
     aria-modal="false" aria-label={`提示词 ${selection.prompt.name}`} aria-busy={preview.state === 'loading'}
-    onKeyDown={event => { event.stopPropagation(); if (event.key === 'Escape') { event.preventDefault(); closeAndFocus(); } }}>
+    onKeyDown={event => { event.stopPropagation(); if (event.key === 'Escape' && !event.nativeEvent.isComposing) { event.preventDefault(); closeAndFocus(); } }}>
     <InteractionCardHeader icon={MessageSquareText} title={selection.prompt.name} tone="blue" />
     <button type="button" className="mcp-prompt-panel__close" aria-label="关闭提示词" onClick={closeAndFocus}><X size={17} /></button>
     <div className="mcp-prompt-panel__body">

@@ -15,6 +15,7 @@ export interface BrowserTabRecord {
 }
 export interface BrowserTabSink {
   visible(): boolean;
+  belongsToSession(id: string): boolean;
   activeId(): string | undefined;
   hasId(id: string): boolean;
   insert(record: BrowserTabRecord, foreground: boolean): void;
@@ -49,20 +50,21 @@ export class BrowserTabs {
   constructor(private host: DesktopBrowser | undefined, private sink: BrowserTabSink) {}
   connect() {
     this.unsubscribe = this.host?.onEvent(event => {
-      if (event.kind === 'shortcut') { this.sink.shortcut(event.command); return; }
       const record = [...this.records.values()].find(item => item.state?.instanceId === (event.kind === 'state' ? event.state.instanceId : event.instanceId));
       if (!record) return;
-      if (event.kind === 'state') { record.state = event.state; this.sink.changed(record); }
-      if (event.kind === 'notice') { record.notice = event.message; this.sink.changed(record); }
-      if (event.kind === 'popup') {
-        if (!this.sink.visible()) { record.popup = event.url; this.sink.changed(record); }
+      if (event.kind === 'state') { record.state = event.state; this.sink.changed(record); return; }
+      if (event.kind === 'notice') { record.notice = event.message; this.sink.changed(record); return; }
+      const visible = this.sink.visible() && this.sink.activeId() === record.id;
+      if (event.kind === 'shortcut') { if (visible) this.sink.shortcut(event.command); }
+      else {
+        if (!visible) { record.popup = event.url; this.sink.changed(record); }
         else this.open(event.url, { newTab: true, background: event.disposition === 'background-tab' });
       }
     });
     return () => { this.unsubscribe?.(); this.unsubscribe = undefined; };
   }
   find(url: string) {
-    const candidates = [...this.records.values()].filter(item => item.state?.url === url && !item.opening && !item.pendingNavigation && !item.state.loading && !item.state.pendingUrl && !item.state.crashed);
+    const candidates = [...this.records.values()].filter(item => item.state?.url === url && !item.opening && !item.pendingNavigation && !item.state.loading && !item.state.pendingUrl && !item.state.crashed && this.sink.belongsToSession(item.id));
     return candidates.find(item => item.id === this.sink.activeId()) ?? candidates[0];
   }
   private newId(): string {
@@ -131,5 +133,5 @@ export class BrowserTabs {
     this.records.delete(id); record.opening = undefined;
     if (record.state) void this.host?.close(record.state.instanceId).catch(() => {});
   }
-  clear() { for (const id of this.records.keys()) this.close(id); void this.host?.clear().catch(() => {}); }
+  closeAll() { for (const id of this.records.keys()) this.close(id); }
 }

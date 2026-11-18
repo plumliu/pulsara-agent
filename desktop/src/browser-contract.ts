@@ -11,28 +11,18 @@ export interface BrowserState {
   error: { url: string; message: string } | null;
   crashed: boolean;
 }
-export interface BrowserPresentation { instanceId: string | null; presentationId: string }
-export interface BrowserLayout {
-  instanceId: string;
-  presentationId: string;
-  bounds: { x: number; y: number; width: number; height: number };
-  visible: boolean;
-}
-export interface BrowserHide { instanceId: string; presentationId: string }
 export type BrowserCommand = { instanceId: string; kind: 'navigate'; url: string }
-  | { instanceId: string; kind: 'back' | 'forward' | 'reload' | 'stop' | 'focus' };
+  | { instanceId: string; kind: 'back' | 'forward' | 'reload' | 'stop' };
 export type BrowserEvent =
   | { kind: 'state'; state: BrowserState }
   | { kind: 'popup'; instanceId: string; url: string; disposition: string }
   | { kind: 'notice'; instanceId: string; message: string }
-  | { kind: 'shortcut'; command: 'search' | 'new-session' };
+  | { kind: 'shortcut'; instanceId: string; command: 'search' | 'new-session' };
 export interface DesktopBrowser {
   create(input: { tabId: string }): Promise<BrowserState>;
   command(input: BrowserCommand): Promise<void>;
   close(instanceId: string): Promise<void>;
-  clear(): Promise<void>;
-  activate(input: BrowserPresentation): Promise<void>;
-  layout(input: BrowserLayout): Promise<void>;
-  hide(input: BrowserHide): Promise<void>;
   onEvent(listener: (event: BrowserEvent) => void): () => void;
 }
+
+export function browserGuestSource(instanceId: string): string { return `about:blank#${instanceId}`; }

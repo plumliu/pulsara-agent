@@ -32,7 +32,7 @@ function stubClipboard(writeText: (value: string) => Promise<void>) {
 }
 
 async function typeComposer(value: string): Promise<HTMLElement> {
-  const composer = screen.getByLabelText('发送给 Pulsara') as HTMLElement;
+  const composer = await screen.findByRole('textbox', { name: '发送给 Pulsara' });
   await userEvent.click(composer);
   await userEvent.type(composer, value, { skipClick: true });
   return composer;
@@ -714,10 +714,15 @@ class FakeAdapter implements RuntimeAdapter {
     return { status: 'reopened' as const };
   }
 
-  closeSession = vi.fn(async (_sessionId: string) => {
-    void _sessionId;
-    return { status: 'closing' as const };
-  });
+  sessionCloseWork = vi.fn(async (_sessionId: string): Promise<import('../../frontend/lib/runtime-adapter').SessionCloseWork> => ({
+    requiresConfirmation: false,
+    hasTerminalProcesses: false,
+    observationId: null,
+  }));
+
+  stopSessionCloseWork = vi.fn(async (_sessionId: string, _work: import('../../frontend/lib/runtime-adapter').SessionCloseWork) => ({
+    status: 'stopped' as const,
+  }));
 
   listSessions = vi.fn(async () => this.sessions.map((session) => ({ ...session })));
 

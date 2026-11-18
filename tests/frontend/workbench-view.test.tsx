@@ -736,14 +736,15 @@ describe('current-session runtime actions', () => {
     expect(trigger.getAttribute('aria-expanded')).toBe('false');
   });
 
-  it('keeps runtime reopen in the header menu, separate from compaction', () => {
+  it('keeps compaction and runtime reopen inside the session actions menu', () => {
     const onReopenRuntime = vi.fn();
     render(<WorkbenchView {...props({ onReopenRuntime })} />);
     const trigger = screen.getByRole('button', { name: '更多会话操作' });
-    expect(screen.getByRole('button', { name: '压缩上下文' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '压缩上下文' })).toBeNull();
     expect(screen.queryByRole('button', { name: '重新加载会话' })).toBeNull();
 
     fireEvent.click(trigger);
+    expect(screen.getByRole('button', { name: '压缩上下文' })).toBeTruthy();
     expect(trigger.getAttribute('aria-expanded')).toBe('true');
     fireEvent.click(screen.getByRole('button', { name: /重新加载会话/ }));
     expect(onReopenRuntime).toHaveBeenCalledOnce();
@@ -791,6 +792,7 @@ describe('empty session welcome composer', () => {
   it('disables compaction for an empty session even with an unsent draft, but allows existing context', () => {
     const input = props({ isRunning: false });
     const view = render(<WorkbenchView {...input} />);
+    fireEvent.click(screen.getByRole('button', { name: '更多会话操作' }));
     const compact = () => screen.getByRole('button', { name: '压缩上下文' }) as HTMLButtonElement;
     expect(compact().disabled).toBe(true);
     act(() => promptDraftStore.insertText('session-one', '尚未发送'));
@@ -1690,10 +1692,11 @@ describe('ROOT context compaction progress', () => {
     expect(status.querySelector('.context-compaction-divider__spinner')).toBeTruthy();
     expect(screen.queryByRole('separator', { name: '上下文已压缩' })).toBeNull();
     if (!isObserver) {
+      fireEvent.click(screen.getByRole('button', { name: '更多会话操作' }));
       const button = screen.getByRole('button', { name: '压缩中…' }) as HTMLButtonElement;
       expect(button.disabled).toBe(true);
       expect(button.getAttribute('aria-busy')).toBe('true');
-      expect(button.classList.contains('is-compacting')).toBe(true);
+      expect(button.querySelector('.session-actions__busy')).toBeTruthy();
       expect(button.textContent).toBe('压缩中…');
     }
   });

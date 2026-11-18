@@ -254,6 +254,7 @@ function ProjectCapabilityPanel({
   selectedMcpId,
   mcpTargetRole,
   canControl,
+  visible,
   kind,
   setKind,
   mcpForms,
@@ -281,6 +282,7 @@ function ProjectCapabilityPanel({
   selectedMcpId?: string;
   mcpTargetRole?: 'configuration' | 'runtime';
   canControl: boolean;
+  visible: boolean;
   mcpForms: ProjectMcpForms;
   kind: ProjectCapabilityKind;
   setKind: (kind: ProjectCapabilityKind) => void;
@@ -310,10 +312,11 @@ function ProjectCapabilityPanel({
   const [inheritedExpanded, setInheritedExpanded] = useState(false);
   const [dialogKind, setDialogKind] = useState<ProjectCapabilityKind>();
   const [dialogOpener, setDialogOpener] = useState<HTMLButtonElement | null>(null);
-  const [previousCanControl, setPreviousCanControl] = useState(canControl);
-  if (previousCanControl !== canControl) {
-    setPreviousCanControl(canControl);
-    if (!canControl) {
+  const canShowDialogs = canControl && visible;
+  const [previousCanShowDialogs, setPreviousCanShowDialogs] = useState(canShowDialogs);
+  if (previousCanShowDialogs !== canShowDialogs) {
+    setPreviousCanShowDialogs(canShowDialogs);
+    if (!canShowDialogs) {
       setEditingMcp(undefined); setImportingMcp(false);
       setRemovingSkill(undefined); setDialogKind(undefined);
     }
@@ -486,9 +489,9 @@ function ProjectCapabilityPanel({
         </section>
       )}
       {busy && <div className="project-capability-busy"><LoaderCircle size={12} /> {busy}</div>}
-      {canControl && dialogKind && snapshot?.credentialScopeKey && <ProjectCapabilityDialog onPickDirectory={onPickDirectory} onNotify={onNotify} mcpForms={mcpForms} initialKind={dialogKind} credentialScopeKey={snapshot.credentialScopeKey} returnFocusTo={dialogOpener} onClose={() => setDialogKind(undefined)} onPreviewSkills={onPreviewSkills} onInstallSkill={onInstallSkill} onCreateMcp={onCreateMcp} />}
-      {canControl && editingMcp && snapshot?.credentialScopeKey && createPortal(<McpEditor authorizationKey={mcpForms.authorizationKey?.(editingMcp)} credentialScopeKey={snapshot.credentialScopeKey} server={{...editingMcp, enabled: editingMcp.configuredEnabled, config: editingMcp.config!, currentIdentity: editingMcp.configIdentity!, transport: editingMcp.transport!} satisfies UserMcpServerCapability} onClose={() => setEditingMcp(undefined)} onTest={mcpForms.test} onNotify={onNotify} onAuthorization={(action) => mcpForms.authorize(editingMcp, action)} onSave={async (input) => { await onEditMcp(editingMcp, input); return true; }} />, document.body)}
-      {canControl && importingMcp && createPortal(<McpImporter onPreview={mcpForms.preview} onImport={mcpForms.import} onClose={() => setImportingMcp(false)} />, document.body)}
+      {canShowDialogs && dialogKind && snapshot?.credentialScopeKey && <ProjectCapabilityDialog onPickDirectory={onPickDirectory} onNotify={onNotify} mcpForms={mcpForms} initialKind={dialogKind} credentialScopeKey={snapshot.credentialScopeKey} returnFocusTo={dialogOpener} onClose={() => setDialogKind(undefined)} onPreviewSkills={onPreviewSkills} onInstallSkill={onInstallSkill} onCreateMcp={onCreateMcp} />}
+      {canShowDialogs && editingMcp && snapshot?.credentialScopeKey && createPortal(<McpEditor authorizationKey={mcpForms.authorizationKey?.(editingMcp)} credentialScopeKey={snapshot.credentialScopeKey} server={{...editingMcp, enabled: editingMcp.configuredEnabled, config: editingMcp.config!, currentIdentity: editingMcp.configIdentity!, transport: editingMcp.transport!} satisfies UserMcpServerCapability} onClose={() => setEditingMcp(undefined)} onTest={mcpForms.test} onNotify={onNotify} onAuthorization={(action) => mcpForms.authorize(editingMcp, action)} onSave={async (input) => { await onEditMcp(editingMcp, input); return true; }} />, document.body)}
+      {canShowDialogs && importingMcp && createPortal(<McpImporter onPreview={mcpForms.preview} onImport={mcpForms.import} onClose={() => setImportingMcp(false)} />, document.body)}
     </div>
   );
 }
@@ -604,6 +607,7 @@ export function InspectorPanel({
     if (tab.kind !== 'capabilities' && tab.kind !== 'mcp') { const unhandled: never = tab; return unhandled; }
     return <ProjectCapabilityPanel selectedMcpId={tab.kind === "mcp" ? tab.entityId : undefined} mcpTargetRole={tab.kind === "mcp" ? tab.mcpTargetRole : undefined} onOpenMcp={server => open("mcp", server.name, server.id, backgroundHostSessionId)}
             canControl={canControl}
+            visible={isOpen && workspace?.visible === true}
             onNotify={onNotify}
             key={session.id}
             kind={tab.kind === "mcp" ? "mcp" : capabilityKind}
@@ -630,11 +634,11 @@ export function InspectorPanel({
           />;
   };
   return <DesktopWorkspace isOpen={isOpen} onClose={onClose} renderTab={renderTab} sessionContentAvailable={sessionContentAvailable} toolbar={<nav aria-label="工作区入口">
-    <button type="button" aria-label="能力" title="能力" onClick={() => open('capabilities', '能力')}><Blocks size={13} />能力</button>
+    <button type="button" aria-label="能力" title="能力" onClick={() => open('capabilities', '能力')}><Blocks size={13} /><span>能力</span></button>
 
-    <button type="button" title="进程" onClick={() => open('background', '进程')}><TerminalSquare size={13} />进程</button>
-    <button type="button" title="子代理" onClick={() => open('subagents', '子代理')}><Bot size={13} />子代理</button>
-    <button type="button" title="cell" onClick={() => session.id && backgroundHostSessionId ? open('cells', 'cell', undefined, backgroundHostSessionId) : open('cells-unavailable', 'cell')}><FileCode2 size={13} />cell</button>
-    <button type="button" title="网页" aria-label="网页" onClick={() => workspace?.browserTabs.open()}><Globe size={13} />网页</button>
+    <button type="button" aria-label="进程" title="进程" onClick={() => open('background', '进程')}><TerminalSquare size={13} /><span>进程</span></button>
+    <button type="button" aria-label="子代理" title="子代理" onClick={() => open('subagents', '子代理')}><Bot size={13} /><span>子代理</span></button>
+    <button type="button" aria-label="cell" title="cell" onClick={() => session.id && backgroundHostSessionId ? open('cells', 'cell', undefined, backgroundHostSessionId) : open('cells-unavailable', 'cell')}><FileCode2 size={13} /><span>cell</span></button>
+    <button type="button" title="网页" aria-label="网页" onClick={() => workspace?.browserTabs.open()}><Globe size={13} /><span>网页</span></button>
   </nav>} />;
 }

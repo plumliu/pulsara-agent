@@ -180,7 +180,7 @@ export class PromptDraftStore {
     editor.view.dispatch(closeHistory(editor.state.tr).delete(annotation.position, annotation.position + 1));
   }
 
-  insertFiles(sessionId: string, files: readonly File[], position?: number | 'end'): void {
+  insertFiles(sessionId: string, files: readonly File[], position?: number | 'end', focus = true): void {
     const session = this.requireSession(sessionId);
     for (const file of files) {
       if (!desktopHost()?.pathForFile(file) && file.type.startsWith('image/') && !acceptedImageMediaTypes.has(file.type)) {
@@ -207,16 +207,18 @@ export class PromptDraftStore {
         },
       });
     }
-    const chain = session.editor.chain().focus(undefined, { scrollIntoView: false });
+    const chain = session.editor.chain();
+    if (focus) chain.focus(undefined, { scrollIntoView: false });
     if (position !== undefined) chain.setTextSelection(position === 'end' ? session.editor.state.doc.content.size - 1 : position);
     chain.insertContent(nodes).run();
     this.changed();
   }
 
-  insertPaths(sessionId: string, paths: readonly string[], directory: boolean, position?: number | 'end'): void {
+  insertPaths(sessionId: string, paths: readonly string[], directory: boolean, position?: number | 'end', focus = true): void {
     const session = this.requireSession(sessionId);
     const nodes = paths.map(path => referenceNode(formatWorkspaceReference({ path, kind: directory ? 'directory' : 'file' })));
-    const chain = session.editor.chain().focus(undefined, { scrollIntoView: false });
+    const chain = session.editor.chain();
+    if (focus) chain.focus(undefined, { scrollIntoView: false });
     if (position !== undefined) chain.setTextSelection(position === 'end' ? session.editor.state.doc.content.size - 1 : position);
     chain.insertContent(nodes).run();
     this.changed();

@@ -32,9 +32,13 @@ it('shares the original background attempt with early navigation without publish
   expect(screen.queryByRole('textbox', {name:'发送给 Pulsara'})).toBeNull();
   expect(adapter.lastConnection).toBeUndefined();
   expect(uiPreferences.getItem('pulsara-active-session')).toBeNull();
-  expect(screen.getByRole('button', {current:'page',name:/准备发布/}).querySelector('small')?.textContent).toBe('正在载入');
+  expect(screen.getByRole('button', {name:/准备发布.*正在载入/})).toBeTruthy();
+  expect(screen.queryByRole('button', {current:'page',name:/准备发布/})).toBeNull();
+  expect(screen.queryByRole('tab', {name:/准备发布/})).toBeNull();
   await act(async () => pending.resolve());
   expect((await screen.findByRole('textbox', {name:'发送给 Pulsara'})).getAttribute('contenteditable')).toBe('true');
+  expect(screen.getByRole('tab', {name:/准备发布/}).getAttribute('aria-selected')).toBe('true');
+  expect(uiPreferences.getItem('pulsara-active-session')).toBe(initialSession.id);
   expect(connect).toHaveBeenCalledTimes(1);
   expect(close).not.toHaveBeenCalled();
   view.unmount();
@@ -101,7 +105,7 @@ it('still closes the actual late connection after unmounting a shared attempt', 
   expect(screen.queryByRole('textbox', {name:'发送给 Pulsara'})).toBeNull();
 });
 
-it.each(['takeover','reconnecting'] as const)('keeps a later normal open distinct from an in-flight %s intent', async intent => {
+it.each(['takeover','reconnecting'] as const)('keeps an in-flight %s intent when the loaded session is selected again', async intent => {
   const adapter = new FakeAdapter();
   adapter.connectionRole = intent === 'takeover' ? 'observer' : 'controller';
   adapter.connectionValue = {...projection(''), messages:[], isRunning:false, activeTurnId:undefined};
@@ -109,13 +113,14 @@ it.each(['takeover','reconnecting'] as const)('keeps a later normal open distinc
   if (intent === 'takeover') await screen.findAllByRole('button', {name:'在此窗口继续'});
   else await screen.findByRole('textbox', {name:'发送给 Pulsara'});
   const first = adapter.lastConnection!;
+  const originalWindow = document.getElementById(initialSession.id);
+  const originalTab = screen.getByRole('tab', {name:/准备发布/});
+  fireEvent.click(screen.getByRole('button', {name:'还原会话窗口'}));
+  expect(originalWindow?.getAttribute('data-mode')).toBe('floating');
   const pending = deferred<void>(), native = adapter.connect.bind(adapter);
-  const opened: Awaited<ReturnType<typeof native>>[] = [];
   const connect = vi.spyOn(adapter, 'connect').mockImplementation(async (...args) => {
     await pending.promise;
-    const next = await native(...args);
-    opened.push(next);
-    return next;
+    return native(...args);
   });
   if (intent === 'takeover') fireEvent.click(screen.getAllByRole('button', {name:'在此窗口继续'})[0]);
   else {
@@ -125,11 +130,15 @@ it.each(['takeover','reconnecting'] as const)('keeps a later normal open distinc
   }
   await waitFor(() => expect(connect).toHaveBeenCalledTimes(1));
   selectSession();
-  await waitFor(() => expect(connect).toHaveBeenCalledTimes(2));
-  expect(connect.mock.calls).toEqual([[initialSession.id,intent === 'takeover'],[initialSession.id,false]]);
+  expect(originalWindow?.getAttribute('data-mode')).toBe('maximized');
+  expect(screen.getByRole('tab', {name:/准备发布/})).toBe(originalTab);
+  expect(connect.mock.calls).toEqual([[initialSession.id,intent === 'takeover']]);
   await act(async () => pending.resolve());
-  await screen.findByRole('textbox', {name:'发送给 Pulsara'});
-  expect(opened[0].closed).toBe(true);
-  expect(opened[1].closed).toBe(false);
+  await waitFor(() => expect(screen.getByRole('textbox', {name:'发送给 Pulsara'}).getAttribute('contenteditable')).toBe('true'));
+  expect(first.closed).toBe(true);
+  expect(adapter.lastConnection?.closed).toBe(false);
+  expect(adapter.lastConnection?.role).toBe('controller');
+  expect(document.getElementById(initialSession.id)).toBe(originalWindow);
+  expect(connect.mock.calls).toEqual([[initialSession.id,intent === 'takeover']]);
   if (intent === 'reconnecting') expect(first.submitPrompt).toHaveBeenCalledTimes(1);
 });

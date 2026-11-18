@@ -12,6 +12,7 @@ import { DraftImagePreviewContext } from './prompt-image-node';
 import type { CompleteWorkspacePaths } from '../lib/file-reference';
 import type { SkillCapability } from '../lib/pulsara-types';
 import { usePromptSuggestions } from './prompt-suggestions';
+import { useSessionCanvasWindow } from './session-canvas';
 
 interface PromptComposerProps {
   store: PromptDraftStore;
@@ -44,6 +45,9 @@ export function PromptComposer({
   interactionOpen = false,
   onPromptPanelOpenChange,
 }: PromptComposerProps) {
+  const { focused, visible } = useSessionCanvasWindow();
+  const windowActive = useRef(true);
+  windowActive.current = focused && visible;
   const editor: Editor = store.getEditor(sessionId);
   useSyncExternalStore(store.subscribe, store.getVersion, store.getVersion);
   const [preview, setPreview] = useState<number>();
@@ -214,6 +218,7 @@ export function PromptComposer({
         carousel={{ finite: true }}
         controller={{ closeOnPullDown: true, closeOnBackdropClick: true }}
         on={{ view: ({ index }) => setPreview(index), exited: () => {
+          if (!windowActive.current) return;
           if (previewTrigger.current?.isConnected) previewTrigger.current.focus();
           else if (!editor.isDestroyed) editor.commands.focus();
         } }}

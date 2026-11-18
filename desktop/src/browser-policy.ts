@@ -20,12 +20,3 @@ export function allowBrowserRequest(value: string, resourceType: string, protect
     return ['data:', 'blob:'].includes(url.protocol) || (resourceType !== 'mainFrame' && value === 'about:blank');
   } catch { return false; }
 }
-export function browserBounds(bounds: unknown, zoom: number): Electron.Rectangle {
-  if (!bounds || typeof bounds !== 'object') throw new Error('无效的网页布局。');
-  const b = bounds as Record<string, unknown>;
-  for (const key of ['x', 'y', 'width', 'height']) if (typeof b[key] !== 'number' || !Number.isFinite(b[key])) throw new Error('无效的网页布局。');
-  if ((b.width as number) <= 0 || (b.height as number) <= 0) throw new Error('网页布局必须有有效尺寸。');
-  const result = Object.fromEntries(['x', 'y', 'width', 'height'].map(key => [key, Math.round((b[key] as number) * zoom)])) as unknown as Electron.Rectangle;
-  if (Object.values(result).some(value => !Number.isSafeInteger(value) || value < -2147483648 || value > 2147483647) || result.width < 1 || result.height < 1) throw new Error('网页布局超出原生坐标范围。');
-  return result;
-}

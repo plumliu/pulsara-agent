@@ -588,6 +588,14 @@ export interface ModelDiscoveryInput {
   connection_id: string | null;
 }
 
+export interface SessionCloseWork {
+  requiresConfirmation: boolean;
+  hasTerminalProcesses: boolean;
+  observationId: string | null;
+}
+
+export type SessionCloseStopOutcome = { status: 'stopped' };
+
 export interface RuntimeAdapter {
   userAvatar(): Promise<{ configured: boolean }>;
   uploadUserAvatar(file: File): Promise<{ configured: boolean }>;
@@ -635,7 +643,8 @@ export interface RuntimeAdapter {
     status: 'reopened' | 'deferred';
     publicCode?: string;
   }>;
-  closeSession(sessionId: string): Promise<{ status: 'closing' }>;
+  sessionCloseWork(sessionId: string): Promise<SessionCloseWork>;
+  stopSessionCloseWork(sessionId: string, work: SessionCloseWork): Promise<SessionCloseStopOutcome>;
   connect(sessionId: string, takeover?: boolean): Promise<RuntimeConnection | CanonicalHistoryView>;
   openAgentReader(rootSessionId: string, agentSessionId: string, signal?: AbortSignal): Promise<AgentConversationReader>;
   createAgentContentReader(rootSessionId: string, agentSessionId: string): AgentContentReader;
@@ -1287,11 +1296,11 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
   clearUserAvatar(): Promise<{ configured: boolean }> {
     return apiRequest('/api/user-avatar', { method: 'DELETE' });
   }
-  private chatConnection?: LocalRuntimeConnection;
-  private connectAttempt = 0;
+  private readonly chatConnections = new Map<string, LocalRuntimeConnection>();
+  private readonly connecting = new Map<string, Promise<RuntimeConnection | CanonicalHistoryView>>();
   private sessionRequest<T>(sessionId: string, url: string, init: RequestInit): Promise<T> {
-    const connection = this.chatConnection;
-    if (!connection || connection.sessionId !== sessionId || connection.role !== 'controller') {
+    const connection = this.chatConnections.get(sessionId);
+    if (connection?.role !== 'controller') {
       throw new RuntimeApiError('CHAT_CONTROLLER_REQUIRED', '此窗口仅供查看。', false);
     }
     return apiRequest(url, {...init, headers: {...init.headers, ...connection.chatWriteHeaders()}});
@@ -1300,10 +1309,10 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     return apiRequest(`/api/sessions/${encodeURIComponent(sessionId)}/workspace-availability`, {signal});
   }
   restoreWorkspace(sessionId: string): Promise<WorkspaceAvailability> {
-    const connection = this.chatConnection;
+    const connection = this.chatConnections.get(sessionId);
     return apiRequest(`/api/sessions/${encodeURIComponent(sessionId)}/restore-workspace`, {
       method: 'POST', body: '{}',
-      headers: connection?.sessionId === sessionId ? connection.chatWriteHeaders() : {},
+      headers: connection?.chatWriteHeaders() ?? {},
     });
   }
 
@@ -1503,9 +1512,22 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     return { status: payload.status, publicCode: payload.public_code };
   }
 
-  async closeSession(sessionId: string): Promise<{ status: 'closing' }> {
-    return this.sessionRequest(sessionId, `/api/sessions/${encodeURIComponent(sessionId)}/close`, {
-      method: 'POST', body: JSON.stringify({}), keepalive: true,
+  async sessionCloseWork(sessionId: string): Promise<SessionCloseWork> {
+    const work = await this.sessionRequest<{
+      requires_confirmation: boolean;
+      has_terminal_processes: boolean;
+      observation_id: string | null;
+    }>(sessionId, `/api/sessions/${encodeURIComponent(sessionId)}/close-work`, { method: 'GET' });
+    return {
+      requiresConfirmation: work.requires_confirmation,
+      hasTerminalProcesses: work.has_terminal_processes,
+      observationId: work.observation_id,
+    };
+  }
+
+  async stopSessionCloseWork(sessionId: string, work: SessionCloseWork): Promise<SessionCloseStopOutcome> {
+    return this.sessionRequest(sessionId, `/api/sessions/${encodeURIComponent(sessionId)}/close-work`, {
+      method: 'POST', body: JSON.stringify({ observation_id: work.observationId }),
     });
   }
 
@@ -1911,7 +1933,20 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
   }
 
   async connect(sessionId: string, takeover = false): Promise<RuntimeConnection | CanonicalHistoryView> {
-    const attempt = ++this.connectAttempt;
+    // A reconnect replaces the same browser's controller on the server. Issue
+    // those requests in order, while different sessions connect independently.
+    const previous = this.connecting.get(sessionId);
+    const open = () => this.attachSession(sessionId, takeover);
+    const pending = previous ? previous.then(open, open) : open();
+    this.connecting.set(sessionId, pending);
+    try {
+      return await pending;
+    } finally {
+      if (this.connecting.get(sessionId) === pending) this.connecting.delete(sessionId);
+    }
+  }
+
+  private async attachSession(sessionId: string, takeover: boolean) {
     const payload = await apiRequest<ConnectPayload | {view: "history"; session_id: string; runtime_closing?: boolean; workspace_availability: WorkspaceAvailability; snapshot: {snapshot: {snapshot: ProtocolCanonicalSnapshot}}}>(
       `/api/sessions/${encodeURIComponent(sessionId)}/connections`,
       {
@@ -1923,16 +1958,27 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
       },
     );
     if ('view' in payload && payload.view === 'history') {
+      if (payload.session_id !== sessionId) throw new RuntimeApiError('READER_IDENTITY_INVALID', '会话记录与请求的会话不一致。', false);
       const history = new CanonicalHistoryView(payload.session_id, payload.workspace_availability,
         payload.snapshot.snapshot.snapshot, 'ROOT', undefined, undefined, payload.runtime_closing === true);
       await history.initialize();
-      if (attempt === this.connectAttempt) this.chatConnection = undefined;
+      this.chatConnections.delete(sessionId);
       return history;
     }
-    const connection = new LocalRuntimeConnection(payload as ConnectPayload);
-    await connection.initialize();
-    if (attempt === this.connectAttempt) this.chatConnection = connection;
-    return connection;
+    const connection = new LocalRuntimeConnection(payload as ConnectPayload, 'ROOT', undefined, undefined, closed => {
+      if (this.chatConnections.get(sessionId) === closed) this.chatConnections.delete(sessionId);
+    });
+    try {
+      if (connection.sessionId !== sessionId) {
+        throw new RuntimeApiError('READER_IDENTITY_INVALID', '会话连接与请求的会话不一致。', false);
+      }
+      await connection.initialize();
+      this.chatConnections.set(sessionId, connection);
+      return connection;
+    } catch (error) {
+      await connection.close();
+      throw error;
+    }
   }
 
   async openAgentReader(rootSessionId: string, agentSessionId: string, signal?: AbortSignal): Promise<AgentConversationReader> {
@@ -3199,7 +3245,8 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
   }
 
   constructor(payload: ConnectPayload, private readonly scopeKind: 'ROOT' | 'SUBAGENT' = 'ROOT',
-              private readonly historyRoot?: string, private readonly queueRoot?: string) {
+              private readonly historyRoot?: string, private readonly queueRoot?: string,
+              private readonly onClose?: (connection: LocalRuntimeConnection) => void) {
     super();
     this.availability = payload.workspace_availability;
     this.connectionId = payload.connection_id;
@@ -3818,6 +3865,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    this.onClose?.(this);
     this.liveControl.media_ranges = [];
     this.mediaReadStarts = [];
     this.presentationEpoch.abort();

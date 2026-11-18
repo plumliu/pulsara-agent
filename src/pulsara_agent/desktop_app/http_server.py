@@ -705,6 +705,8 @@ class LocalHttpServer:
         self._app.router.add_delete("/api/sessions/{session_id}", self._delete_session)
         self._app.router.add_delete("/api/sessions/{session_id}/archived", self._delete_archived_session)
         self._app.router.add_post("/api/sessions/{session_id}/close", self._close_session)
+        self._app.router.add_get("/api/sessions/{session_id}/close-work", self._session_close_work)
+        self._app.router.add_post("/api/sessions/{session_id}/close-work", self._stop_session_close_work)
         self._app.router.add_post(
             "/api/sessions/{session_id}/runtime/reopen",
             self._runtime_reopen_session,
@@ -2416,7 +2418,7 @@ class LocalHttpServer:
         session_id = request.match_info.get("session_id")
         if session_id and request.method not in {"GET", "HEAD", "OPTIONS"}:
             suffix = request.path.split("/api/sessions/", 1)[-1].split("/", 1)[-1]
-            independent = {session_id, "title", "archive", "unarchive", "archived", "connections", "restore-workspace", "path-candidates"}
+            independent = {session_id, "title", "archive", "unarchive", "archived", "connections", "restore-workspace", "path-candidates", "close-work"}
             parts = suffix.split("/")
             sidebar_read = (suffix in {"agents", "queue"}
                 or (len(parts) == 3 and parts[0] == "agents" and parts[2] in {"reader", "queue"})
@@ -2632,6 +2634,33 @@ class LocalHttpServer:
         except SessionControlRejected as exc:
             raise HttpPublicError(exc.public_code, str(exc), status=409, retryable=True) from exc
         return web.json_response({"status": status}, status=202 if status == "closing" else 200)
+
+    async def _session_close_work(self, request: web.Request) -> web.Response:
+        try:
+            work = await self.bridge.session_close_work(
+                request.match_info["session_id"],
+                request.headers.get("X-Pulsara-Connection-Id", ""),
+                int(request.headers.get("X-Pulsara-Connection-Generation", "0")),
+            )
+        except SessionControlRejected as exc:
+            raise HttpPublicError(exc.public_code, str(exc), status=409, retryable=True) from exc
+        return web.json_response(work, headers={"Cache-Control": "no-store"})
+
+    async def _stop_session_close_work(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) != {"observation_id"}:
+            raise ValueError("session tab stop requires the observed work identity")
+        observation_id = require_id(body["observation_id"], "operation")
+        try:
+            await self.bridge.stop_session_close_work(
+                request.match_info["session_id"],
+                request.headers.get("X-Pulsara-Connection-Id", ""),
+                int(request.headers.get("X-Pulsara-Connection-Generation", "0")),
+                observation_id,
+            )
+        except SessionControlRejected as exc:
+            raise HttpPublicError(exc.public_code, str(exc), status=409, retryable=True) from exc
+        return web.json_response({"status": "stopped"})
 
     async def _runtime_reopen_session(self, request: web.Request) -> web.Response:
         raw = await request.read()

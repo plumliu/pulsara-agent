@@ -5,8 +5,8 @@ import type { BrowserEvent, BrowserState, DesktopBrowser } from '../../frontend/
 const state = (tab: BrowserTabRecord, instanceId = randomIdentity('browser-instance')): BrowserState => ({ instanceId, tabId: tab.id, title: '', url: '', pendingUrl: null, loading: false, canGoBack: false, canGoForward: false, error: null, crashed: false });
 function setup() {
   let event!: (event: BrowserEvent) => void;
-  const sink: BrowserTabSink = { visible: () => true, activeId: () => undefined, hasId: () => false, insert: vi.fn(), changed: vi.fn(), activate: vi.fn(), shortcut: vi.fn() };
-  const host: DesktopBrowser = { create: vi.fn(), command: vi.fn(async () => {}), close: vi.fn(async () => {}), clear: vi.fn(async () => {}), activate: vi.fn(async () => {}), layout: vi.fn(async () => {}), hide: vi.fn(async () => {}), onEvent: listener => { event = listener; return () => {}; } };
+  const sink: BrowserTabSink = { visible: () => true, belongsToSession: () => true, activeId: () => undefined, hasId: () => false, insert: vi.fn(), changed: vi.fn(), activate: vi.fn(), shortcut: vi.fn() };
+  const host: DesktopBrowser = { create: vi.fn(), command: vi.fn(async () => {}), close: vi.fn(async () => {}), onEvent: listener => { event = listener; return () => {}; } };
   vi.mocked(host.create).mockImplementation(async ({tabId}) => state({id: tabId}));
   const tabs = new BrowserTabs(host, sink); tabs.connect();
   return {tabs, host, sink, event: (value: BrowserEvent) => event(value)};
@@ -29,7 +29,7 @@ it.each(['', '/Users/me/index.html', 'file:///tmp/a', 'javascript:alert(1)', 'ja
   expect(() => browserAddressUrl(input)).toThrow();
 });
 describe('browser resource ownership', () => {
-  it('matches committed URLs in the user browser, preferring the active exact match', async () => {
+  it('matches committed URLs in the session, preferring the active exact match', async () => {
     const {tabs, host, sink, event} = setup();
     const first = tabs.open('https://example.com')!; await settle();
     event({kind: 'state', state: {...first.state!, url:'https://example.com/'}});
@@ -67,7 +67,8 @@ describe('browser resource ownership', () => {
     const {tabs,host,sink,event}=setup(); const record=tabs.open('https://source.test')!; await settle();
     sink.visible=()=>false; event({kind:'popup',instanceId:record.state!.instanceId,url:'https://child.test/',disposition:'foreground-tab'});
     expect(record.popup).toBe('https://child.test/'); expect(host.create).toHaveBeenCalledTimes(1);
-    sink.visible=()=>true; event({kind:'popup',instanceId:record.state!.instanceId,url:'https://child.test/',disposition:'background-tab'});
+    sink.visible=()=>true; sink.activeId=()=>record.id;
+    event({kind:'popup',instanceId:record.state!.instanceId,url:'https://child.test/',disposition:'background-tab'});
     expect(sink.insert).toHaveBeenLastCalledWith(expect.objectContaining({id:expect.any(String)}),false);
     tabs.close(record.id); event({kind:'popup',instanceId:record.state!.instanceId,url:'https://stale.test/',disposition:'foreground-tab'});
     expect(host.create).toHaveBeenCalledTimes(2);
@@ -96,9 +97,14 @@ describe('browser resource ownership', () => {
     expect(isCanonicalIdentity(tab.id, 'tab')).toBe(true);
     get.mockRestore();
   });
-  it('clears the user browser even after every visible tab was already closed', async () => {
-    const {tabs,host}=setup(); const record=tabs.open()!; await settle(); tabs.close(record.id);
-    tabs.clear(); expect(host.clear).toHaveBeenCalledOnce();
+  it('dispatches shortcuts only for the visible selected guest', async () => {
+    const {tabs,sink,event}=setup(); const record=tabs.open()!; await settle();
+    const shortcut = {kind:'shortcut', instanceId:record.state!.instanceId, command:'search'} as const;
+    event(shortcut);
+    sink.activeId=()=>record.id; sink.visible=()=>false; event(shortcut);
+    expect(sink.shortcut).not.toHaveBeenCalled();
+    sink.visible=()=>true; event(shortcut);
+    expect(sink.shortcut).toHaveBeenCalledExactlyOnceWith('search');
   });
   it('does not infer schemes, credentials, or local-file navigation', () => {
     for (const url of ['example.com','file:///tmp/test','javascript:alert(1)','https://user:password@example.com']) expect(()=>browserUrl(url)).toThrow();

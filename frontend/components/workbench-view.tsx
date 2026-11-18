@@ -109,6 +109,7 @@ import { AnnotationBody, AnnotationReader, ResponseAnnotations } from './respons
 import { PromptComposer } from './prompt-composer';
 import { PromptContentView } from './prompt-content-view';
 import { MediaEvidenceIndex } from './media-evidence-index';
+import { SessionCanvasTitleActions, SessionCanvasTitleIdentity, useSessionCanvasWindow } from './session-canvas';
 import { ToolBusinessContent } from './tool-business-content';
 import { WelcomeTypewriter } from './welcome-typewriter';
 import { AnimatedDisclosure } from './animated-disclosure';
@@ -239,7 +240,7 @@ interface WorkbenchViewProps {
   onRenameSession: () => void;
   onOpenScheduledTask?: () => void;
   onReopenRuntime: () => void;
-  onCloseSession: () => void;
+  onCloseSession?: () => void;
   runtimeReopenBusy: boolean;
   onReadInteraction: (
     interaction: RuntimeInteractionSummary,
@@ -654,6 +655,7 @@ function TodoDock({
   interactionOpen: boolean;
   onLayoutChange: () => void;
 }) {
+  const { focused } = useSessionCanvasWindow();
   const [open, setOpen] = useState(true);
   const todoListId = useId();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -670,12 +672,12 @@ function TodoDock({
   const expanded = open && !interactionOpen;
 
   useEffect(() => {
-    if (!expanded) return undefined;
+    if (!expanded || !focused) return undefined;
     const closeOnOutsidePointer = (event: PointerEvent) => {
       if (!containerRef.current?.contains(event.target as Node)) setOpen(false);
     };
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false);
+      if (event.key === 'Escape' && !event.isComposing && !event.defaultPrevented) setOpen(false);
     };
     document.addEventListener('pointerdown', closeOnOutsidePointer);
     document.addEventListener('keydown', closeOnEscape);
@@ -683,7 +685,7 @@ function TodoDock({
       document.removeEventListener('pointerdown', closeOnOutsidePointer);
       document.removeEventListener('keydown', closeOnEscape);
     };
-  }, [expanded]);
+  }, [expanded, focused]);
 
   useEffect(() => {
     let frame = window.requestAnimationFrame(onLayoutChange);
@@ -1800,10 +1802,11 @@ export interface AgentReadingState {
 interface ConversationReadingOptions extends Pick<WorkbenchViewProps,
   'history' | 'onLoadHistory' | 'onReadLatestHistory' | 'onReadProcessEnd' | 'onRetainHistory' | 'onLocateAnnotation' | 'onNotify' | 'messages' | 'activeTurnId'> {
   sessionId: string;
+  visible?: boolean;
   savedState?: AgentReadingState;
 }
 
-function useConversationReading({ sessionId, history, onLoadHistory, onReadLatestHistory,
+function useConversationReading({ sessionId, visible = true, history, onLoadHistory, onReadLatestHistory,
   onReadProcessEnd, onRetainHistory, onLocateAnnotation, onNotify, messages, activeTurnId,
   savedState }: ConversationReadingOptions) {
   const [latestVisible, setLatestVisible] = useState(true);
@@ -1814,6 +1817,8 @@ function useConversationReading({ sessionId, history, onLoadHistory, onReadLates
   // cannot place a boundary inside a partially loaded history window.
   const [locatedFocus, setLocatedFocus] = useState<LocatedEntry>();
   const currentSessionRef = useRef(sessionId);
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
   const currentHistory = useRef(history); currentHistory.current = history;
   const atLatestHistory = history?.atLatest !== false;
   const readingOwner = history?.readingOwner;
@@ -1828,7 +1833,7 @@ function useConversationReading({ sessionId, history, onLoadHistory, onReadLates
   const olderAutoRequest = useRef<{ owner?: object; windowId?: string; firstEntryId?: string } | undefined>(undefined);
   const checkOlderBoundary = useRef<() => void>(() => {});
   const follow = useMemo(() => new ThreadFollowController(
-    () => currentSessionRef.current === sessionId ? threadRef.current : null,
+    () => currentSessionRef.current === sessionId && visibleRef.current ? threadRef.current : null,
     () => currentHistory.current?.atLatest !== false && !(currentHistory.current?.loading && !currentHistory.current.windows.length),
     setLatestVisible,
     () => { locateRequest.current?.abort(); setJumpingToLatest(false); },
@@ -1965,7 +1970,11 @@ function useConversationReading({ sessionId, history, onLoadHistory, onReadLates
     } finally { if (locateRequest.current === request) { setJumpingToLatest(false); follow.endNavigation(); } }
   }, [onReadLatestHistory, onNotify, follow, sessionId]);
 
-  const canAutoCollapse = useCallback(() => follow.canFollow, [follow]);
+  const canAutoCollapse = useCallback(() => visibleRef.current && follow.canFollow, [follow]);
+  useLayoutEffect(() => {
+    if (!visible) automaticProcessRead.current?.request.abort();
+    else follow.selectionChanged();
+  }, [follow, visible]);
   useLayoutEffect(() => {
     const pending = automaticProcessRead.current;
     const latestTurn = activeTurnId ?? messages.at(-1)?.turnId;
@@ -2018,10 +2027,10 @@ function useConversationReading({ sessionId, history, onLoadHistory, onReadLates
   const locatingEntry = useRef<string | undefined>(undefined);
   const residenceFrame = useRef<number | undefined>(undefined);
   const reportResidence = useCallback(() => {
-    if (!onRetainHistory || residenceFrame.current !== undefined || currentSessionRef.current !== sessionId) return;
+    if (!visibleRef.current || !onRetainHistory || residenceFrame.current !== undefined || currentSessionRef.current !== sessionId) return;
     residenceFrame.current = requestAnimationFrame(() => {
       residenceFrame.current = undefined;
-      if (currentSessionRef.current !== sessionId) return;
+      if (!visibleRef.current || currentSessionRef.current !== sessionId) return;
       const thread = threadRef.current;
       const drawerAnimations = [...thread?.querySelectorAll<HTMLElement>('.conversation-run__drawer') ?? []]
         .flatMap(drawer => drawer.getAnimations?.() ?? []);
@@ -2370,6 +2379,10 @@ export function WorkbenchView({
   onNotify,
   onPermissionChange,
 }: WorkbenchViewProps) {
+  const { focused, visible, inCanvas } = useSessionCanvasWindow();
+  const windowActive = focused && visible;
+  const windowActiveRef = useRef(windowActive);
+  windowActiveRef.current = windowActive;
   // The editor and open skill menu own text updates. The surrounding history
   // only needs these current-session admission/control primitives.
   const draft = {
@@ -2498,6 +2511,7 @@ export function WorkbenchView({
       handledQueueActions.current.add(action.commandId);
       onQueueActionHandled(action.commandId);
       requestAnimationFrame(() => {
+        if (!windowActiveRef.current || !workbenchRef.current) return;
         const next = queuedPrompts.filter(item => item.deliveryMode === 'new-turn'
           && compareSequence(item.sequence, action.source.sequence) > 0 && visibleQueue.some(visible => visible.queueItemId === item.queueItemId))[0];
         const button = action.kind === 'delete' && next
@@ -2601,14 +2615,14 @@ export function WorkbenchView({
   const hasCompactionContext = hasCanonicalHistory || messages.length > 0 || isRunning
     || initialContextBase?.base_kind === 'SNAPSHOT' || Boolean(contextCompaction);
   useEffect(() => {
-    if (!sessionActionsOpen) return;
+    if (!sessionActionsOpen || !windowActive) return;
     const outside = (event: PointerEvent) => {
       if (event.target instanceof Node && !sessionActionsRef.current?.contains(event.target)) {
         setSessionActionsOpen(false);
       }
     };
     const escape = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
+      if (event.key !== 'Escape' || event.isComposing || event.defaultPrevented) return;
       setSessionActionsOpen(false);
       sessionActionsTriggerRef.current?.focus();
     };
@@ -2618,7 +2632,7 @@ export function WorkbenchView({
       document.removeEventListener('pointerdown', outside);
       document.removeEventListener('keydown', escape);
     };
-  }, [sessionActionsOpen]);
+  }, [sessionActionsOpen, windowActive]);
   useLayoutEffect(() => {
     const departure = welcomeDeparture.current;
     if (welcome || !departure) return;
@@ -2633,10 +2647,10 @@ export function WorkbenchView({
   }, [welcome, session.id]);
 
   useLayoutEffect(() => {
-    if (addOpen) addMenu.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus({ preventScroll: true });
+    if (addOpen && windowActiveRef.current) addMenu.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus({ preventScroll: true });
   }, [addOpen, skillOpen]);
   useEffect(() => {
-    if (!addOpen && !modelOpen && !reasoningOpen && !skillOpen && !permissionOpen) return;
+    if (!windowActive || (!addOpen && !modelOpen && !reasoningOpen && !skillOpen && !permissionOpen)) return;
     const close = () => {
       setAddOpen(false); setModelOpen(false); setReasoningOpen(false);
       setSkillOpen(false); setPermissionOpen(false);
@@ -2645,7 +2659,7 @@ export function WorkbenchView({
       if (event.target instanceof Node && !composerWrapRef.current?.contains(event.target)) close();
     };
     const escape = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
+      if (event.key !== 'Escape' || event.isComposing || event.defaultPrevented) return;
       close();
       if (addOpen) addTrigger.current?.focus();
     };
@@ -2655,8 +2669,8 @@ export function WorkbenchView({
       document.removeEventListener('pointerdown', outside);
       document.removeEventListener('keydown', escape);
     };
-  }, [addOpen, modelOpen, reasoningOpen, skillOpen, permissionOpen]);
-  const reading = useConversationReading({ sessionId: session.id, history,
+  }, [addOpen, modelOpen, reasoningOpen, skillOpen, permissionOpen, windowActive]);
+  const reading = useConversationReading({ sessionId: session.id, visible, history,
     onLoadHistory, onReadLatestHistory, onReadProcessEnd, onRetainHistory, onLocateAnnotation,
     onNotify, messages, activeTurnId });
   const { latestVisible, locatedFocus, currentSessionRef, atLatestHistory, jumpingToLatest,
@@ -2670,7 +2684,9 @@ export function WorkbenchView({
     draftStore.insertSkillReference(session.id, name);
     setSkillOpen(false);
     setAddOpen(false);
-    window.requestAnimationFrame(() => draftStore.focus(session.id));
+    window.requestAnimationFrame(() => {
+      if (windowActiveRef.current && workbenchRef.current) draftStore.focus(session.id);
+    });
   }, [draftStore, editingQueue, session.id]);
 
   const fileEntryBlocked = !canControl || isObserver || runtimeStatus !== 'online' || editingQueue || submitting;
@@ -2692,12 +2708,14 @@ export function WorkbenchView({
       return;
     }
     void (directory ? host.chooseDirectory().then(path => path ? [path] : []) : host.chooseFiles()).then(paths => {
-      if (!paths.length) return;
+      if (!paths.length || !workbenchRef.current) return;
       if (pickerCurrent.current.sessionId !== selectedSession || pickerCurrent.current.blocked || queueClicks.current.has('composer-edit')) {
         onNotify('文件未加入草稿', '会话已切换或输入框暂不可编辑，请重新选择。', 'warning'); return;
       }
-      draftStore.insertPaths(selectedSession, paths, directory, 'end');
-    }).catch(error => onNotify('文件未加入草稿', error instanceof Error ? error.message : '请选择文件后重试。', 'warning'));
+      draftStore.insertPaths(selectedSession, paths, directory, 'end', windowActiveRef.current);
+    }).catch(error => {
+      if (workbenchRef.current) onNotify('文件未加入草稿', error instanceof Error ? error.message : '请选择文件后重试。', 'warning');
+    });
   };
   const updateJumpPosition = useCallback(() => {
     const workbench = workbenchRef.current;
@@ -2750,7 +2768,7 @@ export function WorkbenchView({
     const previous = acceptedDraftLayout;
     const editor = composerEditorRef.current;
     if (!previous || previous.sessionId !== session.id || !editor) return;
-    if (previous.restoreFocus) draftStore.focus(session.id);
+    if (previous.restoreFocus && windowActiveRef.current) draftStore.focus(session.id);
     const height = editor.getBoundingClientRect().height;
     if (previous.height === height) return;
     // The accepted submission clears the editor below the queue. Animate that
@@ -2798,6 +2816,10 @@ export function WorkbenchView({
       setSubmitting(false);
     }
     if (!accepted) return;
+    if (!workbenchRef.current) {
+      draftStore.clearIfSnapshot(session.id, snapshot);
+      return;
+    }
     if (currentSessionRef.current === session.id && !isRunning && queuedCount === 0 && !interaction) void jumpToLatest();
     const editorHeight = composerEditorRef.current?.getBoundingClientRect().height;
     const layout = editorHeight === undefined ? null : {
@@ -2858,70 +2880,79 @@ export function WorkbenchView({
   }, [latestVisible, interaction?.id, isObserver, queuedCount, session.id, todo?.id, updateJumpPosition, welcome]);
 
 
+  const scheduledTaskButton = onOpenScheduledTask && <button type="button" className="session-schedule-button" title="查看此会话的活跃定时任务" aria-label="查看此会话的活跃定时任务" onClick={onOpenScheduledTask}><AlarmClock size={16} aria-hidden="true" /></button>;
+  const titleIdentity = <div className={`session-title${inCanvas ? ' is-in-canvas' : ''}`}>
+    {sessionStatusLabel && <span className={`live-badge live-badge--${readOnlyDock ? 'readonly' : session.status}`}>{sessionStatusLabel}</span>}
+    <div>
+      <div className="session-title-heading">
+        <h2 title={session.title}>{session.title}</h2>
+        {!inCanvas && scheduledTaskButton}
+      </div>
+      {!inCanvas && <p>{workspace.kind === 'quick' ? '快速开始' : '指定目录'} · {workspace.path}</p>}
+    </div>
+  </div>;
+  const titleActions = session.id ? <div className={`topbar-actions${inCanvas ? ' is-in-canvas' : ''}`} data-canvas-no-drag="">
+    {queuedDisplayCount > 0 && <span className="queue-badge">{queuedDisplayCount} 条等待处理</span>}
+    {inCanvas && scheduledTaskButton}
+    <div className="popover-anchor session-actions" ref={sessionActionsRef}>
+      <button
+        ref={sessionActionsTriggerRef}
+        className={`icon-button${sessionActionsOpen ? ' is-active' : ''}`}
+        type="button"
+        aria-label="更多会话操作"
+        title="更多会话操作"
+        aria-expanded={sessionActionsOpen}
+        disabled={!session.id || runtimeReopenBusy || !canControl}
+        onClick={() => setSessionActionsOpen((open) => !open)}
+      >
+        {runtimeReopenBusy ? <LoaderCircle size={15} className="session-actions__busy" /> : <MoreHorizontal size={16} />}
+      </button>
+      {sessionActionsOpen && <div className="menu-popover session-actions-menu" aria-label="会话操作">
+        <button type="button" onClick={() => { if (!canControl) return; setSessionActionsOpen(false); onRenameSession(); }}>
+          <Pencil size={15} />
+          <span><strong>重命名</strong><small>给你的会话起个名字</small></span>
+        </button>
+        {canControl && <button
+          type="button"
+          aria-busy={compactionBusy}
+          disabled={compactionBusy || !hasCompactionContext || runtimeStatus !== 'online'}
+          title={!hasCompactionContext ? '开始对话后即可压缩上下文' : undefined}
+          onClick={() => {
+            setSessionActionsOpen(false);
+            sessionActionsTriggerRef.current?.focus();
+            setCompacting(true);
+            void onCompact().finally(() => setCompacting(false));
+          }}
+        >
+          {compactionBusy ? <LoaderCircle size={15} className="session-actions__busy" aria-hidden="true" /> : <Minimize2 size={15} aria-hidden="true" />}
+          <span><strong>{compactionBusy ? '压缩中…' : '压缩上下文'}</strong></span>
+        </button>}
+        <button type="button" onClick={() => { if (!canControl) return; setSessionActionsOpen(false); onReopenRuntime(); }}>
+          <RotateCcw size={15} />
+          <span><strong>重新加载会话</strong><small>从数据库重新组装上下文</small></span>
+        </button>
+        {onCloseSession && <button type="button" onClick={() => { if (!canControl) return; setSessionActionsOpen(false); onCloseSession(); }}>
+          <Square size={15} />
+          <span><strong>关闭会话标签</strong></span>
+        </button>}
+      </div>}
+    </div>
+    <button type="button" className={`icon-button${inspectorOpen ? ' is-active' : ''}`} onClick={onToggleInspector} aria-label="切换检查器" aria-expanded={inspectorOpen} title={inspectorOpen ? '收起工作区' : '展开工作区'}><PanelRight size={15} /></button>
+  </div> : null;
+
   return (
     <HistoryDisclosureContext.Provider value={disclosureChoices}>
     <HistoryHydrationContext.Provider value={onHydrateEntries}>
     <ResponseAnnotations skills={skills} completePaths={onCompletePaths} sessionId={session.id} store={draftStore} onLocate={locateAnnotation} onNotify={onNotify}
       canAnnotate={canControl && !isObserver && runtimeStatus === 'online' && Boolean(session.id) && !editingQueue}>
-    <section className={`workbench${welcome ? ' is-welcome' : ''}${fileDrop.dragging ? ' is-file-dragging' : ''}`} aria-label="会话工作台" ref={workbenchRef} {...fileDrop.handlers}>
+    <section className={`workbench${inCanvas ? ' is-in-canvas' : ''}${welcome ? ' is-welcome' : ''}${fileDrop.dragging ? ' is-file-dragging' : ''}`} aria-label="会话工作台" ref={workbenchRef} {...fileDrop.handlers}>
       {fileDrop.dragging && <div className="workbench-file-drop" role="status">
         <span><Upload size={22} aria-hidden="true" />松开以添加文件</span>
       </div>}
-      <header className="topbar" onDoubleClick={event => { if (!(event.target as HTMLElement).closest('button')) void desktopHost()?.toggleMaximize(); }}>
-        <div className="session-title">
-          {sessionStatusLabel && <span className={`live-badge live-badge--${readOnlyDock ? "readonly" : session.status}`}>{sessionStatusLabel}</span>}
-          <div><div className="session-title-heading"><h2>{session.title}</h2>
-            {onOpenScheduledTask && <button type="button" className="session-schedule-button" title="查看此会话的活跃定时任务" aria-label="查看此会话的活跃定时任务" onClick={onOpenScheduledTask}><AlarmClock size={16} aria-hidden="true" /></button>}
-          </div><p>{workspace.kind === 'quick' ? '快速开始' : '指定目录'} · {workspace.path}</p></div>
-        </div>
-        <div className="topbar-actions">
-          {queuedDisplayCount > 0 && <span className="queue-badge">{queuedDisplayCount} 条等待处理</span>}
-          <div className="popover-anchor session-actions" ref={sessionActionsRef}>
-            <button
-              ref={sessionActionsTriggerRef}
-              className={`icon-button${sessionActionsOpen ? ' is-active' : ''}`}
-              type="button"
-              aria-label="更多会话操作"
-              aria-expanded={sessionActionsOpen}
-              disabled={!session.id || runtimeReopenBusy || !canControl}
-              onClick={() => setSessionActionsOpen((open) => !open)}
-            >
-              {runtimeReopenBusy ? <LoaderCircle size={15} className="session-actions__busy" /> : <MoreHorizontal size={16} />}
-            </button>
-            {sessionActionsOpen && <div className="menu-popover session-actions-menu" aria-label="会话操作">
-              <button type="button" onClick={() => { if (!canControl) return; setSessionActionsOpen(false); onRenameSession(); }}>
-                <Pencil size={15} />
-                <span><strong>重命名</strong><small>给你的会话起个名字</small></span>
-              </button>
-              <button type="button" onClick={() => { if (!canControl) return; setSessionActionsOpen(false); onReopenRuntime(); }}>
-                <RotateCcw size={15} />
-                <span><strong>重新加载会话</strong><small>从数据库重新组装上下文</small></span>
-              </button>
-              <button type="button" onClick={() => { if (!canControl) return; setSessionActionsOpen(false); onCloseSession(); }}>
-                <Square size={15} />
-                <span><strong>停止并关闭会话</strong><small>停止会话及后台工作并保留聊天记录</small></span>
-              </button>
-            </div>}
-          </div>
-          {canControl && (
-            <button
-              className={`ghost-button context-compact-button${compactionBusy ? ' is-compacting' : ''}`}
-              aria-label={compactionBusy ? '压缩中…' : '压缩上下文'}
-              aria-busy={compactionBusy}
-              disabled={compactionBusy || !hasCompactionContext || runtimeStatus !== 'online'}
-              title={!hasCompactionContext ? '开始对话后即可压缩上下文' : undefined}
-              onClick={() => {
-                setCompacting(true);
-                void onCompact().finally(() => setCompacting(false));
-              }}
-            >
-              {compactionBusy ? <LoaderCircle size={13} aria-hidden="true" /> : <Minimize2 size={13} aria-hidden="true" />}
-              <span>{compactionBusy ? '压缩中…' : '压缩上下文'}</span>
-            </button>
-          )}
-          <button className={`icon-button${inspectorOpen ? ' is-active' : ''}`} onClick={onToggleInspector} aria-label="切换检查器"><PanelRight size={15} /></button>
-        </div>
-      </header>
+      {inCanvas ? <>
+        <SessionCanvasTitleIdentity>{titleIdentity}</SessionCanvasTitleIdentity>
+        <SessionCanvasTitleActions>{titleActions}</SessionCanvasTitleActions>
+      </> : <header className="topbar">{titleIdentity}{titleActions}</header>}
 
       <ConversationScroll reading={reading}>
         <div className="thread-column conversation-transcript">
@@ -3077,7 +3108,7 @@ export function WorkbenchView({
                 <button ref={addTrigger} type="button" className="composer-add-trigger" aria-label="添加文件、技能或规划" aria-haspopup="dialog" aria-expanded={addOpen}
                   disabled={fileEntryBlocked}
                   onClick={() => { setAddOpen(value => !value); setSkillOpen(false); setModelOpen(false); setReasoningOpen(false); setPermissionOpen(false); }}
-                  onKeyDown={event => { if (event.key === 'ArrowDown') { event.preventDefault(); setAddOpen(true); setSkillOpen(false); setModelOpen(false); setReasoningOpen(false); setPermissionOpen(false); requestAnimationFrame(() => addMenu.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus()); } }}><Plus size={18} /></button>
+                  onKeyDown={event => { if (event.key === 'ArrowDown') { event.preventDefault(); setAddOpen(true); setSkillOpen(false); setModelOpen(false); setReasoningOpen(false); setPermissionOpen(false); } }}><Plus size={18} /></button>
                   <input ref={windowsFileInput} type="file" multiple hidden aria-label="从 Windows 添加文件" onChange={event => {
                     const files = Array.from(event.currentTarget.files ?? []);
                     event.currentTarget.value = '';
@@ -3087,7 +3118,7 @@ export function WorkbenchView({
                     if (pickerCurrent.current.sessionId !== selectedSession || pickerCurrent.current.blocked || queueClicks.current.has('composer-edit')) {
                       onNotify('文件未加入草稿', '会话已切换或输入框暂不可编辑，请重新选择。', 'warning'); return;
                     }
-                    try { draftStore.insertFiles(selectedSession, files, 'end'); }
+                    try { draftStore.insertFiles(selectedSession, files, 'end', windowActiveRef.current && !!workbenchRef.current); }
                     catch (error) { onNotify('文件未加入草稿', error instanceof Error ? error.message : '请重新选择文件。', 'warning'); }
                   }} />
                 {addOpen && <div ref={addMenu} className={`menu-popover composer-add-menu${skillOpen ? ' is-skills' : ''}`} role="dialog" aria-label="添加内容与模式" onKeyDown={event => {
@@ -3128,8 +3159,8 @@ export function WorkbenchView({
                 </div>}
               </div>
               <div className="popover-anchor">
-                <button className={`mode-chip permission-chip${permission === 'bypass-permissions' ? ' is-danger' : ''}`} onClick={() => {setPermissionOpen((value) => !value); setAddOpen(false); setReasoningOpen(false); setSkillOpen(false); setModelOpen(false);}} aria-expanded={permissionOpen} disabled={submitting}>
-                  {permission === 'bypass-permissions' ? <TriangleAlert size={12} /> : <ShieldCheck size={12} />} {permissionLabels[permission]} <ChevronDown size={10} />
+                <button className={`mode-chip permission-chip${permission === 'bypass-permissions' ? ' is-danger' : ''}`} onClick={() => {setPermissionOpen((value) => !value); setAddOpen(false); setReasoningOpen(false); setSkillOpen(false); setModelOpen(false);}} aria-label={permissionLabels[permission]} title={permissionLabels[permission]} aria-expanded={permissionOpen} disabled={submitting}>
+                  {permission === 'bypass-permissions' ? <TriangleAlert size={12} /> : <ShieldCheck size={12} />}<span>{permissionLabels[permission]}</span><ChevronDown size={10} />
                 </button>
                 {permissionOpen && (
                   <div className="menu-popover permission-menu permission-menu--composer">
@@ -3145,7 +3176,7 @@ export function WorkbenchView({
               </div>
             </div>
             <div className="composer-controls">
-              {modelReady && onReadContextUsage && <ContextUsageIndicator
+              {Boolean(session.id) && modelReady && onReadContextUsage && <ContextUsageIndicator
                 sessionId={session.id} binding={modelCallBinding!} revision={contextUsageRevision}
                 isRunning={isRunning} readUsage={onReadContextUsage} />}
               <div className="popover-anchor model-picker">

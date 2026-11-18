@@ -716,6 +716,15 @@ class LocalSessionController(SessionCapabilities):
             raise KeyError(host_session_id)
         return host
 
+    async def require_tab_close_host(self, session_id: str, host_session_id: str) -> KernelHostSession:
+        async with self._lock:
+            handle = self._by_session.get(session_id)
+            if (handle is None or handle.host_session_id != host_session_id
+                    or handle.session._closing or handle.session._closed
+                    or self._operations.get(session_id) is not None):
+                raise SessionControlRejected("SESSION_CLOSE_HOST_CHANGED", "会话运行时已变化，请重新检查任务。")
+            return handle.session
+
     async def sidebar_cells(self, root_session_id: str, host_session_id: str, body: dict):
         if set(body) - {"cursor", "max_items"}:
             raise ValueError("Cell page parameters are invalid")

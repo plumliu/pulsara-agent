@@ -148,6 +148,7 @@ it('a focus list issued before creation cannot close the new connection or erase
   const adapter = new FakeAdapter();
   renderWorkbench(<PulsaraApp adapter={adapter} />);
   await screen.findByRole('heading', { name: initialSession.title });
+  const originalConnection = adapter.lastConnection!;
   const before = [...adapter.sessions];
   const stale = deferred<SessionSummary[]>();
   const lists = vi.spyOn(adapter, 'listSessions').mockImplementationOnce(() => stale.promise);
@@ -160,9 +161,12 @@ it('a focus list issued before creation cannot close the new connection or erase
   const composer = await typeComposer('keep this new draft');
   await act(async () => stale.resolve(before));
   expect(screen.queryByText('当前没有活动会话')).toBeNull();
+  expect(originalConnection.closed).toBe(false);
   expect(connection.closed).toBe(false);
-  expect(screen.getByLabelText('发送给 Pulsara')).toBe(composer);
+  expect(screen.getByRole('textbox', { name: '发送给 Pulsara' })).toBe(composer);
   expect(composer.textContent).toContain('keep this new draft');
+  expect(screen.getByRole('tab', { name: /新会话/ }).getAttribute('aria-selected')).toBe('true');
+  expect(screen.getByRole('tab', { name: new RegExp(initialSession.title) })).toBeTruthy();
   expect(screen.getByLabelText('新会话 更多操作')).toBeTruthy();
   expect(adapter.sessions[0].id).toBe(connection.sessionId);
 });

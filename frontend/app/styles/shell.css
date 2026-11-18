@@ -8,7 +8,6 @@
   isolation: isolate;
 }
 .pulsara-shell.is-workbench { grid-template-columns: 62px 252px minmax(480px, 1fr) 0; }
-.pulsara-shell.is-workbench.has-inspector { grid-template-columns: 62px 252px minmax(480px, 1fr) 360px; }
 .pulsara-shell.is-surface { grid-template-columns: 62px minmax(0, 1fr); }
 
 .activity-rail {
@@ -186,7 +185,7 @@
 
 .database-workbench-mask {
   position: fixed;
-  inset: 0 0 0 62px;
+  inset: 44px 0 0 62px;
   z-index: 75;
   display: grid;
   place-items: center;

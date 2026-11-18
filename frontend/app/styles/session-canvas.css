@@ -1,0 +1,295 @@
+.session-canvas {
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  background: var(--paper-deep);
+}
+.desktop-shell > .session-canvas { grid-area: 2 / 2; }
+.session-canvas[hidden],
+.session-canvas-window[hidden] {
+  display: none;
+}
+.session-canvas__tabs {
+  position: relative;
+  flex: none;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+}
+.session-canvas__tabs[data-dragging] { -webkit-app-region: no-drag; }
+.session-canvas__tab-strip {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  height: 100%;
+  padding: 0 3px;
+  overflow: auto hidden;
+  scrollbar-width: none;
+}
+.session-canvas__tab {
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  min-width: 88px;
+  max-width: 205px;
+  height: 30px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: var(--muted);
+  -webkit-app-region: no-drag;
+}
+.session-canvas__tab[data-placed] { color: var(--ink); }
+.session-canvas__tab:hover { background: var(--paper); }
+.session-canvas__tab[data-selected] {
+  border-color: var(--line);
+  color: var(--ink);
+  background: var(--paper-solid);
+}
+.session-canvas__tab-select {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  gap: 7px;
+  min-width: 0;
+  align-self: stretch;
+  padding: 0 5px 0 9px;
+  text-align: left;
+  user-select: none;
+}
+.session-canvas__tab-select svg { flex: none; }
+.session-canvas__tab-title,
+.session-canvas-window__identity > strong,
+.session-canvas__preview > strong,
+.session-canvas__drag-card,
+.session-canvas__flight {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-canvas__tab-dot,
+.session-canvas__approval {
+  display: inline-block;
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.session-canvas__tab[data-placed] .session-canvas__tab-dot { background: var(--green); }
+.session-canvas__approval { background: var(--amber); }
+.session-canvas__tab-close,
+.session-canvas-window__actions > button {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 5px;
+  color: var(--muted);
+}
+.session-canvas__tab-close {
+  width: 24px;
+  height: 24px;
+  margin-right: 3px;
+}
+.session-canvas__tab-close:hover,
+.session-canvas-window__actions > button:hover {
+  background: var(--paper-deep);
+  color: var(--ink);
+}
+.session-canvas__tab button:focus-visible,
+.session-canvas-window__actions > button:focus-visible {
+  outline: 1px solid var(--blue);
+  outline-offset: -2px;
+}
+.session-canvas-window__actions > button { position: relative; }
+.session-canvas-window__actions > button:is(:hover, :focus-visible)::after {
+  position: absolute;
+  z-index: 1;
+  top: calc(100% + 5px);
+  right: 0;
+  padding: 4px 7px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--ink);
+  background: var(--paper-solid);
+  box-shadow: var(--shadow-sm);
+  font-size: var(--type-small);
+  white-space: nowrap;
+  pointer-events: none;
+  content: attr(aria-label);
+}
+.session-canvas__insertion {
+  position: absolute;
+  z-index: 2;
+  top: 5px;
+  bottom: 3px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--blue);
+  pointer-events: none;
+}
+.session-canvas__surface {
+  flex: 1;
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: clip;
+  isolation: isolate;
+}
+.session-canvas__empty {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+.session-canvas-window {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  container: session-canvas-window / inline-size;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: var(--paper-solid);
+  box-shadow: var(--shadow-md);
+  outline: none;
+}
+.session-canvas-window[data-mode="maximized"] {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+.session-canvas-window[data-mode="docked"] {
+  border-radius: 2px;
+  box-shadow: var(--shadow-sm);
+}
+.session-canvas-window[data-dock-conflict] {
+  outline: 2px solid var(--amber);
+  outline-offset: -2px;
+}
+.session-canvas-window__title {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex: none;
+  align-items: center;
+  min-width: 0;
+  height: 36px;
+  padding: 0 4px 0 10px;
+  border-bottom: 1px solid var(--line);
+  border-radius: 8px 8px 0 0;
+  background: var(--paper-raised);
+  cursor: grab;
+  user-select: none;
+}
+.session-canvas-window[data-mode="maximized"] .session-canvas-window__title,
+.session-canvas-window[data-mode="docked"] .session-canvas-window__title { border-radius: 0; }
+.session-canvas-window__identity,
+.session-canvas-window__identity-host,
+.session-canvas-window__actions,
+.session-canvas-window__actions-host {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.session-canvas-window__identity {
+  flex: 1;
+  font-size: var(--type-control);
+}
+.session-canvas-window__actions,
+.session-canvas-window__actions-host {
+  flex: none;
+  gap: 4px;
+  cursor: default;
+}
+.session-canvas-window__actions-host:empty { display: none; }
+.session-canvas-window__body {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  container: session-window / inline-size;
+  border-radius: inherit;
+}
+.session-canvas-window__resize {
+  position: absolute;
+  z-index: 2;
+  touch-action: none;
+}
+.session-canvas-window__resize[data-edge="n"] { inset: -1px 9px auto; height: 5px; cursor: ns-resize; }
+.session-canvas-window__resize[data-edge="s"] { inset: auto 9px -1px; height: 5px; cursor: ns-resize; }
+.session-canvas-window__resize[data-edge="w"] { inset: 9px auto 9px -1px; width: 5px; cursor: ew-resize; }
+.session-canvas-window__resize[data-edge="e"] { inset: 9px -1px 9px auto; width: 5px; cursor: ew-resize; }
+.session-canvas-window__resize[data-edge="nw"],
+.session-canvas-window__resize[data-edge="ne"],
+.session-canvas-window__resize[data-edge="sw"],
+.session-canvas-window__resize[data-edge="se"] { width: 10px; height: 10px; }
+.session-canvas-window__resize[data-edge="nw"] { top: -1px; left: -1px; cursor: nwse-resize; }
+.session-canvas-window__resize[data-edge="ne"] { top: -1px; right: -1px; cursor: nesw-resize; }
+.session-canvas-window__resize[data-edge="sw"] { bottom: -1px; left: -1px; cursor: nesw-resize; }
+.session-canvas-window__resize[data-edge="se"] { bottom: -1px; right: -1px; cursor: nwse-resize; }
+.session-canvas__divider { position: absolute; touch-action: none; }
+.session-canvas__divider[data-axis="x"] { cursor: ew-resize; }
+.session-canvas__divider[data-axis="y"] { cursor: ns-resize; }
+.session-canvas__divider::after {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  content: '';
+  opacity: 0;
+  pointer-events: none;
+  background: var(--blue);
+}
+.session-canvas__divider[data-axis="x"]::after { width: 2px; }
+.session-canvas__divider[data-axis="y"]::after { height: 2px; }
+.session-canvas__divider:hover::after,
+.session-canvas__divider[data-active]::after { opacity: .7; }
+.session-canvas__preview,
+.session-canvas__drag-card,
+.session-canvas__flight {
+  border: 1px solid color-mix(in srgb, var(--blue) 58%, var(--line));
+  border-radius: 8px;
+  pointer-events: none;
+  font-size: var(--type-control);
+  background: var(--paper-raised);
+  box-shadow: var(--shadow-md);
+}
+.session-canvas__preview {
+  position: absolute;
+  z-index: 12;
+  display: flex;
+  align-items: flex-start;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--paper-raised) 88%, transparent);
+}
+.session-canvas__preview[data-snap] {
+  border: 2px solid color-mix(in srgb, var(--blue) 70%, var(--line));
+  background: color-mix(in srgb, var(--blue) 11%, transparent);
+  box-shadow: none;
+}
+.session-canvas__drag-card,
+.session-canvas__flight {
+  position: fixed;
+  z-index: 28;
+  max-width: 260px;
+  padding: 7px 11px;
+}
+.session-canvas__drag-card { z-index: 82; }
+.session-canvas__flight {
+  z-index: 27;
+  max-width: none;
+}
+.session-canvas[data-dragging] .session-canvas-window__title { cursor: grabbing; }
+
+@media (prefers-reduced-motion: reduce) {
+  .session-canvas__tab-select .is-spinning { animation: none; }
+}

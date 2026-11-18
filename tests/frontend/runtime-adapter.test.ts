@@ -18,8 +18,9 @@ const connectedWorkspaceAvailability = {path: '/tmp/project', outcome: 'AVAILABL
 let historyOwnerFixture: Record<string, unknown> = {};
 afterEach(() => { delete window.pulsaraDesktop; vi.unstubAllGlobals(); historyOwnerFixture = {}; });
 
-it('submits explicit session close with its live controller identity and generation', async () => {
+it('queries and stops observed tab work using its live controller identity', async () => {
   const sessionId = deriveIdentity('session', 'close-test', 'selected');
+  const observationId = deriveIdentity('operation', 'close-test', 'observed');
   const payload = connectPayload();
   payload.session_id = payload.snapshot.snapshot.session_id = sessionId;
   payload.connection_generation = 7;
@@ -28,17 +29,22 @@ it('submits explicit session close with its live controller identity and generat
       const headers = new Headers(init?.headers);
       const authorized = headers.get('X-Pulsara-Connection-Id') === payload.connection_id
         && headers.get('X-Pulsara-Connection-Generation') === '7';
-      return new Response(JSON.stringify(authorized ? {status:'closing'} : {
+      const expected = init?.method === 'GET'
+        ? {requires_confirmation: true, has_terminal_processes: true, observation_id: observationId}
+        : {status:'stopped'};
+      return new Response(JSON.stringify(authorized ? expected : {
         error: {code:'CHAT_CONTROLLER_REQUIRED', message:'当前窗口没有会话控制权，请重新连接。'},
-      }), {status: authorized ? 202 : 409});
+      }), {status: authorized ? 200 : 409});
     });
   vi.stubGlobal('fetch', fetchMock);
   const adapter = new LocalHttpRuntimeAdapter();
   await adapter.connect(sessionId);
-  expect(await adapter.closeSession(sessionId)).toEqual({status:'closing'});
-  expect(fetchMock).toHaveBeenCalledTimes(2);
-  expect(fetchMock).toHaveBeenLastCalledWith(`/api/sessions/${encodeURIComponent(sessionId)}/close`,
-    expect.objectContaining({method:'POST',body:'{}',keepalive:true,headers:expect.objectContaining({
+  const work = await adapter.sessionCloseWork(sessionId);
+  expect(work).toEqual({requiresConfirmation: true, hasTerminalProcesses: true, observationId});
+  expect(await adapter.stopSessionCloseWork(sessionId, work)).toEqual({status:'stopped'});
+  expect(fetchMock).toHaveBeenCalledTimes(3);
+  expect(fetchMock).toHaveBeenLastCalledWith(`/api/sessions/${encodeURIComponent(sessionId)}/close-work`,
+    expect.objectContaining({method:'POST',body:JSON.stringify({observation_id: observationId}),headers:expect.objectContaining({
       'X-Pulsara-Connection-Id':payload.connection_id,'X-Pulsara-Connection-Generation':'7',
     })}));
 });
@@ -55,9 +61,9 @@ it.each(['disconnected','observer','other-session','closed'] as const)('does not
     const connection = await adapter.connect(payload.session_id);
     if (mode === 'closed') await connection.close();
   }
-  await expect(adapter.closeSession(mode === 'other-session' ? 'other-session' : payload.session_id))
-    .rejects.toMatchObject({code:mode === 'closed' ? 'CHAT_CONNECTION_CLOSED' : 'CHAT_CONTROLLER_REQUIRED'});
-  expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/close'))).toEqual([]);
+  await expect(adapter.sessionCloseWork(mode === 'other-session' ? 'other-session' : payload.session_id))
+    .rejects.toMatchObject({code:'CHAT_CONTROLLER_REQUIRED'});
+  expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/close-work'))).toEqual([]);
 });
 
 it('keeps an unconfirmed closing runtime as a read-only history view', async () => {
@@ -3085,9 +3091,37 @@ it.each(['live', 'history'])('keeps the current write owner when an earlier %s c
     view:'history', session_id:'A', workspace_availability:{outcome:'MISSING', path:'/tmp/A'},
     snapshot:{snapshot:{snapshot:{session_id:'A', entries:[], control:{}, event_sequence_cut:'0'}}},
   })));
-  await (await pending).close();
+  const first = await pending;
+  if (kind === 'live') await adapter.updateModelCallBinding('A', {connection_id:'model', reasoning:null});
+  await first.close();
   await adapter.updateModelCallBinding('B', {connection_id:'model', reasoning:null});
-  expect(writes).toEqual(['connection-B']);
+  expect(writes).toEqual(kind === 'live' ? ['connection-A', 'connection-B'] : ['connection-B']);
+});
+
+it('keeps replacement controller credentials when the earlier connection closes', async () => {
+  let attachment = 0;
+  const writes: string[] = [];
+  stubRuntimeFetch(vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).endsWith('/connections')) {
+      const result = connectPayload();
+      result.connection_id = `connection-${++attachment}`;
+      return new Response(JSON.stringify(result));
+    }
+    if (String(input).endsWith('/model-call-binding')) {
+      writes.push(new Headers(init?.headers).get('X-Pulsara-Connection-Id')!);
+      return new Response(JSON.stringify({model_call_binding:{connection_id:'model', reasoning:null}, reasoning_preference_reset:false}));
+    }
+    if (init?.method === 'DELETE') return new Response('{}');
+    throw new Error(`Unexpected ${input}`);
+  }));
+  const adapter = new LocalHttpRuntimeAdapter();
+  const [previous, replacement] = await Promise.all([adapter.connect('session-1'), adapter.connect('session-1', true)]);
+  await previous.close();
+  await adapter.updateModelCallBinding('session-1', {connection_id:'model', reasoning:null});
+  expect(writes).toEqual(['connection-2']);
+  await replacement.close();
+  await expect(adapter.updateModelCallBinding('session-1', {connection_id:'model', reasoning:null}))
+    .rejects.toMatchObject({code:'CHAT_CONTROLLER_REQUIRED'});
 });
 
 it('retains deduplicated interruption history across continued turns and an older snapshot', async () => {

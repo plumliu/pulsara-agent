@@ -82,6 +82,7 @@ IdentityKind = Literal[
     "page",
     "tab",
     "browser-instance",
+    "browser-partition",
     "presentation",
     "mcp-tool",
     "reasoning-block",

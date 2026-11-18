@@ -52,7 +52,7 @@ export function PresentationProvider({ connection, visible, isOpen, onNotify, ch
             const browser = owner.browserTabs.prepare( target.type === 'browser' ? target.url : undefined, browsers);
             prepared.push({ release: () => {}, start: browser.start, adopt: () => {
               const record = browser.adopt();
-              return { id: record.id, kind: 'browser', title: browserTitle(record), browser: record, onClose: () => owner.browserTabs.close(record.id) };
+              return { id: record.id, kind: 'browser', sessionId: owner.sessionId, title: browserTitle(record), browser: record, onClose: () => owner.browserTabs.close(record.id) };
             } });
           } else if (target.type === 'panel' && (target.name === 'capabilities' || target.name === 'background')) {
             const tab = inspectorTab(owner.sessionId, target.name, presentationLabel(target));

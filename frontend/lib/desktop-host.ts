@@ -1,6 +1,6 @@
 import type { DesktopBrowser } from '../../desktop/src/browser-contract';
 import type { WorkspaceDirectoryCandidate } from '../../desktop/src/backend-paths';
-export type { BrowserState, BrowserEvent, BrowserCommand, BrowserPresentation, BrowserLayout, BrowserHide, DesktopBrowser } from '../../desktop/src/browser-contract';
+export type { BrowserState, BrowserEvent, BrowserCommand, DesktopBrowser } from '../../desktop/src/browser-contract';
 
 export interface CliStatus {
   state: 'ready' | 'missing' | 'outdated' | 'conflict' | 'error';

@@ -8,9 +8,8 @@
 
 @media (max-width: 820px) {
   .thread-column { width: min(670px,calc(100% - 32px)); }
-  .queue-badge { display: none; }
+  .topbar .queue-badge { display: none; }
   .topbar .ghost-button { display: inline-flex; width: 32px; padding: 0; font-size: 0; }
-  .topbar .context-compact-button { flex: none; height: 32px; }
   .page-header { padding-inline: 24px; }
   .settings-layout { grid-template-columns: 170px minmax(400px,1fr); gap: 14px; padding-inline: 20px; }
 }

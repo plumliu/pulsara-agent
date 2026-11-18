@@ -82,8 +82,8 @@ describe('exact stop command lifecycle', () => {
     expect(manualStop.mock.calls[0][0]).toMatchObject({operation: 'STOP_CONTEXT_COMPACTION', targetKind: 'MANUAL_COMPACTION', targetId: 'command:manual'});
   });
 
-  it('does not dispatch a prepared stop after switching sessions', async () => {
-    const {active} = await start();
+  it('dispatches a prepared stop to its original session after switching focus', async () => {
+    const {adapter, active} = await start();
     const prepared = deferred<UserControlCommandRef>();
     const prepare = active.prepareUserControlCommand.getMockImplementation()!;
     active.prepareUserControlCommand.mockImplementationOnce(() => prepared.promise);
@@ -92,8 +92,11 @@ describe('exact stop command lifecycle', () => {
     const target = active.prepareUserControlCommand.mock.calls[0][0];
     fireEvent.click(screen.getByRole('button', {name: /另一会话.*可恢复/}));
     await screen.findByText('另一会话的正文');
+    const other = vi.spyOn(adapter.lastConnection!, 'stopActiveTurn');
     await act(async () => prepared.resolve(await prepare(target)));
-    expect(stop).not.toHaveBeenCalled();
+    expect(stop).toHaveBeenCalledWith(expect.objectContaining(target));
+    expect(other).not.toHaveBeenCalled();
+    expect(active.closed).toBe(false);
   });
 
   it.each(['controller', 'observer'] as const)('stores a late final receipt and presents it on %s return', async role => {
@@ -106,7 +109,12 @@ describe('exact stop command lifecycle', () => {
     await screen.findByText('另一会话的正文');
     await act(async () => ending.resolve({...receipt(stop.mock.calls[0][0], 'failed'), publicMessage: '旧会话停止确认失败'}));
     expect(screen.queryByText('旧会话停止确认失败')).toBeNull();
-    adapter.connectionRole = role;
+    if (role === 'observer') {
+      adapter.connectionRole = role;
+      vi.spyOn(active, 'observe').mockRejectedValueOnce(new RuntimeApiError('LOCAL_TRANSPORT_UNAVAILABLE', '连接已中断。', true));
+      await act(async () => active.emit(active.current()));
+      await waitFor(() => expect(adapter.lastConnection!.role).toBe('observer'));
+    }
     fireEvent.click(screen.getByRole('button', {name: /准备发布.*已载入/}));
     expect(await screen.findByText('旧会话停止确认失败')).toBeTruthy();
   });

@@ -2993,6 +2993,20 @@ class _PromptOperations:
                 is not None
             )
 
+    def list_pending_new_turn_ids(self, *, session_id: str, deadline_monotonic: float) -> tuple[str, ...]:
+        with self._provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            rows = connection.execute(
+                """SELECT id FROM pulsara_v3.prompt_queue_items
+                   WHERE session_id = %s AND status = 'PENDING' AND delivery_mode = 'NEW_TURN'
+                   ORDER BY queue_sequence, id""",
+                (session_id,),
+            ).fetchall()
+            return tuple(str(row["id"]) for row in rows)
+
     def pending_prompt_head_mode(
         self,
         *,

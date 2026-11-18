@@ -10,7 +10,6 @@ import type { AgentReadingState } from './agent-conversation-pane';
 import type { CellGraphReadingState } from './cell-graph-map';
 import { Blocks, Bot, ChevronLeft, ChevronRight, Globe, FileCode2, FileText, FolderKanban, ListChecks, PanelRightClose, Server, TerminalSquare, X } from 'lucide-react';
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
-import { flushSync } from 'react-dom';
 
 export type WorkspaceTabKind = 'browser' | 'file' | 'visualization' | 'capabilities' | 'mcp' | 'background' | 'process' | 'subagents' | 'agent' | 'cells' | 'cells-unavailable' | 'cell' | 'cell-graph';
 export interface WorkspaceControl { forgetSession: (sessionId: string) => void; clear: () => void }
@@ -27,7 +26,7 @@ interface WorkspaceTabBase {
 type StandardWorkspaceKind = 'file' | 'visualization' | 'capabilities' | 'background';
 type StandardWorkspaceTab = { [K in StandardWorkspaceKind]: { kind: K; entityId?: string; hostSessionId?: string } }[StandardWorkspaceKind];
 export type WorkspaceTab = WorkspaceTabBase & (
-  | { kind: 'browser'; browser: BrowserTabRecord; sessionId?: never; entityId?: never; hostSessionId?: never }
+  | { kind: 'browser'; browser: BrowserTabRecord; sessionId: string; entityId?: never; hostSessionId?: never }
   | ({ sessionId: string; browser?: never } & (StandardWorkspaceTab
   | { kind: 'mcp'; entityId?: string; hostSessionId?: string; mcpTargetRole: 'configuration' | 'runtime' }
   | { kind: 'process'; entityId?: string; hostSessionId?: string; initialProcess?: BackgroundProcess }
@@ -71,9 +70,9 @@ interface WorkspaceContext {
   close: (id: string) => void;
   activate: (id: string) => void;
 }
-function selectedTabId(tabs: WorkspaceTab[], sessionId: string, browserId: string | undefined, sessions: Record<string, string>) {
-  const visible = tabs.filter(tab => tab.kind === 'browser' || tab.sessionId === sessionId);
-  return visible.find(tab => tab.id === (browserId ?? sessions[sessionId]))?.id ?? visible.at(-1)?.id;
+function selectedTabId(tabs: WorkspaceTab[], sessionId: string, sessions: Record<string, string>) {
+  const visible = tabs.filter(tab => tab.sessionId === sessionId);
+  return visible.find(tab => tab.id === sessions[sessionId])?.id ?? visible.at(-1)?.id;
 }
 function insertNewTabs(tabs: WorkspaceTab[], batch: WorkspaceTab[], selectedId: string | undefined) {
   const next = [...tabs];
@@ -86,49 +85,37 @@ const Context = createContext<WorkspaceContext | undefined>(undefined);
 export function useDesktopWorkspace() { return useContext(Context); }
 
 /** Disposable view descriptions only. Execution and control references stay with their owners. */
-export function DesktopWorkspaceProvider({ sessionId, onShow, children, controlRef, visible = true, onBrowserShortcut }: { visible?: boolean; onBrowserShortcut?: (command: 'search' | 'new-session') => void; sessionId: string; onShow: () => void; children: ReactNode; controlRef?: RefObject<WorkspaceControl | null> }) {
+export function DesktopWorkspaceProvider({ sessionId, onShow, children, controlRef, visible = true, browserVisible = visible, onBrowserShortcut }: { visible?: boolean; browserVisible?: boolean; onBrowserShortcut?: (command: 'search' | 'new-session') => void; sessionId: string; onShow: () => void; children: ReactNode; controlRef?: RefObject<WorkspaceControl | null> }) {
   const backgroundControls = useRef(new Map<string, BackgroundControlMemory>()).current;
   const [tabs, setTabs] = useState<WorkspaceTab[]>([]);
   const [active, setActive] = useState<Record<string, string>>({});
-  const [activeBrowserId, setActiveBrowserId] = useState<string>();
   const tabsRef = useRef(tabs); tabsRef.current = tabs;
   const interaction = useRef(0);
   const interact = useCallback(() => { interaction.current++; }, []);
   const interactionVersion = useCallback(() => interaction.current, []);
   const show = useRef(onShow); show.current = onShow;
-  const current = useRef({ sessionId, visible, active, activeBrowserId, onBrowserShortcut }); current.current = { sessionId, visible, active, activeBrowserId, onBrowserShortcut };
+  const current = useRef({ sessionId, visible, browserVisible, active, onBrowserShortcut }); current.current = { sessionId, visible, browserVisible, active, onBrowserShortcut };
   const install = useCallback((next: WorkspaceTab[]) => { tabsRef.current = next; setTabs(next); }, []);
   const select = useCallback((tab: WorkspaceTab) => {
     // Consecutive opens in one React batch must use the latest selection.
-    if (tab.kind === 'browser') {
-      current.current.activeBrowserId = tab.id;
-      setActiveBrowserId(tab.id);
-    }
-    else {
-      current.current.active = { ...current.current.active, [tab.sessionId]: tab.id };
-      setActive(current.current.active);
-      if (tab.sessionId === current.current.sessionId) {
-        current.current.activeBrowserId = undefined;
-        setActiveBrowserId(undefined);
-      }
-    }
+    current.current.active = { ...current.current.active, [tab.sessionId]: tab.id };
+    setActive(current.current.active);
   }, []);
   const activate = useCallback((id: string) => {
     interaction.current++;
     const tab = tabsRef.current.find(tab => tab.id === id);
-    if (tab) { select(tab); if ((tab.kind === 'browser' || current.current.sessionId === tab.sessionId) && current.current.visible) show.current(); }
+    if (tab) { select(tab); if (current.current.sessionId === tab.sessionId && current.current.visible) show.current(); }
   }, [select]);
   const open = useCallback((tab: WorkspaceTab, options?: { background?: boolean }) => {
     interaction.current++;
     tab = { view: tabsRef.current.find(item => item.id === tab.id)?.view ?? { top: 0, left: 0, graph: { top: 0, left: 0 } }, ...tab };
-    const targetSession = tab.kind === 'browser' ? current.current.sessionId : tab.sessionId;
-    const selectedId = selectedTabId(tabsRef.current, targetSession, targetSession === current.current.sessionId ? current.current.activeBrowserId : undefined, current.current.active);
+    const selectedId = selectedTabId(tabsRef.current, tab.sessionId, current.current.active);
     install(tabsRef.current.some(item => item.id === tab.id) ? tabsRef.current.map(item => item.id === tab.id ? tab : item) : insertNewTabs(tabsRef.current, [tab], selectedId));
-    if (!options?.background) { select(tab); if ((tab.kind === 'browser' || current.current.sessionId === tab.sessionId) && current.current.visible) show.current(); }
+    if (!options?.background) { select(tab); if (current.current.sessionId === tab.sessionId && current.current.visible) show.current(); }
   }, [install, select]);
   const publish = useCallback((batch: WorkspaceTab[], foreground: boolean) => {
-    if (!batch.length || batch.some(tab => tab.kind !== 'browser' && tab.sessionId !== current.current.sessionId) || !current.current.visible) return;
-    const selectedId = selectedTabId(tabsRef.current, current.current.sessionId, current.current.activeBrowserId, current.current.active);
+    if (!batch.length || batch.some(tab => tab.sessionId !== current.current.sessionId) || !current.current.visible) return;
+    const selectedId = selectedTabId(tabsRef.current, current.current.sessionId, current.current.active);
     const added = batch.map(tab => ({ view: { top: 0, left: 0 }, ...tab }));
     const next = insertNewTabs(tabsRef.current, added, selectedId).map(existing => {
       const runtime = added.find(tab => tab.id === existing.id && tab.kind === 'mcp' && tab.mcpTargetRole === 'runtime');
@@ -142,46 +129,37 @@ export function DesktopWorkspaceProvider({ sessionId, onShow, children, controlR
   }, [install]);
   const [browserTabs] = useState(() => new BrowserTabs(desktopHost()?.browser, {
     hasId: id => tabsRef.current.some(tab => tab.id === id),
-    visible: () => current.current.visible,
-    activeId: () => selectedTabId(tabsRef.current, current.current.sessionId, current.current.activeBrowserId, current.current.active),
-    insert: (record, foreground) => open({ id: record.id, kind: 'browser', title: browserTitle(record), browser: record, onClose: () => browserTabs.close(record.id) }, { background: !foreground }),
+    visible: () => current.current.browserVisible,
+    belongsToSession: id => tabsRef.current.some(tab => tab.id === id && tab.sessionId === current.current.sessionId),
+    activeId: () => selectedTabId(tabsRef.current, current.current.sessionId, current.current.active),
+    insert: (record, foreground) => open({ id: record.id, kind: 'browser', sessionId: current.current.sessionId, title: browserTitle(record), browser: record, onClose: () => browserTabs.close(record.id) }, { background: !foreground }),
     changed: record => update(record.id, { title: browserTitle(record), browser: record }),
     activate,
     shortcut: command => current.current.onBrowserShortcut?.(command),
   }));
   useEffect(() => browserTabs.connect(), [browserTabs]);
-  useEffect(() => () => browserTabs.clear(), [browserTabs]);
+  useEffect(() => () => browserTabs.closeAll(), [browserTabs]);
   const close = useCallback((id: string) => {
     interaction.current++;
     const tab = tabsRef.current.find(tab => tab.id === id);
     tab?.onClose?.();
     const next = tabsRef.current.filter(item => item.id !== id);
     install(next);
-    if (tab?.kind === 'browser') {
-      if (current.current.activeBrowserId === id) {
-        current.current.activeBrowserId = undefined;
-        setActiveBrowserId(undefined);
-        const fallback = next.filter(item => item.kind === 'browser' || item.sessionId === current.current.sessionId).at(-1);
-        if (fallback) select(fallback);
-      }
-    } else if (tab) {
-      if (current.current.active[tab.sessionId] === id) {
-        current.current.active = { ...current.current.active, [tab.sessionId]: next.filter(item => item.kind !== 'browser' && item.sessionId === tab.sessionId).at(-1)?.id ?? '' };
-        setActive(current.current.active);
-      }
+    if (tab && current.current.active[tab.sessionId] === id) {
+      current.current.active = { ...current.current.active, [tab.sessionId]: next.filter(item => item.sessionId === tab.sessionId).at(-1)?.id ?? '' };
+      setActive(current.current.active);
     }
-  }, [install, select]);
+  }, [install]);
   const forgetSession = useCallback((target: string) => {
-    for (const tab of tabsRef.current.filter(tab => tab.kind !== 'browser' && tab.sessionId === target)) tab.onClose?.();
-    install(tabsRef.current.filter(tab => tab.kind === 'browser' || tab.sessionId !== target));
+    for (const tab of tabsRef.current.filter(tab => tab.sessionId === target)) tab.onClose?.();
+    install(tabsRef.current.filter(tab => tab.sessionId !== target));
     const nextActive = { ...current.current.active }; delete nextActive[target];
     current.current.active = nextActive; setActive(nextActive);
     for (const key of backgroundControls.keys()) if (JSON.parse(key)[0] === target) backgroundControls.delete(key);
   }, [backgroundControls, install]);
-  // Database/session cleanup cannot retire the independent user browser owner.
-  if (controlRef) controlRef.current = { forgetSession, clear: () => { for (const target of new Set(tabsRef.current.flatMap(tab => tab.kind === 'browser' ? [] : [tab.sessionId]))) forgetSession(target); backgroundControls.clear(); } };
-  const visibleTabs = useMemo(() => tabs.filter(tab => tab.kind === 'browser' || tab.sessionId === sessionId), [tabs, sessionId]);
-  const activeId = selectedTabId(tabs, sessionId, activeBrowserId, active);
+  if (controlRef) controlRef.current = { forgetSession, clear: () => { for (const target of new Set(tabsRef.current.map(tab => tab.sessionId))) forgetSession(target); backgroundControls.clear(); } };
+  const visibleTabs = useMemo(() => tabs.filter(tab => tab.sessionId === sessionId), [tabs, sessionId]);
+  const activeId = selectedTabId(tabs, sessionId, active);
   const value = useMemo(() => ({ interact, interactionVersion, publish, sessionId, visible, browserTabs, backgroundControls, tabs: visibleTabs, activeId, open, update, close, activate }), [interact, interactionVersion, publish, backgroundControls, browserTabs, visible, visibleTabs, sessionId, activeId, open, update, close, activate]);
   return <Context.Provider value={value}>{children}</Context.Provider>;
 }
@@ -251,7 +229,7 @@ function WorkspaceTabStrip({ tabs, selectedId, activate, close }: { tabs: Worksp
     <div ref={list} className="workspace-tabs" role="tablist" aria-label="打开的内容" onScroll={() => {
       measure(); setScrolling(true); clearTimeout(timer.current);
       timer.current = setTimeout(() => setScrolling(false), 700);
-    }}>{tabs.map(tab => { const Icon = icons[tab.kind]; return <div key={tab.id} className={`workspace-tab${selectedId === tab.id ? ' is-active' : ''}`}><button type="button" role="tab" aria-label={tab.title} aria-selected={selectedId === tab.id} onClick={() => { if (tab.id === selectedId) return; if (!document.startViewTransition || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) activate(tab.id); else { const transition = document.startViewTransition(() => flushSync(() => activate(tab.id))); void transition.finished.catch(() => undefined); } }} title={tab.kind === 'agent' ? `${tab.title}\n${tab.entityId}\n${tab.agentMetadata?.agent ? agentTaskLabel(tab.agentMetadata.agent) : tab.agentMetadata?.unavailable ? '子代理已不可用' : '正在刷新'}` : tab.title}><Icon size={13} /><span>{tab.title}</span>{tab.kind === 'agent' && <i className={`agent-cell-indicator${tab.agentMetadata?.agent?.has_running_turn ? ' is-active' : ''}`} aria-hidden="true" title={tab.agentMetadata?.unavailable ? '子代理已不可用' : tab.agentMetadata?.agent ? agentActivity(tab.agentMetadata.agent) : '正在刷新'} />}</button><button type="button" aria-label={`关闭 ${tab.title}`} title="关闭视图" onClick={() => close(tab.id)}><X size={12} /></button></div>; })}</div>
+    }}>{tabs.map(tab => { const Icon = icons[tab.kind]; return <div key={tab.id} className={`workspace-tab${selectedId === tab.id ? ' is-active' : ''}`}><button type="button" role="tab" aria-label={tab.title} aria-selected={selectedId === tab.id} onClick={() => { if (tab.id !== selectedId) activate(tab.id); }} title={tab.kind === 'agent' ? `${tab.title}\n${tab.entityId}\n${tab.agentMetadata?.agent ? agentTaskLabel(tab.agentMetadata.agent) : tab.agentMetadata?.unavailable ? '子代理已不可用' : '正在刷新'}` : tab.title}><Icon size={13} /><span>{tab.title}</span>{tab.kind === 'agent' && <i className={`agent-cell-indicator${tab.agentMetadata?.agent?.has_running_turn ? ' is-active' : ''}`} aria-hidden="true" title={tab.agentMetadata?.unavailable ? '子代理已不可用' : tab.agentMetadata?.agent ? agentActivity(tab.agentMetadata.agent) : '正在刷新'} />}</button><button type="button" aria-label={`关闭 ${tab.title}`} title="关闭视图" onClick={() => close(tab.id)}><X size={12} /></button></div>; })}</div>
     <button type="button" className="workspace-tab-edge is-left" aria-label="向左滚动标签页" title="向左滚动" disabled={!edges.left} onClick={() => scroll(-1)}><ChevronLeft size={14} /></button>
     <button type="button" className="workspace-tab-edge is-right" aria-label="向右滚动标签页" title="向右滚动" disabled={!edges.right} onClick={() => scroll(1)}><ChevronRight size={14} /></button>
   </div>;
@@ -260,6 +238,10 @@ function WorkspaceTabStrip({ tabs, selectedId, activate, close }: { tabs: Worksp
 const workspaceMinWidth = 350;
 const workspaceCollapseWidth = workspaceMinWidth / 2;
 const workspaceWidthKey = 'pulsara-workspace-width';
+function workspaceResizeLimit(handle: HTMLElement): number {
+  const width = handle.closest<HTMLElement>('.session-workbench-body')?.clientWidth;
+  return width === undefined ? window.innerWidth * .7 : Math.min(width * .7, width - 360);
+}
 type WorkspaceProps = { isOpen: boolean; onClose: () => void; toolbar: ReactNode; renderTab: (tab: WorkspaceTab) => ReactNode; sessionContentAvailable?: boolean };
 export function DesktopWorkspace(props: WorkspaceProps) {
   const workspace = useDesktopWorkspace();
@@ -295,7 +277,7 @@ function WorkspacePane({ isOpen, onClose, toolbar, renderTab, sessionContentAvai
   };
   return <aside className={`desktop-workspace${isOpen ? ' is-open' : ''}${resizing ? ' is-resizing' : ''}`} style={{ '--workspace-width': `${width}px` } as React.CSSProperties} aria-label="会话标签工作区" inert={!isOpen}>
     <div className="workspace-resizer" role="separator" aria-label="调整工作区宽度" aria-orientation="vertical" tabIndex={0}
-      onKeyDown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); const next = Math.max(workspaceMinWidth, Math.min(window.innerWidth * .7, event.currentTarget.parentElement!.getBoundingClientRect().width + (event.key === 'ArrowLeft' ? 32 : -32))); setWidth(next); saveWidth(next); } }}
+      onKeyDown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); const next = Math.max(workspaceMinWidth, Math.min(workspaceResizeLimit(event.currentTarget), event.currentTarget.parentElement!.getBoundingClientRect().width + (event.key === 'ArrowLeft' ? 32 : -32))); setWidth(next); saveWidth(next); } }}
       onPointerDown={event => {
         if (event.button !== 0 || !isOpen) return;
         const currentWidth = event.currentTarget.parentElement!.getBoundingClientRect().width;
@@ -316,19 +298,21 @@ function WorkspacePane({ isOpen, onClose, toolbar, renderTab, sessionContentAvai
           onClose();
           return;
         }
-        start.nextWidth = Math.max(workspaceMinWidth, Math.min(window.innerWidth * .7, nextWidth));
+        start.nextWidth = Math.max(workspaceMinWidth, Math.min(workspaceResizeLimit(event.currentTarget), nextWidth));
         setWidth(start.nextWidth);
       }}
       onPointerUp={finishDrag} onPointerCancel={finishDrag}
       onLostPointerCapture={finishDrag} />
     <div className="workspace-surface">
     <header className="workspace-topbar">
-    <div className="workspace-toolbar">{!['linux', 'win32'].includes(desktopHost()?.platform ?? '') && toolbar}<button type="button" title="收起工作区" aria-label="收起工作区" onClick={onClose}><PanelRightClose size={15} /></button></div>
+    <div className="workspace-toolbar">{toolbar}<button type="button" title="收起工作区" aria-label="收起工作区" onClick={onClose}><PanelRightClose size={15} /></button></div>
     </header>
-    {['linux', 'win32'].includes(desktopHost()?.platform ?? '') && <div className="workspace-toolbar workspace-categories">{toolbar}</div>}
     {isOpen && workspace.visible && sessionContentAvailable && workspace.tabs.filter((tab): tab is WorkspaceTab & {kind:'agent'} => tab.kind === 'agent').map(tab => <AgentTabMetadata key={tab.id} tab={tab} update={workspace.update} />)}
     <WorkspaceTabStrip key={sessionId} tabs={workspace.tabs} selectedId={selected?.id} activate={workspace.activate} close={closeTab} />
-    <div className="workspace-content" role="tabpanel" key={selected?.id} ref={element => { if (element && selected?.view) { element.scrollTop = selected.view.top; element.scrollLeft = selected.view.left; } }} onScroll={event => { if (selected?.view) { selected.view.top = event.currentTarget.scrollTop; selected.view.left = event.currentTarget.scrollLeft; } }}>{selected?.browser ? <BrowserPanel record={selected.browser} tabs={workspace.browserTabs} isOpen={isOpen} /> : selected ? (!sessionContentAvailable ? <div className="workspace-empty" role="status"><strong>正在加载会话…</strong></div> : selected.render ? selected.render() : renderTab(selected)) : isOpen ? <div className="workspace-empty"><FolderKanban size={28} /><strong>从上方选择内容，或从对话打开文件。</strong></div> : null}</div>
+    {workspace.tabs.filter(tab => tab.kind === 'browser').map(tab => <div className="workspace-content workspace-browser-content" role="tabpanel" key={tab.id} hidden={selected?.id !== tab.id} inert={!isOpen || !workspace.visible}>
+      <BrowserPanel record={tab.browser} tabs={workspace.browserTabs} isOpen={isOpen && workspace.visible && selected?.id === tab.id} />
+    </div>)}
+    {selected?.kind !== 'browser' && <div className="workspace-content" role="tabpanel" key={selected?.id} ref={element => { if (element && selected?.view) { element.scrollTop = selected.view.top; element.scrollLeft = selected.view.left; } }} onScroll={event => { if (selected?.view) { selected.view.top = event.currentTarget.scrollTop; selected.view.left = event.currentTarget.scrollLeft; } }}>{selected ? (!sessionContentAvailable ? <div className="workspace-empty" role="status"><strong>正在加载会话…</strong></div> : selected.render ? selected.render() : renderTab(selected)) : isOpen ? <div className="workspace-empty"><FolderKanban size={28} /><strong>从上方选择内容，或从对话打开文件。</strong></div> : null}</div>}
     </div>
   </aside>;
 }

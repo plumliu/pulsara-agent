@@ -14,6 +14,7 @@ import { annotationSourceRange, highlightAnnotationSource, mapResponseSelection,
 import type { MarkdownNotify } from './markdown-body';
 import { AnnotationQuote } from './annotation-quote';
 import { DraftAnnotationContext } from './annotation-interactions';
+import { useSessionCanvasWindow } from './session-canvas';
 
 const AnnotationContext = createContext<(source: PromptAnnotationSource | null) => void>(() => {});
 
@@ -206,6 +207,10 @@ export function ResponseAnnotations({ sessionId, store, canAnnotate, onLocate, o
   sessionId: string; store: PromptDraftStore; canAnnotate: boolean; children: ReactNode; onNotify: MarkdownNotify; skills?: readonly SkillCapability[]; completePaths?: CompleteWorkspacePaths;
   onLocate?: (entryId: string, signal: AbortSignal) => Promise<void>;
 }) {
+  const { focused, visible } = useSessionCanvasWindow();
+  const windowActive = focused && visible;
+  const windowActiveRef = useRef(windowActive);
+  windowActiveRef.current = windowActive;
   useSyncExternalStore(store.subscribe, store.getVersion, store.getVersion);
   const items = store.annotations(sessionId);
   const owner = useRef<HTMLDivElement>(null);
@@ -233,6 +238,7 @@ export function ResponseAnnotations({ sessionId, store, canAnnotate, onLocate, o
   // Hover and active edit have separate lifetimes. Leaving a marker must never
   // clear the persistent highlight of the annotation currently being edited.
   useLayoutEffect(() => {
+    if (!windowActive) return;
     const cleanups: Array<() => void> = [];
     for (const [item, name] of [[active, 'annotation-active'], [preview, 'annotation-hover']] as const) {
       const root = item && sourceRoot(item.value.source, owner.current);
@@ -267,21 +273,23 @@ export function ResponseAnnotations({ sessionId, store, canAnnotate, onLocate, o
   }, [onLocate, onNotify]);
   useEffect(() => {
     const update = () => {
-      if (!canAnnotate) { setMenu(undefined); return; }
+      if (!canAnnotate || !windowActiveRef.current) { setMenu(undefined); return; }
       const mapped = mapResponseSelection(window.getSelection());
       if (!mapped || !owner.current?.contains(mapped.root)) { setMenu(undefined); return; }
       setMenu({ sessionId, selection: mapped });
     };
     const hide = () => setMenu(undefined);
     const keydown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !event.defaultPrevented) { hide(); closeEditor(); locateController.current?.abort(); sourceHighlight.current?.(); }
+      if (event.key === 'Escape' && !event.defaultPrevented && !event.isComposing && windowActiveRef.current) {
+        hide(); closeEditor(); locateController.current?.abort(); sourceHighlight.current?.();
+      }
     };
     const pointerdown = (event: PointerEvent) => {
       const target = event.target instanceof Element ? event.target : null;
-      if (!target?.closest('[data-annotation-ui], .annotation-chip, .annotation-selection-menu')) closeEditor();
+      if (windowActiveRef.current && !target?.closest('[data-annotation-ui], .annotation-chip, .annotation-selection-menu')) closeEditor();
     };
     const copy = (event: ClipboardEvent) => {
-      if (event.defaultPrevented || !event.clipboardData) return;
+      if (!windowActiveRef.current || event.defaultPrevented || !event.clipboardData) return;
       const target = event.target instanceof Element ? event.target : document.activeElement;
       if (target?.closest('input,textarea,[contenteditable="true"],[role="dialog"]')) return;
       const mapped = mapResponseSelection(window.getSelection());
@@ -309,7 +317,7 @@ export function ResponseAnnotations({ sessionId, store, canAnnotate, onLocate, o
   }, [sessionId, closeEditor, canAnnotate]);
   return <AnnotationContext.Provider value={locate}><DraftAnnotationContext.Provider value={{ editable: canAnnotate, activeId: active?.id, edit, preview: setHovered }}>
     <div ref={owner} className="response-annotations-scope" style={{ display: 'contents' }}>{children}</div>
-    {typeof document !== 'undefined' && createPortal(<>
+    {windowActive && typeof document !== 'undefined' && createPortal(<>
       {canAnnotate && items.filter(item => item.value.source).map(item => <AnnotationMarker key={item.id} item={item}
         siblings={items.filter(other => other.value.source?.entry_id === item.value.source!.entry_id).sort((a, b) => a.value.source!.start - b.value.source!.start || a.number - b.number)}
         active={item.id === active?.id} onEdit={id => edit(id)} onPreview={setHovered} owner={owner} />)}

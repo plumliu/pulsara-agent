@@ -1,5 +1,5 @@
 import { Archive, ChevronRight, Ellipsis, Pencil, Folder, FolderOpen, LoaderCircle, Plus, Search, SquarePen, Trash2 } from 'lucide-react';
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { autoUpdate, computePosition, flip, hide, offset, shift } from '@floating-ui/dom';
 import type { RuntimeStatus, SessionSummary, SessionWorkspaceSelection, Workspace } from '../lib/pulsara-types';
 import { desktopHost } from '../lib/desktop-host';
@@ -23,6 +23,8 @@ interface SessionSidebarProps {
   sessions: SessionSummary[];
   activeSessionId: string;
   openingSessionId?: string;
+  sessionOpenErrors?: Readonly<Record<string, string | undefined>>;
+  onSessionPointerDown?: (event: ReactPointerEvent, session: SessionSummary) => void;
   runtimeStatus: RuntimeStatus;
   isOpen: boolean;
   onClose: () => void;
@@ -81,6 +83,8 @@ function SessionItem({
   session,
   activeSessionId,
   opening,
+  openError,
+  onSessionPointerDown,
   onSelectSession,
   onDeleteSession,
   onArchiveSession,
@@ -90,6 +94,8 @@ function SessionItem({
   session: SessionSummary;
   activeSessionId: string;
   opening: boolean;
+  openError?: string;
+  onSessionPointerDown?: SessionSidebarProps['onSessionPointerDown'];
   onSelectSession: (id: string) => void;
   onDeleteSession: (session: SessionSummary) => void;
   onArchiveSession: (session: SessionSummary) => void;
@@ -134,11 +140,12 @@ function SessionItem({
       aria-current={presence === 'current' ? 'page' : undefined}
       onClick={event => { if (event.detail < 2) onSelectSession(session.id); }}
       onDoubleClick={() => onRenameSession(session)}
+      onPointerDown={event => onSessionPointerDown?.(event, session)}
     >
       {opening ? <LoaderCircle size={11} className="session-item__loading" aria-hidden="true" /> : <SessionPresenceGlyph presence={presence} />}
       <span className="session-item__copy">
         <strong title={session.title}>{session.title}</strong>
-        <small>{opening ? '正在载入' : sessionPresenceLabels[presence]}</small>
+        <small title={openError}>{opening ? '正在载入' : openError || sessionPresenceLabels[presence]}</small>
       </span>
       {session.unread && <span className="unread-dot" aria-label="有新活动" />}
     </button>
@@ -172,6 +179,8 @@ export function SessionSidebar({
   sessions,
   activeSessionId,
   openingSessionId,
+  sessionOpenErrors,
+  onSessionPointerDown,
   runtimeStatus,
   isOpen,
   onClose,
@@ -376,6 +385,8 @@ export function SessionSidebar({
                                 session={session}
                                 activeSessionId={activeSessionId}
                                 opening={openingSessionId === session.id}
+                                openError={sessionOpenErrors?.[session.id]}
+                                onSessionPointerDown={onSessionPointerDown}
                                 onSelectSession={onSelectSession}
                                 onDeleteSession={onDeleteSession} onArchiveSession={onArchiveSession} onRenameSession={onRenameSession} onRefreshSessions={onRefreshSessions}
                               />
@@ -410,6 +421,8 @@ export function SessionSidebar({
                       session={session}
                       activeSessionId={activeSessionId}
                       opening={openingSessionId === session.id}
+                      openError={sessionOpenErrors?.[session.id]}
+                      onSessionPointerDown={onSessionPointerDown}
                       onSelectSession={onSelectSession}
                       onDeleteSession={onDeleteSession} onArchiveSession={onArchiveSession} onRenameSession={onRenameSession} onRefreshSessions={onRefreshSessions}
                     />

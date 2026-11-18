@@ -162,7 +162,7 @@ function createWindow(session?: Electron.Session) {
     titleBarStyle:process.platform === 'darwin' ? 'hiddenInset' : 'hidden', trafficLightPosition:{x:16,y:16},
     ...(windowsHost ? {titleBarOverlay:windowsControlsOverlay(), autoHideMenuBar:true} : {}),
     webPreferences:{preload:path.join(__dirname,'preload.js'), sandbox:true, contextIsolation:true, nodeIntegration:false,
-      webviewTag:false, navigateOnDragDrop:false, ...(session ? {session} : {})}});
+      webviewTag:true, navigateOnDragDrop:false, ...(session ? {session} : {})}});
   browser = new BrowserOwner(window, () => origin);
   startupCover = new StartupCover(window, startupFile, path.join(__dirname,'preload.js'));
   window.webContents.setWindowOpenHandler(({url}) => {
@@ -170,7 +170,6 @@ function createWindow(session?: Electron.Session) {
     return {action:'deny'};
   });
   window.webContents.on('will-navigate', event => event.preventDefault());
-  window.webContents.on('will-attach-webview', event => event.preventDefault());
   installWorkbenchPermissions(window.webContents, () => origin);
   window.on('close', event => {
     if (quitting) return;
@@ -446,10 +445,6 @@ else {
     handle('browser-create', value => browser!.create(value));
     handle('browser-command', value => browser!.command(value));
     handle('browser-close', value => browser!.close(value));
-    handle('browser-clear', () => browser!.clear());
-    handle('browser-activate', value => browser!.activate(value));
-    handle('browser-layout', value => browser!.layout(value));
-    handle('browser-hide', value => browser!.hide(value));
     handle('write-ui-preference', value => {
       uiPreferences.write(value);
       if (windowsHost && value.key === 'pulsara-theme') window!.setTitleBarOverlay(windowsControlsOverlay());

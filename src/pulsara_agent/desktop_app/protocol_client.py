@@ -10,7 +10,7 @@ from pulsara_agent.identity import derive_id, random_id
 
 import asyncio
 from contextlib import suppress
-from typing import Final, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 from google.protobuf.message import Message
 
@@ -22,6 +22,9 @@ from pulsara_agent.terminal_protocol.v3_gateway import (
     MAXIMUM_FRAME_BYTES,
     TerminalKernelProtocolServer,
 )
+
+if TYPE_CHECKING:
+    from pulsara_agent.conversation_kernel.host_controls import SessionCloseWork
 
 
 class ProtocolBridgeError(RuntimeError):
@@ -284,6 +287,7 @@ class BrowserRuntimeConnection:
         self.live_hello = live_hello
         self.initial_snapshot = initial_snapshot
         self.initial_live_control = initial_live_control
+        self.close_work_observation: tuple[str, SessionCloseWork] | None = None
         self._close_task: asyncio.Task[None] | None = None
 
     @classmethod
@@ -382,6 +386,7 @@ class BrowserRuntimeConnection:
         return self.controller.is_open and self.observer.is_open
 
     async def _close_owner(self) -> None:
+        self.close_work_observation = None
         await asyncio.gather(
             self.observer.aclose(), self.controller.aclose(), return_exceptions=True
         )

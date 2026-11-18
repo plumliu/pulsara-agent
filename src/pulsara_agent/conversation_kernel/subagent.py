@@ -14,6 +14,7 @@ from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from pulsara_agent.code_mode import CodeModeHost
     from pulsara_agent.conversation_kernel.host import KernelHostCore
 
 # Existing physical execution bound, shared by the whole Core. Logical work is
@@ -47,6 +48,13 @@ class AgentSessionRuntime:
         if root is None:
             raise RuntimeError("Agent physical resources require the owning ROOT Host")
         return root._tools
+
+    def cell_owners(self, root_session_id: str) -> dict[str, CodeModeHost]:
+        return {
+            session.host_session_id: session._code_mode
+            for session in self.core._sessions.values()
+            if session.root_session_id == root_session_id
+        }
 
     def read_deadline(self) -> float:
         return self.core._canonical_deadline()

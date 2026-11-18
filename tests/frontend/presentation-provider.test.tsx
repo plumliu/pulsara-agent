@@ -21,11 +21,11 @@ function fixture() {
   const api:FilePreviewApi={snapshot:vi.fn(),open:vi.fn(async path=>file(path)),close:vi.fn(async()=>{}),page:vi.fn(),action:vi.fn()};
   const create=vi.fn(async ({tabId})=>({instanceId:crypto.randomUUID(),tabId,url:'',loading:false}));
   const command=vi.fn(async()=>{});
-  window.pulsaraDesktop={browser:{create,command,close:vi.fn(async()=>{}),clear:vi.fn(async()=>{}),onEvent:()=>()=>{}}} as unknown as PulsaraDesktop;
+  window.pulsaraDesktop={browser:{create,command,close:vi.fn(async()=>{}),onEvent:()=>()=>{}}} as unknown as PulsaraDesktop;
   const show=vi.fn();
   const notify=vi.fn();
   const closeGroup=vi.fn();
-  function Probe(){const w=useDesktopWorkspace()!;const manual=useContext(PresentationContext);const files=useContext(FileLinkContext);return <><button onClick={event=>files?.open("/project/user.md",event.currentTarget)}>user file</button><pre data-testid="tabs">{JSON.stringify(w.tabs.map(tab=>({id:tab.id,kind:tab.kind,entity:tab.entityId,host:tab.hostSessionId,error:!!tab.render})))}</pre><output data-testid="active">{w.activeId}</output><button onClick={()=>w.tabs[0]&&w.activate(w.tabs[0].id)}>select first</button><button onClick={()=>w.tabs[0]&&w.close(w.tabs[0].id)}>close first</button><button onClick={()=>manual?.([{type:'terminal',process_id:'old',host_session_id:'host:old'}])}>history</button><button onClick={()=>manual?.([{type:'cell',cell_id:'cell:old',root_session_id:'one',host_session_id:'host:old'},{type:'file',path:'/project/history.md'},{type:'browser',url:'https://example.test/history'}])}>cell history</button></>;}
+  function Probe(){const w=useDesktopWorkspace()!;const manual=useContext(PresentationContext);const files=useContext(FileLinkContext);return <><button onClick={event=>files?.open("/project/user.md",event.currentTarget)}>user file</button><pre data-testid="tabs">{JSON.stringify(w.tabs.map(tab=>({id:tab.id,kind:tab.kind,sessionId:tab.sessionId,entity:tab.entityId,host:tab.hostSessionId,error:!!tab.render})))}</pre><output data-testid="active">{w.activeId}</output><button onClick={()=>w.tabs[0]&&w.activate(w.tabs[0].id)}>select first</button><button onClick={()=>w.tabs[0]&&w.close(w.tabs[0].id)}>close first</button><button onClick={()=>manual?.([{type:'terminal',process_id:'old',host_session_id:'host:old'}])}>history</button><button onClick={()=>manual?.([{type:'cell',cell_id:'cell:old',root_session_id:'one',host_session_id:'host:old'},{type:'file',path:'/project/history.md'},{type:'browser',url:'https://example.test/history'}])}>cell history</button></>;}
   function Harness({visible=true,open=false,session='one'}:{visible?:boolean;open?:boolean;session?:string}){return <DesktopWorkspaceProvider sessionId={session} visible={visible} onShow={show}><FilePreviewProvider api={api} ownerKey={session} sessionId={session} onNotify={()=>{}}><PresentationProvider onNotify={notify} connection={connection} visible={visible} isOpen={open}><Probe/></PresentationProvider></FilePreviewProvider></DesktopWorkspaceProvider>;}
   const view=render(<Harness/>);
   const send=(targets:PresentationTarget[],sequence='1')=>act(()=>listener?.({sequence,signal:new AbortController().signal,read:async()=>({targets})}));
@@ -219,17 +219,19 @@ it('manual old Cell history rechecks its original Host and still opens file and 
   expect(f.notify).toHaveBeenCalledWith('无法打开目标', 'cell:old：原 Host 已不可用', 'warning');
 });
 
-it('published tool webpages are user tabs that survive the calling ROOT being replaced or absent', async () => {
+it('publishes a tool webpage only in the calling session’s workspace', async () => {
   const f = fixture();
   await f.send([{type:'browser',url:'https://example.test'}]);
   await waitFor(() => expect(f.tabs()).toHaveLength(1));
   const id = f.tabs()[0].id;
   expect(f.create).toHaveBeenCalledWith({tabId:id});
+  expect(f.tabs()[0].sessionId).toBe('one');
   f.view.rerender(<f.Harness session="two" />);
+  expect(f.tabs()).toHaveLength(0);
+  f.view.rerender(<f.Harness session="one" />);
   expect(f.tabs()).toHaveLength(1); expect(f.tabs()[0].id).toBe(id);
   expect(screen.getByTestId('active').textContent).toBe(id);
-  f.view.rerender(<f.Harness session="" />);
-  expect(f.tabs()).toHaveLength(1); expect(f.tabs()[0].id).toBe(id); expect(f.create).toHaveBeenCalledOnce();
+  expect(f.create).toHaveBeenCalledOnce();
 });
 
 it('reuses an MCP tab for the same runtime source without confusing canonical-looking natural names', async () => {

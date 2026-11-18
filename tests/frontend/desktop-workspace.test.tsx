@@ -2,16 +2,17 @@ import { agentCellApi, type AgentRow } from '../../frontend/lib/agent-cell-api';
 import { uiPreferences } from '../../frontend/lib/ui-preferences';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { useState } from 'react';
+import { createPortal } from 'react-dom';
 import { afterEach, expect, it, vi } from 'vitest';
 import { DesktopWorkspace, DesktopWorkspaceProvider, useDesktopWorkspace } from '../../frontend/components/desktop-workspace';
-import { DesktopSidebarToggle, DesktopTitlebar, DesktopWindowControls } from '../../frontend/components/desktop-titlebar';
+import { DesktopTitlebar } from '../../frontend/components/desktop-titlebar';
 import { PromptDraftStore } from '../../frontend/lib/prompt-draft';
 import { rejectDirectoryDrop } from '../../frontend/lib/file-drop';
 import type { PulsaraDesktop } from '../../frontend/lib/desktop-host';
 
 afterEach(() => { cleanup(); vi.useRealTimers(); delete window.pulsaraDesktop; vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 let workspace: NonNullable<ReturnType<typeof useDesktopWorkspace>>;
-function Content({ onClose = () => {} }: { onClose?: () => void }) { workspace = useDesktopWorkspace()!; return <DesktopWorkspace isOpen onClose={onClose} toolbar={null} renderTab={tab => <p>{tab.sessionId}:{tab.entityId}</p>} />; }
+function Content({ onClose = () => {}, isOpen = true }: { onClose?: () => void; isOpen?: boolean }) { workspace = useDesktopWorkspace()!; return <DesktopWorkspace isOpen={isOpen} onClose={onClose} toolbar={null} renderTab={tab => <p>{tab.sessionId}:{tab.entityId}</p>} />; }
 function Host({ sessionId, onClose }: { sessionId: string; onClose?: () => void }) { return <DesktopWorkspaceProvider sessionId={sessionId} onShow={() => {}}><Content onClose={onClose} /></DesktopWorkspaceProvider>; }
 it('inserts each new tab after the latest selection without moving existing tabs', () => {
   render(<Host sessionId="a" />);
@@ -52,7 +53,7 @@ it('uses the close fallback selection before an immediate new tab', async () => 
   act(() => { workspace.open({ id: 'first', sessionId: 'a', title: 'first', kind: 'file' }); workspace.open({ id: 'second', sessionId: 'a', title: 'second', kind: 'file' }); });
   await act(async () => { workspace.browserTabs.open(); });
   act(() => { workspace.activate('first'); workspace.close('first'); workspace.open({ id: 'new', sessionId: 'a', title: 'new', kind: 'file' }); });
-  expect(workspace.tabs.map(tab => tab.title)).toEqual(['second', 'new', '新网页']);
+  expect(workspace.tabs.map(tab => tab.title)).toEqual(['second', '新网页', 'new']);
   expect(workspace.activeId).toBe('new');
 });
 
@@ -243,26 +244,47 @@ it('keeps category controls in the top header and instance tabs below it', () =>
   expect(view.container.querySelectorAll('header')).toHaveLength(1);
   expect(screen.getByRole('button',{name:'收起工作区'})).toBeTruthy();
 });
-it('leaves session title and workspace switch with the session header and keeps native controls', () => {
+it('keeps application title, sidebar toggle, and maximize gesture in the system header', () => {
   const sidebar=vi.fn(), maximize=vi.fn();
   window.pulsaraDesktop={platform:'darwin',toggleMaximize:maximize} as unknown as PulsaraDesktop;
-  const view=render(<main><DesktopTitlebar workbench title="Session name" onToggleWorkspace={vi.fn()}/><DesktopSidebarToggle onToggle={sidebar}/></main>);
-  expect(screen.queryByText('Session name')).toBeNull();
-  expect(screen.queryByRole('button',{name:'切换标签工作区'})).toBeNull();
-  expect(screen.getByRole('button',{name:'切换会话侧栏'}).parentElement).toBe(view.container.querySelector('main'));
+  const view=render(<main><DesktopTitlebar onToggleSidebar={sidebar}/></main>);
+  const header = view.container.querySelector('header')!;
+  expect(header.contains(screen.getByText('Pulsara'))).toBe(true);
+  expect(header.contains(screen.getByRole('button',{name:'切换会话侧栏'}))).toBe(true);
   fireEvent.click(screen.getByRole('button',{name:'切换会话侧栏'}));
   expect(sidebar).toHaveBeenCalledOnce();
   fireEvent.doubleClick(screen.getByRole('button',{name:'切换会话侧栏'}));
   expect(maximize).not.toHaveBeenCalled();
-  fireEvent.doubleClick(view.container.querySelector('header')!);
+  fireEvent.doubleClick(header);
+  expect(maximize).toHaveBeenCalledOnce();
+});
+
+it('hosts session tabs beside the native controls and reserves blank titlebar space for maximize', () => {
+  const maximize = vi.fn();
+  window.pulsaraDesktop = { platform: 'win32', toggleMaximize: maximize } as unknown as PulsaraDesktop;
+  function TitlebarWithTabs() {
+    const [host, setHost] = useState<HTMLDivElement | null>(null);
+    return <>
+      <DesktopTitlebar conversation onTabsHost={setHost} />
+      {host && createPortal(<div role="tablist"><button type="button" role="tab">会话甲</button></div>, host)}
+    </>;
+  }
+  const view = render(<TitlebarWithTabs />);
+  const header = view.container.querySelector('header')!;
+  const tab = screen.getByRole('tab', { name: '会话甲' });
+  expect(header.contains(tab)).toBe(true);
+  expect(screen.queryByText('Pulsara')).toBeNull();
+  fireEvent.doubleClick(tab);
+  expect(maximize).not.toHaveBeenCalled();
+  fireEvent.doubleClick(screen.getByRole('tablist'));
   expect(maximize).toHaveBeenCalledOnce();
 });
 
 it('routes Linux window controls to the desktop host without maximizing on a button double-click', () => {
   const minimize = vi.fn(), maximize = vi.fn(), close = vi.fn();
   window.pulsaraDesktop = { platform: 'linux', minimize, toggleMaximize: maximize, closeWindow: close } as unknown as PulsaraDesktop;
-  const view = render(<main><DesktopTitlebar workbench title="Session" onToggleWorkspace={vi.fn()} /><DesktopSidebarToggle onToggle={vi.fn()} /><DesktopWindowControls /></main>);
-  expect(screen.getByRole('group', { name: '窗口控制' }).parentElement).toBe(view.container.querySelector('main'));
+  const view = render(<main><DesktopTitlebar onToggleSidebar={vi.fn()} /></main>);
+  expect(screen.getByRole('group', { name: '窗口控制' }).parentElement).toBe(view.container.querySelector('header'));
   fireEvent.click(screen.getByRole('button', { name: '最小化' }));
   fireEvent.click(screen.getByRole('button', { name: '最大化或还原' }));
   fireEvent.click(screen.getByRole('button', { name: '关闭窗口' }));
@@ -272,7 +294,7 @@ it('routes Linux window controls to the desktop host without maximizing on a but
   expect(close).toHaveBeenCalledOnce();
 });
 
-it.each(['linux', 'darwin'] as const)('places workspace categories below the top row only on Linux (%s)', platform => {
+it.each(['darwin', 'linux', 'win32'] as const)('places workspace categories in the pane header on %s', platform => {
   window.pulsaraDesktop = { platform } as PulsaraDesktop;
   const toolbar = <nav aria-label="工作区入口"><button>能力</button><button>任务</button><button>后台进程</button><button>新建网页</button></nav>;
   const collapse = vi.fn();
@@ -286,11 +308,8 @@ it.each(['linux', 'darwin'] as const)('places workspace categories below the top
   act(() => workspace.open({ id: 'a-file', sessionId: 'a', title: 'guide.md', kind: 'file' }));
   const topbar = view.container.querySelector('.workspace-topbar')!;
   const categories = screen.getByRole('navigation', { name: '工作区入口' });
-  expect(topbar.contains(categories)).toBe(platform === 'darwin');
-  if (platform === 'linux') {
-    expect(categories.parentElement).toBe(topbar.nextElementSibling);
-    expect(categories.parentElement!.nextElementSibling).toBe(view.container.querySelector('.workspace-tab-strip'));
-  }
+  expect(topbar.contains(categories)).toBe(true);
+  expect(topbar.nextElementSibling).toBe(view.container.querySelector('.workspace-tab-strip'));
   expect(topbar.contains(screen.getByRole('button', { name: '收起工作区' }))).toBe(true);
   fireEvent.click(screen.getByRole('button', { name: '收起工作区' }));
   expect(collapse).toHaveBeenCalledOnce();
@@ -348,9 +367,9 @@ function userBrowserHost() {
     instanceId: `native:${tabId}`, tabId, url: '', pendingUrl: null, title: '', loading: false,
     canGoBack: false, canGoForward: false, error: null, crashed: false,
   }));
-  const close = vi.fn(async () => {}), clear = vi.fn(async () => {});
-  window.pulsaraDesktop = { browser: {create, close, clear, activate: vi.fn(async () => {}), layout: vi.fn(async () => {}), hide: vi.fn(async () => {}), command: vi.fn(async () => {}), onEvent: () => () => {}} } as unknown as PulsaraDesktop;
-  return {create, close, clear};
+  const close = vi.fn(async () => {});
+  window.pulsaraDesktop = { browser: {create, close, command: vi.fn(async () => {}), onEvent: () => () => {}} } as unknown as PulsaraDesktop;
+  return {create, close};
 }
 
 it('inserts webpages and session tabs beside each other using the current selection', async () => {
@@ -369,65 +388,69 @@ it('inserts webpages and session tabs beside each other using the current select
   expect(workspace.tabs.map(tab => tab.id)).toEqual(['first', browserId, backgroundId, 'new-file', 'last']);
   expect(workspace.activeId).toBe(browserId);
   view.rerender(<Host sessionId="b" />);
-  expect(workspace.tabs.map(tab => tab.id)).toEqual([browserId, backgroundId]);
-  expect(workspace.activeId).toBe(browserId);
+  expect(workspace.tabs).toEqual([]);
 });
 
-it('opens user webpages without a session and preserves their identity through session switches and deletion', async () => {
+it('keeps each session guest mounted through tab changes and sidebar or session collapse', async () => {
   const browser = userBrowserHost();
-  const control = {current:null as import('../../frontend/components/desktop-workspace').WorkspaceControl | null};
-  function UserHost({sessionId}: {sessionId:string}) {
-    return <DesktopWorkspaceProvider sessionId={sessionId} onShow={() => {}} controlRef={control}><Content /></DesktopWorkspaceProvider>;
+  type Workspace = NonNullable<ReturnType<typeof useDesktopWorkspace>>;
+  const owners = new Map<string, Workspace>();
+  function Pane({ isOpen }: {isOpen: boolean}) {
+    const owner = useDesktopWorkspace()!;
+    owners.set(owner.sessionId, owner);
+    return <Content isOpen={isOpen} />;
   }
-  const view = render(<UserHost sessionId="" />);
-  await act(async () => { workspace.browserTabs.open(); });
-  const id = workspace.tabs[0].id;
-  expect(workspace.tabs[0].sessionId).toBeUndefined();
-  expect(browser.create).toHaveBeenCalledWith({tabId:id});
-  expect(workspace.activeId).toBe(id);
-  view.rerender(<UserHost sessionId="a" />);
-  act(() => workspace.open({id:'a-file',sessionId:'a',kind:'file',title:'A file'}));
-  act(() => workspace.activate(id));
-  view.rerender(<UserHost sessionId="b" />);
-  expect(workspace.tabs.map(tab => tab.id)).toEqual([id]); expect(workspace.activeId).toBe(id);
-  act(() => control.current!.forgetSession('a'));
-  act(() => control.current!.clear());
-  view.rerender(<UserHost sessionId="" />);
-  expect(workspace.tabs.map(tab => tab.id)).toEqual([id]); expect(workspace.activeId).toBe(id);
-  expect(browser.close).not.toHaveBeenCalled(); expect(browser.clear).not.toHaveBeenCalled();
-  act(() => workspace.close(id));
-  expect(browser.close).toHaveBeenCalledWith(`native:${id}`);
-  expect(workspace.tabs).toHaveLength(0);
-  view.unmount(); expect(browser.clear).toHaveBeenCalledOnce();
+  function Hosts({ collapse = false, showA = true }: { collapse?: boolean; showA?: boolean }) {
+    return <>
+      {showA && <section hidden={collapse} aria-label="会话 A"><DesktopWorkspaceProvider sessionId="a" onShow={() => {}} visible={!collapse}><Pane isOpen={!collapse} /></DesktopWorkspaceProvider></section>}
+      <section aria-label="会话 B"><DesktopWorkspaceProvider sessionId="b" onShow={() => {}}><Pane isOpen /></DesktopWorkspaceProvider></section>
+    </>;
+  }
+  const view = render(<Hosts />);
+  await act(async () => { owners.get('a')!.browserTabs.open(); owners.get('b')!.browserTabs.open(); });
+  const a = owners.get('a')!.tabs[0], b = owners.get('b')!.tabs[0];
+  const guestA = view.container.querySelector('[aria-label="会话 A"] webview');
+  const guestB = view.container.querySelector('[aria-label="会话 B"] webview');
+  expect(guestA).toBeTruthy(); expect(guestB).toBeTruthy();
+  expect(a.sessionId).toBe('a'); expect(b.sessionId).toBe('b');
+  act(() => owners.get('a')!.open({id:'a-file',sessionId:'a',kind:'file',title:'A file'}));
+  expect(guestA?.closest('[role="tabpanel"]')?.hasAttribute('hidden')).toBe(true);
+  act(() => owners.get('a')!.activate(a.id));
+  view.rerender(<Hosts collapse />);
+  view.rerender(<Hosts />);
+  expect(view.container.querySelector('[aria-label="会话 A"] webview')).toBe(guestA);
+  expect(view.container.querySelector('[aria-label="会话 B"] webview')).toBe(guestB);
+  expect(browser.close).not.toHaveBeenCalled();
+  view.rerender(<Hosts showA={false} />);
+  expect(browser.close).toHaveBeenCalledExactlyOnceWith(`native:${a.id}`);
+  expect(view.container.querySelector('[aria-label="会话 B"] webview')).toBe(guestB);
 });
 
-it('deduplicates against the effective selected browser after falling back from another session page', async () => {
+it('deduplicates against the selected browser within its session', async () => {
   userBrowserHost();
-  const view = render(<Host sessionId="a" />);
+  render(<Host sessionId="a" />);
   let first!: import('../../frontend/lib/browser-tabs').BrowserTabRecord;
   let second!: import('../../frontend/lib/browser-tabs').BrowserTabRecord;
   await act(async () => {
     first = workspace.browserTabs.open(); second = workspace.browserTabs.open(undefined, {newTab:true});
   });
   first.state!.url = second.state!.url = 'https://example.test/';
-  act(() => workspace.open({id:'a-file',sessionId:'a',kind:'file',title:'A file'}));
-  view.rerender(<Host sessionId="empty" />);
   expect(workspace.activeId).toBe(second.id);
   let found;
   act(() => { found = workspace.browserTabs.open('https://example.test'); });
   expect(found).toBe(second); expect(workspace.tabs).toHaveLength(2);
 });
 
-it('releases a late user webpage allocation when the workspace owner is destroyed', async () => {
+it('releases a late webpage allocation when its session workspace is destroyed', async () => {
   const browser = userBrowserHost();
   let resolve!: (state: Awaited<ReturnType<typeof browser.create>>) => void;
   browser.create.mockImplementation(() => new Promise(done => {resolve=done;}));
-  const view = render(<Host sessionId="" />);
+  const view = render(<Host sessionId="a" />);
   act(() => { workspace.browserTabs.open(); });
   const id = workspace.tabs[0].id;
   view.unmount();
   await act(async () => resolve({instanceId:'late',tabId:id,url:'',pendingUrl:null,title:'',loading:false,canGoBack:false,canGoForward:false,error:null,crashed:false}));
-  expect(browser.clear).toHaveBeenCalledOnce(); expect(browser.close).toHaveBeenCalledWith('late');
+  expect(browser.close).toHaveBeenCalledExactlyOnceWith('late');
 });
 
 it('refreshes inactive Agent tab metadata serially without replacing its identity or reading state', async () => {
