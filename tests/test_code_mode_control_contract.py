@@ -1,7 +1,7 @@
 """Native control reads full source and observes existing Cell lifecycle facts."""
 
 import asyncio
-from types import SimpleNamespace, MethodType
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
@@ -10,11 +10,10 @@ from pulsara_agent.identity import random_id
 
 
 def port(owner, **extra):
-    value = SimpleNamespace(_code_mode=owner, **extra)
-    value._query_cells = MethodType(DirectKernelToolPort._query_cells, value)
-    value._invoke_code_mode_control = MethodType(
-        DirectKernelToolPort._invoke_code_mode_control, value
-    )
+    value = object.__new__(DirectKernelToolPort)
+    value._code_mode = owner
+    for name, attribute in extra.items():
+        setattr(value, name, attribute)
     return value
 
 
@@ -136,6 +135,7 @@ def test_manage_cell_reports_actual_terminal_state_and_unsettled_effect_count():
     target = {"kind": "CELL", "cell_id": random_id("cell")}
     capture = SimpleNamespace(error=None)
     owner = SimpleNamespace(
+        find_cell_snapshot=lambda _: capture,
         capture_cell=lambda _: capture,
         stop=AsyncMock(return_value={"state": "terminated", "pending_calls": 2}),
         wait_state=AsyncMock(

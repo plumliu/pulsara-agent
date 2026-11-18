@@ -897,7 +897,7 @@ class CodeModeHost:
         cell = self._cells.get(cell_id)
         if cell is None:
             raise CodeModeError(
-                "unavailable", "Code Mode cell is unavailable in this Host"
+                "unavailable", "当前 Host 没有这个 Cell 的执行实例。可用 query_cells 查看本会话中保存的状态。"
             )
         return cell
 

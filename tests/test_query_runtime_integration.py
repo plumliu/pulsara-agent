@@ -123,7 +123,13 @@ def test_complete_cell_source_query_does_not_take_output_owner(tmp_path):
             assert detail.content.content[0].value == source
             assert reads == [{"session_id": port._session_id, "attempt_id": attempt}]
             assert await host.lease_output(cell) is lease
-            assert (await host.wait_state(cell, 0))["state"] == "completed"
+            waited = await dispatch(port, "manage_cell", {"target": target, "action": "wait"})
+            assert waited.public_value() == {
+                "target": target,
+                "meta": {"status": "SUCCESS", "cell_status": "completed", "pending_calls": 0},
+                "content": [],
+            }
+            archived.assert_not_awaited()
             assert await host.lease_output(cell) is lease
             await host.acknowledge_output(lease)
             async with asyncio.timeout(5):
@@ -139,8 +145,55 @@ def test_complete_cell_source_query_does_not_take_output_owner(tmp_path):
             }
             saved.assert_awaited_once_with(attempt, "completed", None)
             archived.assert_awaited_once_with(session_id=port._session_id, cell_id=cell)
-            unavailable = await dispatch(port, "manage_cell", {"target": target, "action": "wait"})
-            assert unavailable.state == "APPLICATION_ERROR"
+            waited = await dispatch(port, "manage_cell", {
+                "target": target, "action": "wait", "yield_time_ms": 15000,
+            })
+            assert waited.public_value() == {
+                "target": target,
+                "meta": {"status": "SUCCESS", "cell_status": "completed", "pending_calls": 0},
+                "content": [{"type": "text", "value": "这个 Cell 已完成，执行实例已回收。"}],
+            }
+            assert len(reads) == 2
+            archived.assert_awaited_with(session_id=port._session_id, cell_id=cell)
+            archived.reset_mock()
+            stopped = await dispatch(port, "manage_cell", {"target": target, "action": "stop"})
+            assert stopped.public_value() == {
+                "meta": {"status": "ERROR"},
+                "content": [{"type": "text", "value":
+                    "当前 Host 没有这个 Cell 的执行实例。可用 query_cells 查看本会话中保存的状态。"}],
+            }
+            archived.assert_not_awaited()
+        finally:
+            await host.aclose()
+            await port.aclose()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(("state", "diagnostic", "notice"), [
+    ("failed", "变量 result 未定义。", "这个 Cell 执行失败，执行实例已回收。"),
+    ("terminated", None, "这个 Cell 已终止，执行实例已回收。"),
+    (None, None, "当前 Host 已没有这个 Cell 的执行实例，无法确认其最终状态。"),
+])
+def test_wait_reports_the_saved_cell_outcome(tmp_path, state, diagnostic, notice):
+    async def run():
+        host = CodeModeHost()
+        read_source = AsyncMock()
+        read_outcome = AsyncMock(return_value=(random_id("attempt"), state, diagnostic))
+        port = runtime(tmp_path, host, read_source, read_outcome=read_outcome)
+        target = {"kind": "CELL", "cell_id": random_id("cell")}
+        try:
+            result = await dispatch(port, "manage_cell", {"target": target, "action": "wait"})
+            value = result.public_value()
+            assert value["target"] == target
+            assert value["meta"] == (
+                {"status": "ERROR"} if state is None else
+                {"status": "SUCCESS", "cell_status": state, "pending_calls": 0}
+            )
+            assert [part["value"] for part in value["content"]] == (
+                [notice, diagnostic] if diagnostic else [notice]
+            )
+            read_source.assert_not_awaited()
         finally:
             await host.aclose()
             await port.aclose()
@@ -149,7 +202,7 @@ def test_complete_cell_source_query_does_not_take_output_owner(tmp_path):
 
 
 @pytest.mark.postgres
-def test_native_query_reads_a_reclaimed_cell_after_resuming_its_session(
+def test_native_query_and_wait_read_a_reclaimed_cell_after_resuming_its_session(
     tmp_path, monkeypatch, stage2_migrated_postgres_database,
 ):
     from psycopg.rows import dict_row
@@ -169,6 +222,8 @@ def test_native_query_reads_a_reclaimed_cell_after_resuming_its_session(
             events = _tool_call("exec_cell", random_id("call"), {"code": script})
         elif len(model.requests) == 3:
             events = _tool_call("query_cells", random_id("call"), {"target": target})
+        elif len(model.requests) == 4:
+            events = _tool_call("manage_cell", random_id("call"), {"target": target, "action": "wait"})
         else:
             events = _text("done")
         for event in events:
@@ -200,6 +255,11 @@ def test_native_query_reads_a_reclaimed_cell_after_resuming_its_session(
             other = await core.open_session(workspace)
             foreign = await dispatch(other._tools, "query_cells", {"target": target})
             assert foreign.public_value()["meta"] == {"status": "ERROR"}
+            foreign_wait = await dispatch(other._tools, "manage_cell", {"target": target, "action": "wait"})
+            assert foreign_wait.public_value() == {
+                "meta": {"status": "ERROR"},
+                "content": [{"type": "text", "value": "当前会话中找不到该 Cell。"}],
+            }
             await core.close_session(session.host_session_id)
             resumed = await core.resume_session(session.session_id, workspace_input=workspace)
             assert not resumed._code_mode.snapshot_cell_index()
@@ -209,18 +269,28 @@ def test_native_query_reads_a_reclaimed_cell_after_resuming_its_session(
                 lane=PostgresConnectionLane.INSPECTOR, row_factory=dict_row,
                 deadline_monotonic=monotonic()+5,
             ) as connection:
-                row = connection.execute(
-                    """SELECT id FROM pulsara_v3.tool_results WHERE session_id=%s
-                       ORDER BY accepted_at DESC LIMIT 1""",
+                rows = connection.execute(
+                    """SELECT p.tool_name, r.id FROM pulsara_v3.tool_results r
+                       JOIN pulsara_v3.content_parts p ON p.session_id=r.session_id
+                         AND p.entry_id=r.tool_call_entry_id AND p.tool_call_id=r.tool_call_id
+                       WHERE r.session_id=%s AND p.tool_name IN ('query_cells', 'manage_cell')""",
                     (resumed.session_id,),
-                ).fetchone()
-            stored = resumed.repository.read_accepted_tool_result_observation(
-                session_id=resumed.session_id, result_id=row["id"], deadline_monotonic=monotonic()+5,
-            )
-            assert stored["value"] == {
+                ).fetchall()
+            values = {
+                row["tool_name"]: resumed.repository.read_accepted_tool_result_observation(
+                    session_id=resumed.session_id, result_id=row["id"], deadline_monotonic=monotonic()+5,
+                )["value"]
+                for row in rows
+            }
+            assert values["query_cells"] == {
                 "target": target,
                 "meta": {"status": "SUCCESS", "cell_status": "completed", "pending_calls": 0},
                 "content": [{"type": "text", "value": script}],
+            }
+            assert values["manage_cell"] == {
+                "target": target,
+                "meta": {"status": "SUCCESS", "cell_status": "completed", "pending_calls": 0},
+                "content": [{"type": "text", "value": "这个 Cell 已完成，执行实例已回收。"}],
             }
         finally:
             await core.shutdown()
@@ -263,6 +333,12 @@ def test_source_failure_keeps_live_cell_and_stop_does_not_read_output(tmp_path):
                 and result.content.content[0].value == "canonical content is corrupt"
             )
             assert host.capture_cell(cell).pending_calls == 1
+            waited = await dispatch(port, "manage_cell", {
+                "action": "wait", "target": target, "yield_time_ms": 1,
+            })
+            assert waited.public_value()["meta"] == {
+                "status": "SUCCESS", "cell_status": "running", "pending_calls": 1,
+            }
             inventory = await dispatch(port, "query_cells", {})
             assert inventory.content.content[0].value["pending_calls"] == 1
             stopped = await dispatch(

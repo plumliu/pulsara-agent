@@ -758,7 +758,7 @@
 .workbench.is-welcome > .thread-scroll { grid-area: 2 / 1 / 4 / 2; }
 .workbench.is-welcome > .composer-wrap { grid-area: 2 / 1 / 4 / 2; align-self: center; background: transparent; }
 .welcome-heading { position: absolute; bottom: calc(100% + 28px); left: 0; right: 0; text-align: center; pointer-events: none; opacity: 0; visibility: hidden; transform: translateY(-12px); transition: opacity .2s ease, transform .3s ease, visibility 0s .3s; }
-.welcome-heading h1, .session-canvas__welcome h1 { margin: 0; color: var(--ink-soft); font-family: var(--serif); font-size: clamp(27px, 3vw, 36px); font-weight: 500; letter-spacing: .025em; line-height: 1.35; }
+.welcome-heading h1 { margin: 0; color: var(--ink-soft); font-family: var(--serif); font-size: clamp(27px, 3vw, 36px); font-weight: 500; letter-spacing: .025em; line-height: 1.35; }
 .welcome-typewriter { display: inline-grid; max-width: min(86vw, 760px); text-align: left; white-space: nowrap; }
 .welcome-typewriter__sizer, .welcome-typewriter__line { grid-area: 1 / 1; }
 .welcome-typewriter__sizer { visibility: hidden; }

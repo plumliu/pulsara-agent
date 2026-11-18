@@ -1,4 +1,5 @@
 import { McpAuthorizationContext, mcpAuthorizationKey, useMcpAuthorization } from '../components/mcp-authorization';
+import { MessageSquarePlus, Sparkles } from 'lucide-react';
 import { flushSync } from 'react-dom';
 import { uiPreferences } from '../lib/ui-preferences';
 import { isCanonicalIdentity } from '../lib/identity';
@@ -1150,8 +1151,22 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
       </div>
     </section>
   ) : (
-    <section className="session-canvas__welcome" aria-label="会话欢迎页">
-      <WelcomeTypewriter active={showWorkbench} />
+    <section className="session-canvas__welcome is-welcome" aria-label="会话欢迎页">
+      <div className="composer-wrap">
+        <div className="composer-frame">
+          <div className="welcome-heading"><WelcomeTypewriter active={showWorkbench} /></div>
+          <div className="composer session-required-composer">
+            <span className="session-required-composer__icon" aria-hidden="true"><Sparkles size={15} /></span>
+            <span className="session-required-composer__copy">
+              <strong>创建或选择会话后开始</strong>
+              <small>提问、写代码，或一起探索一个想法。</small>
+            </span>
+            <button className="secondary-action" type="button" disabled={!canCreateSession} onClick={openNewSession}>
+              <MessageSquarePlus size={13} aria-hidden="true" /> 创建会话
+            </button>
+          </div>
+        </div>
+      </div>
     </section>
   );
 

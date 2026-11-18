@@ -464,7 +464,13 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     ),
     "manage_cell": _descriptor(
         name="manage_cell",
-        description="Control target:CELL. wait(target, action:wait, yield_time_ms?) waits briefly for state changes; stop(target, action:stop) stops further script execution. Use only the selected action's fields. Submitted tool calls still settle actual effects. Output already delivered is not withdrawn.",
+        description=(
+            "Pass target:CELL and action. wait waits for a final state up to yield_time_ms "
+            "(default 1000), or immediately returns a saved final state from this session. "
+            "Read meta.cell_status for the Cell outcome. stop stops further execution of a Cell "
+            "held by the current Host. Submitted tool calls settle separately. Use query_cells "
+            "to read source and status."
+        ),
         input_schema=manage_cell_parameters_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False, permission_category="subagent_runtime",

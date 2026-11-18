@@ -22,7 +22,8 @@ console.log({content:[...notes.content, ...picture.content]});
 
 Use native `query_cells` to list Cells held by the current Host. Pass a CELL Target for frozen source
 and live or saved status in this session. Unconfirmed final status is `unknown`.
-Native `manage_cell` waits for or stops a live Cell. Output arrives separately.
+Use `manage_cell` with `wait` to await a running Cell or get its saved final state.
+Use `stop` on Cells held by the current Host. Output arrives separately.
 
 - [Results, errors and images](references/tool-calling/results-and-errors.md)
 - [Discover an MCP tool before calling it](references/tool-calling/patterns.md)

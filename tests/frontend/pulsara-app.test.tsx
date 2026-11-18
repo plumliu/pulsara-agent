@@ -2111,7 +2111,7 @@ describe('PulsaraApp', () => {
     expect(screen.queryByRole('button', { name: '切换检查器' })).toBeNull();
     expect(adapter.connectCalls).toHaveLength(0);
 
-    fireEvent.click(screen.getByRole('button', { name: /^新建会话/ }));
+    fireEvent.click(within(welcome).getByRole('button', { name: '创建会话' }));
     expect(screen.getByRole('heading', { name: '新建会话' })).toBeTruthy();
   });
 

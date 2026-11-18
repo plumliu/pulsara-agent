@@ -1300,6 +1300,19 @@ class DirectKernelToolPort(
         return {"cell": snapshot.public_value(), "participation_coverage": observed["participation_coverage"],
                 "section": section, "items": items, "next_cursor": next_cursor}
 
+    async def _read_saved_code_cell_outcome(self, *, session_id, cell_id):
+        from pulsara_agent.code_mode.contracts import CodeModeError
+
+        try:
+            outcome = await self._code_mode_read_outcome(session_id=session_id, cell_id=cell_id)
+        except MemoryError:
+            raise
+        except Exception as error:
+            raise CodeModeError('unavailable', str(error)) from error
+        if outcome is None:
+            raise CodeModeError('unavailable', '当前会话中找不到该 Cell。')
+        return outcome
+
     async def _query_cells(self, arguments, context, *, capture=None, outcome=None):
         from pulsara_agent.code_mode.contracts import CodeModeError
         from pulsara_agent.conversation_kernel.content_parts import ResultPart
@@ -1396,15 +1409,8 @@ class DirectKernelToolPort(
                     cell_id = arguments['target']['cell_id']
                     capture = self._code_mode.find_cell_snapshot(cell_id)
                     if capture is None:
-                        try:
-                            outcome = await self._code_mode_read_outcome(
-                                session_id=context.session_id, cell_id=cell_id)
-                        except MemoryError:
-                            raise
-                        except Exception as error:
-                            raise CodeModeError('unavailable', str(error)) from error
-                        if outcome is None:
-                            raise CodeModeError('unavailable', '当前会话中找不到该 Cell。')
+                        outcome = await self._read_saved_code_cell_outcome(
+                            session_id=context.session_id, cell_id=cell_id)
                     target = arguments['target']
                 business = await self._query_cells(arguments, context, capture=capture, outcome=outcome)
             elif tool_name == 'exec_cell':
@@ -1423,18 +1429,36 @@ class DirectKernelToolPort(
                 business = ToolBusinessValue(public_fields={'target':target}, content=(ResultPart('text','已接纳脚本执行。'),))
             else:
                 cell_id = arguments['target']['cell_id']
-                captured = self._code_mode.capture_cell(cell_id)
-                target = arguments['target']
-                observation = (await self._code_mode.stop(cell_id) if arguments['action'] == 'stop'
-                               else await self._code_mode.wait_state(cell_id, arguments.get('yield_time_ms',1000)))
-                parts = []
-                if arguments['action'] == 'stop':
-                    parts.append(ResultPart('text', '已停止脚本执行。' if observation['state'] == 'terminated' else '脚本已结束。'))
-                error = observation.get('error') or captured.error
-                if error:
-                    parts.append(ResultPart('text', str(error.get('message', error))))
+                action = arguments['action']
+                if action == 'wait' and self._code_mode.find_cell_snapshot(cell_id) is None:
+                    _, state, diagnostic = await self._read_saved_code_cell_outcome(
+                        session_id=context.session_id, cell_id=cell_id)
+                    target = arguments['target']
+                    if state is None:
+                        raise CodeModeError('unavailable',
+                            '当前 Host 已没有这个 Cell 的执行实例，无法确认其最终状态。')
+                    pending_calls = 0
+                    parts = [ResultPart('text', {
+                        'completed': '这个 Cell 已完成，执行实例已回收。',
+                        'failed': '这个 Cell 执行失败，执行实例已回收。',
+                        'terminated': '这个 Cell 已终止，执行实例已回收。',
+                    }[state])]
+                    if diagnostic:
+                        parts.append(ResultPart('text', diagnostic))
+                else:
+                    captured = self._code_mode.capture_cell(cell_id)
+                    target = arguments['target']
+                    observation = (await self._code_mode.stop(cell_id) if action == 'stop'
+                                   else await self._code_mode.wait_state(cell_id, arguments.get('yield_time_ms', 1000)))
+                    state, pending_calls = observation['state'], observation['pending_calls']
+                    parts = []
+                    if action == 'stop':
+                        parts.append(ResultPart('text', '已停止脚本执行。' if state == 'terminated' else '脚本已结束。'))
+                    error = observation.get('error') or captured.error
+                    if error:
+                        parts.append(ResultPart('text', str(error.get('message', error))))
                 business = ToolBusinessValue(public_fields={'target':target,
-                    'meta':{'cell_status':observation['state'],'pending_calls':observation['pending_calls']}}, content=tuple(parts))
+                    'meta':{'cell_status':state,'pending_calls':pending_calls}}, content=tuple(parts))
             return KernelToolResult(state='SUCCESS', content=business,
                 physical_observation=_freeze_physical_observation(monotonic(), ToolObservationOrigin.BUILTIN))
         except (CodeModeError, ValueError, OSError, UnicodeError, LookupError) as error:

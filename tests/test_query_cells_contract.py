@@ -244,7 +244,8 @@ def test_live_query_does_not_reserve_or_consume_formal_output():
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("source", ["", "\\" * 20000, "// 冻结源码😀\n" * 5000])
+@pytest.mark.parametrize("source", ["", "\\" * 20000, "// 冻结源码😀\n" * 5000],
+                         ids=["empty", "escaped", "unicode"])
 def test_query_source_is_complete_and_capture_survives_retirement_without_consuming_output(
     source,
 ):
@@ -260,6 +261,7 @@ def test_query_source_is_complete_and_capture_survives_retirement_without_consum
             return source
 
         port._code_mode_read_source = read_source
+        port._code_mode_read_outcome = AsyncMock(return_value=None)
         context = _context()
         try:
             cell = await _start(host, "console.log('unread output');")
@@ -267,7 +269,7 @@ def test_query_source_is_complete_and_capture_survives_retirement_without_consum
             lease = await host.lease_output(cell)
             target = cell_target(cell)
             release.set()
-            value = await port._query_cells({"target": target}, context)
+            value = (await port._invoke_code_mode_control("query_cells", {"target": target}, context)).content
             assert value.public_fields == {
                 "target": target,
                 "meta": {"cell_status": "completed", "pending_calls": 0},
@@ -276,17 +278,19 @@ def test_query_source_is_complete_and_capture_survives_retirement_without_consum
             assert await host.lease_output(cell) is lease
             started.clear()
             release.clear()
-            query = asyncio.create_task(port._query_cells({"target": target}, context))
+            query = asyncio.create_task(port._invoke_code_mode_control("query_cells", {"target": target}, context))
             await started.wait()
             owned = host._cells[cell]
             await owned.vm_released.wait()
             await host.acknowledge_output(lease)
             assert cell not in host._cells
             release.set()
-            assert "".join(part.value for part in (await query).content) == source
-            with pytest.raises(CodeModeError) as missing:
-                await port._query_cells({"target": target}, context)
-            assert missing.value.code == "unavailable"
+            assert "".join(part.value for part in (await query).content.content) == source
+            missing = await port._invoke_code_mode_control("query_cells", {"target": target}, context)
+            assert missing.public_value() == {
+                "meta": {"status": "ERROR"},
+                "content": [{"type": "text", "value": "当前会话中找不到该 Cell。"}],
+            }
         finally:
             release.set()
             await host.aclose()
@@ -346,6 +350,7 @@ def test_query_missing_cell_does_not_claim_target_or_read_source():
         port._code_mode = host
         read_source = AsyncMock()
         port._code_mode_read_source = read_source
+        port._code_mode_read_outcome = AsyncMock(return_value=None)
         try:
             target = cell_target(random_id("cell"))
             result = await port._invoke_code_mode_control(
@@ -354,6 +359,7 @@ def test_query_missing_cell_does_not_claim_target_or_read_source():
             value = result.public_value()
             assert value["meta"] == {"status": "ERROR"}
             assert "target" not in value
+            assert value["content"] == [{"type": "text", "value": "当前会话中找不到该 Cell。"}]
             read_source.assert_not_awaited()
         finally:
             await host.aclose()

@@ -152,12 +152,31 @@
 .session-canvas__welcome {
   display: grid;
   place-items: center;
-  padding: 24px;
-  text-align: center;
-  background: radial-gradient(ellipse min(85%, 560px) min(65%, 300px) at center,
-    color-mix(in srgb, var(--amber-soft) 40%, transparent), transparent 75%), var(--paper);
+  padding: 0 clamp(16px, 4%, 48px);
+  background-color: var(--paper);
 }
+.session-canvas__welcome > .composer-wrap { width: 100%; padding: 0; background: transparent; }
 .session-canvas__welcome .welcome-typewriter__line { justify-content: center; }
+.session-required-composer {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 60px;
+  padding: 8px 12px;
+}
+.session-required-composer__icon {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: var(--paper-deep);
+  color: var(--faint);
+}
+.session-required-composer__copy { display: grid; gap: 3px; }
+.session-required-composer__copy strong { color: var(--ink-soft); font: 650 var(--type-small) var(--serif); }
+.session-required-composer__copy small { color: var(--faint); font-size: var(--type-label); line-height: 1.45; }
 .session-canvas-window {
   position: absolute;
   display: flex;

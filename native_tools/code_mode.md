@@ -386,9 +386,7 @@ next: null
 
 ### 3.1 用途与最简参数
 
-wait 等待指定 Cell 进入终态，或在本次等待期限到达时返回实际状态；stop 停止该 Cell 的后续 JS 执行和工具提交。两种动作都不读取源码，不消费或重发 steer。
-
-底层执行、停止、取消信号、已发生效果结算、输出移交及资源回收完全保持当前语义。本次调整参数表达及公开结果，不把停止 Cell 扩大为撤销所有工具效果、取消全部 Agent Work 或撤回已入队输出。
+wait 等待指定 Cell 进入终态，或在本次等待期限到达时返回实际状态。已有本会话保存的终态时直接返回。stop 停止当前 Host 持有的 Cell 的后续 JS 执行和工具提交。源码用 query_cells 读取，Cell 输出通过会话输入队列独立交付。
 
 | 参数 | 类型 | 必填与默认 | 明确含义 |
 | --- | --- | --- | --- |
@@ -410,7 +408,9 @@ type ManageCellArgs =
 | --- | --- | --- |
 | Cell 未结束 | 等待终态或本次期限到达 | 阻止后续 JS 执行和工具提交，等待取得实际终态 |
 | Cell 已结束且仍可访问 | 立即返回实际状态 | 保留 completed／failed／terminated，不强制改成 terminated |
-| Cell 已回收或不可用 | ERROR | ERROR，不重建或重新执行 Cell |
+| Cell 已回收，当前会话有已确认的终态 | 立即 SUCCESS，返回已保存的终态和 pending_calls:0 | ERROR，说明当前 Host 没有该 Cell 的执行实例，可用 query_cells 查询 |
+| 当前会话有执行记录，终态未确认 | ERROR，说明无法确认最终状态 | ERROR，说明当前 Host 没有该 Cell 的执行实例 |
+| 当前会话找不到该 Cell | ERROR，说明当前会话中找不到该 Cell | ERROR，说明当前 Host 没有该 Cell 的执行实例 |
 | 收到 console.log 输出 | 不因此结束状态等待，输出继续独立交付 | 按第 3.4 节区分输出阶段 |
 | 本次等待到期但 Cell 未结束 | SUCCESS，返回 queued 或 running，不停止 Cell | 无本次等待期限参数 |
 
@@ -452,7 +452,7 @@ wait 和 stop 共用结果字段，正常取得结果时均保留 pending_calls�
 | meta.status | 本次控制工具调用的 SUCCESS／ERROR／CANCELLED |
 | meta.cell_status | 本次实际取得的 Cell 状态；wait 可为任意现有状态，stop 成功时为实际终态 |
 | meta.pending_calls | 本次观察时尚未结清的脚本工具调用数量，非负整数 |
-| content | TextPart[]；wait 通常为空，有实际诊断时保留文字；stop 返回简短说明及必要诊断 |
+| content | TextPart[]；wait 读到已回收 Cell 的终态时说明实际结果，并附已保存的诊断。等待 Host 持有的 Cell 时有诊断才输出文字。stop 返回简短说明及必要诊断 |
 
 ```typescript
 type ManageCellTerminalState = "completed" | "failed" | "terminated";
@@ -489,11 +489,11 @@ type ManageCellResult =
   | ManageCellFailure;
 ```
 
-成功观察到 failed 不等于 wait 失败，停止成功也不等于本次工具调用被取消，均返回 SUCCESS。CANCELLED 只用于本次调用自身的取消结算；不能因这次控制调用被取消，就宣称 Cell、已提交工具或队列输出全部已经取消。
+成功取得状态或执行停止时返回 SUCCESS，Cell 的实际结果看 cell_status，包括 failed 和 terminated。本次工具调用被取消时返回 CANCELLED。
 
-参数无效、Cell 不可用或实际控制失败使用 ERROR。错误和取消时只返回 meta.status 和简短 content，确有已确认对象时才可保留 target；已知状态、控制效果及不确定性写入 content，不伪造状态或数量，也不构造可选元数据组合。更早失败没有业务值时沿既有错误通道报告，不伪造结果。
+参数无效、Cell 不可用、终态无法确认或实际控制失败使用 ERROR。错误和取消返回 meta.status 和简短 content，已确认对象时可保留 target。content 说明这次操作未能完成的原因。有 Cell 诊断时也放在 content 中。
 
-删除 wait 的公开 error_code，实际诊断放 content；内部错误事实、输出缓冲和取消信号继续用于原有停止与结算，不因公开字段删除而丢弃。不增加 timeout、stopped、has_unread_output、输出撤回数量或另一组状态／错误枚举。正常停止到 terminated 时说明“已停止脚本执行。”；若实际已经 completed 或 failed，则说明“脚本已结束。”，有用诊断另放文字，不假称本次终止了已完成的脚本。
+stop 结束脚本时说明“已停止脚本执行。”。如果脚本已经完成或失败，则说明“脚本已结束。”。
 
 ### 3.6 原生示例
 
@@ -528,7 +528,7 @@ tool_result: <本次完整等待结果的导出 Target>
 next: null
 ```
 
-若等待取得脚本失败状态，有实际诊断时仍为正常观察结果：
+若 Cell 已回收，wait 取得保存的失败状态和诊断：
 
 ```text
 target: {"kind":"CELL","cell_id":"cell:<A>"}
@@ -539,7 +539,8 @@ meta:
   pending_calls: 0
 
 content:
-  脚本执行失败：变量 result 未定义。
+  这个 Cell 执行失败，执行实例已回收。
+  变量 result 未定义。
 
 tool_result: <本次完整等待结果的导出 Target>
 next: null
@@ -576,20 +577,20 @@ tool_result: <本次完整停止结果的导出 Target>
 next: null
 ```
 
-Cell 已回收或不可用，且错误结果已正常保存交付时：
+stop 的目标不在当前 Host 时：
 
 ```text
 meta:
   status: ERROR
 
 content:
-  无法操作 Cell cell:<A>：当前 Host 中该 Cell 已不可用。
+  当前 Host 没有这个 Cell 的执行实例。可用 query_cells 查看本会话中保存的状态。
 
 tool_result: <本次完整错误结果的导出 Target>
 next: null
 ```
 
-本工具的诊断及说明均使用 type:text、value:string 内容项；正常 wait 无诊断时为 content:[]。示例假设结果一页可完整交付，实际观察信息沿共同规则顶层并列，不伪造耗时。
+本工具的诊断及说明均使用 type:text、value:string 内容项。示例假设结果一页可完整交付，实际观察信息沿共同规则顶层并列。
 
 ### 3.7 冻结结果与实施边界
 
@@ -597,7 +598,7 @@ next: null
 
 删除停止前因结果不满足展示页预算而拒绝执行 stop 的旧检查；这沿共同的业务执行与展示分离规则处理，不改变底层停止、工具取消及输出归属。保存或交付失败如实保留已知效果，不因模型没收到停止说明就重做操作，不提供假 tool_result 或 NEXT。
 
-实施只需接通本章的参数／结果合同及共同交付路径，不重写现有停止或队列机制，不增加撤回已入队 steer、回滚工具效果、连带取消 Work、等待全部调用结算或跨重启恢复的能力。重复停止只在 Cell 仍可访问时按实际状态返回；回收后的引用不因曾成功停止而恢复可用。
+wait 与 query_cells 共用本会话的终态查询。重复 stop 时，Host 仍持有该 Cell 就按实际状态返回。回收后可用 wait 或 query_cells 查询终态。
 
 ## 4. 当前生产实现参考
 
