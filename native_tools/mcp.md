@@ -267,7 +267,7 @@ console.log({
 });
 ```
 
-上例仅交付脚本选中的 content，不自动补 structuredContent。直接 console.log(result) 或显式 return result 则交付脚本实际返回的完整值；共同图片项在任意嵌套位置按既定规则识别，structuredContent 中普通 SDK image/data 对象或 Base64 字符串不被解析为真实图片。业务 JSON 原值不因包含相似字段而被修改。
+上例仅交付脚本选中的 content。要同时交付 structuredContent 等字段，可用 console.log(result) 输出完整值。共同图片项在任意嵌套位置按既定规则识别，structuredContent 中普通 SDK image/data 对象或 Base64 字符串按业务 JSON 原值保留。
 
 业务错误仍可取得完整失败值并显式交付：
 
@@ -507,7 +507,7 @@ const result = await tools.read_mcp_resource({
 console.log(result);
 ```
 
-读取图片资源时，result.content 中的 image 项使用真实 IMAGE_REF；脚本可以选取、组合或输出完整结果。console.log／return 的任意层级图片识别、模型能力投影和独立 steer 交付沿共同规则，未输出的中间值不自动交给模型。
+读取图片资源时，result.content 中的 image 项使用真实 IMAGE_REF。用 console.log 输出所需图片，或将图片项与其他内容一起输出。嵌套图片识别、模型能力投影和独立 steer 交付沿共同规则。
 
 有完整失败值时可显式输出它：
 

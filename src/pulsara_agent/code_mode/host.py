@@ -15,7 +15,7 @@ import json
 import logging
 import math
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Awaitable, Callable, Mapping
 from types import MappingProxyType
 
 from pulsara_agent.identity import random_id, require_id
@@ -152,6 +152,7 @@ class _Cell:
     participation_pending: dict[tuple[str, str | None], int] | None = None
     participation_task: asyncio.Task[None] | None = None
     participation_incomplete: bool = False
+    collecting: bool = False
 
     @property
     def pending_calls(self) -> int:
@@ -181,6 +182,12 @@ class CodeModeHost:
         self._output_ready: Callable[[], None] | None = None
         self._output_preparer = None
         self._output_quoter = None
+        self._save_outcome: Callable[[str, CellState, str | None], Awaitable[None]] | None = None
+
+    def set_outcome_saver(
+        self, save: Callable[[str, CellState, str | None], Awaitable[None]],
+    ) -> None:
+        self._save_outcome = save
 
     def set_output_preparer(self, prepare, *, quote=None) -> None:
         self._output_preparer = prepare
@@ -468,6 +475,8 @@ class CodeModeHost:
                         reservation.set_result(False)
                 cell.reservations.clear()
                 cell.changed.set()
+            for cell in tuple(self._cells.values()):
+                await self._collect(cell)
 
     async def start(
         self,
@@ -895,7 +904,15 @@ class CodeModeHost:
     def capture_cell(self, cell_id: str) -> CodeModeCellSnapshot:
         """Capture source provenance and metadata without an output reservation."""
         self._require_query_available()
-        cell = self._cell(cell_id)
+        return self._snapshot(self._cell(cell_id))
+
+    def find_cell_snapshot(self, cell_id: str) -> CodeModeCellSnapshot | None:
+        """Observe live facts for a detail query even if execution is unavailable."""
+        cell = self._cells.get(cell_id)
+        return self._snapshot(cell) if cell is not None else None
+
+    @staticmethod
+    def _snapshot(cell: _Cell) -> CodeModeCellSnapshot:
         return CodeModeCellSnapshot(
             cell.cell_id,
             cell.state,
@@ -1251,6 +1268,7 @@ class CodeModeHost:
     async def _collect(self, cell: _Cell) -> None:
         if (
             self._cells.get(cell.cell_id) is cell
+            and not cell.collecting
             and cell.state in _TERMINAL
             and not cell.pending
             and not cell.output
@@ -1258,9 +1276,17 @@ class CodeModeHost:
             and not cell.output_borrowing
             and cell.vm_released.is_set()
         ):
+            cell.collecting = True
             if cell.participation_task is not None:
                 cell.participation_task.cancel()
-            self._cells.pop(cell.cell_id, None)
+            try:
+                if self._save_outcome is not None and cell.admitted.done() and not cell.admitted.exception():
+                    diagnostic = str(cell.error.get("message", cell.error)) if cell.error else None
+                    await self._save_outcome(cell.source_exec_attempt_id, cell.state, diagnostic)
+            except Exception:
+                logging.getLogger(__name__).exception("Could not save the outcome of Cell %s", cell.cell_id)
+            finally:
+                self._cells.pop(cell.cell_id, None)
             await self._safe_send({"type": "forget", "cell_id": cell.cell_id})
 
     @staticmethod

@@ -661,6 +661,10 @@ CREATE TABLE pulsara_v3.tool_execution_attempts (
     code_source_content_size bigint CHECK (code_source_content_size >= 0),
     code_source_content_media_type text,
     code_source_content_codec text,
+    code_cell_terminal_state text CHECK (code_cell_terminal_state IN ('completed', 'failed', 'terminated')),
+    code_cell_diagnostic text,
+    CHECK (code_cell_terminal_state IS NULL OR code_source_content_digest IS NOT NULL),
+    CHECK (code_cell_diagnostic IS NULL OR code_cell_terminal_state IS NOT NULL),
     CHECK (
         (num_nonnulls(code_source_inline_content,code_source_blob_id,code_source_content_digest,
             code_source_content_size,code_source_content_media_type,code_source_content_codec)=0)
@@ -824,6 +828,11 @@ CREATE TABLE pulsara_v3.imported_tool_call_closures (
     FOREIGN KEY (session_id, assistant_entry_id, tool_call_id)
         REFERENCES pulsara_v3.content_parts (session_id, entry_id, tool_call_id) ON DELETE CASCADE
 );
+
+CREATE INDEX idx_tool_results_cell_target
+    ON pulsara_v3.tool_results (session_id, (public_fields->'target'->>'cell_id'))
+    WHERE result_record_kind='EXECUTED' AND result_state='SUCCESS'
+      AND public_fields->'target'->>'kind'='CELL';
 
 CREATE TABLE pulsara_v3.prompt_queue_items (
     id text CHECK (id ~ '^queue:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,

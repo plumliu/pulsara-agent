@@ -78,8 +78,7 @@ def test_query_cells_has_complete_scope_and_exact_frozen_source():
         error={"message": "actual failure"},
     )
     surface = port(
-        SimpleNamespace(list_cell_snapshots=listing),
-        capture_code_cell=lambda _: capture,
+        SimpleNamespace(list_cell_snapshots=listing, find_cell_snapshot=lambda _: capture),
         _code_mode_read_source=AsyncMock(return_value=source),
     )
     context = SimpleNamespace(session_id=random_id("session"))
@@ -105,6 +104,32 @@ def test_query_cells_has_complete_scope_and_exact_frozen_source():
         "session_id": context.session_id,
         "attempt_id": capture.source_exec_attempt_id,
     }
+
+
+def test_query_cells_returns_frozen_source_when_terminal_state_is_unconfirmed():
+    target = {"kind": "CELL", "cell_id": random_id("cell")}
+    session = random_id("session")
+    attempt = random_id("attempt")
+    source = "// no terminal record\n"
+    surface = port(
+        SimpleNamespace(find_cell_snapshot=lambda _: None),
+        _code_mode_read_outcome=AsyncMock(return_value=(attempt, None, None)),
+        _code_mode_read_source=AsyncMock(return_value=source),
+    )
+    value = asyncio.run(surface._invoke_code_mode_control(
+        "query_cells", {"target": target}, SimpleNamespace(session_id=session),
+    )).public_value()
+    assert value == {
+        "target": target,
+        "meta": {"status": "SUCCESS", "cell_status": "unknown"},
+        "content": [{"type": "text", "value": source}],
+    }
+    surface._code_mode_read_outcome.assert_awaited_once_with(
+        session_id=session, cell_id=target["cell_id"],
+    )
+    surface._code_mode_read_source.assert_awaited_once_with(
+        session_id=session, attempt_id=attempt,
+    )
 
 
 def test_manage_cell_reports_actual_terminal_state_and_unsettled_effect_count():

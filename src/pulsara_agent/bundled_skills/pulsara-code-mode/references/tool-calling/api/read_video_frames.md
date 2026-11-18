@@ -2,8 +2,6 @@
 
 Read local video frames. Pass target:PATH, from?, to?, action? and crop?. overview locates content across a range; detail reads text or objects within explicit from/to at most two seconds apart; motion examines changes and order. detail samples start, midpoint and just before the end. Decimal seconds and normalized crop are supported. Returned indices describe the images that follow them.
 
-See the [API rules](index.md) for successful resolution, actual `err.result` and explicit output. Array constraints are retained in type annotations.
-
 ```ts
 export interface ReadVideoFramesArgs {
   /**
@@ -16,7 +14,7 @@ export interface ReadVideoFramesArgs {
    * @minItems 4
    * @maxItems 4
    */
-  crop?: [number, number, number, number, ...number[]];
+  crop?: [number, number, number, number];
   /**
    * Start in seconds (decimals supported). Defaults to 0 for overview/motion; required for detail.
    */
@@ -30,139 +28,74 @@ export interface ReadVideoFramesArgs {
    */
   to?: number;
 }
-
-export type ReadVideoFramesValue =
-  | (
-      | {
-          target: {
-            kind: "PATH";
-            path: string;
-          };
-          meta: {
-            status: "SUCCESS";
-          };
-          content: (
-            | {
-                type: "text";
-                value: string;
-              }
-            | {
-                type: "image";
-                value: {
-                  kind: "IMAGE_REF";
-                  image_ref: string;
-                };
-              }
-            | {
-                type: "object";
-                value:
-                  | {
-                      t: number;
-                      /**
-                       * @minItems 2
-                       * @maxItems 2
-                       */
-                      visible_range: [number, number, ...number[]];
-                      dt?: number;
-                    }
-                  | {
-                      frames: {
-                        n: number;
-                        t: number;
-                        /**
-                         * @minItems 4
-                         * @maxItems 4
-                         */
-                        cell_rect: [number, number, number, number, ...number[]];
-                        dt?: number;
-                        /**
-                         * @minItems 2
-                         * @maxItems 2
-                         */
-                        visible_range?: [number, number, ...number[]];
-                        /**
-                         * @minItems 2
-                         * @maxItems 2
-                         */
-                        representative_range?: [number, number, ...number[]];
-                      }[];
-                    };
-              }
-          )[];
-        }
-      | {
-          target?: {
-            kind: "PATH";
-            path: string;
-          };
-          meta: {
-            status: "ERROR" | "CANCELLED";
-          };
-          content: (
-            | {
-                type: "text";
-                value: string;
-              }
-            | {
-                type: "image";
-                value: {
-                  kind: "IMAGE_REF";
-                  image_ref: string;
-                };
-              }
-            | {
-                type: "object";
-                value:
-                  | {
-                      t: number;
-                      /**
-                       * @minItems 2
-                       * @maxItems 2
-                       */
-                      visible_range: [number, number, ...number[]];
-                      dt?: number;
-                    }
-                  | {
-                      frames: {
-                        n: number;
-                        t: number;
-                        /**
-                         * @minItems 4
-                         * @maxItems 4
-                         */
-                        cell_rect: [number, number, number, number, ...number[]];
-                        dt?: number;
-                        /**
-                         * @minItems 2
-                         * @maxItems 2
-                         */
-                        visible_range?: [number, number, ...number[]];
-                        /**
-                         * @minItems 2
-                         * @maxItems 2
-                         */
-                        representative_range?: [number, number, ...number[]];
-                      }[];
-                    };
-              }
-          )[];
-        }
-    )
-  | {
-      meta: {
-        status: "ERROR" | "CANCELLED";
-      };
-      content: {
-        type: "text";
-        value: string;
-      }[];
-    };
-
-type Successful<T> = T extends { meta: { status: infer S } }
-  ? "SUCCESS" extends S ? T & { meta: { status: "SUCCESS" } } : never
-  : never;
+export interface ReadVideoFramesSuccess {
+  target: PathTarget;
+  meta: {
+    status: "SUCCESS";
+  };
+  content: (TextPart | ImagePart | ObjectPart)[];
+}
+export interface PathTarget {
+  kind: "PATH";
+  path: string;
+}
+export interface TextPart {
+  type: "text";
+  value: string;
+}
+export interface ImagePart {
+  type: "image";
+  value: ImageRefTarget;
+}
+export interface ImageRefTarget {
+  kind: "IMAGE_REF";
+  image_ref: string;
+}
+export interface ObjectPart {
+  type: "object";
+  value: Value | Value2;
+}
+export interface Value {
+  t: number;
+  /**
+   * @minItems 2
+   * @maxItems 2
+   */
+  visible_range: [number, number];
+  dt?: number;
+}
+export interface Value2 {
+  frames: Frames[];
+}
+export interface Frames {
+  n: number;
+  t: number;
+  /**
+   * @minItems 4
+   * @maxItems 4
+   */
+  cell_rect: [number, number, number, number];
+  dt?: number;
+  /**
+   * @minItems 2
+   * @maxItems 2
+   */
+  visible_range?: [number, number];
+  /**
+   * @minItems 2
+   * @maxItems 2
+   */
+  representative_range?: [number, number];
+}
+export interface ReadVideoFramesFailure {
+  target?: PathTarget;
+  meta: {
+    status: "ERROR" | "CANCELLED";
+  };
+  content: (TextPart | ImagePart | ObjectPart)[];
+}
 
 declare const tools: {
-  read_video_frames(args: ReadVideoFramesArgs): Promise<Successful<ReadVideoFramesValue>>;
+  read_video_frames(args: ReadVideoFramesArgs): Promise<ReadVideoFramesSuccess>;
 };
 ```

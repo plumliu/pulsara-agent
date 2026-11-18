@@ -1,8 +1,6 @@
 # `tools.wait_agent(args)`
 
-Wait in ROOT Code Mode with exactly one of works:WORK[] or agents:AGENT[]. settle is all (default) or first; timeout_seconds is 0–300 (default 30). WORK waits for terminal states, AGENT for idle or a selected sender's message. Already satisfied targets count immediately. Success returns every target in input order: WORK records have agent/work/work_status; AGENT records have agent/is_idle. meta.wait_reason explains return; timeout is successful observation, not work completion. Message bodies arrive separately in normal conversation input; failures reject with err.result when available.
-
-See the [API rules](index.md) for successful resolution, actual `err.result` and explicit output. Array constraints are retained in type annotations.
+Wait with either works or agents. settle is all (default) or first; timeout_seconds is 0–300 (default 30). WORK waits for terminal state. AGENT waits for idle or a message from one of the specified Agents. Already satisfied targets count immediately. Check meta.wait_reason and the records, which cover all targets in input order.
 
 ```ts
 export type WaitAgentArgs =
@@ -12,204 +10,90 @@ export type WaitAgentArgs =
       /**
        * @minItems 1
        */
-      works: [
-        {
-          kind: "WORK";
-          work_id: string;
-        },
-        ...{
-          kind: "WORK";
-          work_id: string;
-        }[]
-      ];
+      works: [WorkTarget, ...WorkTarget[]];
     }
   | {
       /**
        * @minItems 1
        */
-      agents: [
-        {
-          agent_id: string;
-          kind: "AGENT";
-        },
-        ...{
-          agent_id: string;
-          kind: "AGENT";
-        }[]
-      ];
+      agents: [AgentTarget, ...AgentTarget[]];
       settle?: "all" | "first";
       timeout_seconds?: number;
     };
-
-export type WaitAgentValue =
-  | (
-      | (
-          | {
-              meta: {
-                status: "SUCCESS";
-                wait_reason: "condition_met" | "timeout";
-              };
-              /**
-               * @minItems 1
-               */
-              content: [
-                {
-                  type: "object";
-                  value: {
-                    agent: {
-                      kind: "AGENT";
-                      agent_id: string;
-                    };
-                    work: {
-                      kind: "WORK";
-                      work_id: string;
-                    };
-                    work_status: "queued" | "running" | "completed" | "stopped";
-                  };
-                },
-                ...{
-                  type: "object";
-                  value: {
-                    agent: {
-                      kind: "AGENT";
-                      agent_id: string;
-                    };
-                    work: {
-                      kind: "WORK";
-                      work_id: string;
-                    };
-                    work_status: "queued" | "running" | "completed" | "stopped";
-                  };
-                }[]
-              ];
-            }
-          | {
-              meta: {
-                status: "SUCCESS";
-                wait_reason: "condition_met" | "timeout";
-              };
-              /**
-               * @minItems 1
-               */
-              content: [
-                {
-                  type: "object";
-                  value: {
-                    agent: {
-                      kind: "AGENT";
-                      agent_id: string;
-                    };
-                    is_idle: boolean;
-                  };
-                },
-                ...{
-                  type: "object";
-                  value: {
-                    agent: {
-                      kind: "AGENT";
-                      agent_id: string;
-                    };
-                    is_idle: boolean;
-                  };
-                }[]
-              ];
-            }
-          | {
-              meta: {
-                status: "SUCCESS";
-                wait_reason: "message_available";
-                /**
-                 * @minItems 1
-                 */
-                message_sources: [
-                  {
-                    kind: "AGENT";
-                    agent_id: string;
-                  },
-                  ...{
-                    kind: "AGENT";
-                    agent_id: string;
-                  }[]
-                ];
-              };
-              /**
-               * @minItems 1
-               */
-              content: [
-                {
-                  type: "object";
-                  value: {
-                    agent: {
-                      kind: "AGENT";
-                      agent_id: string;
-                    };
-                    is_idle: boolean;
-                  };
-                },
-                ...{
-                  type: "object";
-                  value: {
-                    agent: {
-                      kind: "AGENT";
-                      agent_id: string;
-                    };
-                    is_idle: boolean;
-                  };
-                }[]
-              ];
-            }
-        )
-      | {
-          meta: {
-            status: "ERROR" | "CANCELLED";
-          };
-          content: (
-            | {
-                type: "text";
-                value: string;
-              }
-            | {
-                type: "object";
-                value: {
-                  agent: {
-                    kind: "AGENT";
-                    agent_id: string;
-                  };
-                  work: {
-                    kind: "WORK";
-                    work_id: string;
-                  };
-                  work_status: "queued" | "running" | "completed" | "stopped";
-                };
-              }
-            | {
-                type: "object";
-                value: {
-                  agent: {
-                    kind: "AGENT";
-                    agent_id: string;
-                  };
-                  is_idle: boolean;
-                };
-              }
-          )[];
-        }
-    )
+export type WaitAgentSuccess =
+  | {
+      meta: Meta;
+      /**
+       * @minItems 1
+       */
+      content: [ObjectPart, ...ObjectPart[]];
+    }
+  | {
+      meta: Meta;
+      /**
+       * @minItems 1
+       */
+      content: [ObjectPart2, ...ObjectPart2[]];
+    }
   | {
       meta: {
-        status: "ERROR" | "CANCELLED";
+        status: "SUCCESS";
+        wait_reason: "message_available";
+        /**
+         * @minItems 1
+         */
+        message_sources: [AgentTarget, ...AgentTarget[]];
       };
-      content: {
-        type: "text";
-        value: string;
-      }[];
+      /**
+       * @minItems 1
+       */
+      content: [ObjectPart2, ...ObjectPart2[]];
     };
 
-type Successful<T> = T extends { meta: { status: infer S } }
-  ? "SUCCESS" extends S ? T & { meta: { status: "SUCCESS" } } : never
-  : never;
+export interface WorkTarget {
+  kind: "WORK";
+  work_id: string;
+}
+export interface AgentTarget {
+  agent_id: string;
+  kind: "AGENT";
+}
+export interface Meta {
+  status: "SUCCESS";
+  wait_reason: "condition_met" | "timeout";
+}
+export interface ObjectPart {
+  type: "object";
+  value: Value;
+}
+export interface Value {
+  agent: AgentTarget;
+  work: WorkTarget;
+  work_status: "queued" | "running" | "completed" | "stopped";
+}
+export interface ObjectPart2 {
+  type: "object";
+  value: Value2;
+}
+export interface Value2 {
+  agent: AgentTarget;
+  is_idle: boolean;
+}
+export interface WaitAgentFailure {
+  meta: {
+    status: "ERROR" | "CANCELLED";
+  };
+  content: (
+    | {
+        type: "text";
+        value: string;
+      }
+    | ObjectPart
+    | ObjectPart2
+  )[];
+}
 
 declare const tools: {
-  wait_agent(args: WaitAgentArgs): Promise<Successful<WaitAgentValue>>;
+  wait_agent(args: WaitAgentArgs): Promise<WaitAgentSuccess>;
 };
 ```

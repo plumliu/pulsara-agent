@@ -212,7 +212,13 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     ),
     'call_mcp_tool': _descriptor(
         name='call_mcp_tool',
-        description='Call an MCP tool using the invocation.target returned by query_capabilities. Supply arguments matching its input_schema. Read the relevant parameter and available output descriptions before composing calls; output_schema may be absent. The reference can be reused in this conversation, including Code Mode. If it is stale or unavailable, query the tool again; do not automatically repeat a call whose effect is uncertain.',
+        description=(
+            "Call an MCP tool with invocation.target from query_capabilities. Pass arguments "
+            "matching its input_schema. Read the interface before writing the call. Optional "
+            "output_schema describes successful structuredContent. The reference works across "
+            "native calls and Cells in this session. Query again if it becomes stale. Check "
+            "uncertain effects before retrying."
+        ),
         input_schema={'type': 'object',
  'properties': {'target': {'type': 'object',
                            'properties': {'kind': {'const': 'MCP_TOOL_REF'},
@@ -234,7 +240,11 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     ),
     "read_mcp_resource": _descriptor(
         name="read_mcp_resource",
-        description="Discover or read MCP resources. target:MCP_CONNECTION lists that service's resources and URI templates; no uri is accepted. target:MCP_RESOURCE reads its exact URI; supply values for template variables in the URI before reading. Resource listings are metadata, not resource content. Omit unused fields; use the returned content in its given order.",
+        description=(
+            "List resources and URI templates with target:MCP_CONNECTION. Read one resource "
+            "with target:MCP_RESOURCE. Use a returned resource Target, or fill a template "
+            "and use its server_id and concrete uri in the Target. Read content in order."
+        ),
         input_schema=object_schema(properties={"target": {"oneOf": [
             capability_target_schema("MCP_CONNECTION"), capability_target_schema("MCP_RESOURCE")]}}, required=["target"]),
         is_read_only=True,
@@ -440,14 +450,14 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     ),
     "exec_cell": _descriptor(
         name="exec_cell",
-        description="Start a JavaScript Cell. Pass exactly one of code (inline JavaScript) or target:PATH (a UTF-8 source file). Read the needed tool interfaces before writing the business script. Tool calls return full saved business values; console.log and a non-undefined top-level return send selected values separately to the conversation. This tool's result reports the Cell start, not its eventual output.",
+        description="Start a JavaScript Cell. Pass exactly one of code (inline JavaScript) or target:PATH (a UTF-8 source file). Read the needed tool interfaces before writing the business script. Tool calls return full saved business values. Use console.log to send selected values separately to the conversation. This tool's result reports the Cell start, not its eventual output.",
         input_schema=exec_cell_parameters_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False, permission_category="subagent_runtime",
     ),
     "query_cells": _descriptor(
         name="query_cells",
-        description='Query Code Mode Cells. Omit target to list retained Cells; pass target:CELL only for its state, pending_calls and complete executed source. Cell output is delivered separately. There are no source offsets or query cursors.',
+        description='Omit target to list Cells held by the current Host. Pass target:CELL to read the complete executed source and live or saved final state of a Cell in this session. If the final state could not be confirmed, it is unknown. Cell output is delivered separately.',
         input_schema=query_cells_parameters_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=True, permission_category="subagent_runtime",
@@ -528,7 +538,12 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
 _SCRIPT_API_DESCRIPTORS = {
     "run_agent": _descriptor(
         name="run_agent",
-        description="Submit an ordered array of assignments through tools.run_agent in ROOT Code Mode. Each item needs instruction; target:AGENT reuses an agent, omission creates one. Optional work_title names this Work. materials accepts CONTEXT_MATERIAL with turns 1–3 or a completed WORK, for new and reused agents. depends_on waits for the specified Work results. Success content records preserve assignment order and contain agent, work and work_status. Acceptance is not completion; use wait_agent or query_agents for progress and answers.",
+        description=(
+            "Submit an array of assignments. Omit target to create an Agent or pass an AGENT "
+            "Target to queue work for it. Use materials for selected ROOT turns or ended Works "
+            "and depends_on for successful prerequisites. Accepted records follow assignment order. "
+            "Use wait_agent or query_agents for progress and answers."
+        ),
         input_schema=run_agent_parameters_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False, permission_category="subagent_runtime",
@@ -538,13 +553,9 @@ _SCRIPT_API_DESCRIPTORS = {
         description=(
             "Evaluate one natural-language yes/no condition independently for each supplied text "
             "using the configured Decision model. Returns one content object with {decisions: boolean[]} in input "
-            "order. Compose with any tools or agent operations for filtering, branching, loops or "
-            "further calls. Include needed context in each input. Guard calls with "
-            "if (tools.decide.available()); this local synchronous method reports configuration "
-            "availability captured at Cell startup. Otherwise pass the condition and material to "
-            "ROOT to continue. Use JavaScript for exact comparisons. Empty inputs return an empty "
-            "array. Service failures reject the call. Decision configuration is independent of "
-            "memory reranking."
+            "order. Include needed context in each input. tools.decide.available() is a "
+            "synchronous configuration check fixed at Cell startup. Use JavaScript for exact "
+            "comparisons. Empty inputs return an empty array."
         ),
         input_schema=object_schema(properties={
             "condition": {"type": "string", "minLength": 1,
@@ -564,13 +575,11 @@ _SCRIPT_API_DESCRIPTORS["wait_agent"] = replace(
     _descriptor(name="wait_agent", input_schema=wait_agent_parameters_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW, is_read_only=True,
         permission_category="subagent_runtime",
-        description=("Wait in ROOT Code Mode with exactly one of works:WORK[] or agents:AGENT[]. "
+        description=("Wait with either works or agents. "
             "settle is all (default) or first; timeout_seconds is 0–300 (default 30). "
-            "WORK waits for terminal states, AGENT for idle or a selected sender's message. "
-            "Already satisfied targets count immediately. Success returns every target in input order: "
-            "WORK records have agent/work/work_status; AGENT records have agent/is_idle. "
-            "meta.wait_reason explains return; timeout is successful observation, not work completion. "
-            "Message bodies arrive separately in normal conversation input; failures reject with err.result when available.")),
+            "WORK waits for terminal state. AGENT waits for idle or a message from one of "
+            "the specified Agents. Already satisfied targets count immediately. Check "
+            "meta.wait_reason and the records, which cover all targets in input order.")),
     is_model_callable=False,
 )
 _SCRIPT_API_DESCRIPTORS["read_file"] = replace(

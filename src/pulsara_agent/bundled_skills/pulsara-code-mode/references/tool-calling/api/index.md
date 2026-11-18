@@ -1,14 +1,6 @@
 # Code Mode API reference
 
-Read the relevant tool page before composing calls or accessing result fields. These pages describe the actual JS directory; they do not add native tools or expose Cell variables to ROOT. TypeScript here describes interfaces; write JavaScript in a Cell, without copying export, interface or import declarations.
-
-Calls take one declared object or array argument. Await the complete saved business value; successful delivery of a SUCCESS value resolves normally. A thrown error may carry the actual complete business value as err.result. Its meta.status remains SUCCESS, ERROR or CANCELLED according to the business outcome; a save or delivery failure does not change a known SUCCESS. Read the error's message for the save or delivery failure. Errors without a business value omit it. Narrow each page's Value type by meta.status when handling an actual err.result. Common early rejection or execution failures contain only meta and text content; domain failures keep their declared fields. Do not repeat an action to recover its response.
-
-Tool-call errors have name "ToolError", code and message, and result when an actual business value exists; ordinary JavaScript errors such as TypeError need not have this interface.
-
-Missing fields differ from null, and content item order is preserved. JsonValue means JSON null, boolean, number, string, array or object, including unknown external MCP business values. Array length and numeric constraints remain those of the actual argument schema, including displayed annotations.
-
-Use console.log or a top-level return to disclose selected values to ROOT. Values held only in Cell memory are not model-visible. Native observation time, page controls and NEXT are outside these JS values. Actual image items are recognized recursively in explicit output; bare Targets remain text.
+Read the tool's inputs and result before writing a call. The declarations are TypeScript for reference; write JavaScript in the Cell. See [shared output and error rules](../results-and-errors.md).
 
 ## agents
 

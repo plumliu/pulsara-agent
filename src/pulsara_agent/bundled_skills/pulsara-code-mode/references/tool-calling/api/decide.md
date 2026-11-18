@@ -1,10 +1,8 @@
 # `tools.decide(args)`
 
-Evaluate one natural-language yes/no condition independently for each supplied text using the configured Decision model. Returns one content object with {decisions: boolean[]} in input order. Compose with any tools or agent operations for filtering, branching, loops or further calls. Include needed context in each input. Guard calls with if (tools.decide.available()); this local synchronous method reports configuration availability captured at Cell startup. Otherwise pass the condition and material to ROOT to continue. Use JavaScript for exact comparisons. Empty inputs return an empty array. Service failures reject the call. Decision configuration is independent of memory reranking.
+Evaluate one natural-language yes/no condition independently for each supplied text using the configured Decision model. Returns one content object with {decisions: boolean[]} in input order. Include needed context in each input. tools.decide.available() is a synchronous configuration check fixed at Cell startup. Use JavaScript for exact comparisons. Empty inputs return an empty array.
 
-`tools.decide.available()` is a local synchronous boolean, frozen at Cell startup; it does not call a service or test service health. Actual decide calls are asynchronous. The successful decisions array follows inputs order.
-
-See the [API rules](index.md) for successful resolution, actual `err.result` and explicit output. Array constraints are retained in type annotations.
+`available()` checks configuration without testing service health.
 
 ```ts
 export interface DecideArgs {
@@ -17,57 +15,36 @@ export interface DecideArgs {
    */
   inputs: string[];
 }
-
-export type DecideValue =
-  | (
-      | {
-          meta: {
-            status: "SUCCESS";
-          };
-          /**
-           * @minItems 1
-           * @maxItems 1
-           */
-          content: [
-            {
-              type: "object";
-              value: {
-                decisions: boolean[];
-              };
-            },
-            ...{
-              type: "object";
-              value: {
-                decisions: boolean[];
-              };
-            }[]
-          ];
-        }
-      | {
-          meta: {
-            status: "ERROR" | "CANCELLED";
-          };
-          content: {
-            type: "text";
-            value: string;
-          }[];
-        }
-    )
-  | {
-      meta: {
-        status: "ERROR" | "CANCELLED";
+export interface DecideSuccess {
+  meta: {
+    status: "SUCCESS";
+  };
+  /**
+   * @minItems 1
+   * @maxItems 1
+   */
+  content: [
+    {
+      type: "object";
+      value: {
+        decisions: boolean[];
       };
-      content: {
-        type: "text";
-        value: string;
-      }[];
-    };
-
-type Successful<T> = T extends { meta: { status: infer S } }
-  ? "SUCCESS" extends S ? T & { meta: { status: "SUCCESS" } } : never
-  : never;
+    }
+  ];
+}
 
 declare const tools: {
-  decide: ((args: DecideArgs) => Promise<Successful<DecideValue>>) & { available(): boolean };
+  decide: ((args: DecideArgs) => Promise<DecideSuccess>) & { available(): boolean };
 };
+```
+
+```js
+const condition = "Does this describe an export failure?";
+const inputs = ["Export did not create a file.", "The file opens correctly."];
+if (tools.decide.available()) {
+  const result = await tools.decide({condition, inputs});
+  console.log(inputs.filter((_, i) => result.content[0].value.decisions[i]));
+} else {
+  console.log({condition, inputs});
+}
 ```

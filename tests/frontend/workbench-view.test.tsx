@@ -486,7 +486,6 @@ function props(overrides: Partial<ComponentProps<typeof WorkbenchView>> = {}): C
     onQueueAction: vi.fn(async () => undefined),
     onQueueActionHandled: vi.fn(),
     runtimeStatus: 'online',
-    canCreateSession: true,
     modelConfigurations: [model],
     modelCallBinding: { connection_id: model.id, reasoning: null },
     canControl: true,
@@ -496,7 +495,6 @@ function props(overrides: Partial<ComponentProps<typeof WorkbenchView>> = {}): C
     onFork: vi.fn(async () => undefined),
     onReconnect: vi.fn(),
     onTakeControl: vi.fn(),
-    onNewSession: vi.fn(),
     onToggleInspector: vi.fn(),
     onOpenModelSettings: vi.fn(),
     onModelCallBindingChange: vi.fn(async () => undefined),
@@ -731,7 +729,7 @@ describe('current-session runtime actions', () => {
     render(<WorkbenchView {...props({ onRenameSession })} />);
     const trigger = screen.getByRole('button', { name: '更多会话操作' });
     fireEvent.click(trigger);
-    fireEvent.click(screen.getByRole('button', { name: '重命名给你的会话起个名字' }));
+    fireEvent.click(screen.getByRole('button', { name: '重命名' }));
     expect(onRenameSession).toHaveBeenCalledOnce();
     expect(trigger.getAttribute('aria-expanded')).toBe('false');
   });

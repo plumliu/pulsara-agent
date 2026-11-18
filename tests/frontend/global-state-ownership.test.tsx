@@ -44,7 +44,7 @@ it.each(['database_unavailable', 'database_restart_required', 'error'] as const)
       else stale.resolve({ ...bootstrap, database_state: outcome });
     });
     expect(screen.getByText('已连接本地服务')).toBeTruthy();
-    expect((screen.getByRole('button', { name: '创建会话' }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole('button', { name: /^新建会话/ }) as HTMLButtonElement).disabled).toBe(false);
     expect(screen.queryByRole('region', { name: 'PostgreSQL 配置引导' })).toBeNull();
     expect(adapter.connectCalls).toHaveLength(0);
   },
@@ -66,7 +66,7 @@ it.each(['success', 'error'] as const)('a superseded startup %s cannot publish o
     if (outcome === 'error') stale.reject(new RuntimeApiError('UNAVAILABLE', '旧启动失败', true));
     else stale.resolve({ ...bootstrap, database_state: 'database_restart_required' });
   });
-  expect((screen.getByRole('button', { name: '创建会话' }) as HTMLButtonElement).disabled).toBe(false);
+  expect((screen.getByRole('button', { name: /^新建会话/ }) as HTMLButtonElement).disabled).toBe(false);
   expect(screen.queryByRole('region', { name: 'PostgreSQL 配置引导' })).toBeNull();
   expect(adapter.connectCalls).toHaveLength(0);
   expect(settled).toHaveBeenCalledOnce();
@@ -138,7 +138,7 @@ it('a newer current list can finish global recovery while the superseded list re
   await waitFor(() => expect(lists.mock.calls.length).toBeGreaterThan(1));
   fireEvent.click(screen.getByRole('button', { name: '会话', exact: true }));
   await screen.findByText('已连接本地服务');
-  expect((screen.getByRole('button', { name: '创建会话' }) as HTMLButtonElement).disabled).toBe(false);
+  expect((screen.getByRole('button', { name: /^新建会话/ }) as HTMLButtonElement).disabled).toBe(false);
   await act(async () => stale.reject(new RuntimeApiError('UNAVAILABLE', '过期列表失败', true)));
   expect(screen.getByText('已连接本地服务')).toBeTruthy();
   expect(adapter.connectCalls).toHaveLength(0);
@@ -160,7 +160,7 @@ it('a focus list issued before creation cannot close the new connection or erase
   const connection = adapter.lastConnection!;
   const composer = await typeComposer('keep this new draft');
   await act(async () => stale.resolve(before));
-  expect(screen.queryByText('当前没有活动会话')).toBeNull();
+  expect(screen.queryByRole('region', { name: '会话欢迎页' })).toBeNull();
   expect(originalConnection.closed).toBe(false);
   expect(connection.closed).toBe(false);
   expect(screen.getByRole('textbox', { name: '发送给 Pulsara' })).toBe(composer);
@@ -187,7 +187,7 @@ it('latest list ownership preserves a newer server title while still accepting r
   expect(screen.getByRole('heading', { name: '另一个窗口的新标题' })).toBeTruthy();
   adapter.sessions = [];
   fireEvent.focus(window);
-  await screen.findByText('当前没有活动会话');
+  await screen.findByRole('region', { name: '会话欢迎页' });
   expect(connection.closed).toBe(true);
 });
 

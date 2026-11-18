@@ -199,7 +199,6 @@ interface SessionWorkbenchProps {
   userServiceStatus: RuntimeStatus;
   userServiceError?: string;
   userCapabilityMutation?: UserCapabilitySnapshot;
-  canCreateSession: boolean;
   scheduledApi: LocalScheduledTasksApi;
   promptDraftStore: PromptDraftStore;
   suggestionCache: SessionSuggestionCache;
@@ -214,7 +213,6 @@ interface SessionWorkbenchProps {
   onSessionMissing: (id: string) => void;
   onClose: (id: string) => void;
   onOpenSession: (id: string) => Promise<boolean>;
-  onNewSession: () => void;
   onRenameSession: (session: SessionSummary) => void;
   onOpenScheduledTask: (id: string) => void;
   onOpenUserCapabilities: (kind?: CapabilityTab) => void;
@@ -224,8 +222,8 @@ interface SessionWorkbenchProps {
 
 export function SessionWorkbench({
   adapter, session: activeSession, loaded, visible, focused, bootstrap, userServiceStatus, userServiceError, userCapabilityMutation,
-  canCreateSession, scheduledApi, promptDraftStore, suggestionCache, changeSessionList, invalidateSessionList, readSessionList,
-  notify: onNotify, runMcpAuthorization, onObservation, onConnection, onPublishStatus, onSessionMissing, onClose, onOpenSession, onNewSession, onRenameSession,
+  scheduledApi, promptDraftStore, suggestionCache, changeSessionList, invalidateSessionList, readSessionList,
+  notify: onNotify, runMcpAuthorization, onObservation, onConnection, onPublishStatus, onSessionMissing, onClose, onOpenSession, onRenameSession,
   onOpenScheduledTask, onOpenUserCapabilities, onOpenSettings, onBrowserShortcut,
 }: SessionWorkbenchProps) {
   const sessionId = activeSession.id;
@@ -2052,8 +2050,6 @@ export function SessionWorkbench({
           )}
           onReconnect={reconnect}
           onTakeControl={() => activeSessionId && void openRuntimeSession(activeSessionId, true, true)}
-          onNewSession={onNewSession}
-          canCreateSession={canCreateSession}
           onToggleInspector={() => setInspectorOpen((value) => !value)}
           onOpenModelSettings={() => onOpenSettings('models')}
           suggestion={suggestion}

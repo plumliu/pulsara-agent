@@ -49,7 +49,6 @@ import {
   GitFork,
   ListTodo,
   LoaderCircle,
-  MessageSquarePlus,
   Minimize2,
   MoreHorizontal,
   PanelRight,
@@ -224,8 +223,6 @@ interface WorkbenchViewProps {
   skills: SkillCapability[];
   onReconnect: () => void;
   onTakeControl: () => void;
-  onNewSession: () => void;
-  canCreateSession: boolean;
   onToggleInspector: () => void;
   onOpenModelSettings: () => void;
   onModelCallBindingChange: (binding: ModelCallBindingPayload) => Promise<void>;
@@ -2350,8 +2347,6 @@ export function WorkbenchView({
   skills,
   onReconnect,
   onTakeControl,
-  onNewSession,
-  canCreateSession,
   onToggleInspector,
   onOpenModelSettings,
   onModelCallBindingChange,
@@ -2910,7 +2905,7 @@ export function WorkbenchView({
       {sessionActionsOpen && <div className="menu-popover session-actions-menu" aria-label="会话操作">
         <button type="button" onClick={() => { if (!canControl) return; setSessionActionsOpen(false); onRenameSession(); }}>
           <Pencil size={15} />
-          <span><strong>重命名</strong><small>给你的会话起个名字</small></span>
+          <span><strong>重命名</strong></span>
         </button>
         {canControl && <button
           type="button"
@@ -2929,7 +2924,7 @@ export function WorkbenchView({
         </button>}
         <button type="button" onClick={() => { if (!canControl) return; setSessionActionsOpen(false); onReopenRuntime(); }}>
           <RotateCcw size={15} />
-          <span><strong>重新加载会话</strong><small>从数据库重新组装上下文</small></span>
+          <span><strong>重新加载会话</strong></span>
         </button>
         {onCloseSession && <button type="button" onClick={() => { if (!canControl) return; setSessionActionsOpen(false); onCloseSession(); }}>
           <Square size={15} />
@@ -2966,12 +2961,6 @@ export function WorkbenchView({
                   error instanceof Error ? error.message : '请重新打开 Pulsara。', 'warning'));
               }}>重启工作台</button>}
               {(runtimeErrorDetails || runtimeError) && <details className="runtime-error-details"><summary>技术详情</summary><pre>{runtimeErrorDetails || runtimeError}</pre></details>}
-            </div>
-          )}
-          {!welcome && !session.id && messages.length === 0 && conversationSubmissions.length === 0 && runtimeStatus === 'online' && (
-            <div className="conversation-empty">
-              <Sparkles size={20} />
-              <span>点击下方的“创建会话”，开始你的第一个任务。</span>
             </div>
           )}
           {initialContextBase?.base_kind === 'SNAPSHOT' && <ContextCompactionDivider inherited />}
@@ -3051,25 +3040,7 @@ export function WorkbenchView({
         </button>
       )}
 
-      {!session.id ? (
-        <div className="composer-wrap composer-wrap--session-required" ref={composerWrapRef}>
-          <div className="composer-frame">
-            <div className="composer composer--session-required">
-              <div className="session-required-composer">
-                <span className="session-required-composer__icon" aria-hidden="true"><Sparkles size={15} /></span>
-                <span className="session-required-composer__copy">
-                  <strong>创建或选择会话后开始</strong>
-                  <small>提问、写代码，或一起探索一个想法。</small>
-                </span>
-                <button className="secondary-action" type="button" disabled={!canCreateSession} onClick={onNewSession}>
-                  <MessageSquarePlus size={13} /> 创建会话
-                </button>
-              </div>
-            </div>
-          </div>
-          <p className="composer-note">当前没有活动会话</p>
-        </div>
-      ) : !readOnlyDock ? <div className="composer-wrap" ref={composerWrapRef}>
+      {!readOnlyDock ? <div className="composer-wrap" ref={composerWrapRef}>
         <div className="composer-frame">
           <div className="welcome-heading" aria-hidden={!welcome}>
             <WelcomeTypewriter key={session.id} active={welcome} cycling={!draft.hasContent} />

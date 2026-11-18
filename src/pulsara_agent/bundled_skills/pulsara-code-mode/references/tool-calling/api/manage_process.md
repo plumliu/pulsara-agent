@@ -2,19 +2,11 @@
 
 Observe or control a process in this session. wait: target, optional timeout_seconds (0–30; default 30); write: target,data,optional yield_time_ms (0–30000; default 1000); close_stdin/kill: target only. wait/write return all pending public output and frozen process facts. Nonzero process exit is a successful observation. No action is rerun by NEXT.
 
-See the [API rules](index.md) for successful resolution, actual `err.result` and explicit output. Array constraints are retained in type annotations.
-
 ```ts
 export type ManageProcessArgs =
   | {
       action: "wait";
-      target: {
-        kind: "PROCESS";
-        /**
-         * Exact process_id from this terminal environment.
-         */
-        process_id: string;
-      };
+      target: ProcessTarget;
       timeout_seconds?: number;
     }
   | {
@@ -23,13 +15,7 @@ export type ManageProcessArgs =
        * Exact UTF-8 text; an empty string is allowed.
        */
       data: string;
-      target: {
-        kind: "PROCESS";
-        /**
-         * Exact process_id from this terminal environment.
-         */
-        process_id: string;
-      };
+      target: ProcessTarget;
       /**
        * Wait for process exit after input is flushed; 0 returns immediately.
        */
@@ -37,97 +23,54 @@ export type ManageProcessArgs =
     }
   | {
       action: "close_stdin";
-      target: {
-        kind: "PROCESS";
-        /**
-         * Exact process_id from this terminal environment.
-         */
-        process_id: string;
-      };
+      target: ProcessTarget;
     }
   | {
       action: "kill";
-      target: {
-        kind: "PROCESS";
-        /**
-         * Exact process_id from this terminal environment.
-         */
-        process_id: string;
-      };
+      target: ProcessTarget;
     };
-
-export type ManageProcessValue =
-  | (
-      | {
-          target: {
-            kind: "PROCESS";
-            /**
-             * Exact process_id from this terminal environment.
-             */
-            process_id: string;
-          };
-          meta: {
-            status: "SUCCESS";
-            process_status: "RUNNING";
-            exit_code: null;
-            cwd: string;
-          };
-          content: {
-            type: "text";
-            value: string;
-          }[];
-        }
-      | {
-          target: {
-            kind: "PROCESS";
-            /**
-             * Exact process_id from this terminal environment.
-             */
-            process_id: string;
-          };
-          meta: {
-            status: "SUCCESS";
-            process_status: "EXITED";
-            exit_code: number;
-            cwd: string;
-          };
-          content: {
-            type: "text";
-            value: string;
-          }[];
-        }
-      | {
-          target: {
-            kind: "PROCESS";
-            /**
-             * Exact process_id from this terminal environment.
-             */
-            process_id: string;
-          };
-          meta: {
-            status: "ERROR" | "CANCELLED";
-          };
-          content: {
-            type: "text";
-            value: string;
-          }[];
-        }
-    )
+export type ManageProcessSuccess =
   | {
+      target: ProcessTarget;
       meta: {
-        status: "ERROR" | "CANCELLED";
+        status: "SUCCESS";
+        process_status: "RUNNING";
+        exit_code: null;
+        cwd: string;
       };
-      content: {
-        type: "text";
-        value: string;
-      }[];
+      content: TextPart[];
+    }
+  | {
+      target: ProcessTarget;
+      meta: {
+        status: "SUCCESS";
+        process_status: "EXITED";
+        exit_code: number;
+        cwd: string;
+      };
+      content: TextPart[];
     };
 
-type Successful<T> = T extends { meta: { status: infer S } }
-  ? "SUCCESS" extends S ? T & { meta: { status: "SUCCESS" } } : never
-  : never;
+export interface ProcessTarget {
+  kind: "PROCESS";
+  /**
+   * Exact process_id from this terminal environment.
+   */
+  process_id: string;
+}
+export interface TextPart {
+  type: "text";
+  value: string;
+}
+export interface ManageProcessFailure {
+  target: ProcessTarget;
+  meta: {
+    status: "ERROR" | "CANCELLED";
+  };
+  content: TextPart[];
+}
 
 declare const tools: {
-  manage_process(args: ManageProcessArgs): Promise<Successful<ManageProcessValue>>;
+  manage_process(args: ManageProcessArgs): Promise<ManageProcessSuccess>;
 };
 ```

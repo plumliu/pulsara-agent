@@ -149,6 +149,15 @@
   min-height: 0;
   overflow: auto;
 }
+.session-canvas__welcome {
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  text-align: center;
+  background: radial-gradient(ellipse min(85%, 560px) min(65%, 300px) at center,
+    color-mix(in srgb, var(--amber-soft) 40%, transparent), transparent 75%), var(--paper);
+}
+.session-canvas__welcome .welcome-typewriter__line { justify-content: center; }
 .session-canvas-window {
   position: absolute;
   display: flex;
@@ -213,6 +222,8 @@
 .session-canvas-window__actions-host:empty { display: none; }
 .session-canvas-window__body {
   position: relative;
+  /* Keep the conversation and workspace layers below the title bar's menu. */
+  isolation: isolate;
   display: flex;
   flex: 1;
   min-width: 0;

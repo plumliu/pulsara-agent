@@ -2,8 +2,6 @@
 
 Read timed original text from local video or audio. Pass target:PATH with optional from/to seconds. Embedded text subtitles are preferred; cached or configured ASR fills gaps. The complete requested range is acquired before display pagination. Transcription does not verify subtitles against speech or interpret music.
 
-See the [API rules](index.md) for successful resolution, actual `err.result` and explicit output. Array constraints are retained in type annotations.
-
 ```ts
 export interface ReadTranscriptArgs {
   from?: number;
@@ -13,85 +11,49 @@ export interface ReadTranscriptArgs {
   };
   to?: number;
 }
-
-export type ReadTranscriptValue =
-  | (
-      | {
-          target: {
-            kind: "PATH";
-            path: string;
-          };
-          meta: {
-            status: "SUCCESS";
-            source: "subtitle" | "asr";
-            language?: string;
-          };
-          content: (
-            | {
-                type: "text";
-                value: string;
-              }
-            | {
-                type: "object";
-                value: {
-                  from: number;
-                  to: number;
-                  text: string;
-                  speaker?: string;
-                  visible_range?: {
-                    from: number;
-                    to: number;
-                  };
-                };
-              }
-          )[];
-        }
-      | {
-          target?: {
-            kind: "PATH";
-            path: string;
-          };
-          meta: {
-            status: "ERROR" | "CANCELLED";
-            source?: "subtitle" | "asr";
-            language?: string;
-          };
-          content: (
-            | {
-                type: "text";
-                value: string;
-              }
-            | {
-                type: "object";
-                value: {
-                  from: number;
-                  to: number;
-                  text: string;
-                  speaker?: string;
-                  visible_range?: {
-                    from: number;
-                    to: number;
-                  };
-                };
-              }
-          )[];
-        }
-    )
-  | {
-      meta: {
-        status: "ERROR" | "CANCELLED";
-      };
-      content: {
-        type: "text";
-        value: string;
-      }[];
-    };
-
-type Successful<T> = T extends { meta: { status: infer S } }
-  ? "SUCCESS" extends S ? T & { meta: { status: "SUCCESS" } } : never
-  : never;
+export interface ReadTranscriptSuccess {
+  target: PathTarget;
+  meta: {
+    status: "SUCCESS";
+    source: "subtitle" | "asr";
+    language?: string;
+  };
+  content: (TextPart | ObjectPart)[];
+}
+export interface PathTarget {
+  kind: "PATH";
+  path: string;
+}
+export interface TextPart {
+  type: "text";
+  value: string;
+}
+export interface ObjectPart {
+  type: "object";
+  value: Value;
+}
+export interface Value {
+  from: number;
+  to: number;
+  text: string;
+  speaker?: string;
+  visible_range?: VisibleRange;
+}
+export interface VisibleRange {
+  from: number;
+  to: number;
+}
+export interface ReadTranscriptFailure {
+  target?: PathTarget;
+  meta: {
+    status: "ERROR" | "CANCELLED";
+    source?: "subtitle" | "asr";
+    language?: string;
+  };
+  content: (TextPart | ObjectPart)[];
+}
 
 declare const tools: {
-  read_transcript(args: ReadTranscriptArgs): Promise<Successful<ReadTranscriptValue>>;
+  read_transcript(args: ReadTranscriptArgs): Promise<ReadTranscriptSuccess>;
 };
 ```

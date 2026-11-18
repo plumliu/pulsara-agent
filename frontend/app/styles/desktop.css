@@ -2,15 +2,15 @@
 .desktop-shell { --desktop-navigation-width: 314px; grid-template-rows: 44px minmax(0, 1fr); min-height: 420px; }
 .desktop-shell.is-workbench { grid-template-columns: var(--desktop-navigation-width) minmax(0, 1fr); transition: --desktop-navigation-width .22s cubic-bezier(.2,.7,.2,1); }
 .desktop-shell.is-surface { grid-template-columns: 62px minmax(0, 1fr); }
-.desktop-titlebar { --desktop-navigation-width: inherit; --desktop-leading-controls: 54px; --desktop-caption-width: 144px; position: relative; grid-column: 1 / -1; grid-row: 1; display: flex; align-items: center; min-width: 0; padding: 0 14px; border-bottom: 1px solid var(--line); background: var(--paper-raised); -webkit-app-region: drag; user-select: none; }
+.desktop-titlebar { --desktop-titlebar-leading-inset: 6px; --desktop-control-size: 28px; --desktop-caption-width: 144px; position: relative; grid-column: 1 / -1; grid-row: 1; display: flex; align-items: center; min-width: 0; padding-inline: var(--desktop-titlebar-leading-inset) 14px; border-bottom: 1px solid var(--line); background: var(--paper-raised); -webkit-app-region: drag; user-select: none; }
 /* Native traffic lights start at y=16 and have a 14px diameter (center y=23).
    The 44px row has a 1px bottom border; 3px top padding aligns its controls. */
-.desktop-shell[data-platform='darwin'] .desktop-titlebar { --desktop-leading-controls: 118px; padding-left: 82px; padding-top: 3px; }
+.desktop-shell[data-platform='darwin'] .desktop-titlebar { --desktop-titlebar-leading-inset: 82px; padding-top: 3px; }
 /* Windows can report a wider native control area when display scaling changes. */
 .desktop-shell[data-platform='win32'] .desktop-titlebar__session-tabs { inset-inline-end: max(var(--desktop-caption-width), 100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw)); }
-.desktop-titlebar > button, .desktop-window-controls button { -webkit-app-region: no-drag; display: grid; place-items: center; width: 28px; height: 28px; color: var(--muted); background: transparent; border-radius: 6px; }
+.desktop-titlebar > button, .desktop-window-controls button { -webkit-app-region: no-drag; display: grid; place-items: center; width: var(--desktop-control-size); height: var(--desktop-control-size); color: var(--muted); background: transparent; border-radius: 6px; }
 .desktop-titlebar > button:hover, .desktop-window-controls button:hover { background: var(--paper-deep); color: var(--ink); }
-.desktop-titlebar__session-tabs { position: absolute; inset-block: 0; inset-inline-start: max(var(--desktop-navigation-width), var(--desktop-leading-controls)); inset-inline-end: var(--desktop-caption-width); min-width: 0; }
+.desktop-titlebar__session-tabs { position: absolute; inset-block: 0; inset-inline-start: calc(var(--desktop-titlebar-leading-inset) + var(--desktop-control-size) + 8px); inset-inline-end: var(--desktop-caption-width); min-width: 0; }
 .desktop-titlebar__title { position: absolute; left: 50%; translate: -50% 0; pointer-events: none; font: 550 12px var(--sans); color: var(--muted); }
 .desktop-window-controls { display: flex; gap: 8px; margin-left: auto; }
 .desktop-shell > .surface-view { grid-area: 2 / 2; }

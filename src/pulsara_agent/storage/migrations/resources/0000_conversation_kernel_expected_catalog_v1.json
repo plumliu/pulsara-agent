@@ -1,5 +1,5 @@
 {
-  "observed_catalog_fingerprint": "sha256:40563b4a912904c89bd813db50bd4e8774ca15f5c6a8c7fcd3c561523d51dd05",
+  "observed_catalog_fingerprint": "sha256:cddf48d846bd44f17676cff61bd0e0983d08d4d82252cde86956e5e3d4abe0fa",
   "required_extensions": [
     {
       "extension_name": "vector",

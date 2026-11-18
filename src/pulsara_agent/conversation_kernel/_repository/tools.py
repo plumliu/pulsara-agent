@@ -81,7 +81,7 @@ class _ToolOperations:
 
     def read_code_mode_source(self, *, session_id: str, attempt_id: str,
                               deadline_monotonic: float) -> str | None:
-        """Read only a live owner's frozen source association, through canonical I/O."""
+        """Read the source frozen on the exec_cell attempt."""
         from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
         with self._provider.connection(lane=PostgresConnectionLane.INSPECTOR,
             row_factory=dict_row, deadline_monotonic=deadline_monotonic) as connection:
@@ -110,6 +110,38 @@ class _ToolOperations:
             return CanonicalProviderInputReader(self._provider).read_code_mode_source(
                 content, workspace_id=str(row["workspace_id"]), connection=connection,
                 deadline_monotonic=deadline_monotonic)
+
+    def save_code_mode_outcome(self, guard, *, attempt_id, state, diagnostic, deadline_monotonic):
+        with self._writer_transaction(guard, deadline_monotonic=deadline_monotonic) as connection:
+            row = connection.execute(
+                """UPDATE pulsara_v3.tool_execution_attempts
+                   SET code_cell_terminal_state=%s, code_cell_diagnostic=%s
+                   WHERE session_id=%s AND id=%s AND code_source_content_digest IS NOT NULL
+                     AND (code_cell_terminal_state IS NULL OR
+                       (code_cell_terminal_state=%s AND code_cell_diagnostic IS NOT DISTINCT FROM %s))
+                   RETURNING id""",
+                (state, diagnostic, guard.session_id, attempt_id, state, diagnostic),
+            ).fetchone()
+            if row is None:
+                raise ConversationKernelConflict("Cell outcome requires the same frozen exec_cell attempt and outcome")
+
+    def read_code_mode_cell_outcome(self, *, session_id, cell_id, deadline_monotonic):
+        """Resolve a CELL through the accepted launch result in its own session."""
+        with self._provider.connection(lane=PostgresConnectionLane.INSPECTOR,
+            deadline_monotonic=deadline_monotonic, isolation_level=IsolationLevel.REPEATABLE_READ) as connection:
+            return connection.execute(
+                """SELECT a.id, a.code_cell_terminal_state, a.code_cell_diagnostic
+                   FROM pulsara_v3.tool_results r
+                   JOIN pulsara_v3.tool_execution_attempts a ON a.session_id=r.session_id AND a.id=r.attempt_id
+                   JOIN pulsara_v3.tool_invocations i ON i.session_id=a.session_id AND i.id=a.invocation_id
+                   JOIN pulsara_v3.content_parts p ON p.session_id=i.session_id
+                     AND p.entry_id=i.assistant_entry_id AND p.tool_call_id=i.tool_call_id
+                   WHERE r.session_id=%s AND r.result_record_kind='EXECUTED' AND r.result_state='SUCCESS'
+                     AND r.public_fields->'target'->>'kind'='CELL'
+                     AND r.public_fields->'target'->>'cell_id'=%s
+                     AND i.source_kind='MODEL_TOOL_CALL' AND p.tool_name='exec_cell'""",
+                (session_id, cell_id),
+            ).fetchone()
 
     def _accept_invocation_source(
         self, connection, guard, *, assistant_entry_id, tool_call_id,

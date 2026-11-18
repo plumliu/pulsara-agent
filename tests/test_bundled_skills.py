@@ -592,8 +592,8 @@ def _example_records(value):
     return [part["value"] for part in value["content"] if part["type"] == "object"]
 
 
-@pytest.mark.parametrize("work_status", ["completed", "stopped"])
-def test_code_mode_main_skill_dispatches_dependencies_and_reads_exact_work(work_status):
+@pytest.mark.parametrize("work_status", ["completed", "stopped", "running"])
+def test_code_mode_agent_guide_dispatches_dependencies_and_reads_exact_work(work_status):
     from pulsara_agent.code_mode import CodeModeToolResult
     from pulsara_agent.identity import is_valid_id
 
@@ -610,6 +610,10 @@ def test_code_mode_main_skill_dispatches_dependencies_and_reads_exact_work(work_
             assert members[1]["parameters"]["depends_on"] == [
                 {"kind": "WORK", "work_id": members[0]["work_id"]}
             ]
+            assert json.dumps(
+                {"kind": "AGENT", "agent_id": members[0]["agent_id"]},
+                separators=(",", ":"),
+            ) in members[1]["parameters"]["instruction"]
             value = _accepted_agent_example(members)
             accepted.extend(_example_records(value))
             assert all(
@@ -624,7 +628,10 @@ def test_code_mode_main_skill_dispatches_dependencies_and_reads_exact_work(work_
                 "timeout_seconds": 60,
             }
             value = {
-                "meta": {"status": "SUCCESS", "wait_reason": "condition_met"},
+                "meta": {
+                    "status": "SUCCESS",
+                    "wait_reason": "timeout" if work_status == "running" else "condition_met",
+                },
                 "content": [
                     {"type": "object", "value": {**row, "work_status": work_status}}
                     for row in accepted
@@ -640,11 +647,10 @@ def test_code_mode_main_skill_dispatches_dependencies_and_reads_exact_work(work_
                 "work_status": work_status,
                 "instruction": "Investigate the parser and report evidence.",
             }
-            detail.update(
-                {"final": "Concrete evidence"}
-                if work_status == "completed"
-                else {"diagnostic": "Stopped by user"}
-            )
+            if work_status == "completed":
+                detail["final"] = "Concrete evidence"
+            elif work_status == "stopped":
+                detail["diagnostic"] = "Stopped by user"
             value = {
                 "meta": {"status": "SUCCESS"},
                 "content": [{"type": "object", "value": detail}],
@@ -652,7 +658,9 @@ def test_code_mode_main_skill_dispatches_dependencies_and_reads_exact_work(work_
         return CodeModeToolResult(value=value)
 
     output = asyncio.run(
-        _execute_code_mode_example(_code_mode_example("SKILL.md", 1), invoke, False)
+        _execute_code_mode_example(
+            _code_mode_example("agent-orchestration/coordination.md", 0), invoke, False
+        )
     )
     assert [call.tool_name for call in calls] == [
         "run_agent",
@@ -660,6 +668,12 @@ def test_code_mode_main_skill_dispatches_dependencies_and_reads_exact_work(work_
         "query_agents",
     ]
     assert _example_records(output[0]) == accepted
+    assert output[1]["meta"]["wait_reason"] == (
+        "timeout" if work_status == "running" else "condition_met"
+    )
+    assert [row["work"] for row in _example_records(output[1])] == [
+        row["work"] for row in accepted
+    ]
     assert [row["work_status"] for row in _example_records(output[1])] == [
         work_status,
         work_status,
@@ -667,80 +681,7 @@ def test_code_mode_main_skill_dispatches_dependencies_and_reads_exact_work(work_
     assert _example_records(output[2])[0]["target"] == accepted[0]["work"]
     assert _example_records(output[2])[0].get(
         "final", _example_records(output[2])[0].get("diagnostic")
-    ) == ("Concrete evidence" if work_status == "completed" else "Stopped by user")
-
-
-def test_code_mode_teammate_example_uses_actual_preallocated_refs():
-    from pulsara_agent.code_mode import CodeModeToolResult
-
-    accepted = []
-
-    async def invoke(call):
-        assert call.tool_name == "run_agent"
-        members = call.arguments["members"]
-        value = _accepted_agent_example(members)
-        rows = _example_records(value)
-        for index, member in enumerate(members):
-            assert (
-                json.dumps(rows[1 - index]["agent"], separators=(",", ":"))
-                in member["parameters"]["instruction"]
-            )
-        accepted.append(value)
-        return CodeModeToolResult(value=value)
-
-    output = asyncio.run(
-        _execute_code_mode_example(
-            _code_mode_example("agent-orchestration/examples.md", 1), invoke, False
-        )
-    )
-    assert output == accepted
-
-
-def test_code_mode_dependency_example_waits_for_every_exact_work():
-    from pulsara_agent.code_mode import CodeModeToolResult
-
-    records, calls = [], []
-
-    async def invoke(call):
-        calls.append(call)
-        if call.tool_name == "run_agent":
-            members = call.arguments["members"]
-            assert members[1]["parameters"]["depends_on"] == [
-                {"kind": "WORK", "work_id": members[0]["work_id"]}
-            ]
-            value = _accepted_agent_example(members)
-            records.extend(_example_records(value))
-        else:
-            assert call.tool_name == "wait_agent"
-            assert call.arguments == {
-                "works": [row["work"] for row in records],
-                "settle": "all",
-            }
-            value = {
-                "meta": {"status": "SUCCESS", "wait_reason": "timeout"},
-                "content": [
-                    {"type": "object", "value": {**row, "work_status": status}}
-                    for row, status in zip(
-                        records, ("completed", "running"), strict=True
-                    )
-                ],
-            }
-        return CodeModeToolResult(value=value)
-
-    output = asyncio.run(
-        _execute_code_mode_example(
-            _code_mode_example("agent-orchestration/examples.md", 2), invoke, False
-        )
-    )
-    assert [call.tool_name for call in calls] == ["run_agent", "wait_agent"]
-    assert output[0]["meta"]["wait_reason"] == "timeout"
-    assert [row["work"] for row in _example_records(output[0])] == [
-        row["work"] for row in records
-    ]
-    assert [row["work_status"] for row in _example_records(output[0])] == [
-        "completed",
-        "running",
-    ]
+    ) == {"completed": "Concrete evidence", "stopped": "Stopped by user"}.get(work_status)
 
 
 def test_code_mode_examples_reuse_actual_agent_in_a_fresh_cell():
@@ -766,13 +707,12 @@ def test_code_mode_examples_reuse_actual_agent_in_a_fresh_cell():
         batches.append(value)
         return CodeModeToolResult(value=value)
 
-    first = asyncio.run(
-        _execute_code_mode_example(
-            _code_mode_example("agent-orchestration/examples.md", 1), invoke, False
-        )
-    )
+    first = asyncio.run(_execute_code_mode_example(
+        'console.log(await tools.run_agent([{instruction:"Investigate."}]));',
+        invoke, False,
+    ))
     agent_id = _example_records(first[0])[0]["agent"]["agent_id"]
-    source = _code_mode_example("agent-orchestration/examples.md", 3).replace(
+    source = _code_mode_example("agent-orchestration/coordination.md", 1).replace(
         "session:aaaaaaaaaaaaaaaaaaaaaaaaaa", agent_id
     )
     second = asyncio.run(_execute_code_mode_example(source, invoke, False))
@@ -807,7 +747,7 @@ def test_code_mode_decision_example_guards_actual_availability_and_preserves_pos
 
     output = asyncio.run(
         _execute_code_mode_example(
-            _code_mode_example("tool-calling/examples.md", 3), invoke, available
+            _code_mode_example("tool-calling/api/decide.md", 0), invoke, available
         )
     )
     if available:
@@ -881,7 +821,7 @@ def test_code_mode_mcp_example_queries_the_current_directory_shape():
 
     output = asyncio.run(
         _execute_code_mode_example(
-            _code_mode_example("tool-calling/patterns.md", 1), invoke, False
+            _code_mode_example("tool-calling/patterns.md", 0), invoke, False
         )
     )
     assert len(calls) == 1

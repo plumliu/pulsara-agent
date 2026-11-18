@@ -2,7 +2,11 @@
 
 import asyncio
 import inspect
+from time import monotonic
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
 from pulsara_agent.code_mode import CodeModeHost, CodeModeToolResult
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
@@ -14,7 +18,7 @@ from tests.support.model_config import scheduled_task_service
 from tests.support.round3 import direct_tool_invocation_context
 
 
-def runtime(tmp_path, host=None, read_source=None):
+def runtime(tmp_path, host=None, read_source=None, *, save_outcome=None, read_outcome=None):
     port = DirectKernelToolPort(
         scheduled_tasks=scheduled_task_service(),
         workspace_root=tmp_path,
@@ -29,7 +33,8 @@ def runtime(tmp_path, host=None, read_source=None):
         )
         port.bind_code_mode_port(host)
         port.bind_code_mode_executor(
-            invoke=None, freeze_source=None, read_source=read_source
+            invoke=None, freeze_source=None, read_source=read_source,
+            save_outcome=save_outcome, read_outcome=read_outcome,
         )
     return port
 
@@ -91,7 +96,9 @@ def test_complete_cell_source_query_does_not_take_output_owner(tmp_path):
         async def no_tools(_):
             return CodeModeToolResult(value={})
 
-        port = runtime(tmp_path, host, read_source)
+        saved = AsyncMock()
+        archived = AsyncMock(return_value=(attempt, "completed", None))
+        port = runtime(tmp_path, host, read_source, save_outcome=saved, read_outcome=archived)
         try:
             cell = await host.start(
                 source=source,
@@ -122,12 +129,103 @@ def test_complete_cell_source_query_does_not_take_output_owner(tmp_path):
             async with asyncio.timeout(5):
                 while host.snapshot_cell_index():
                     await asyncio.sleep(0.001)
-            absent = await dispatch(port, "query_cells", {"target": target})
-            assert absent.state == "APPLICATION_ERROR"
+            inventory = await dispatch(port, "query_cells", {})
+            assert [part.type for part in inventory.content.content] == ["text"]
+            historical = await dispatch(port, "query_cells", {"target": target})
+            assert historical.public_value() == {
+                "target": target,
+                "meta": {"status": "SUCCESS", "cell_status": "completed", "pending_calls": 0},
+                "content": [{"type": "text", "value": source}],
+            }
+            saved.assert_awaited_once_with(attempt, "completed", None)
+            archived.assert_awaited_once_with(session_id=port._session_id, cell_id=cell)
+            unavailable = await dispatch(port, "manage_cell", {"target": target, "action": "wait"})
+            assert unavailable.state == "APPLICATION_ERROR"
         finally:
             await host.aclose()
             await port.aclose()
 
+    asyncio.run(run())
+
+
+@pytest.mark.postgres
+def test_native_query_reads_a_reclaimed_cell_after_resuming_its_session(
+    tmp_path, monkeypatch, stage2_migrated_postgres_database,
+):
+    from psycopg.rows import dict_row
+
+    from pulsara_agent.llm.input import PromptContent
+    from pulsara_agent.primitives.permission import PermissionMode
+    from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
+    from pulsara_agent.workspace_identity import HostWorkspaceInput
+    from tests.support.round3 import CallbackScriptedKernelModel
+    from tests.test_round4_plan_host import _open_test_session, _text, _tool_call
+
+    script = "// A silent Cell also has a queryable execution record.\nconst answer = 42;\n"
+    target = None
+
+    async def stream(_request):
+        if len(model.requests) == 1:
+            events = _tool_call("exec_cell", random_id("call"), {"code": script})
+        elif len(model.requests) == 3:
+            events = _tool_call("query_cells", random_id("call"), {"target": target})
+        else:
+            events = _text("done")
+        for event in events:
+            yield event
+
+    async def run():
+        nonlocal target
+        core, session = await _open_test_session(
+            tmp_path=tmp_path, monkeypatch=monkeypatch, model=model,
+            postgres_dsn=stage2_migrated_postgres_database.runtime_dsn,
+        )
+        try:
+            await session.run_turn(PromptContent.text("execute the script"),
+                requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
+            async with asyncio.timeout(10):
+                while session._code_mode.snapshot_cell_index():
+                    await asyncio.sleep(.01)
+            with session.repository.connection_provider.connection(
+                lane=PostgresConnectionLane.INSPECTOR, row_factory=dict_row,
+                deadline_monotonic=monotonic()+5,
+            ) as connection:
+                row = connection.execute(
+                    """SELECT public_fields->'target' AS target FROM pulsara_v3.tool_results
+                       WHERE session_id=%s AND public_fields->'target'->>'kind'='CELL'""",
+                    (session.session_id,),
+                ).fetchone()
+                target = row["target"]
+            workspace = HostWorkspaceInput(workspace_kind="project", workspace_root=tmp_path)
+            other = await core.open_session(workspace)
+            foreign = await dispatch(other._tools, "query_cells", {"target": target})
+            assert foreign.public_value()["meta"] == {"status": "ERROR"}
+            await core.close_session(session.host_session_id)
+            resumed = await core.resume_session(session.session_id, workspace_input=workspace)
+            assert not resumed._code_mode.snapshot_cell_index()
+            await resumed.run_turn(PromptContent.text("query it"),
+                requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
+            with resumed.repository.connection_provider.connection(
+                lane=PostgresConnectionLane.INSPECTOR, row_factory=dict_row,
+                deadline_monotonic=monotonic()+5,
+            ) as connection:
+                row = connection.execute(
+                    """SELECT id FROM pulsara_v3.tool_results WHERE session_id=%s
+                       ORDER BY accepted_at DESC LIMIT 1""",
+                    (resumed.session_id,),
+                ).fetchone()
+            stored = resumed.repository.read_accepted_tool_result_observation(
+                session_id=resumed.session_id, result_id=row["id"], deadline_monotonic=monotonic()+5,
+            )
+            assert stored["value"] == {
+                "target": target,
+                "meta": {"status": "SUCCESS", "cell_status": "completed", "pending_calls": 0},
+                "content": [{"type": "text", "value": script}],
+            }
+        finally:
+            await core.shutdown()
+
+    model = CallbackScriptedKernelModel(stream)
     asyncio.run(run())
 
 

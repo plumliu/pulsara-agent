@@ -54,6 +54,7 @@ import type {
   UserSkillCapability,
 } from '../lib/pulsara-types';
 
+import { WelcomeTypewriter } from '../components/welcome-typewriter';
 import { SessionCanvas, useSessionCanvas, useSessionCanvasWindow, type SessionCanvasPlacement } from '../components/session-canvas';
 import { SessionWorkbench, emptySession, emptyWorkspace, productMessage, type SessionWorkbenchObservation } from './session-workbench';
 
@@ -592,6 +593,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     } catch (error) {
       if (!ownsRead()) return;
       setUserServiceStatus(error instanceof RuntimeApiError && error.retryable ? 'offline' : 'failed');
+      setUserServiceError(productMessage(error instanceof Error ? error.message : undefined, '无法连接本地服务。'));
       throw error;
     } finally {
       if (ownsRead() && !background) setStartupSettled(true);
@@ -1022,7 +1024,6 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   const activeSessionId = canvas.layout.focusedId ?? '';
   const openingSession = sessionList.find(session => session.id === openingSessionId);
   const openingObservation = sessionObservations[openingSessionId];
-  const hasSessionWindows = canvas.layout.focusedId !== null;
   const releaseSession = (id: string) => {
     removeMountedSession(id);
     void readSessionList().catch(() => {});
@@ -1091,7 +1092,6 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     userServiceStatus={userServiceStatus}
     userServiceError={userServiceError}
     userCapabilityMutation={userCapabilityMutation}
-    canCreateSession={canCreateSession}
     scheduledApi={scheduledApi}
     promptDraftStore={promptDraftStore}
     suggestionCache={suggestionCache}
@@ -1106,7 +1106,6 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     onSessionMissing={forgetSession}
     onClose={id => void closeSession(id)}
     onOpenSession={openSession}
-    onNewSession={openNewSession}
     onRenameSession={setRenameTarget}
     onOpenScheduledTask={id => {
       navigate('scheduled');
@@ -1128,6 +1127,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   const sessionOpenErrors = Object.fromEntries(
     [...pendingOpens.current.keys()].map(id => [id, sessionObservations[id]?.error]),
   );
+  const serviceUnavailable = userServiceStatus === 'offline' || userServiceStatus === 'failed';
   const emptyContent = openingSession ? <SessionOpeningView
     session={openingSession}
     workspace={openingSession.workspace ?? emptyWorkspace}
@@ -1138,7 +1138,22 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
       void desktopHost()!.restartWorkbench().catch(error => notify('工作台未能重启',
         error instanceof Error ? error.message : '请重新打开 Pulsara。', 'warning'));
     } : undefined}
-  /> : !mountedSessionIds.length ? renderWorkbench(emptySession) : undefined;
+  /> : mountedSessionIds.length ? undefined
+    : serviceUnavailable || userServiceStatus === 'reconnecting' ? (
+    <section className="session-opening__body" aria-label="会话连接状态">
+      <div className="session-opening__content">
+        <div>
+          <h3 role="status">{serviceUnavailable ? '本地服务连接失败' : '正在重新连接本地服务…'}</h3>
+          {serviceUnavailable && userServiceError && <p>{userServiceError}</p>}
+        </div>
+        {serviceUnavailable && <button className="ghost-button" type="button" onClick={reconnectUserService}>重新连接</button>}
+      </div>
+    </section>
+  ) : (
+    <section className="session-canvas__welcome" aria-label="会话欢迎页">
+      <WelcomeTypewriter active={showWorkbench} />
+    </section>
+  );
 
   return (
     <UserAvatarProvider adapter={adapter}>
@@ -1176,7 +1191,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
 
       </div>
       <SessionCanvas controller={canvas} visible={showWorkbench} sessions={canvasSessions} tabHost={canvasTabHost}
-        onOpenSession={openSession} onCloseSession={id => void closeSession(id)} emptyContent={hasSessionWindows ? undefined : emptyContent} />
+        onOpenSession={openSession} onCloseSession={id => void closeSession(id)} emptyContent={emptyContent} />
       {activeView === 'workbench' && databaseBlocked && databaseState && (
         <div className="database-workbench-mask">
           <DatabaseSetupGuide

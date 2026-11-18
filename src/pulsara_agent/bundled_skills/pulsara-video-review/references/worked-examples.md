@@ -91,7 +91,7 @@ already generated; reading it does not decode the source again.
 A different time range or crop is a new read_video_frames request. Stopping NEXT
 can save further model reading, while the source-processing cost of the completed
 request has already been incurred. Code Mode instead returns the complete value;
-console.log or a top-level return makes the chosen content model-visible.
+Use console.log to send the chosen content to the model.
 
 The same frozen-result rule applies to read_transcript. If a delivered segment
 ends before the needed explanation, continue the saved result. Use its reported

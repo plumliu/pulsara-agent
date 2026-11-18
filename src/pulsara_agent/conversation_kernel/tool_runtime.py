@@ -702,6 +702,7 @@ class DirectKernelToolPort(
         self._code_mode_invoke = None
         self._code_mode_freeze_source = None
         self._code_mode_read_source = None
+        self._code_mode_read_outcome = None
         self._memory: KernelMemoryToolPort | None = None
         self._decision: KernelDecisionToolPort | None = None
         self._interaction: KernelToolInteractionPort | None = None
@@ -751,10 +752,13 @@ class DirectKernelToolPort(
             self._memory = port
             self._surface_generation += 1
 
-    def bind_code_mode_executor(self, *, invoke, freeze_source, read_source) -> None:
+    def bind_code_mode_executor(self, *, invoke, freeze_source, read_source, save_outcome, read_outcome) -> None:
         self._code_mode_invoke = invoke
         self._code_mode_freeze_source = freeze_source
         self._code_mode_read_source = read_source
+        self._code_mode_read_outcome = read_outcome
+        if self._code_mode is not None:
+            self._code_mode.set_outcome_saver(save_outcome)
 
     def bind_decision_port(self, port: KernelDecisionToolPort) -> None:
         with self._surface_lock:
@@ -1296,7 +1300,7 @@ class DirectKernelToolPort(
         return {"cell": snapshot.public_value(), "participation_coverage": observed["participation_coverage"],
                 "section": section, "items": items, "next_cursor": next_cursor}
 
-    async def _query_cells(self, arguments, context, *, capture=None):
+    async def _query_cells(self, arguments, context, *, capture=None, outcome=None):
         from pulsara_agent.code_mode.contracts import CodeModeError
         from pulsara_agent.conversation_kernel.content_parts import ResultPart
         from pulsara_agent.ports.tool_execution import ToolBusinessValue
@@ -1304,10 +1308,17 @@ class DirectKernelToolPort(
             rows = self._code_mode.list_cell_snapshots(max_items=None)['cells']
             parts = [ResultPart('object', {key:row[key] for key in ('target','state','pending_calls')}) for row in rows]
             return ToolBusinessValue(content=tuple(parts or [ResultPart('text', '没有当前仍持有的 Cell。')]))
-        if capture is None:
-            capture = self.capture_code_cell(arguments['target']['cell_id'])
+        if capture is not None:
+            attempt_id = capture.source_exec_attempt_id
+            meta = {'cell_status': capture.state, 'pending_calls': capture.pending_calls}
+            diagnostic = str(capture.error.get('message', capture.error)) if capture.error else None
+        else:
+            attempt_id, state, diagnostic = outcome
+            meta = {'cell_status': state or 'unknown'}
+            if state is not None:
+                meta['pending_calls'] = 0
         try:
-            source = await self._code_mode_read_source(session_id=context.session_id, attempt_id=capture.source_exec_attempt_id)
+            source = await self._code_mode_read_source(session_id=context.session_id, attempt_id=attempt_id)
         except MemoryError:
             raise
         except Exception as error:
@@ -1315,12 +1326,11 @@ class DirectKernelToolPort(
         if source is None:
             raise LookupError('The frozen source for this Cell is unavailable')
         parts = []
-        if capture.error:
-            parts.append(ResultPart('text', '执行诊断：'+str(capture.error.get('message', capture.error))+'\n\n执行源码：\n'))
+        if diagnostic:
+            parts.append(ResultPart('text', f'执行诊断：{diagnostic}\n\n执行源码：\n'))
         if source:
             parts.append(ResultPart('text', source))
-        return ToolBusinessValue(public_fields={'target':arguments['target'],
-            'meta':{'cell_status':capture.state,'pending_calls':capture.pending_calls}}, content=tuple(parts))
+        return ToolBusinessValue(public_fields={'target':arguments['target'], 'meta':meta}, content=tuple(parts))
 
     async def _invoke_media(self, tool, arguments, context, started, origin):
         """Bind media orchestration to this exact direct tool invocation."""
@@ -1381,10 +1391,22 @@ class DirectKernelToolPort(
                 raise CodeModeError('unavailable', 'Code Mode Host is unavailable')
             if tool_name == 'query_cells':
                 capture = None
+                outcome = None
                 if 'target' in arguments:
-                    capture = self.capture_code_cell(arguments['target']['cell_id'])
+                    cell_id = arguments['target']['cell_id']
+                    capture = self._code_mode.find_cell_snapshot(cell_id)
+                    if capture is None:
+                        try:
+                            outcome = await self._code_mode_read_outcome(
+                                session_id=context.session_id, cell_id=cell_id)
+                        except MemoryError:
+                            raise
+                        except Exception as error:
+                            raise CodeModeError('unavailable', str(error)) from error
+                        if outcome is None:
+                            raise CodeModeError('unavailable', '当前会话中找不到该 Cell。')
                     target = arguments['target']
-                business = await self._query_cells(arguments, context, capture=capture)
+                business = await self._query_cells(arguments, context, capture=capture, outcome=outcome)
             elif tool_name == 'exec_cell':
                 if self._code_mode_invoke is None or context.code_mode_snapshot is None:
                     raise RuntimeError('exec_cell lost its common execution snapshot')

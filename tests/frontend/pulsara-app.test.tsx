@@ -236,7 +236,7 @@ describe('PulsaraApp', () => {
     expect(startup).toHaveBeenCalledOnce();
     expect(screen.getByRole('region', { name: '会话加载页' })).toHaveProperty('textContent', expect.stringContaining(initialSession.title));
     expect(screen.queryByRole('textbox', { name: '发送给 Pulsara' })).toBeNull();
-    expect(screen.queryByText('当前没有活动会话')).toBeNull();
+    expect(screen.queryByRole('region', { name: '会话欢迎页' })).toBeNull();
     expect(adapter.createSession).not.toHaveBeenCalled();
     await act(async () => pending.resolve());
     expect(await screen.findByLabelText('发送给 Pulsara')).toBeTruthy();
@@ -246,14 +246,17 @@ describe('PulsaraApp', () => {
 
   it('releases the startup cover into the conversation error state when initialization fails', async () => {
     const adapter = new FakeAdapter();
+    adapter.sessions = [];
     const onStartupSettled = vi.fn();
-    vi.spyOn(adapter, 'bootstrap').mockRejectedValue(new RuntimeApiError('START_FAILED', '本地服务启动失败', false));
+    vi.spyOn(adapter, 'bootstrap').mockResolvedValue(bootstrap)
+      .mockRejectedValueOnce(new RuntimeApiError('START_FAILED', '本地服务启动失败', false));
     render(<PulsaraApp adapter={adapter} onStartupSettled={onStartupSettled} />);
     await screen.findByText('本地服务启动失败');
     expect(onStartupSettled).toHaveBeenCalledOnce();
     expect(screen.getByRole('button', { name: '会话', exact: true }).getAttribute('aria-current')).toBe('page');
-    expect(screen.getByRole('region', { name: '会话工作台' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: '重新连接' })).toBeTruthy();
+    const recovery = screen.getByRole('region', { name: '会话连接状态' });
+    fireEvent.click(within(recovery).getByRole('button', { name: '重新连接' }));
+    expect(await screen.findByRole('region', { name: '会话欢迎页' })).toBeTruthy();
     expect(adapter.connectCalls).toHaveLength(0);
   });
 
@@ -2088,15 +2091,17 @@ describe('PulsaraApp', () => {
     expect(screen.getByRole('heading', { name: '设置' })).toBeTruthy();
   });
 
-  it('replaces the entire composer until an active session exists', async () => {
+  it('shows a standalone welcome when there are no loaded sessions', async () => {
     const adapter = new FakeAdapter();
     adapter.sessions = [];
     render(<PulsaraApp adapter={adapter} />);
 
-    await waitFor(() => expect((screen.getByRole('button', { name: '创建会话' }) as HTMLButtonElement).disabled).toBe(false));
+    await waitFor(() => expect((screen.getByRole('button', { name: /^新建会话/ }) as HTMLButtonElement).disabled).toBe(false));
 
-    expect(await screen.findByText('创建或选择会话后开始')).toBeTruthy();
-    expect(screen.getByText('当前没有活动会话')).toBeTruthy();
+    const welcome = screen.getByRole('region', { name: '会话欢迎页' });
+    expect(within(welcome).getByRole('heading', { name: isWelcomeHeading })).toBeTruthy();
+    expect(screen.queryByRole('region', { name: '会话工作台' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: '尚未选择会话' })).toBeNull();
     expect(screen.queryByLabelText('发送给 Pulsara')).toBeNull();
     expect(screen.queryByRole('button', { name: '选择模型' })).toBeNull();
     expect(screen.queryByRole('button', { name: '先规划' })).toBeNull();
@@ -2106,7 +2111,7 @@ describe('PulsaraApp', () => {
     expect(screen.queryByRole('button', { name: '切换检查器' })).toBeNull();
     expect(adapter.connectCalls).toHaveLength(0);
 
-    fireEvent.click(screen.getByRole('button', { name: '创建会话' }));
+    fireEvent.click(screen.getByRole('button', { name: /^新建会话/ }));
     expect(screen.getByRole('heading', { name: '新建会话' })).toBeTruthy();
   });
 
@@ -2116,7 +2121,6 @@ describe('PulsaraApp', () => {
     renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByText('本地服务启动失败');
     expect((screen.getByRole('button', { name: /新建会话/ }) as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByRole('button', { name: '创建会话' }) as HTMLButtonElement).disabled).toBe(true);
     for (const modifier of ['ctrlKey', 'metaKey']) {
       fireEvent.keyDown(window, { key: 'n', [modifier]: true });
       expect(screen.queryByRole('dialog', { name: '新建会话' })).toBeNull();
@@ -2126,7 +2130,7 @@ describe('PulsaraApp', () => {
     expect(adapter.searchSessions).not.toHaveBeenCalled();
     expect(screen.queryByRole('dialog', { name: '命令面板' })).toBeNull();
     fireEvent.keyDown(window, { key: 'Escape' });
-    expect((screen.getByRole('button', { name: '创建会话' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: /^新建会话/ }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: '记忆' }));
     expect(screen.getByRole('heading', { name: retryable ? '本地服务连接已中断' : '本地服务连接失败' })).toBeTruthy();
     expect(adapter.createSession).not.toHaveBeenCalled();
@@ -2145,10 +2149,10 @@ describe('PulsaraApp', () => {
     await act(async () => finishBootstrap(bootstrap));
     expect(onStartupSettled).not.toHaveBeenCalled();
     expect((screen.getByRole('button', { name: /新建会话/ }) as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByRole('region', { name: '会话工作台' })).toBeTruthy();
+    expect(screen.getByRole('region', { name: '会话欢迎页' })).toBeTruthy();
     await act(async () => finishList([]));
     expect(onStartupSettled).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole('region', { name: '会话工作台' })).toBeTruthy();
+    expect(screen.getByRole('region', { name: '会话欢迎页' })).toBeTruthy();
     expect((screen.getByRole('button', { name: /新建会话/ }) as HTMLButtonElement).disabled).toBe(false);
     fireEvent.keyDown(window, { key: 'n', metaKey: true });
     expect(screen.getByRole('dialog', { name: '新建会话' })).toBeTruthy();
@@ -2611,7 +2615,7 @@ describe('PulsaraApp', () => {
   it('opens the models settings section from the picker gear and keeps the regular settings entry unchanged', async () => {
     renderWorkbench(<PulsaraApp adapter={new FakeAdapter()} />);
     await screen.findByRole('heading', { name: '准备发布' });
-    fireEvent.click(screen.getByRole('button', { name: 'test-model' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'test-model' }));
     expect(screen.queryByRole('button', { name: '管理模型配置' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: '模型设置' }));
     expect(await screen.findByRole('heading', { name: '模型配置' })).toBeTruthy();
@@ -4187,9 +4191,8 @@ describe('explicit runtime reopen owner', () => {
     fireEvent.click(screen.getByRole('button', { name: '关闭会话标签' }));
     expect(adapter.sessionCloseWork).toHaveBeenCalledExactlyOnceWith(initialSession.id);
     await waitFor(() => expect(original.closed).toBe(true));
-    expect(screen.getByRole('region', { name: '会话工作台' })).toBeTruthy();
-    expect(screen.getByRole('heading', { name: '尚未选择会话' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: '创建会话' })).toBeTruthy();
+    expect(screen.getByRole('region', { name: '会话欢迎页' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^新建会话/ })).toBeTruthy();
     expect(screen.queryByLabelText('发送给 Pulsara')).toBeNull();
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(adapter.sessions.some(session => session.id === initialSession.id)).toBe(true);

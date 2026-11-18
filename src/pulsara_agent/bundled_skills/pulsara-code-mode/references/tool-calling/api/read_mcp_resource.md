@@ -1,11 +1,6 @@
 # `tools.read_mcp_resource(args)`
 
-Use an MCP_CONNECTION Target to list a service's resources and URI templates.
-Use a returned MCP_RESOURCE Target to read its URI. For a template, fill its URI
-variables and construct an MCP_RESOURCE Target with the returned server_id and
-concrete uri. Listing returns metadata; reading returns ordered content items.
-
-See the [API rules](index.md) for successful resolution, actual `err.result` and explicit output. Array constraints are retained in type annotations.
+List resources and URI templates with target:MCP_CONNECTION. Read one resource with target:MCP_RESOURCE. Use a returned resource Target, or fill a template and use its server_id and concrete uri in the Target. Read content in order.
 
 ```ts
 export interface ReadMcpResourceArgs {
@@ -15,68 +10,53 @@ export interface ReadMcpResourceArgs {
         kind: "MCP_CONNECTION";
         server_id: string;
       }
-    | {
-        kind: "MCP_RESOURCE";
-        server_id: string;
-        uri: string;
-      };
+    | McpResourceTarget;
 }
-
-export type ReadMcpResourceValue =
-  | {
-      meta: {
-        status: "SUCCESS" | "ERROR" | "CANCELLED";
-      };
-      content: (
-        | {
-            type: "text";
-            value: string;
-          }
-        | {
-            type: "image";
-            value: {
-              kind: "IMAGE_REF";
-              image_ref: string;
-            };
-          }
-        | {
-            type: "object";
-            value:
-              | {
-                  target: {
-                    kind: "MCP_RESOURCE";
-                    server_id: string;
-                    uri: string;
-                  };
-                  name: string;
-                  description?: string;
-                  mime_type?: string;
-                }
-              | {
-                  server_id: string;
-                  uri_template: string;
-                  name: string;
-                  description?: string;
-                  mime_type?: string;
-                };
-          }
-      )[];
-    }
-  | {
-      meta: {
-        status: "ERROR" | "CANCELLED";
-      };
-      content: {
+export interface McpResourceTarget {
+  kind: "MCP_RESOURCE";
+  server_id: string;
+  uri: string;
+}
+export interface ReadMcpResourceSuccess {
+  meta: {
+    status: "SUCCESS";
+  };
+  content: (
+    | {
         type: "text";
         value: string;
-      }[];
-    };
-
-type Successful<T> = T extends { meta: { status: infer S } }
-  ? "SUCCESS" extends S ? T & { meta: { status: "SUCCESS" } } : never
-  : never;
+      }
+    | {
+        type: "image";
+        value: {
+          kind: "IMAGE_REF";
+          image_ref: string;
+        };
+      }
+    | {
+        type: "object";
+        value:
+          | {
+              target: McpResourceTarget;
+              name: string;
+              description?: string;
+              mime_type?: string;
+            }
+          | {
+              server_id: string;
+              uri_template: string;
+              name: string;
+              description?: string;
+              mime_type?: string;
+            };
+      }
+  )[];
+}
+export type ReadMcpResourceFailure = Omit<ReadMcpResourceSuccess, "meta"> & {
+  meta: {status: "ERROR" | "CANCELLED"};
+};
 
 declare const tools: {
-  read_mcp_resource(args: ReadMcpResourceArgs): Promise<Successful<ReadMcpResourceValue>>;
+  read_mcp_resource(args: ReadMcpResourceArgs): Promise<ReadMcpResourceSuccess>;
 };
 ```

@@ -401,7 +401,8 @@ class ToolBatchExecutor:
         bind = getattr(tools, "bind_code_mode_executor", None)
         if bind is not None:
             bind(invoke=self.invoke_code_mode, freeze_source=self.freeze_code_mode_source,
-                 read_source=self.read_code_mode_source)
+                 read_source=self.read_code_mode_source, save_outcome=self.save_code_mode_outcome,
+                 read_outcome=self.read_code_mode_cell_outcome)
 
     def freeze_code_mode_context(self, **values) -> CodeModeExecutionSnapshot:
         epoch = self._continuity.current_view(values["continuity_scope"])
@@ -435,6 +436,23 @@ class ToolBatchExecutor:
             deadline_monotonic=self._canonical_deadline(),
         )
 
+    async def save_code_mode_outcome(self, attempt_id, state, diagnostic) -> None:
+        await self._io.run(
+            self._repository.save_code_mode_outcome,
+            self._writer_lease.guard,
+            attempt_id=attempt_id,
+            state=state,
+            diagnostic=diagnostic,
+            deadline_monotonic=self._canonical_deadline(),
+        )
+
+    async def read_code_mode_cell_outcome(self, *, session_id, cell_id):
+        return await self._io.run(
+            self._repository.read_code_mode_cell_outcome,
+            session_id=session_id,
+            cell_id=cell_id,
+            deadline_monotonic=self._canonical_deadline(),
+        )
 
     async def invoke_code_mode(self, invocation):
         """Run one admitted program call through the native execution leaf."""

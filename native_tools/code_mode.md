@@ -8,7 +8,7 @@
 
 ### 1.1 用途与行为
 
-提交一个独立 JavaScript 脚本，等待执行环境接纳后返回 CELL Target，不等待脚本完成。支持顶层 await 和 return；每次调用使用独立脚本环境，不共享上一次 Cell 的 JS 变量，也不是向同一 REPL 追加代码。
+提交一个独立 JavaScript 脚本，等待执行环境接纳后返回 CELL Target。脚本支持顶层 await，使用 console.log 把所需信息发给模型。每次调用使用独立脚本环境，拥有自己的 JS 变量。
 
 保留现有执行、工具调用、输出及生命周期语义。本次只调整参数和启动工具结果，不将脚本输出搬入启动结果，不改变 steer 的独立交付路径。
 
@@ -79,7 +79,7 @@ type ExecCellResult = ExecCellSuccess | ExecCellFailure;
 工具：exec_cell
 参数：
 {
-  "code": "console.log('开始检查'); return '检查完成';"
+  "code": "console.log('检查完成');"
 }
 ```
 
@@ -156,15 +156,15 @@ exec_cell 只返回本次启动结果。脚本内部工具返回值保留在 JS 
 
 ### 2.1 用途与范围
 
-不传 target 时，列出当前 Host 仍持有的全部 Cell；传入 CELL Target 时，取得该 Cell 的状态、待结清工具调用数量及完整冻结源码。查询不执行脚本、不等待脚本完成，也不消费或重新交付 Cell steer。
+不传 target 时，列出当前 Host 仍持有的全部 Cell，按 Cell ID 排序。传入 CELL Target 时，查询当前会话中对应 Cell 的实际执行源码与状态。源码沿原执行尝试读取，包括通过 PATH 启动后被冻结的源码。查询不执行脚本、不等待脚本完成，也不消费或重新交付 Cell steer。
 
-本工具查询当前仍持有的 Cell，不新增历史 Cell 查询或保留承诺。完成且相关调用、输出和资源已经结清的 Cell 仍按现有生命周期回收；源码已保存不代表已回收的 CELL Target 仍可查询。列表保持现有按 Cell ID 排序的规则，不把此顺序解释为创建时间。
+仍由 Host 持有的 Cell 使用本次取得的实时状态和待结清调用数。Cell 结清后照常释放 JS 环境和内存，终态及必要诊断存入原执行尝试。回收或 Host 重启后，通过本会话已保存的 exec_cell 启动结果定位执行尝试。终态已保存时返回实际终态和 pending_calls:0。若执行记录和源码存在，但终态未确认，仍返回源码，cell_status 为 unknown，省略 pending_calls。
 
 ### 2.2 最简参数表
 
 | 参数 | 类型 | 必填与默认 | 明确含义 |
 | --- | --- | --- | --- |
-| target | CELL Target | 可选；省略则查询列表 | 填写则查询指定 Cell 的状态和完整冻结源码 |
+| target | CELL Target | 可选；省略则查询列表 | 填写则查询本会话中指定 Cell 的状态和完整冻结源码 |
 
 只接受 target；填写时只允许 {kind:"CELL",cell_id:string}，身份沿共享 ID 层校验，不接受 null、其他 Target kind 或额外字段。
 
@@ -185,7 +185,7 @@ interface QueryCellsArgs {
 | 顶层 target | 不返回；Target 在每条 object 内 | 返回实际查到的 CELL Target |
 | meta.status | SUCCESS／ERROR／CANCELLED | SUCCESS／ERROR／CANCELLED |
 | meta.cell_status | 不返回；状态在各记录内 | 成功时为本次查询取得的 Cell 状态 |
-| meta.pending_calls | 不返回；数量在各记录内 | 成功时为本次查询取得的待结清工具调用数量 |
+| meta.pending_calls | 不返回；数量在各记录内 | 成功时为本次查询取得的待结清工具调用数量，unknown 时省略 |
 | content | object 记录数组；无记录或失败时使用文字说明 | 完整源码文字项；有实际诊断或查询失败时使用文字说明 |
 
 列表每条 object 只保留 target、state、pending_calls。pending_calls 是当前尚未结清的脚本工具调用数量，为非负整数，不是所有历史调用总数。删除公开的 has_unread_output；它反映 Host 内部输出移交情况，不用于判断 ROOT 是否收到或阅读了 steer。内部输出缓冲、移交状态及取消信号仍沿现有 owner 保留，不因公开字段精简而删除或改义。
@@ -218,9 +218,10 @@ interface QueryCellSuccess {
   target: ExecCellTarget;
   meta: {
     status: "SUCCESS";
-    cell_status: QueryCellState;
-    pending_calls: number;
-  };
+  } & (
+    | {cell_status: QueryCellState; pending_calls: number}
+    | {cell_status: "unknown"; pending_calls?: never}
+  );
   content: ExecCellTextPart[];
 }
 
@@ -354,25 +355,26 @@ tool_result: <本次完整单查结果的导出 Target>
 next: null
 ```
 
-源码是读取到的实际执行源码，不重新打开 exec_cell 的原 PATH。上述例子假设一页可完整交付；超出时 next 为 NEXT Target，而不是重新调用 query_cells 的参数。观察信息和身份占位沿第 1 章的示例约定。
+源码是读取到的实际执行源码，不重新打开 exec_cell 的原 PATH。同一个 Target 在 Cell 正常结束且已回收后查询，源码原文相同，meta 为 {status:"SUCCESS",cell_status:"completed",pending_calls:0}。上述例子假设一页可完整交付，超出时使用 NEXT Target 续读。观察信息和身份占位沿第 1 章的示例约定。
 
 ### 2.5 空结果、错误及取消
 
 | 情况 | meta.status | content 与其他字段 |
 | --- | --- | --- |
 | 正常列表查询，没有记录 | SUCCESS | 一条文字：“当前没有可查询的 Cell。”；无顶层 target |
-| 指定 Cell 不存在、已回收或当前 Host 不可用 | ERROR | 简短实际原因；不伪造 Target、Cell 状态或数量 |
+| 指定 Cell 不存在或不属于当前会话 | ERROR | 简短实际原因，不提供未确认的 Target 或状态 |
+| 指定 Cell 有已保存源码，终态未确认 | SUCCESS | 返回实际 Target、冻结源码和 unknown 状态，省略待结清数量 |
 | Cell 已查到，但冻结源码读取失败 | ERROR | 返回已确认的 CELL Target；文字说明源码读取失败及实际原因，不以空源码冒充成功，不另设 source.status |
 | 参数无效或其他查询失败 | ERROR | 具体原因；已经取得且有用的事实放文字，不伪造成功记录 |
 | 调用取消 | CANCELLED | 说明实际取消情况；不因查询取消停止被查询的 Cell |
 
-列表无记录与单查不可用必须区分；Host 不可用不能冒充空列表。错误及取消时不提供可选的 cell_status、pending_calls 字段组合，必要已知事实直接写入 content；确实查到 Cell 时才可返回其 Target。
+列表无记录、列表 Host 不可用和单查找不到对应执行尝试分别报告。单查已保存的 Cell 可在 Host 重启后读取。错误及取消时不提供可选的 cell_status、pending_calls 字段组合，必要已知事实直接写入 content；确实查到 Cell 时才可返回其 Target。
 
 错误结果同样沿完整保存和原生分页规则交付。结果已保存且正常交付完整时可以提供 tool_result 和 next:null；这只表示错误正文已读完。保存或交付失败沿共同规则报告，不提供假引用，也不重新执行原查询或脚本。
 
 ### 2.6 冻结结果与统一分页
 
-列表一次取得当前完整记录，单查一次取得该 Cell 的状态、调用数量及完整冻结源码，形成并保存本次结果后再分页。状态和数量是查询时的快照，不在补页时重新读取 live Cell；源码也不依赖后来磁盘文件的内容。
+列表一次取得当前完整记录，单查一次取得该 Cell 的状态、调用数量及完整冻结源码，形成并保存本次结果后再分页。运行中使用查询时的状态和数量，回收后使用保存的结算状态。补页沿本次快照交付。
 
 原生按统一 12k 顺序交付；列表 object 的 JSON 文字投影及源码文字均允许跨页，不增加整条记录不可拆的限制。NEXT 只定位已保存冻结结果的未交付内容，模型原样传给 read_file；不公开内部位置，不生成查询游标、源码偏移或完整后继调用参数。
 

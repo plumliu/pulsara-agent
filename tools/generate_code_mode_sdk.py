@@ -7,6 +7,7 @@ import argparse
 from collections import defaultdict
 import json
 from pathlib import Path
+import re
 import subprocess
 
 from pulsara_agent.capability.builtin_catalog import execution_catalog_entry
@@ -74,17 +75,51 @@ def _render_declarations(entries: list[dict[str, object]]) -> dict[str, str]:
     return json.loads(process.stdout)
 
 
-def _tool_page(name: str, arguments: str, value: str) -> str:
+def _with_statuses(schema: dict, statuses: list[str]) -> dict:
+    properties = schema["properties"]
+    meta = properties["meta"]
+    return {**schema, "properties": {**properties, "meta": {
+        **meta, "properties": {**meta["properties"], "status": {"enum": statuses}},
+    }}}
+
+
+def _result_branches(schema: dict, statuses: set[str]) -> list[dict]:
+    for keyword in ("anyOf", "oneOf"):
+        if keyword in schema:
+            return [
+                result for branch in schema[keyword]
+                for result in _result_branches(branch, statuses)
+            ]
+    status_schema = schema["properties"]["meta"]["properties"]["status"]
+    return [_with_statuses(schema, selected)] if (
+        selected := [status for status in status_schema["enum"] if status in statuses]
+    ) else []
+
+
+def _result_schema(branches: list[dict]) -> dict:
+    return branches[0] if len(branches) == 1 else {"anyOf": branches}
+
+
+def _plain_failure(schema: dict) -> bool:
+    common = tool_business_value_schema(statuses=("ERROR", "CANCELLED"))
+    content = schema["properties"]["content"]
+    items = content.get("items", {})
+    if set(items) == {"oneOf"} and len(items["oneOf"]) == 1:
+        schema = {**schema, "properties": {
+            **schema["properties"], "content": {**content, "items": items["oneOf"][0]},
+        }}
+    return schema == common
+
+
+def _tool_page(name: str, declarations: str, *, shared_failure: bool) -> str:
     descriptor = execution_catalog_entry(name, code_mode=True).descriptor
     type_name = _type_name(name)
     extra, adapter, argument_type = "", "", f"{type_name}Args"
     if name == "run_agent":
         extra = (
-            "Pass one ordered assignments array, including for a single assignment. "
-            "The generated argument type describes the resolved assignments. Before dispatch, "
-            "`instruction` and `depends_on` may also be synchronous JavaScript functions of "
-            "preallocated `{agents,works}` Targets. They return a string and a WORK Target "
-            "array respectively; they cannot call tools, await, or return a Promise.\n\n"
+            "An assignment can include up to 16 WORK materials and 16 dependencies, "
+            "with at most 64 dependency edges per batch. Instructions and titles have UTF-8 "
+            "limits of 65,536 and 256 bytes. See [Agent coordination](../../agent-orchestration/coordination.md).\n\n"
         )
         adapter = (
             "type Assignment = RunAgentArgs[number];\n"
@@ -97,38 +132,47 @@ def _tool_page(name: str, arguments: str, value: str) -> str:
             "  depends_on?: Assignment[\"depends_on\"] | ((refs: BatchRefs) => NonNullable<Assignment[\"depends_on\"]>);\n"
             "};\n"
         )
-        argument_type = "CallAssignment[]"
+        argument_type = "[CallAssignment, ...CallAssignment[]]"
     elif name == "decide":
         extra = (
-            "`tools.decide.available()` is a local synchronous boolean, frozen at Cell "
-            "startup; it does not call a service or test service health. Actual decide calls "
-            "are asynchronous. The successful decisions array follows inputs order.\n\n"
+            "`available()` checks configuration without testing service health.\n\n"
         )
-    declarations = arguments + "\n" + value + "\n" + adapter + (
-        'type Successful<T> = T extends { meta: { status: infer S } }\n'
-        '  ? "SUCCESS" extends S ? T & { meta: { status: "SUCCESS" } } : never\n'
-        '  : never;\n'
-    )
-    if "JsonValue" in declarations:
+    if re.search(r"\bJsonValue\b", declarations):
         declarations = (
             "type JsonValue = null | boolean | number | string | JsonValue[] "
             "| { [key: string]: JsonValue };\n\n" + declarations
         )
+    if shared_failure:
+        declarations += (
+            f'export type {type_name}Failure = Omit<{type_name}Success, "meta"> & {{\n'
+            '  meta: {status: "ERROR" | "CANCELLED"};\n'
+            '};\n'
+        )
     signature = (f"declare const tools: {{\n  {name}(args: {argument_type}): "
-        f"Promise<Successful<{type_name}Value>>;\n}};\n")
+        f"Promise<{type_name}Success>;\n}};\n")
+    example = ""
     if name == "decide":
         signature = (
             "declare const tools: {\n  decide: ((args: DecideArgs) => "
-            "Promise<Successful<DecideValue>>) "
+            "Promise<DecideSuccess>) "
             "& { available(): boolean };\n};\n"
+        )
+        example = (
+            '\n```js\n'
+            'const condition = "Does this describe an export failure?";\n'
+            'const inputs = ["Export did not create a file.", "The file opens correctly."];\n'
+            'if (tools.decide.available()) {\n'
+            '  const result = await tools.decide({condition, inputs});\n'
+            '  console.log(inputs.filter((_, i) => result.content[0].value.decisions[i]));\n'
+            '} else {\n'
+            '  console.log({condition, inputs});\n'
+            '}\n```\n'
         )
     return (
         f"# `tools.{name}(args)`\n\n"
         f"{descriptor.description}\n\n"
         f"{extra}"
-        "See the [API rules](index.md) for successful resolution, actual `err.result` "
-        "and explicit output. Array constraints are retained in type annotations.\n\n"
-        "```ts\n" + declarations + "\n" + signature + "```\n"
+        "```ts\n" + declarations + "\n" + adapter + signature + "```\n" + example
     )
 
 
@@ -138,7 +182,7 @@ def reference_documents() -> dict[str, str]:
     from jsonschema import Draft202012Validator
 
     documents = {}
-    schemas, tools = [], []
+    schemas, tools = [], {}
     families: dict[str, list[str]] = defaultdict(list)
     for name in sorted(CODE_MODE_SHARED_TOOL_NAMES):
         descriptor = execution_catalog_entry(name, code_mode=True).descriptor
@@ -147,47 +191,40 @@ def reference_documents() -> dict[str, str]:
         inputs = (run_agent_script_input_schema() if name == "run_agent"
                   else thaw_tool_json_object(descriptor.input_schema))
         family, business_output = _business_schema(name)
-        outputs = {"anyOf": [business_output,
-            tool_business_value_schema(statuses=("ERROR", "CANCELLED"))]}
         Draft202012Validator.check_schema(inputs)
-        Draft202012Validator.check_schema(outputs)
+        Draft202012Validator.check_schema(business_output)
         type_name = _type_name(name)
-        schemas.extend([{"name": f"{type_name}Args", "schema": inputs},
-                        {"name": f"{type_name}Value", "schema": outputs}])
-        tools.append(name)
+        success = _result_schema(_result_branches(business_output, {"SUCCESS"}))
+        failures = [
+            branch for branch in _result_branches(business_output, {"ERROR", "CANCELLED"})
+            if not _plain_failure(branch)
+        ]
+        definitions = {f"{type_name}Success": success}
+        # A mixed-status owner value can keep the exact same fields on failure.
+        # Reuse its declaration when status is the only difference.
+        shared_failure = (
+            len(failures) == 1
+            and failures[0]["properties"]["meta"] == tool_business_value_schema(
+                statuses=("ERROR", "CANCELLED")
+            )["properties"]["meta"]
+            and _with_statuses(failures[0], ["SUCCESS"]) == success
+        )
+        if failures and not shared_failure:
+            definitions[f"{type_name}Failure"] = _result_schema(failures)
+        schemas.append({"name": f"{type_name}Args", "schema": inputs, "definitions": definitions})
+        tools[name] = shared_failure
         families[family].append(name)
     declarations = _render_declarations(schemas)
-    for name in tools:
+    for name, shared_failure in tools.items():
         type_name = _type_name(name)
-        documents[f"{name}.md"] = _tool_page(name,
-            declarations[f"{type_name}Args"], declarations[f"{type_name}Value"])
+        documents[f"{name}.md"] = _tool_page(
+            name, declarations[f"{type_name}Args"], shared_failure=shared_failure,
+        )
     lines = [
         "# Code Mode API reference", "",
-        "Read the relevant tool page before composing calls or accessing result fields. "
-        "These pages describe the actual JS directory; they do not add native tools "
-        "or expose Cell variables to ROOT. TypeScript here describes interfaces; "
-        "write JavaScript in a Cell, without copying export, interface or import declarations.", "",
-        "Calls take one declared object or array argument. Await the complete saved "
-        "business value; successful delivery of a SUCCESS value resolves normally. "
-        "A thrown error may carry the actual complete business value as err.result. "
-        "Its meta.status remains SUCCESS, ERROR or CANCELLED according to the business "
-        "outcome; a save or delivery failure does not change a known SUCCESS. Read the "
-        "error's message for the save or delivery failure. Errors "
-        "without a business value omit it. Narrow each page's Value type by "
-        "meta.status when handling an actual err.result. Common early rejection or "
-        "execution failures contain only meta and text content; domain failures keep "
-        "their declared fields. Do not repeat an action to recover its response.", "",
-        'Tool-call errors have name "ToolError", code and message, and result when an '
-        "actual business value exists; ordinary JavaScript errors such as TypeError "
-        "need not have this interface.", "",
-        "Missing fields differ from null, and content item order is preserved. "
-        "JsonValue means JSON null, boolean, number, string, array or object, including "
-        "unknown external MCP business values. Array length and numeric constraints "
-        "remain those of the actual argument schema, including displayed annotations.", "",
-        "Use console.log or a top-level return to disclose selected values to ROOT. "
-        "Values held only in Cell memory are not model-visible. Native observation "
-        "time, page controls and NEXT are outside these JS values. Actual image items "
-        "are recognized recursively in explicit output; bare Targets remain text.", "",
+        "Read the tool's inputs and result before writing a call. The declarations "
+        "are TypeScript for reference; write JavaScript in the Cell. See "
+        "[shared output and error rules](../results-and-errors.md).", "",
     ]
     for family, names in sorted(families.items()):
         lines.extend([f"## {family}", ""])

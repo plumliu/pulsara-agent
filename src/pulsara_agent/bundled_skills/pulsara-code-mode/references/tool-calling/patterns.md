@@ -1,42 +1,21 @@
-# Tool calling patterns
+# Discover and call MCP tools
 
-Use tools from the actual Cell directory. Native and JS entry points retain each
-tool's documented parameters and permissions; Code Mode control tools themselves
-are native-only. ROOT bypass-permissions is required for a Cell.
-
-Read each tool's [API reference](api/index.md) for its input and complete return
-type before composing a business Cell. Shared content items alone do not describe
-an individual tool's result fields or error branches.
-
-Sequential calls can feed later arguments directly. Use Promise.all for independent
-calls; already submitted calls still settle if another call fails. Print only the
-selected evidence or image items that ROOT should receive.
-
-```js
-const reads = await Promise.all(["README.md","pyproject.toml"].map(path=>
-  tools.read_file({target:{kind:"PATH",path}})));
-console.log({content:reads.flatMap(result=>result.content)});
-```
-
-Use `tools.web_search` to find sources and `tools.web_fetch` to read a chosen URL.
-Both are built-in APIs with fixed arguments; no MCP discovery or invocation
-reference is needed. Independent searches or reads can run in parallel. Output
-the search records before asking ROOT to select a source; an explicit selection
-rule such as "read the first result" can run within the same Cell.
-
-For MCP, first obtain the needed input schema, available return description and
-invocation reference through native query_capabilities or a preparation Cell:
+Before writing a business Cell, obtain the remote tool's parameters, any
+available result schema and its invocation Target. Query natively, or run a
+preparation Cell and send the result to ROOT:
 
 ```js
 const matches = await tools.query_capabilities({kind:"MCP",query:"find issues"});
 console.log(matches);
 ```
 
-Once the model has received the relevant interface, write the business Cell with
-that actual reference. It works across native calls and Cells in the same session;
-a second query inside the business Cell is unnecessary. Query results in JS memory
-become model-visible through explicit output.
+Search may return service records as well as tool details. Query a service's
+MCP_CONNECTION Target for its tool directory, or a MCP_TOOL Target for exact tool
+details. Pass the actual `invocation.target` (MCP_TOOL_REF) and matching
+`arguments` to `tools.call_mcp_tool`. The reference works in native calls and
+across Cells in this session. If it becomes stale, query again.
 
-Use tools.decide only for semantic predicates over supplied strings. Its
-available() method takes no arguments, returns the Cell's frozen configuration
-boolean, and creates no tool call. Exact counts and string matching use JS.
+Use the ordered `content` directly. If supplied, `output_schema` describes the
+successful `structuredContent` value only. Without it, inspect the result before
+accessing unknown fields. An uncertain side effect is a reason to check what
+happened before calling again.
