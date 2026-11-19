@@ -606,6 +606,7 @@ class LocalHttpServer:
             self._plugin_mcp_authorization,
         )
         self._app.router.add_get("/api/sessions", self._list_sessions)
+        self._app.router.add_post("/api/sessions/wait-for-tab-unload", self._wait_for_tab_unload)
         self._app.router.add_post("/api/sessions/search", self._search_sessions)
         self._app.router.add_put("/api/sessions/{session_id}/title", self._rename_session)
         self._app.router.add_get(
@@ -1721,10 +1722,12 @@ class LocalHttpServer:
     async def _list_sessions(self, _request: web.Request) -> web.Response:
         return web.json_response({"sessions": await self.sessions.list_sessions()})
 
-
-
-
-
+    async def _wait_for_tab_unload(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) != {"session_ids"} or not isinstance(body["session_ids"], list) or not body["session_ids"]:
+            raise ValueError("expected pending tab unload session IDs")
+        await self.sessions.wait_for_tab_unload(frozenset(require_id(item, "session") for item in body["session_ids"]))
+        return web.Response(status=204)
 
     async def _inspect_session_capabilities(self, request: web.Request) -> web.Response:
         payload = await self.sessions.inspect_session_capabilities(

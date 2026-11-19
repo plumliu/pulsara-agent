@@ -29,6 +29,48 @@ async function start() {
 }
 
 describe('production session canvas', () => {
+  it('changes the closed sidebar row to resumable when its Host unloads', async () => {
+    const { adapter } = await start();
+    const unloaded = deferred<void>();
+    adapter.waitForTabUnload.mockReturnValue(unloaded.promise);
+    adapter.sessions[0] = { ...initialSession, live: true, tabUnloadPending: true };
+    await userEvent.click(closeFirst());
+    expect(screen.queryByRole('tab', { name: /准备发布/ })).toBeNull();
+    expect(await screen.findByRole('button', { name: /准备发布.*已载入/ })).toBeTruthy();
+    expect(adapter.waitForTabUnload).toHaveBeenCalledWith([initialSession.id], expect.any(AbortSignal));
+
+    adapter.sessions[0] = { ...initialSession, live: false, tabUnloadPending: false };
+    await act(async () => unloaded.resolve());
+    expect(await screen.findByRole('button', { name: /准备发布.*可恢复/ })).toBeTruthy();
+    expect(adapter.connectCalls).toHaveLength(1);
+  });
+
+  it('shares a wait across closed tabs and retires it when the remaining tab reopens', async () => {
+    const { adapter } = await start();
+    const firstUnload = deferred<void>();
+    const otherUnload = deferred<void>();
+    adapter.waitForTabUnload.mockReturnValueOnce(firstUnload.promise).mockReturnValue(otherUnload.promise);
+    adapter.sessions = [initialSession, second].map(session => ({ ...session, live: true, tabUnloadPending: true }));
+    await userEvent.click(closeFirst());
+    await waitFor(() => expect(adapter.waitForTabUnload).toHaveBeenCalledExactlyOnceWith(
+      [initialSession.id, second.id].sort(), expect.any(AbortSignal),
+    ));
+
+    adapter.sessions[0] = initialSession;
+    await act(async () => firstUnload.resolve());
+    expect(await screen.findByRole('button', { name: /准备发布.*可恢复/ })).toBeTruthy();
+    const loaded = screen.getByRole('button', { name: /另一会话.*已载入/ });
+    await waitFor(() => expect(adapter.waitForTabUnload).toHaveBeenLastCalledWith([second.id], expect.any(AbortSignal)));
+    const [, signal] = adapter.waitForTabUnload.mock.lastCall!;
+    adapter.sessions[1] = { ...second, live: true, tabUnloadPending: false };
+    await userEvent.click(loaded);
+    await waitFor(() => expect(signal.aborted).toBe(true));
+    const reads = adapter.listSessions.mock.calls.length;
+    await act(async () => otherUnload.resolve());
+    expect(adapter.listSessions.mock.calls.length).toBe(reads);
+    expect(screen.getByRole('button', { name: /另一会话.*当前会话/ })).toBeTruthy();
+  });
+
   it('keeps both streams and window DOM alive while another composer is composing and during user navigation', async () => {
     const { adapter, first, firstConnection } = await start();
     const firstComposer = within(first).getByLabelText('发送给 Pulsara');

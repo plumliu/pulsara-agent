@@ -396,19 +396,33 @@ class LocalSessionController(SessionCapabilities):
             include_archived=False,
         )
         async with self._lock:
-            live_ids = frozenset(self._by_session)
             handles = dict(self._by_session)
             busy_ids = frozenset(self._operations)
+            pending_unloads = frozenset(self._pending_tab_unloads)
         idle_ids = await self.core.idle_session_ids(self.memory_domain_id)
         result = []
         for item in summaries:
-            payload = self._summary_payload(item, item.session_id in live_ids)
+            payload = self._summary_payload(item, item.session_id in handles)
+            payload["tab_unload_pending"] = item.session_id in pending_unloads
             idle = item.session_id in idle_ids and item.session_id not in busy_ids
             if idle and item.session_id in handles:
                 idle = await handles[item.session_id].session.inspect_archive_idle()
             payload['can_archive'] = idle
             result.append(payload)
         return result
+
+    async def wait_for_tab_unload(self, session_ids: frozenset[str]) -> None:
+        """Wake the visible session list when any observed unload settles."""
+        tasks = set()
+        for session_id in session_ids:
+            pending = self._pending_tab_unloads.get(session_id)
+            if pending is None or pending.task is None:
+                return  # The list was read before this close settled or was withdrawn.
+            tasks.add(pending.task)
+        if tasks:
+            # The sidebar also refreshes ordinary metadata every 30 seconds.
+            # A read timing out or disconnecting must leave all Host work running.
+            await asyncio.wait(tasks, timeout=30, return_when=asyncio.FIRST_COMPLETED)
 
     async def search_sessions(self, *, query: str, lifecycle: str = "ALL", cursor: str | None = None, limit: int = 20):
         from pulsara_agent.conversation_kernel.host import _kernel_session_summary
@@ -760,6 +774,8 @@ class LocalSessionController(SessionCapabilities):
             pending.wake.set()
 
     def reopen_tab(self, session_id: str) -> None:
+        if isinstance(self._operations.get(session_id), _IdleUnloadInFlight):
+            return  # A reopen joins a committed unload until its Host settles.
         pending = self._pending_tab_unloads.pop(session_id, None)
         if pending is not None:
             pending.wake.set()

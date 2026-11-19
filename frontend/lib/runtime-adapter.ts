@@ -662,6 +662,7 @@ export interface RuntimeAdapter {
   unarchiveSession(sessionId: string): Promise<{ status: 'OPEN'; session_id: string }>;
   readSession(sessionId: string): Promise<SessionSummary | null>;
   listSessions(): Promise<SessionSummary[]>;
+  waitForTabUnload(sessionIds: string[], signal: AbortSignal): Promise<void>;
   inspectCapabilities(sessionId: string): Promise<CapabilitySnapshot>;
   reconnectMcpServer(sessionId: string, serverId: string): Promise<CapabilitySnapshot>;
   installSkill(
@@ -1496,6 +1497,12 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
       const payload = await apiRequest<{ sessions: Array<Record<string, unknown>> }>('/api/sessions');
       if (revision === this.sessionTitleRevision) return payload.sessions.map(projectSessionSummary);
     }
+  }
+
+  async waitForTabUnload(sessionIds: string[], signal: AbortSignal): Promise<void> {
+    await apiRequest('/api/sessions/wait-for-tab-unload', {
+      method: 'POST', body: JSON.stringify({ session_ids: sessionIds }), signal,
+    });
   }
 
   async reopenRuntime(sessionId: string): Promise<{
@@ -5005,6 +5012,7 @@ function projectSessionSummary(value: Record<string, unknown>): SessionSummary {
     status: projectRootStatus(value.latest_root_turn as {status?: string} | null),
     updatedAt: formatRelativeTime(String(value.updated_at ?? '')),
     live: Boolean(value.live),
+    tabUnloadPending: value.tab_unload_pending === true,
     subagentCount: typeof value.subagent_count === 'number' ? value.subagent_count : undefined,
     modelCallBinding: projectModelCallBinding(value.model_call_binding),
     workspace,

@@ -717,6 +717,7 @@ class FakeAdapter implements RuntimeAdapter {
   closeSessionTab = vi.fn<RuntimeAdapter['closeSessionTab']>(async () => ({ status: 'closed' }));
 
   listSessions = vi.fn(async () => this.sessions.map((session) => ({ ...session })));
+  waitForTabUnload = vi.fn<RuntimeAdapter['waitForTabUnload']>();
 
   inspectCapabilities = vi.fn(async (sessionId: string) => ({
     ...capabilitySnapshot,

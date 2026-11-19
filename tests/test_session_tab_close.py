@@ -103,6 +103,17 @@ async def wait_until(check):
             await asyncio.sleep(0.015)
 
 
+async def listed_session(client, origin, session_id):
+    async with client.get(f"{origin}/api/sessions") as response:
+        assert response.status == 200
+        return next(row for row in (await response.json())["sessions"] if row["id"] == session_id)
+
+
+async def observe_unload(client, origin, session_id):
+    async with client.post(f"{origin}/api/sessions/wait-for-tab-unload", json={"session_ids": [session_id]}) as response:
+        assert response.status == 204
+
+
 def test_direct_and_browser_observers_are_counted_and_last_disconnect_releases_host(
     tmp_path, monkeypatch, stage2_migrated_postgres_database,
 ):
@@ -116,6 +127,14 @@ def test_direct_and_browser_observers_are_counted_and_last_disconnect_releases_h
                 server=protocol, host_session_id=host.host_session_id, session_id=host.session_id,
                 role=wire.ATTACHMENT_ROLE_OBSERVER, client_instance_id=random_id("transport"),
             )
+            observing = asyncio.Event()
+            wait_for_unload = sessions.wait_for_tab_unload
+
+            async def observe(ids):
+                observing.set()
+                await wait_for_unload(ids)
+
+            monkeypatch.setattr(sessions, "wait_for_tab_unload", observe)
             try:
                 for connection in (viewer, owner):
                     prompt = await close_tab(client, origin, host.session_id, connection)
@@ -123,11 +142,20 @@ def test_direct_and_browser_observers_are_counted_and_last_disconnect_releases_h
                                       "visible_form": False, "other_clients": True}
                     assert await close_tab(client, origin, host.session_id, connection, prompt) == {"status": "closed"}
                 assert host.host_session_id in sessions.core._sessions
+                row = await listed_session(client, origin, host.session_id)
+                assert row["live"] and row["tab_unload_pending"]
+                observation = asyncio.create_task(observe_unload(client, origin, host.session_id))
+                await asyncio.wait_for(observing.wait(), 5)
+                assert not observation.done()
             finally:
                 # A direct peer can close its Unix socket without a browser notification.
                 direct._writer.close()
                 await direct._writer.wait_closed()
-            await wait_until(lambda: host.host_session_id not in sessions.core._sessions)
+            await asyncio.wait_for(observation, 5)
+            row = await listed_session(client, origin, host.session_id)
+            assert not row["live"] and not row["tab_unload_pending"]
+            # Settlement may also precede the sidebar's first wait request.
+            await asyncio.wait_for(observe_unload(client, origin, host.session_id), 5)
             reopened = await connect(client, origin, host.session_id)
             assert reopened["live_control_snapshot"]["snapshot"]["host_session_id"] != host.host_session_id
             assert reopened["role"] == "controller"
@@ -260,6 +288,8 @@ def test_open_during_committed_unload_waits_then_returns_live_or_saved_history(
             try:
                 await asyncio.sleep(0.05)
                 assert not opening.done()
+                row = await listed_session(client, origin, host.session_id)
+                assert row["live"] and row["tab_unload_pending"]
             finally:
                 release.set()
             view = await asyncio.wait_for(opening, 8)

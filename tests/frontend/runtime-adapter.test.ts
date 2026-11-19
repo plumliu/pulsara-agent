@@ -2257,6 +2257,7 @@ describe('session summaries', () => {
         lifecycle: 'OPEN',
         updated_at: '2026-08-30T11:00:00Z',
         live: true,
+        tab_unload_pending: true,
         task_counts: { total: 5, active: 1, waiting: 2, attention: 1 },
       }, {
         id: 'session-resumable',
@@ -2274,11 +2275,12 @@ describe('session summaries', () => {
       id: session.id,
       subtitle: session.subtitle,
       live: session.live,
+      pending: session.tabUnloadPending,
     }))).toEqual([
       {
-        id: 'session-loaded', subtitle: '13 条记录', live: true,
+        id: 'session-loaded', subtitle: '13 条记录', live: true, pending: true,
       },
-      { id: 'session-resumable', subtitle: '8 条记录', live: false },
+      { id: 'session-resumable', subtitle: '8 条记录', live: false, pending: false },
     ]);
   });
 });

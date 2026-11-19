@@ -61,6 +61,10 @@ import { SessionWorkbench, emptySession, emptyWorkspace, productMessage, type Se
 
 const defaultAdapter = new LocalHttpRuntimeAdapter();
 
+function pendingTabUnloadIds(sessions: SessionSummary[]): string {
+  return sessions.filter(session => session.tabUnloadPending).map(session => session.id).sort().join(',');
+}
+
 type PendingOpen = {
   placement: SessionCanvasPlacement;
   result: Promise<boolean>;
@@ -555,34 +559,44 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   };
 
 
+  const pendingTabUnloads = useMemo(() => pendingTabUnloadIds(sessionList), [sessionList]);
   useEffect(() => {
-    let disposed = false;
+    let observation = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
-    let latestRead: object;
-    const refreshSessions = () => {
+    const visible = () => databaseState === 'ready' && document.visibilityState === 'visible';
+    const refreshLater = () => { timer = setTimeout(refreshSessions, 30_000); };
+    function observe(signal: AbortSignal) {
+      if (signal.aborted || !visible()) return;
+      if (!pendingTabUnloads) { refreshLater(); return; }
+      // One wait covers every pending close, including sessions on another page.
+      void adapter.waitForTabUnload(pendingTabUnloads.split(','), signal).then(
+        () => { if (!signal.aborted) refreshSessions(); },
+        () => { if (!signal.aborted) refreshLater(); },
+      );
+    }
+    function refreshSessions() {
       clearTimeout(timer);
-      if (document.visibilityState !== 'visible' || databaseState !== 'ready') return;
-      const read = {};
-      latestRead = read;
-      void readSessionList().catch(() => {}).finally(() => {
-        if (!disposed && latestRead === read && document.visibilityState === 'visible') {
-          timer = setTimeout(refreshSessions, 30_000);
-        }
-      });
-    };
-    // User-level metadata can change after a queued input becomes ROOT while
-    // another page is open. Use the ordinary desktop observation cadence;
-    // this reads session rows only and cannot create ephemeral provider work.
-    if (databaseState === 'ready') timer = setTimeout(refreshSessions, 30_000);
+      observation.abort();
+      observation = new AbortController();
+      if (!visible()) return;
+      const { signal } = observation;
+      void readSessionList(() => !signal.aborted).then(sessions => {
+        if (signal.aborted) return;
+        if (!sessions) refreshLater();
+        else if (pendingTabUnloadIds(sessions) === pendingTabUnloads) observe(signal);
+        // A different set starts its own observation when React publishes the list.
+      }, () => { if (!signal.aborted) refreshLater(); });
+    }
+    observe(observation.signal);
     window.addEventListener('focus', refreshSessions);
     document.addEventListener('visibilitychange', refreshSessions);
     return () => {
-      disposed = true;
+      observation.abort();
       clearTimeout(timer);
       window.removeEventListener('focus', refreshSessions);
       document.removeEventListener('visibilitychange', refreshSessions);
     };
-  }, [databaseState, readSessionList]);
+  }, [adapter, databaseState, pendingTabUnloads, readSessionList]);
 
   const refreshConfiguration = useCallback(async (options?: { background?: boolean }) => {
     const background = options?.background === true;
