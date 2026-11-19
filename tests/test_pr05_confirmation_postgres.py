@@ -118,6 +118,7 @@ def pg_owner(database):
             assistant_entry_id=entry_id,
             tool_call_id=call_id,
             tool_name="exec_process",
+            public_prompt="执行命令：true",
             permission_snapshot=permission,
         ),
     )

@@ -198,6 +198,20 @@ def test_model_secret_template_update_requires_confirmation_only_for_new_destina
             call = CapabilityManagementCall(owner, prepared)
             if destination_changed:
                 assert prepared.user_inputs == ("credential_destination_confirmation",)
+                form = CapabilityManagementCall(owner, prepared).form("review")
+                prefill = thaw_json(form.public_projection)["prefill"]
+                assert prefill["saved_destination"] == original["transport"]
+                proposed = prefill["config"]
+                assert proposed["transport"]["endpoint"] == "https://new.example/mcp"
+                assert "retained-test-credential" not in json.dumps(prefill)
+                with pytest.raises(ValueError, match="确认"):
+                    await form.prepare_submission({"config": proposed})
+                await form.prepare_submission(
+                    {"config": {**proposed, "transport": original["transport"]}}
+                )
+                await form.prepare_submission(
+                    {"config": proposed, "retain_credentials_confirmed": True}
+                )
                 with pytest.raises(ValueError, match="requires user input"):
                     await call.execute()
                 assert config_guard(owner.mcp.inspect(target)) == config_guard(

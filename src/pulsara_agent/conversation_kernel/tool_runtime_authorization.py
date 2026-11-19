@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Mapping
 from jsonschema import ValidationError
 from .capability_management_execution import CapabilityManagementCall
+from pulsara_agent.capability.management_intent import CapabilityManagementAction
 from pulsara_agent.capability.builtin_catalog import execution_catalog_entry
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.ports.terminal import (
@@ -55,6 +56,7 @@ from .tool_contracts import (
     KernelToolAuthorizationKind,
     PreparedPermissionRequest,
 )
+from .tool_permission_prompt import builtin_permission_prompt, management_permission_prompt
 from .mcp.supervisor import (
     McpBoundToolExecutor,
     McpDispatchAdmissionPermit,
@@ -331,26 +333,37 @@ class _ToolAuthorizationOperations:
                     decision.reference,
                     decision.public_message,
                 )
-            form = (
+            requires_permission = decision.kind is ToolDispatchDecisionKind.REQUIRE_CONFIRMATION
+            editable_connection = capability_call.prepared.intent.action in {
+                CapabilityManagementAction.ADD_LOCAL_MCP,
+                CapabilityManagementAction.UPDATE_MCP_CONNECTION,
+            }
+            if (
                 readonly_form
                 or bool(capability_call.prepared.user_inputs)
-                or (decision.kind is ToolDispatchDecisionKind.REQUIRE_CONFIRMATION)
-            )
+                or (editable_connection and requires_permission)
+            ):
+                return KernelToolAuthorization(
+                    KernelToolAuthorizationKind.CAPABILITY_FORM_REQUIRED,
+                    decision.reference,
+                    decision.public_message,
+                    capability_call=capability_call,
+                    capability_permission_required=requires_permission,
+                )
             return KernelToolAuthorization(
-                KernelToolAuthorizationKind.CAPABILITY_FORM_REQUIRED
-                if form
+                KernelToolAuthorizationKind.REQUIRE_CONFIRMATION
+                if requires_permission
                 else KernelToolAuthorizationKind.ALLOW,
                 decision.reference,
-                decision.public_message,
+                management_permission_prompt(capability_call.prepared, self._workspace_root)
+                if requires_permission else decision.public_message,
                 capability_call=capability_call,
-                capability_permission_required=decision.kind
-                is ToolDispatchDecisionKind.REQUIRE_CONFIRMATION,
             )
         if decision.kind is ToolDispatchDecisionKind.REQUIRE_CONFIRMATION:
             return KernelToolAuthorization(
                 KernelToolAuthorizationKind.REQUIRE_CONFIRMATION,
                 decision.reference,
-                decision.public_message,
+                builtin_permission_prompt(tool_name, arguments, self._workspace_root),
             )
         if decision.kind is ToolDispatchDecisionKind.DENY:
             return KernelToolAuthorization(
@@ -517,7 +530,7 @@ class _ToolAuthorizationOperations:
             return KernelToolAuthorization(
                 KernelToolAuthorizationKind.REQUIRE_CONFIRMATION,
                 f"mcp-policy:{execution_policy_fingerprint(executor.policy)}",
-                f"Allow external MCP action {executor.semantic.remote_tool_name}?",
+                f"调用 MCP 服务器 {executor.semantic.server_id} 上的工具 {executor.semantic.remote_tool_name}。",
             )
         try:
             permit = executor.admit(
@@ -707,6 +720,7 @@ class _ToolAuthorizationOperations:
         *,
         prepared_request: PreparedPermissionRequest,
         tool_name: str,
+        public_prompt: str,
         assistant_entry_id: str,
         permission_snapshot: FrozenRunPermissionSnapshot,
         cell_cancel_event: asyncio.Event | None = None,
@@ -768,6 +782,7 @@ class _ToolAuthorizationOperations:
             assistant_entry_id=assistant_entry_id,
             tool_call_id=tool_call_id,
             tool_name=tool_name,
+            public_prompt=public_prompt,
             permission_snapshot=permission_snapshot,
             cell_cancel_event=cell_cancel_event,
             admission_hooks=(
@@ -810,10 +825,13 @@ class _ToolAuthorizationOperations:
                 self._mcp_meta_invocations.pop(permit_entry[0], None)
                 if permit_entry[1].state.value == "ADMITTED":
                     permit_entry[1].release()
+            cancelled_before_dispatch = resolution.result_entry_id is None and resolution.reference in {
+                "interaction:expired", "interaction:cell-stopped",
+            }
             return KernelToolAuthorization(
-                (KernelToolAuthorizationKind.CANCELLED_BEFORE_DISPATCH
-                 if resolution.reference == "interaction:cell-stopped" and resolution.result_entry_id is None
-                 else KernelToolAuthorizationKind.PERMISSION_DENIED),
+                KernelToolAuthorizationKind.CANCELLED_BEFORE_DISPATCH
+                if cancelled_before_dispatch
+                else KernelToolAuthorizationKind.PERMISSION_DENIED,
                 resolution.reference,
                 resolution.public_message,
                 accepted_result_entry_id=resolution.result_entry_id,

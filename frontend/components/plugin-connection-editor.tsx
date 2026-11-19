@@ -4,9 +4,24 @@ import type { McpEditInput, PluginMcpConnection, PluginMcpEditInput, UserMcpServ
 
 const record = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 
-export function PluginConnectionEditor({ plugin, connection, onClose, onSave, onAuthorization, presentation = 'dialog', scopeLabel }: {
+function sameConfiguration(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length
+      && left.every((value, index) => sameConfiguration(value, right[index]));
+  }
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false;
+  const entries = Object.entries(left);
+  const other = record(right);
+  return entries.length === Object.keys(other).length
+    && entries.every(([key, value]) => Object.hasOwn(other, key) && sameConfiguration(value, other[key]));
+}
+
+export function PluginConnectionEditor({ plugin, connection, savedDestination, prefillRestoresDefaults, onClose, onSave, onAuthorization, presentation = 'dialog', scopeLabel }: {
   presentation?: 'dialog' | 'inline'; scopeLabel?: string;
   plugin: Pick<UserPluginCapability, 'name' | 'enabled' | 'packageInstallId'>; connection: PluginMcpConnection; onClose: () => void;
+  savedDestination?: Record<string, unknown>;
+  prefillRestoresDefaults?: boolean;
   onSave: (input: PluginMcpEditInput) => Promise<boolean>;
   onAuthorization?: (action: 'login' | 'status' | 'cancel' | 'logout') => Promise<void>;
 }) {
@@ -18,24 +33,32 @@ export function PluginConnectionEditor({ plugin, connection, onClose, onSave, on
     transport: { kind: transport.type === 'stdio' ? 'stdio' : 'http', summary: String(transport.command ?? transport.endpoint ?? '') },
     tools: [], config: connection.config,
   };
-  const save = (input: McpEditInput) => {
-    const next = record(input.config.transport);
-    const defaults = record(connection.defaults.transport);
+  const toOverlay = (config: Record<string, unknown>) => {
+    const next = record(config.transport);
+    const baseline = prefillRestoresDefaults ? connection.config : connection.defaults;
+    const defaults = record(baseline.transport);
     const prior = connection.overlay ?? {};
     const difference = (values: unknown, base: unknown, previous: unknown) => Object.fromEntries(
-      Object.entries(record(values)).filter(([name, value]) => value !== record(base)[name] || name in record(previous)),
+      Object.entries(record(values)).filter(([name, value]) => !sameConfiguration(value, record(base)[name]) || name in record(previous)),
     );
+    return {
+      local_server_id: connection.serverId, transport_kind: next.type,
+      scope_policy: config.scope_policy,
+      endpoint: next.type === 'stdio' ? null : next.endpoint !== defaults.endpoint || prior.endpoint != null ? next.endpoint : null,
+      public_headers: difference(config.public_headers, baseline.public_headers, prior.public_headers),
+      environment: difference(next.env, defaults.env, prior.environment),
+      secret_environment: prefillRestoresDefaults ? difference(next.secret_env, defaults.secret_env, {}) : record(next.secret_env),
+      auth: prefillRestoresDefaults && sameConfiguration(config.auth, baseline.auth) ? {type: 'none'} : config.auth,
+    };
+  };
+  const save = (input: McpEditInput) => {
+    const overlay = toOverlay(input.config);
+    const unchangedRestore = prefillRestoresDefaults && input.secretChanges.length === 0
+      && sameConfiguration(overlay, toOverlay(connection.config));
     return onSave({
-      overlay: {
-        local_server_id: connection.serverId, transport_kind: next.type,
-        scope_policy: input.config.scope_policy,
-        endpoint: next.type === 'stdio' ? null : next.endpoint !== defaults.endpoint || prior.endpoint != null ? next.endpoint : null,
-        public_headers: difference(input.config.public_headers, connection.defaults.public_headers, prior.public_headers),
-        environment: difference(next.env, defaults.env, prior.environment),
-        secret_environment: record(next.secret_env), auth: input.config.auth,
-      },
+      overlay: unchangedRestore ? null : overlay,
       secretChanges: input.secretChanges, retainCredentialsConfirmed: input.retainCredentialsConfirmed,
     });
   };
-  return <McpEditor presentation={presentation} title={presentation === 'inline' ? `配置 ${server.name} 连接` : undefined} sourceName={presentation === 'inline' ? plugin.name : undefined} scopeLabel={scopeLabel} authorizationKey={plugin.packageInstallId.visibility === 'VISIBLE' ? mcpAuthorizationKey('plugin', plugin.packageInstallId.value, connection.serverId) : undefined} server={server} credentialOwner={connection.credentialOwner} connectionInputs={connection.connectionInputs} packageDefinition={connection.defaults} onClose={onClose} onSave={save} onAuthorization={onAuthorization} onRestoreDefaults={connection.overlay ? () => onSave({overlay: null, secretChanges: []}) : undefined} />;
+  return <McpEditor presentation={presentation} title={presentation === 'inline' ? `配置 ${server.name} 连接` : undefined} sourceName={presentation === 'inline' ? plugin.name : undefined} scopeLabel={scopeLabel} authorizationKey={plugin.packageInstallId.visibility === 'VISIBLE' ? mcpAuthorizationKey('plugin', plugin.packageInstallId.value, connection.serverId) : undefined} server={server} savedDestination={savedDestination} credentialOwner={connection.credentialOwner} connectionInputs={connection.connectionInputs} packageDefinition={connection.defaults} onClose={onClose} onSave={save} onAuthorization={onAuthorization} onRestoreDefaults={connection.overlay ? () => onSave({overlay: null, secretChanges: []}) : undefined} />;
 }

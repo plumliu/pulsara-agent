@@ -56,6 +56,60 @@ it('retains the credential destination consent in an inline update', async () =>
   expect(adapter.lastConnection!.resolveInteraction.mock.calls[0][1]).toEqual(expect.objectContaining({submission: expect.objectContaining({retain_credentials_confirmed: true, secret_changes: [], config: expect.objectContaining({auth: prior.auth, transport: expect.objectContaining({endpoint: 'https://new.example/mcp'})})})}));
 });
 
+it.each([
+  ['local', 'prefilled'], ['local', 'edited'], ['local', 'original'],
+  ['plugin', 'prefilled'], ['plugin', 'edited'], ['plugin', 'original'],
+] as const)('binds inline %s credential consent to the %s destination', async (kind, choice) => {
+  const saved = 'https://saved.example/mcp';
+  const proposed = 'https://proposed.example/mcp';
+  const edited = 'https://edited.example/mcp';
+  const credentialOwner = kind === 'plugin' ? {...owner, kind: 'plugin', plugin_id: 'research'} : owner;
+  const proposedConfig = {
+    ...config,
+    scope_policy: 'ROOT_ONLY',
+    transport: {...config.transport, endpoint: proposed},
+    auth: {type: 'bearer', reference: {source: 'managed', binding: {owner: credentialOwner, name: 'bearer'}}},
+  };
+  const adapter = await open(capability('UPDATE_MCP_CONNECTION', {
+    target: {server_id: 'docs'}, config: proposedConfig,
+    saved_destination: {...config.transport, endpoint: saved},
+  }, kind === 'plugin' ? {
+    plugin: {name: '资料工具包', enabled: true, package_install_id: {visibility: 'VISIBLE', value: 'package:aaaaaaaaaaaaaaaaaaaaaaaaaa'}},
+    connection: {server_id: 'docs', defaults: config, config: proposedConfig,
+      overlay: {endpoint: proposed}, credential_owner: credentialOwner},
+  } : {}));
+  const region = within(await screen.findByRole('region', {
+    name: kind === 'plugin' ? '配置 文档服务 连接' : '编辑 文档服务 连接',
+  }));
+  const address = region.getByLabelText('服务地址');
+  const consentLabel = '我确认将保留的凭据用于新的连接目标。';
+  const save = region.getByRole('button', {name: '保存并继续'}) as HTMLButtonElement;
+  expect(address).toHaveProperty('value', proposed);
+  expect(save.disabled).toBe(true);
+  fireEvent.click(region.getByRole('checkbox', {name: consentLabel}));
+  expect(save.disabled).toBe(false);
+  if (choice !== 'prefilled') {
+    fireEvent.change(address, {target: {value: saved}});
+    expect(region.queryByRole('checkbox', {name: consentLabel})).toBeNull();
+    expect(save.disabled).toBe(false);
+  }
+  if (choice === 'edited') {
+    fireEvent.change(address, {target: {value: edited}});
+    expect(region.getByRole('checkbox', {name: consentLabel})).toHaveProperty('checked', false);
+    expect(save.disabled).toBe(true);
+    fireEvent.click(region.getByRole('checkbox', {name: consentLabel}));
+  }
+  fireEvent.click(save);
+  await waitFor(() => expect(adapter.lastConnection!.resolveInteraction).toHaveBeenCalledTimes(1));
+  const endpoint = choice === 'edited' ? edited : choice === 'original' ? saved : proposed;
+  const fields = kind === 'plugin' ? {overlay: expect.objectContaining({scope_policy: 'ROOT_ONLY', endpoint})}
+    : {config: expect.objectContaining({scope_policy: 'ROOT_ONLY', transport: expect.objectContaining({endpoint})})};
+  expect(adapter.lastConnection!.resolveInteraction.mock.calls[0][1]).toEqual({
+    kind: 'capability', decision: 'SUBMIT',
+    submission: {...fields, secret_changes: [], retain_credentials_confirmed: choice !== 'original'},
+  });
+});
+
 it('saves a real stdio candidate from the inline editor without converting it to an HTTP connection', async () => {
   const adapter = await open(capability('ADD_LOCAL_MCP'));
   const region = within(await screen.findByRole('region', {name: '连接 文档服务'}));
@@ -106,9 +160,9 @@ it('keeps plugin review acceptance and OAuth cancellation on their original capa
 });
 
 it.each(['allow', 'deny'] as const)('submits permission %s once through the session command owner', async decision => {
-  const interaction = {id: 'interaction:permission', kind: 'tool-confirmation' as const, prompt: 'Allow write_file?', options: ['ALLOW', 'DENY'], expiresAtUtc: '2099-01-01T00:00:00Z', decisionInProgress: false};
+  const interaction = {id: 'interaction:permission', kind: 'tool-confirmation' as const, prompt: '在工作区外创建文件：/tmp/report.txt', options: ['ALLOW', 'DENY'], expiresAtUtc: '2099-01-01T00:00:00Z', decisionInProgress: false};
   const adapter = await open({kind: 'tool-confirmation', prompt: interaction.prompt, options: interaction.options}, interaction);
-  await screen.findByRole('heading', {name: '允许修改文件？'});
+  await screen.findByRole('heading', {name: '允许本次操作？'});
   const button = screen.getByRole('button', {name: decision === 'allow' ? '允许本次操作' : '拒绝', exact: true});
   const pending = deferred<Awaited<ReturnType<NonNullable<typeof adapter.lastConnection>['resolveInteraction']>>>();
   adapter.lastConnection!.resolveInteraction.mockReturnValueOnce(pending.promise);
@@ -122,9 +176,9 @@ it.each(['allow', 'deny'] as const)('submits permission %s once through the sess
 });
 
 it.each(['expired', 'processing'] as const)('disables both permission choices while %s', async state => {
-  const interaction = {id: 'interaction:permission', kind: 'tool-confirmation' as const, prompt: 'Allow terminal?', options: ['ALLOW', 'DENY'], expiresAtUtc: state === 'expired' ? '2000-01-01T00:00:00Z' : '2099-01-01T00:00:00Z', decisionInProgress: state === 'processing'};
+  const interaction = {id: 'interaction:permission', kind: 'tool-confirmation' as const, prompt: '在 /project 执行命令：pwd', options: ['ALLOW', 'DENY'], expiresAtUtc: state === 'expired' ? '2000-01-01T00:00:00Z' : '2099-01-01T00:00:00Z', decisionInProgress: state === 'processing'};
   const adapter = await open({kind: 'tool-confirmation', prompt: interaction.prompt, options: interaction.options}, interaction);
-  await screen.findByRole('heading', {name: '允许运行命令？'});
+  await screen.findByRole('heading', {name: '允许本次操作？'});
   expect(screen.getByRole('button', {name: '拒绝'}).hasAttribute('disabled')).toBe(true);
   expect(screen.getByRole('button', {name: '允许本次操作'}).hasAttribute('disabled')).toBe(true);
   expect(adapter.lastConnection!.resolveInteraction).not.toHaveBeenCalled();
@@ -179,6 +233,31 @@ it('restores an inline plugin connection only after reviewing the default and co
   expect(adapter.lastConnection!.resolveInteraction.mock.calls[0][1]).toEqual({kind: 'capability', decision: 'SUBMIT', submission: {overlay: null, secret_changes: [], retain_credentials_confirmed: false}});
 });
 
+it.each([false, true])('preserves a model-proposed default reset with edited fields = %s', async (edit) => {
+  const defaultConfig = {...config, scope_policy: 'ROOT_AND_SUBAGENTS'};
+  const adapter = await open(capability('UPDATE_MCP_CONNECTION', {
+    target: {server_id: 'docs'}, config: defaultConfig, restore_defaults: true,
+    saved_destination: {...config.transport, endpoint: 'https://override.example/mcp'},
+  }, {
+    plugin: {name: '资料工具包', enabled: true, package_install_id: {visibility: 'VISIBLE', value: 'package:aaaaaaaaaaaaaaaaaaaaaaaaaa'}},
+    connection: {server_id: 'docs', defaults: config, config: defaultConfig, overlay: null,
+      credential_owner: {...owner, kind: 'plugin', plugin_id: 'research'}},
+  }));
+  const region = within(await screen.findByRole('region', {name: '配置 文档服务 连接'}));
+  expect(region.getByRole('checkbox', {name: '允许子任务使用'})).toHaveProperty('checked', true);
+  const endpoint = 'https://edited.example/mcp';
+  if (edit) fireEvent.change(region.getByLabelText('服务地址'), {target: {value: endpoint}});
+  fireEvent.click(region.getByRole('button', {name: '保存并继续'}));
+  await waitFor(() => expect(adapter.lastConnection!.resolveInteraction).toHaveBeenCalledTimes(1));
+  expect(adapter.lastConnection!.resolveInteraction.mock.calls[0][1]).toEqual({
+    kind: 'capability', decision: 'SUBMIT',
+    submission: {
+      overlay: edit ? expect.objectContaining({local_server_id: 'docs', scope_policy: 'ROOT_AND_SUBAGENTS', endpoint}) : null,
+      secret_changes: [], retain_credentials_confirmed: false,
+    },
+  });
+});
+
 it('keeps the Hook command and trust gate in the conversation card', async () => {
   const adapter = await open(capability('TRUST_HOOK_SOURCE', {hook_source: {path: '/project/.pulsara/hooks.json', definitions: [{event: 'PreToolUse', command: 'python scripts/check_documents.py', matcher: 'write_file', timeout: 10, async: false, additionalContextLimit: 2000}]}}));
   await screen.findByText('python scripts/check_documents.py');
@@ -221,10 +300,10 @@ it('retains the composer draft when the server rejects a new message during plan
 it.each(['tool-confirmation', 'plan-question', 'capability-form'] as const)('keeps ordinary new inputs queued during %s', async kind => {
   const {typeComposer} = await import('./pulsara-app-fixture');
   const content: RuntimeInteractionContent = kind === 'tool-confirmation'
-    ? {kind, prompt: 'Allow write_file?', options: ['ALLOW', 'DENY']}
+    ? {kind, prompt: '在工作区外创建文件：/tmp/report.txt', options: ['ALLOW', 'DENY']}
     : kind === 'plan-question' ? question : capability('AUTHORIZE_MCP');
-  const adapter = await open(content, kind === 'tool-confirmation' ? {id: 'permission:queue', kind, prompt: 'Allow write_file?', options: ['ALLOW', 'DENY'], expiresAtUtc: '2099-01-01T00:00:00Z', decisionInProgress: false} : undefined);
-  await screen.findByText(kind === 'plan-question' ? question.question : kind === 'tool-confirmation' ? 'Pulsara 想修改工作目录中的文件。' : '前往登录');
+  const adapter = await open(content, kind === 'tool-confirmation' ? {id: 'permission:queue', kind, prompt: '在工作区外创建文件：/tmp/report.txt', options: ['ALLOW', 'DENY'], expiresAtUtc: '2099-01-01T00:00:00Z', decisionInProgress: false} : undefined);
+  await screen.findByText(kind === 'plan-question' ? question.question : kind === 'tool-confirmation' ? '在工作区外创建文件：/tmp/report.txt' : '前往登录');
   adapter.lastConnection!.submitPrompt.mockImplementation(async commandId => ({commandId, status: 'pending', publicCode: 'PROMPT_QUEUED', promptDelivery: {queueItemId: 'queue:blocked', queueStatus: 'PENDING', deliveryMode: 'new-turn'}}));
   const editor = await typeComposer('queue after current operation');
   fireEvent.keyDown(editor, {key: 'Enter', code: 'Enter'});

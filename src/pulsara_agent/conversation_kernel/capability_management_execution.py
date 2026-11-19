@@ -77,6 +77,7 @@ from pulsara_agent.capability.public_projection import (
     public_overlay,
     public_owner,
     public_target,
+    public_transport,
 )
 from pulsara_agent.plugins.public_projection import project_hook_public
 
@@ -984,6 +985,10 @@ def _public_management_fields(value, scrub):
             children[name] = public_overlay(value[name], scrub)
     if "config" in value:
         children["config"] = public_mcp_config(value["config"], scrub)
+    if "saved_destination" in value:
+        children["saved_destination"] = public_transport(
+            value["saved_destination"], scrub
+        )
     if "target" in value:
         children["target"] = public_target(value["target"], scrub)
     if "hook_source" in value:
@@ -1106,7 +1111,11 @@ def management_outcome(prepared, native, *, result_facts=None):
         Action.REVOKE_HOOK_TRUST: f"已撤销 Hook 来源 {name} 的信任。",
         Action.SET_HOOK_SOURCE_ENABLED: f"已{'启用' if enabled else '停用'} Hook 来源 {name}。",
         Action.ADD_LOCAL_MCP: f"已添加 MCP 连接 {name}。",
-        Action.UPDATE_MCP_CONNECTION: f"已{'恢复' if current.get('restored_defaults') else '更新'} MCP 连接 {name}{'的默认配置' if current.get('restored_defaults') else ''}。",
+        Action.UPDATE_MCP_CONNECTION: (
+            f"已恢复 MCP 连接 {name} 的默认配置。"
+            if current.get("restored_defaults")
+            else f"已更新 MCP 连接 {name}。"
+        ),
         Action.REMOVE_LOCAL_MCP: f"已删除 MCP 连接 {name}。",
         Action.AUTHORIZE_MCP: f"已完成 MCP 连接 {name} 的登录。",
         Action.CLEAR_MCP_AUTHORIZATION: f"已清除 MCP 连接 {name} 的本地 OAuth 授权。",

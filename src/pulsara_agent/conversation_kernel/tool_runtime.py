@@ -22,6 +22,7 @@ from pulsara_agent.code_mode.contracts import CellParticipationObserver
 if TYPE_CHECKING:
     from pulsara_agent.code_mode.host import CodeModeHost
     from pulsara_agent.conversation_kernel.decision_tools import KernelDecisionToolPort
+    from .capability_management_execution import CapabilityManagementCall
 
 
 from .capability_management import CapabilityManagementPreparation
@@ -317,6 +318,7 @@ class KernelToolInteractionPort(Protocol):
         assistant_entry_id: str,
         tool_call_id: str,
         tool_name: str,
+        public_prompt: str,
         permission_snapshot: FrozenRunPermissionSnapshot,
         admission_hooks: InteractionAdmissionHooks | None = None,
         cell_cancel_event: asyncio.Event | None = None,
@@ -1466,6 +1468,24 @@ class DirectKernelToolPort(
                 public_fields={} if target is None else {'target':target}, content=(ResultPart('text',str(error)),)),
                 physical_observation=_freeze_physical_observation(monotonic(), ToolObservationOrigin.BUILTIN))
 
+    def discard_tool_admission(
+        self,
+        *,
+        tool_call_id: str,
+        surface_borrow: ProcessLocalToolSurfaceBorrow,
+        capability_call: CapabilityManagementCall | None = None,
+    ) -> None:
+        """Release process-local preparation for a call that will not dispatch."""
+        key = (surface_borrow.prepared.access.surface_generation, tool_call_id)
+        self._mcp_confirmation_admissions.pop(key, None)
+        self._mcp_meta_invocations.pop(key, None)
+        self._mcp_dispatch_resources.pop(key, None)
+        permit = self._mcp_dispatch_permits.pop(key, None)
+        if permit is not None:
+            permit.release()
+        if capability_call is not None:
+            capability_call.discard()
+
     async def invoke(
         self,
         *,
@@ -1506,15 +1526,11 @@ class DirectKernelToolPort(
             raise RuntimeError("decide requires ROOT bypass-permissions mode")
         binding = invocation_context.surface_borrow.execution_binding(tool_name)
         if invocation_context.cell_cancel_event is not None and invocation_context.cell_cancel_event.is_set():
-            key = (invocation_context.surface_borrow.prepared.access.surface_generation, tool_call_id)
-            self._mcp_confirmation_admissions.pop(key, None)
-            self._mcp_meta_invocations.pop(key, None)
-            self._mcp_dispatch_resources.pop(key, None)
-            permit = self._mcp_dispatch_permits.pop(key, None)
-            if permit is not None:
-                permit.release()
-            if invocation_context.capability_call is not None:
-                invocation_context.capability_call.discard()
+            self.discard_tool_admission(
+                tool_call_id=tool_call_id,
+                surface_borrow=invocation_context.surface_borrow,
+                capability_call=invocation_context.capability_call,
+            )
             from pulsara_agent.ports.tool_execution import ToolBusinessValue
             from pulsara_agent.conversation_kernel.content_parts import ResultPart
             return KernelToolResult(state="CANCELLED_BEFORE_DISPATCH", content=ToolBusinessValue(content=(ResultPart("text", "Cell 已停止"),)))

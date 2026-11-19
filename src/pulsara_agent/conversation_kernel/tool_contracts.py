@@ -618,6 +618,7 @@ class ToolInvocationPort(Protocol):
         *,
         prepared_request: PreparedPermissionRequest,
         tool_name: str,
+        public_prompt: str,
         assistant_entry_id: str,
         permission_snapshot: FrozenRunPermissionSnapshot,
         cell_cancel_event: asyncio.Event | None = None,
@@ -645,6 +646,14 @@ class ToolInvocationPort(Protocol):
     def resolve_hook_permission(
         self, *, prepared_request: PreparedPermissionRequest, allow: bool
     ) -> KernelToolAuthorization: ...
+
+    def discard_tool_admission(
+        self,
+        *,
+        tool_call_id: str,
+        surface_borrow: ProcessLocalToolSurfaceBorrow,
+        capability_call: CapabilityManagementCall | None = None,
+    ) -> None: ...
 
     async def invoke(
         self,

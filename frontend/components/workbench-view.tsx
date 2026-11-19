@@ -1587,23 +1587,6 @@ function nestedScrollConsumes(target: EventTarget | null, thread: HTMLElement, d
   return false;
 }
 
-function permissionCopy(prompt: string): {title: string; body: string} {
-  const toolName = prompt.match(/^Allow\s+(.+?)\??$/i)?.[1]?.toLowerCase() ?? '';
-  if (toolName.includes('write') || toolName.includes('edit') || toolName.includes('patch')) {
-    return {title: '允许修改文件？', body: 'Pulsara 想修改工作目录中的文件。'};
-  }
-  if (toolName.includes('read') || toolName.includes('search')) {
-    return {title: '允许读取内容？', body: 'Pulsara 想读取或搜索工作目录中的内容。'};
-  }
-  if (toolName.includes('browser')) {
-    return {title: '允许操作浏览器？', body: 'Pulsara 想操作本地浏览器。'};
-  }
-  if (toolName.includes('terminal') || toolName.includes('shell') || toolName.includes('exec')) {
-    return {title: '允许运行命令？', body: 'Pulsara 想在工作目录中运行一条命令。'};
-  }
-  return {title: '允许本次操作？', body: 'Pulsara 需要执行一项可能产生改动的操作。'};
-}
-
 function InteractionCard({
   interaction,
   toolDecisionPending,
@@ -1625,6 +1608,7 @@ function InteractionCard({
   const [feedback, setFeedback] = useState('');
   const answerId = useId();
   const feedbackId = useId();
+  const prompt = 'prompt' in interaction ? interaction.prompt : '';
   const interactionId = interaction.id;
   const interactionKind = interaction.kind;
   const [now, setNow] = useState(Date.now);
@@ -1639,7 +1623,6 @@ function InteractionCard({
   const toolBusy = busy || decisionInProgress || toolDecisionPending;
   const toolDisabled = toolBusy || expired || !expiresAtUtc;
   const secondsLeft = Math.max(0, Math.ceil((Date.parse(expiresAtUtc) - now) / 1000));
-  const prompt = 'prompt' in interaction ? interaction.prompt : '';
   const optionsKey = 'options' in interaction ? interaction.options.join('\u0000') : '';
   const workflowId = 'workflowId' in interaction ? interaction.workflowId : '';
   const workflowRevision = 'workflowRevision' in interaction ? interaction.workflowRevision : 0;
@@ -1674,13 +1657,12 @@ function InteractionCard({
     if (!accepted) setBusy(false);
   };
 
-  const permission = permissionCopy(content?.kind === 'tool-confirmation' ? content.prompt : prompt);
   const capabilityLoaded = content?.kind === 'capability-form';
   return (
     <section className={`interaction-card interaction-card--${interaction.kind}`} aria-live="polite" aria-busy={!content && !loadError || busy || Boolean(decisionInProgress || toolDecisionPending)}>
       {!capabilityLoaded && <InteractionCardHeader
         icon={interactionKind === 'tool-confirmation' ? ShieldCheck : interactionKind === 'plan-question' ? FileQuestion : ListChecks}
-        title={interactionKind === 'tool-confirmation' ? permission.title : interactionKind === 'plan-question' ? '先确认一个选择' : interactionKind === 'capability-form' ? '需要你的配置' : '方案已准备好'}
+        title={interactionKind === 'tool-confirmation' ? '允许本次操作？' : interactionKind === 'plan-question' ? '先确认一个选择' : interactionKind === 'capability-form' ? '需要你的配置' : '方案已准备好'}
         tone={interactionKind === 'tool-confirmation' ? 'amber' : interactionKind === 'plan-question' ? 'violet' : 'blue'}
         subtitle={interactionKind === 'tool-confirmation' ? '仅本次操作' : undefined}
       />}
@@ -1688,7 +1670,7 @@ function InteractionCard({
       {loadError && <div className="interaction-error" role="alert"><CircleAlert size={18} /><span>{loadError}</span></div>}
       {content?.kind === 'capability-form' && <CapabilityInteractionEditor form={content.form} onResolve={resolution => onResolve(interaction, resolution)} />}
       {content?.kind === 'tool-confirmation' && <>
-        <p className="interaction-question">{permission.body}</p>
+        <p className="interaction-question">{content.prompt}</p>
         <div className="tool-confirmation-footer">
           <div className="tool-confirmation-status">
             {toolBusy ? <LoaderCircle size={16} className="is-spinning" /> : <Clock3 size={16} />}

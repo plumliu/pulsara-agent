@@ -28,6 +28,7 @@ export function CapabilityInteractionEditor({form, onResolve}: {
   const [reviewed, setReviewed] = useState(false);
   const action = String(form.action);
   const prefill = record(form.prefill);
+  const savedDestination = prefill.saved_destination ? record(prefill.saved_destination) : undefined;
   const target = record(prefill.target);
   const plugin = record(form.plugin);
   const scope = form.scope === 'WORKSPACE' ? '当前项目' : '所有会话';
@@ -59,7 +60,7 @@ export function CapabilityInteractionEditor({form, onResolve}: {
       instructions: '', hasFailure: false, tools: [],
       transport: {kind: transport.type === 'stdio' ? 'stdio' : 'http', summary: String(transport.endpoint ?? transport.command ?? '')},
     };
-    return <McpEditor presentation="inline" title={action === 'ADD_LOCAL_MCP' ? `连接 ${server.name}` : `编辑 ${server.name} 连接`} scopeLabel={scope} server={server} credentialOwner={form.credential_owner as McpCredentialOwner}
+    return <McpEditor presentation="inline" title={action === 'ADD_LOCAL_MCP' ? `连接 ${server.name}` : `编辑 ${server.name} 连接`} scopeLabel={scope} server={server} savedDestination={savedDestination} credentialOwner={form.credential_owner as McpCredentialOwner}
       onClose={cancel} onSave={input => submit({config: input.config, secret_changes: input.secretChanges,
         retain_credentials_confirmed: input.retainCredentialsConfirmed ?? false})} />;
   }
@@ -68,7 +69,7 @@ export function CapabilityInteractionEditor({form, onResolve}: {
     const packageInstallId = parsePublicPackageId(plugin.package_install_id);
     if (!packageInstallId) return null;
     const view = {name: String(plugin.name), enabled: Boolean(plugin.enabled), packageInstallId};
-    return <PluginConnectionEditor presentation="inline" scopeLabel={scope} plugin={view} connection={{serverId: String(connection.server_id),
+    return <PluginConnectionEditor presentation="inline" scopeLabel={scope} plugin={view} savedDestination={savedDestination} prefillRestoresDefaults={prefill.restore_defaults === true} connection={{serverId: String(connection.server_id),
       defaults: record(connection.defaults), config: record(connection.config),
       overlay: connection.overlay == null ? null : record(connection.overlay),
       connectionInputs: connection.connection_inputs as PluginMcpConnection['connectionInputs'],

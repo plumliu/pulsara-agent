@@ -853,6 +853,10 @@ class StructuredToolPort:
             "test:hook-permission",
         )
 
+    def discard_tool_admission(self, *, tool_call_id, surface_borrow, capability_call=None):
+        if capability_call is not None:
+            capability_call.discard()
+
     async def invoke(self, **kwargs: object):
         return await self.delegate.invoke(**kwargs)
 

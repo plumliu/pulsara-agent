@@ -12,6 +12,7 @@ from pulsara_agent.identity import random_id
 
 import asyncio
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from threading import Lock
@@ -30,6 +31,7 @@ from pulsara_agent.conversation_kernel.live_control import (
     LiveControlEventKind,
     SessionLiveControlOwner,
 )
+from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 from pulsara_agent.conversation_kernel.live import (
     LiveAgentEventBus,
     LiveBlockKind,
@@ -59,6 +61,16 @@ from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 
 
 INTERACTION_TIMEOUT_SECONDS = 10 * 60
+_TOOL_PERMISSION_NOT_GRANTED_TEXT = "本次工具调用未获授权，操作未执行。"
+
+
+def _tool_argument_preview(prompt: str) -> str:
+    limit = STAGE2_LIMITS.tool_argument_display_hard_bytes
+    raw = prompt.encode("utf-8", errors="backslashreplace")
+    if len(raw) <= limit:
+        return raw.decode()
+    suffix = "…（仅展示开头）"
+    return raw[:limit - len(suffix.encode())].decode("utf-8", errors="ignore") + suffix
 
 
 class ToolInteractionDecisionNotAccepted(RuntimeError):
@@ -112,6 +124,7 @@ class _PendingToolInteraction:
     assistant_entry_id: str
     tool_call_id: str
     tool_name: str
+    public_prompt: str = field(repr=False)
     attempt_id: str
     result_id: str
     result_entry_id: str
@@ -144,6 +157,7 @@ class KernelInteractionCoordinator:
         live_bus: LiveAgentEventBus,
         io_owner: KernelSessionIO,
         deadline_factory: KernelExecutionDeadlineFactory | None = None,
+        scrub_permission_prompt: Callable[[str], str] | None = None,
     ) -> None:
         self._repository = repository
         self._guard = guard
@@ -151,6 +165,7 @@ class KernelInteractionCoordinator:
         self._live_bus = live_bus
         self._io = io_owner
         self._deadlines = deadline_factory or KernelExecutionDeadlineFactory()
+        self._scrub_permission_prompt = scrub_permission_prompt
         self._lock = asyncio.Lock()
         self._controller_lock = Lock()
         self._controller_id: str | None = None
@@ -204,6 +219,7 @@ class KernelInteractionCoordinator:
         assistant_entry_id: str,
         tool_call_id: str,
         tool_name: str,
+        public_prompt: str,
         permission_snapshot: FrozenRunPermissionSnapshot,
         admission_hooks: InteractionAdmissionHooks | None = None,
         cell_cancel_event: asyncio.Event | None = None,
@@ -213,6 +229,7 @@ class KernelInteractionCoordinator:
             assistant_entry_id=assistant_entry_id,
             tool_call_id=tool_call_id,
             tool_name=tool_name,
+            public_prompt=public_prompt,
             permission_snapshot=permission_snapshot,
             admission_hooks=admission_hooks,
             cell_cancel_event=cell_cancel_event,
@@ -233,6 +250,7 @@ class KernelInteractionCoordinator:
             assistant_entry_id=assistant_entry_id,
             tool_call_id=tool_call_id,
             tool_name="manage_capability",
+            public_prompt=form.public_prompt,
             permission_snapshot=permission_snapshot,
             capability_form=form,
             cell_cancel_event=cell_cancel_event,
@@ -245,6 +263,7 @@ class KernelInteractionCoordinator:
         assistant_entry_id: str,
         tool_call_id: str,
         tool_name: str,
+        public_prompt: str,
         permission_snapshot: FrozenRunPermissionSnapshot,
         admission_hooks: InteractionAdmissionHooks | None = None,
         cell_cancel_event: asyncio.Event | None = None,
@@ -295,6 +314,7 @@ class KernelInteractionCoordinator:
                 assistant_entry_id=assistant_entry_id,
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
+                public_prompt=public_prompt,
                 attempt_id=attempt_id,
                 result_id=result_id,
                 result_entry_id=derive_id("entry", "tool-result", result_id),
@@ -331,10 +351,11 @@ class KernelInteractionCoordinator:
                         cell_cancelled.cancel()
                         await asyncio.gather(cell_cancelled, return_exceptions=True)
             except TimeoutError:
+                reference, message = self._expiry_reason(pending)
                 await self._abort_candidate(
                     interaction_id=interaction_id,
-                    reference="interaction:expired",
-                    public_message="tool confirmation expired",
+                    reference=reference,
+                    public_message=message,
                 )
                 return await asyncio.shield(pending.future)
         except asyncio.CancelledError:
@@ -433,7 +454,7 @@ class KernelInteractionCoordinator:
                     pending.result_entry_id if decision == "DENY" else None
                 ),
                 "denial_content": (
-                    InlineContent.from_bytes(b"tool execution denied by user")
+                    InlineContent.from_bytes(_TOOL_PERMISSION_NOT_GRANTED_TEXT.encode("utf-8"))
                     if decision == "DENY"
                     else None
                 ),
@@ -555,14 +576,14 @@ class KernelInteractionCoordinator:
                 accepted.decision_id,
                 "tool execution was allowed"
                 if decision == "ALLOW"
-                else "tool execution was denied",
+                else _TOOL_PERMISSION_NOT_GRANTED_TEXT,
                 accepted.attempt_id,
                 accepted.result_entry_id,
                 accepted.permission_snapshot_fingerprint,
                 accepted.result_id,
                 accepted.result_entry_sequence,
                 accepted.result_observed_at,
-                "tool execution denied by user" if decision == "DENY" else None,
+                _TOOL_PERMISSION_NOT_GRANTED_TEXT if decision == "DENY" else None,
             )
             if not pending.future.done():
                 pending.future.set_result(resolution)
@@ -760,6 +781,15 @@ class KernelInteractionCoordinator:
             public_message="tool confirmation ended with the Host",
         )
 
+    @staticmethod
+    def _expiry_reason(candidate: _PendingToolInteraction) -> tuple[str, str]:
+        message = (
+            "tool confirmation expired"
+            if candidate.capability_form is not None
+            else _TOOL_PERMISSION_NOT_GRANTED_TEXT
+        )
+        return "interaction:expired", message
+
     def _invalidation(
         self, candidate: _PendingToolInteraction
     ) -> tuple[str, str] | None:
@@ -768,7 +798,7 @@ class KernelInteractionCoordinator:
         if self._closed:
             return "interaction:host-closing", "tool confirmation ended with the Host"
         if asyncio.get_running_loop().time() >= candidate.deadline_monotonic:
-            return "interaction:expired", "tool confirmation expired"
+            return self._expiry_reason(candidate)
         if candidate.capability_form is not None and not self.has_controller():
             return (
                 "interaction:controller-detached",
@@ -854,10 +884,11 @@ class KernelInteractionCoordinator:
                     continue
                 candidate.promoting = True
             try:
-                if not candidate.admission_completed:
-                    if candidate.admission_hooks is not None:
-                        candidate.admission_hooks.before_publish()
-                    candidate.admission_completed = True
+                if not candidate.admission_completed and candidate.capability_form is None:
+                    prompt = candidate.public_prompt
+                    if self._scrub_permission_prompt is not None:
+                        prompt = await asyncio.to_thread(self._scrub_permission_prompt, prompt)
+                    candidate.public_prompt = _tool_argument_preview(prompt)
                 async with self._lock:
                     if self._pending is not candidate:
                         self._discard_hooks(candidate)
@@ -869,14 +900,23 @@ class KernelInteractionCoordinator:
                         continue
                     if not self.has_controller():
                         return
+                    if not candidate.admission_completed:
+                        if candidate.admission_hooks is not None:
+                            candidate.admission_hooks.before_publish()
+                        candidate.admission_completed = True
+                        invalidation = self._invalidation(candidate)
+                        if invalidation is not None:
+                            self._invalidate_locked(candidate, invalidation)
+                            self._discard_hooks(candidate)
+                            continue
+                        if not self.has_controller():
+                            return
                     view = CurrentInteractionView(
                         interaction_id=candidate.interaction_id,
                         interaction_kind="CAPABILITY_FORM"
                         if candidate.capability_form
                         else "TOOL_CONFIRMATION",
-                        public_prompt=candidate.capability_form.public_prompt
-                        if candidate.capability_form
-                        else f"Allow {candidate.tool_name}?",
+                        public_prompt=candidate.public_prompt,
                         public_options=("SUBMIT", "CANCEL")
                         if candidate.capability_form
                         else ("ALLOW", "DENY"),

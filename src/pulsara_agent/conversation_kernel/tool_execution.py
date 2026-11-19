@@ -1250,6 +1250,7 @@ class ToolBatchExecutor:
                     authorization.kind
                     is KernelToolAuthorizationKind.REQUIRE_CONFIRMATION
                 ):
+                    management = authorization.capability_call
                     permission_request = self._tools.prepare_permission_request(
                         tool_call_id=call.tool_call_id,
                         turn_id=turn_id,
@@ -1309,12 +1310,18 @@ class ToolBatchExecutor:
                         authorization = await self._tools.request_confirmation(
                             prepared_request=permission_request,
                             tool_name=call.tool_name,
+                            public_prompt=authorization.public_message,
                             assistant_entry_id=assistant_entry_id,
                             permission_snapshot=(
                                 canonical_facts.run_permission_snapshot
                             ),
                             cell_cancel_event=cell_cancel_event,
                         )
+                    if management is not None:
+                        if authorization.kind is KernelToolAuthorizationKind.ALLOW:
+                            authorization = replace(authorization, capability_call=management)
+                        else:
+                            management.discard()
                 attempt_id: str | None = None
                 attempt_permission_snapshot_fingerprint: str | None = (
                     authorization.accepted_permission_snapshot_fingerprint
@@ -1323,29 +1330,41 @@ class ToolBatchExecutor:
                 live_attribution: dict[str, object] | None = None
                 tool_result_block_id: str | None = None
                 workspace_id: str | None = None
-                binding_fingerprint: str | None = None
+                dispatch_block: KernelToolAuthorization | None = None
                 if authorization.kind is KernelToolAuthorizationKind.ALLOW:
                     try:
-                        advertised_binding = surface_borrow.execution_binding(
-                            call.tool_name
-                        )
-                        binding = advertised_binding
-                        binding_fingerprint = (
-                            advertised_binding.executor_binding_fingerprint
-                        )
-                        observation_origin = tool_observation_origin_for_binding(
-                            advertised_binding
-                        )
+                        binding = surface_borrow.execution_binding(call.tool_name)
                     except RuntimeError:
-                        authorization = KernelToolAuthorization(
+                        dispatch_block = KernelToolAuthorization(
                             KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
                             "tool-surface:revoked",
-                            f"tool unavailable: {call.tool_name}",
+                            f"工具 {call.tool_name} 已不可用，本次调用未执行。"
+                            if authorization.accepted_attempt_id is not None
+                            else f"tool unavailable: {call.tool_name}",
                         )
-                if self._workspace_gate is not None and self._workspace_gate.observe().outcome != "AVAILABLE" and authorization.accepted_result_entry_id is None:
-                    authorization = KernelToolAuthorization(
-                        KernelToolAuthorizationKind.TOOL_UNAVAILABLE, "workspace:unavailable",
-                        "工作目录不可用，此工具未执行。")
+                if (
+                    authorization.accepted_result_entry_id is None
+                    and not (
+                        machine_policy_kind is KernelToolAuthorizationKind.REQUIRE_CONFIRMATION
+                        and authorization.reference == "interaction:expired"
+                    )
+                    and self._workspace_gate is not None
+                    and self._workspace_gate.observe().outcome != "AVAILABLE"
+                ):
+                    dispatch_block = KernelToolAuthorization(
+                        KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
+                        "workspace:unavailable",
+                        "工作目录不可用，此工具未执行。",
+                    )
+                if dispatch_block is not None:
+                    if authorization.kind is KernelToolAuthorizationKind.ALLOW:
+                        self._tools.discard_tool_admission(
+                            tool_call_id=call.tool_call_id,
+                            surface_borrow=surface_borrow,
+                            capability_call=authorization.capability_call,
+                        )
+                    if authorization.accepted_attempt_id is None:
+                        authorization = dispatch_block
                 if authorization.kind is not KernelToolAuthorizationKind.ALLOW:
                     if _physical_complete is not None:
                         _physical_complete()
@@ -1505,7 +1524,13 @@ class ToolBatchExecutor:
                             admission_held = False
                         continue
                 else:
-                    assert binding_fingerprint is not None
+                    if binding is None:
+                        # A revoked binding still describes the already accepted attempt.
+                        # Use the frozen leaf only to attribute the undispatched result.
+                        assert dispatch_block is not None
+                        binding = surface_borrow.prepared.binding(call.tool_name)
+                    binding_fingerprint = binding.executor_binding_fingerprint
+                    observation_origin = tool_observation_origin_for_binding(binding)
                     attempt_id = authorization.accepted_attempt_id or random_id('attempt')
                     if authorization.capability_user_submission:
                         if authorization.capability_call is None:
@@ -1669,8 +1694,38 @@ class ToolBatchExecutor:
                     self._admission_lock.release()
                     admission_held = False
                     try:
-                        if self._workspace_gate is not None and self._workspace_gate.observe().outcome != "AVAILABLE":
-                            result = KernelToolResult(state="APPLICATION_ERROR", content=ToolBusinessValue(content=(ResultPart("text", "工作目录不可用，此工具未执行。"),)))
+                        if dispatch_block is None:
+                            if (
+                                self._workspace_gate is not None
+                                and self._workspace_gate.observe().outcome != "AVAILABLE"
+                            ):
+                                dispatch_block = KernelToolAuthorization(
+                                    KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
+                                    "workspace:unavailable",
+                                    "工作目录不可用，此工具未执行。",
+                                )
+                            else:
+                                try:
+                                    surface_borrow.execution_binding(call.tool_name)
+                                except RuntimeError:
+                                    dispatch_block = KernelToolAuthorization(
+                                        KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
+                                        "tool-surface:revoked",
+                                        f"工具 {call.tool_name} 已不可用，本次调用未执行。",
+                                    )
+                            if dispatch_block is not None:
+                                self._tools.discard_tool_admission(
+                                    tool_call_id=call.tool_call_id,
+                                    surface_borrow=surface_borrow,
+                                    capability_call=authorization.capability_call,
+                                )
+                        if dispatch_block is not None:
+                            result = KernelToolResult(
+                                state="APPLICATION_ERROR",
+                                content=ToolBusinessValue(
+                                    content=(ResultPart("text", dispatch_block.public_message),),
+                                ),
+                            )
                         else:
                             result = await self._tools.invoke(
                                 tool_name=call.tool_name,

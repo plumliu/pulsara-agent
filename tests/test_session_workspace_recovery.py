@@ -323,7 +323,7 @@ def test_unlaunched_tool_rejected_and_workspace_feedback_waits_for_new_input(
     from pulsara_agent.conversation_kernel import host as host_module
     from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader
     from tests.support.model_stream import _tool_call, _text
-    from pulsara_agent.llm.input import MessageRole
+    from pulsara_agent.llm.input import MessageRole, join_text_content
 
     monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "home"))
     monkeypatch.setattr(
@@ -383,9 +383,8 @@ def test_unlaunched_tool_rejected_and_workspace_feedback_waits_for_new_input(
                     maximum_control_items=128,
                     deadline_monotonic=monotonic() + 5,
                 )
-                if any(
-                    entry.entry_kind == wire.TOOL_RESULT for entry in snapshot.entries
-                ):
+                tool_entries = [entry for entry in snapshot.entries if entry.entry_kind == wire.TOOL_RESULT]
+                if tool_entries:
                     break
                 assert monotonic() < deadline
                 await asyncio.sleep(0.01)
@@ -394,6 +393,8 @@ def test_unlaunched_tool_rejected_and_workspace_feedback_waits_for_new_input(
                 and not run.done()
                 and not root.exists()
             )
+            assert len(tool_entries) == 1
+            assert tool_entries[0].tool_result.result_state == "TOOL_UNAVAILABLE"
             await session.restore_missing_workspace()
             result = await asyncio.wait_for(run, 5)
             assert result.final_text == "RESTORED_OK"
@@ -411,7 +412,9 @@ def test_unlaunched_tool_rejected_and_workspace_feedback_waits_for_new_input(
                 for message in second.messages
                 if message.role is MessageRole.TOOL_RESULT
             )
-            assert "TOOL_UNAVAILABLE" in str(tool_result.content)
+            body = join_text_content(tool_result.content)
+            assert "\nmeta:\n  status: ERROR\n" in body
+            assert "工作目录不可用，此工具未执行。" in body
             assert "USER_ACTIONS" not in str(second.messages)
             assert session._pending_workspace_recreated is not None
             follow_up = await session.run_turn(PromptContent.text("Continue after restoring the workspace."))

@@ -3296,6 +3296,7 @@ def test_round6_config_disable_cancels_visible_uncommitted_confirmation(
             waiter = asyncio.create_task(
                 port.request_confirmation(
                     prepared_request=prepared_permission,
+                    public_prompt=authorization.public_message,
                     tool_name="call_mcp_tool",
                     assistant_entry_id='entry:xedxcmf5dpahplt7jyzwxzziue',
                     permission_snapshot=permission,
@@ -3345,6 +3346,7 @@ def test_round6_interaction_close_joins_started_canonical_resolution() -> None:
                 turn_id='turn:xlydhkijwcj57gxatjj7r3zobm',
                 assistant_entry_id='entry:vvyy67wxbd4ja3ia7enkykvhx4',
                 tool_call_id="call:close",
+                public_prompt="运行工具 tool_close。",
                 tool_name="tool_close",
                 permission_snapshot=permission,
             )
@@ -3398,6 +3400,7 @@ def test_round6_interaction_retry_installs_fresh_unsettled_edge() -> None:
                 turn_id='turn:ax6y2mzd7lxwumght7qxav4eoq',
                 assistant_entry_id='entry:mmbbrs7b7naf3avzv65zagvsz4',
                 tool_call_id="call:retry",
+                public_prompt="运行工具 tool_retry。",
                 tool_name="tool_retry",
                 permission_snapshot=permission,
             )
@@ -3508,6 +3511,7 @@ def test_round6_mcp_confirmation_admits_before_publish_and_drains_dirty(
             waiter = asyncio.create_task(
                 port.request_confirmation(
                     prepared_request=prepared_permission,
+                    public_prompt=authorization.public_message,
                     tool_name="call_mcp_tool",
                     assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
                     permission_snapshot=permission,
@@ -3597,6 +3601,7 @@ def test_round6_confirmation_arbiter_is_single_visible_fifo() -> None:
                 turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
                 assistant_entry_id='entry:jfasfwsw2puygc3hrueckpvgba',
                 tool_call_id=f"call:{index}",
+                public_prompt=f"运行工具 tool_{index}。",
                 tool_name=f"tool_{index}",
                 permission_snapshot=permission,
                 admission_hooks=InteractionAdmissionHooks(

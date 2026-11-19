@@ -520,6 +520,7 @@ class KernelHostSession(
             live_bus=self.live_bus,
             io_owner=self._io,
             deadline_factory=self._deadlines,
+            scrub_permission_prompt=self._scrub_permission_prompt,
         )
         self._presentation_notices: dict[str, list[str]] = {}
         self._plan_interactions = KernelPlanInteractionCoordinator(timeout_resolver=self._resolve_plan_interaction_timeout)
@@ -802,6 +803,12 @@ class KernelHostSession(
         self._delivery_task: asyncio.Task[None] | None = None
         self._code_mode.set_output_ready_callback(self._cell_output_wake.set)
         self._cell_output_task: asyncio.Task[None] | None = None
+
+    def _scrub_permission_prompt(self, prompt: str) -> str:
+        scrub = self._model_runtime.settings.read().credential_scrub_set()
+        for value in self._credential_boundary.capture_scrub_set().values:
+            scrub.observe(value)
+        return scrub.scrub_text(prompt)
 
     def activate_execution(self) -> None:
         """Core calls this only after complete assembly and route registration."""

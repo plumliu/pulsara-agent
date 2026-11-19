@@ -935,6 +935,7 @@ def test_stage2_pending_interaction_is_same_host_ephemeral_and_stale_safe() -> N
                 turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
                 assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
                 tool_call_id="call:1",
+                public_prompt="执行命令：true",
                 tool_name="exec_process",
                 permission_snapshot=build_run_permission_snapshot(
                     snapshot_id='permission:53mvfpeaityebpvslz3hltgfuy',

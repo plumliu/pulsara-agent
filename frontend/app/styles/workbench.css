@@ -337,6 +337,7 @@
 .interaction-error { display: flex; align-items: flex-start; gap: 10px; margin: 16px 22px; padding: 10px 14px; border: 1px solid color-mix(in srgb,var(--red) 14%,var(--line)); border-radius: 9px; background: color-mix(in srgb,var(--red-soft) 25%,var(--paper-solid)); color: var(--red); font-size: 12px; line-height: 1.8; }
 .interaction-error svg { flex: none; margin-top: 2px; }
 .interaction-plan-deadline { display: flex; align-items: center; gap: 6px; margin: 0; padding: 12px 22px 0; color: var(--muted); font: 12px var(--sans); }
+.interaction-card--tool-confirmation .interaction-question { white-space: pre-wrap; }
 .interaction-question { margin: 0; padding: 16px 22px; color: var(--ink-soft); font-size: 14px; font-weight: 400; line-height: 1.85; overflow-wrap: anywhere; }
 .interaction-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; padding: 10px 22px; }
 .interaction-actions button, .interaction-text-answer > button { display: inline-flex; align-items: center; justify-content: center; gap: 9px; min-height: 34px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--paper-solid); color: var(--muted); font: 500 12px/1.5 var(--sans); }

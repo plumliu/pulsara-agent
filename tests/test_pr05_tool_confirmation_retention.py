@@ -20,6 +20,7 @@ from pulsara_agent.conversation_kernel.interaction_arbiter import (
     InteractionAdmissionHooks,
 )
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
+from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.conversation_kernel.live_control import SessionLiveControlOwner
 from pulsara_agent.conversation_kernel.repository import (
@@ -27,6 +28,7 @@ from pulsara_agent.conversation_kernel.repository import (
     ConversationKernelConflict,
 )
 from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.process_credential_boundary import ProcessCredentialScrubSet
 from pulsara_agent.primitives.run_permission import (
     RunPermissionAdmissionSource,
     build_run_permission_snapshot,
@@ -72,7 +74,7 @@ class DecisionRepository:
         return self.accepted
 
 
-def make_owner(repository=None):
+def make_owner(repository=None, *, scrub_permission_prompt=None):
     repository = repository or DecisionRepository()
     live = SessionLiveControlOwner(session_id='session:tdspn5k2oo6jafhz5tcbmngqga', owner_epoch=7)
     owner = KernelInteractionCoordinator(
@@ -81,16 +83,18 @@ def make_owner(repository=None):
         live_control=live,
         live_bus=LiveAgentEventBus(),
         io_owner=KernelSessionIO(),
+        scrub_permission_prompt=scrub_permission_prompt,
     )
     return owner, live, repository
 
 
-def request(owner, ordinal=1, hooks=None):
+def request(owner, ordinal=1, hooks=None, *, public_prompt="执行命令：true"):
     return asyncio.create_task(
         owner.request_tool_confirmation(
             turn_id=derive_id("turn", "test-fixture", f"turn:{ordinal}"),
             assistant_entry_id=derive_id("entry", "test-fixture", f"entry:{ordinal}"),
             tool_call_id=f"call:{ordinal}",
+            public_prompt=public_prompt,
             tool_name="exec_process",
             permission_snapshot=build_run_permission_snapshot(
                 snapshot_id='permission:lsf3jcj5tfegppf2erwmuymj4e',
@@ -114,6 +118,33 @@ def resolve(owner, live, *, actor="controller:1", decision="ALLOW"):
         decision=decision,
         actor_id=actor,
     )
+
+
+def test_permission_preview_scrubs_before_clipping_and_preserves_the_request():
+    async def exercise():
+        scrub = ProcessCredentialScrubSet()
+        secret = "test-private-credential"
+        scrub.observe(secret)
+        owner, live, _ = make_owner(scrub_permission_prompt=scrub.scrub_text)
+        limit = STAGE2_LIMITS.tool_argument_display_hard_bytes
+        prefix = "执行命令：" + secret + "\n"
+        prompt = prefix + "参" * limit
+        waiter = request(owner, public_prompt=prompt)
+        await asyncio.sleep(0)
+        try:
+            await owner.attach_controller("controller:1")
+            card = live.current_snapshot().current_interaction
+            assert card.public_prompt.startswith(scrub.scrub_text(prefix))
+            assert secret not in card.public_prompt
+            assert card.public_prompt.endswith("…（仅展示开头）")
+            assert len(card.public_prompt.encode()) <= limit
+            await resolve(owner, live)
+            assert (await waiter).decision == "ALLOW"
+        finally:
+            await owner.aclose()
+            await waiter
+
+    asyncio.run(exercise())
 
 
 def test_r01_visible_detach_retains_exact_future_and_deadline():
@@ -584,11 +615,12 @@ def test_r07_r14_cancel_real_mcp_tool_waiter_joins_and_releases(
             admission_source=RunPermissionAdmissionSource.USER_SUBMISSION)
         waiter = submission = None
         try:
-            await port.authorize(tool_name="call_mcp_tool", arguments=await _meta_arguments(port,borrow,"fixture_effect",{"value":"must-not-execute"}),
+            authorization = await port.authorize(tool_name="call_mcp_tool", arguments=await _meta_arguments(port,borrow,"fixture_effect",{"value":"must-not-execute"}),
                 tool_call_id="call:cancel", turn_id='turn:bjo672se4p33odo75fvtqi452q', assistant_entry_id='entry:fzz4xmltqd5ttmzc3n22eqjjdu',
                 permission_snapshot=permission, surface_borrow=borrow, memory_context=_enabled_memory_context())
             prepared = port.prepare_permission_request(tool_call_id="call:cancel", turn_id='turn:bjo672se4p33odo75fvtqi452q', surface_borrow=borrow)
             waiter = asyncio.create_task(port.request_confirmation(prepared_request=prepared,
+                public_prompt=authorization.public_message,
                 tool_name="call_mcp_tool", assistant_entry_id='entry:fzz4xmltqd5ttmzc3n22eqjjdu', permission_snapshot=permission))
             await asyncio.sleep(0)
             pending = owner._pending

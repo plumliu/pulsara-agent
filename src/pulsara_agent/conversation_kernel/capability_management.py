@@ -89,6 +89,15 @@ from pulsara_agent.primitives.context import (
 )
 
 
+def _editor_destination(config):
+    transport = config["transport"]
+    return {
+        field: transport[field]
+        for field in ("type", "endpoint", "command", "args", "cwd")
+        if field in transport
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class PreparedCapabilityManagementInvocation:
     intent: CapabilityManagementIntent
@@ -400,6 +409,9 @@ class CapabilityManagementPreparation:
             old = overlay_to_dict(old_overlay) if old_overlay is not None else None
             current = self._connection(plugin, server)
             if intent.action is Action.UPDATE_MCP_CONNECTION:
+                connection_owner = plugin_connection_owner(
+                    plugin.identity, server.local_server_id
+                )
                 self._exact(fields, "expected_overlay", old)
                 expected["expected_overlay"] = old
                 if "config" not in fields:
@@ -410,6 +422,13 @@ class CapabilityManagementPreparation:
                 else:
                     from .capability_management_config import plugin_config_candidate
 
+                    if not native_config:
+                        _, saved = connection_editor_definition(
+                            server, old_overlay, owner=connection_owner
+                        )
+                        prefill["saved_destination"] = _editor_destination(saved)
+                        if fields["config"] is None:
+                            prefill["restore_defaults"] = True
                     overlay = (
                         (
                             overlay_from_dict(fields["config"])
@@ -422,9 +441,7 @@ class CapabilityManagementPreparation:
                             current,
                             old_overlay,
                             fields["config"],
-                            owner=plugin_connection_owner(
-                                plugin.identity, server.local_server_id
-                            ),
+                            owner=connection_owner,
                         )
                     )
                     if (
@@ -471,11 +488,7 @@ class CapabilityManagementPreparation:
                 # Keep executable/package-root fields in the immutable editor
                 # definition, not a fabricated editable local-MCP cwd.
                 _, prefill["config"] = connection_editor_definition(
-                    server,
-                    overlay,
-                    owner=plugin_connection_owner(
-                        plugin.identity, server.local_server_id
-                    ),
+                    server, overlay, owner=connection_owner
                 )
                 process = plugin.enabled and isinstance(server, PluginMcpStdioSummary)
             elif intent.action is Action.AUTHORIZE_MCP:
@@ -766,6 +779,7 @@ class CapabilityManagementPreparation:
     async def _local(self, intent, fields, root, *, native_config=False):
         target = LocalMcpTarget(fields["server_id"], root)
         entry = fields.get("config")
+        saved_destination = None
         if intent.action is not Action.REMOVE_LOCAL_MCP and "config" not in fields:
             async with self.mcp.lane:
                 current = await asyncio.to_thread(self.mcp.inspect, target)
@@ -807,6 +821,10 @@ class CapabilityManagementPreparation:
                         and current is None
                     ):
                         raise McpManagementConflict("MCP connection no longer exists")
+                    if current is not None:
+                        saved_destination = _editor_destination(
+                            config_to_entry(current)
+                        )
                     entry = local_config_candidate(current, entry, owner=target.owner)
                     fields["expected_identity"] = (
                         config_guard(current) if current else None
@@ -824,6 +842,11 @@ class CapabilityManagementPreparation:
             requirements.append("connection_configuration")
         if mutation.requires_destination_confirmation:
             requirements.append("credential_destination_confirmation")
+        prefill = intent.to_dict()
+        if saved_destination is not None:
+            prefill["saved_destination"] = saved_destination
+        if mutation.entry is not None:
+            prefill["config"] = thaw_json(mutation.entry)
         return PreparedCapabilityManagementInvocation(
             intent,
             CapabilityManagementScope.WORKSPACE
@@ -831,12 +854,7 @@ class CapabilityManagementPreparation:
             else CapabilityManagementScope.USER,
             mutation.effects,
             tuple(requirements),
-            freeze_json(
-                {
-                    **intent.to_dict(),
-                    **({"config": thaw_json(mutation.entry)} if mutation.entry else {}),
-                }
-            ),
+            freeze_json(prefill),
             freeze_json({"expected_identity": mutation.expected})
             if mutation.expected is not None
             else freeze_json({}),

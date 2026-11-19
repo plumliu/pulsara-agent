@@ -6,7 +6,7 @@
 
 运行时对每次调用使用本轮的有效权限模式，结合参数、目标和实际操作判断是否需要授权。例如，`ask-permissions` 下普通 `read_file` 可以直接读取，`write_file` 需要询问。`accept-edits` 下，`write_file` 写入工作区内可以直接执行，写入工作区外需要询问。策略或权限 Hook 直接阻止模型执行时，保留该路径的实际原因。[权限预设](src/pulsara_agent/primitives/permission.py) · [逐次调用的权限判断](src/pulsara_agent/tool_permission.py)
 
-权限卡应让用户看出「允许」将授权什么。后端从本次已解析的调用生成可公开的操作摘要，通过现有 `public_prompt` 传给前端直接展示。写文件时显示实际目标路径，写到工作区外时明确标出。调用 `call_mcp_tool` 时显示实际 MCP 服务器和远端工具名，管理能力时显示具体动作和目标。摘要排除凭据值。[审批提示来源](src/pulsara_agent/conversation_kernel/interaction.py) · [前端权限卡](frontend/components/workbench-view.tsx)
+权限卡应让用户看出「允许」将授权什么。后端从本次已解析的调用生成可公开的操作摘要，通过现有 `public_prompt` 传给前端直接展示。写文件时显示实际目标路径，写到工作区外时明确标出。调用 `call_mcp_tool` 时显示实际 MCP 服务器和远端工具名，管理能力时显示具体动作和目标。摘要先遮盖凭据值，再按现有工具参数展示预算截取。超长时卡片标明只展示开头，授权仍针对本次完整调用。[审批提示来源](src/pulsara_agent/conversation_kernel/interaction.py) · [前端权限卡](frontend/components/workbench-view.tsx)
 
 `manage_capability` 按用户在弹窗中要做的事分流。仅需批准模型按原参数执行的操作，使用普通权限卡。以下场景由用户亲自操作，即使没有文本框也使用工具表单，点「取消」沿用工具自身的取消结果。
 

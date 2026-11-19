@@ -17,6 +17,12 @@ from pulsara_agent.capability.mcp_management import (
 from pulsara_agent.conversation_kernel.capability_management_execution import (
     CapabilityManagementCall,
 )
+from pulsara_agent.mcp_config import McpScopePolicy
+from pulsara_agent.plugins.connection_management import (
+    ReplacePluginMcpConnectionRequest,
+)
+from pulsara_agent.plugins.mcp_connection import PluginMcpConnectionOverlay
+from pulsara_agent.primitives.context import thaw_json
 
 
 def test_direct_call_is_consumed_once_and_uses_canonical_local_owner(tmp_path):
@@ -140,8 +146,6 @@ def test_plugin_enable_always_uses_user_review_then_guarded_existing_owner(tmp_p
             await direct.execute()
         call = CapabilityManagementCall(service, prepared)
         form = call.form("review")
-        from pulsara_agent.primitives.context import thaw_json
-
         shown = thaw_json(form.public_projection)["plugin"]["mcp"][0]
         assert shown["server_id"] == "docs"
         assert shown["config"]["transport"]["endpoint"] == "https://example.org/mcp"
@@ -154,6 +158,92 @@ def test_plugin_enable_always_uses_user_review_then_guarded_existing_owner(tmp_p
         assert outcome.state == "SUCCESS", outcome
         assert (await service._plugin(None, "example")).enabled
         await service.mcp.aclose()
+
+    asyncio.run(run())
+
+
+def test_plugin_connection_form_preserves_scope_on_patch_and_removes_override_on_reset(
+    tmp_path,
+):
+    async def run():
+        service = preparation(tmp_path)
+        try:
+            installed = await install_plugin(service, tmp_path)
+            old_endpoint = "https://saved.example/mcp"
+            edited_endpoint = "https://edited.example/mcp"
+            await service.plugins.replace_plugin_mcp_connection_overlay(
+                ReplacePluginMcpConnectionRequest(
+                    installed.identity,
+                    "docs",
+                    installed.package_install_id,
+                    None,
+                    PluginMcpConnectionOverlay(
+                        "docs",
+                        "streamable_http",
+                        endpoint=old_endpoint,
+                        scope_policy=McpScopePolicy.ROOT_ONLY,
+                    ),
+                    service.deadline(),
+                ),
+                connections=service.mcp,
+            )
+            args = {
+                "action": "UPDATE_MCP_CONNECTION",
+                "target": mcp_target(service, "docs", scope="USER", plugin="example"),
+            }
+            patch = CapabilityManagementCall(
+                service,
+                await service.prepare(
+                    {**args, "config": {"transport": {"endpoint": edited_endpoint}}}
+                ),
+            )
+            patch_form = patch.form("review")
+            shown = thaw_json(patch_form.public_projection)
+            assert shown["prefill"]["saved_destination"] == {
+                "type": "streamable_http",
+                "endpoint": old_endpoint,
+            }
+            assert (
+                shown["connection"]["config"]["transport"]["endpoint"]
+                == edited_endpoint
+            )
+            assert shown["connection"]["config"]["scope_policy"] == "ROOT_ONLY"
+            values = await patch_form.prepare_submission(
+                {"overlay": shown["connection"]["overlay"]}
+            )
+            patch.accept(AcceptedCapabilityFormSubmission(values))
+            assert (await patch.execute()).state == "SUCCESS"
+            plugin = await service._plugin(None, "example")
+            assert (
+                plugin.mcp_connection_overlays[0].scope_policy
+                is McpScopePolicy.ROOT_ONLY
+            )
+
+            restore = CapabilityManagementCall(
+                service, await service.prepare({**args, "config": None})
+            )
+            restore_form = restore.form("review")
+            shown = thaw_json(restore_form.public_projection)
+            assert shown["prefill"]["saved_destination"]["endpoint"] == edited_endpoint
+            assert shown["prefill"]["restore_defaults"] is True
+            assert shown["connection"]["overlay"] is None
+            assert shown["connection"]["config"]["scope_policy"] == "ROOT_AND_SUBAGENTS"
+            values = await restore_form.prepare_submission({"overlay": None})
+            restore.accept(AcceptedCapabilityFormSubmission(values))
+            result = await restore.execute()
+            assert result.state == "SUCCESS"
+            assert (
+                result.business_value.content[0].value
+                == "已恢复 MCP 连接 docs 的默认配置。"
+            )
+            plugin = await service._plugin(None, "example")
+            assert plugin.mcp_connection_overlays == ()
+            server = plugin.summary.mcp.mcp_servers[0]
+            current = service._connection(plugin, server)
+            assert current.transport.endpoint == "https://example.org/mcp"
+            assert current.scope_policy is McpScopePolicy.ROOT_AND_SUBAGENTS
+        finally:
+            await service.mcp.aclose()
 
     asyncio.run(run())
 
