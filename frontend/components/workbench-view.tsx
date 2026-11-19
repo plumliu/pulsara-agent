@@ -2421,7 +2421,9 @@ export function WorkbenchView({
       setPermissionOpen(false); setModelOpen(false); setReasoningOpen(false);
     }
   }
-  const [modelBindingBusy, setModelBindingBusy] = useState(false);
+  const [modelBindingSave, setModelBindingSave] = useState<{ sessionId: string; modelName: string } | null>(null);
+  const pendingModelBinding = modelBindingSave?.sessionId === session.id ? modelBindingSave : null;
+  const modelBindingBusy = Boolean(pendingModelBinding);
   const [preparingQueueEdit, setPreparingQueueEdit] = useState<string>();
   const [jumpBottom, setJumpBottom] = useState(126);
   const [queueVisibleItems, setQueueVisibleItems] = useState(5);
@@ -2606,6 +2608,8 @@ export function WorkbenchView({
   );
   const selectedModel = modelConfigurations.find((item) => item.id === modelCallBinding?.connection_id);
   const modelBindingMissing = Boolean(modelCallBinding && !selectedModel);
+  const modelLabel = modelBindingMissing ? '模型配置已删除' : selectedModel?.display_name ?? selectedModel?.model_id ?? '选择模型';
+  const modelSaveStatus = pendingModelBinding ? `正在保存模型配置：${pendingModelBinding.modelName}` : undefined;
   const modelPending = modelCatalogLoading && selectedModel?.source === 'models_dev' && selectedModel.status !== 'ready';
   const modelReady = Boolean(
     modelCallBinding
@@ -2787,7 +2791,7 @@ export function WorkbenchView({
   }, [acceptedDraftLayout, draftStore, session.id]);
 
   const submit = useCallback(async () => {
-    if (!canControl || promptPanelOpen) return;
+    if (!canControl || promptPanelOpen || modelBindingBusy) return;
     if (!draft.hasContent || submitting || editingQueue) return;
     if (!modelReady) {
       if (!welcome) onNotify(
@@ -2839,20 +2843,23 @@ export function WorkbenchView({
     setRequestPlan(false);
     onPermissionChange('bypass-permissions');
   }, [canControl, promptPanelOpen, activePlanMode, draft.hasContent, draftStore, editingQueue, isRunning,
-    modelBindingMissing, modelReady, onNotify, onPermissionChange, onSend,
+    modelBindingBusy, modelBindingMissing, modelReady, onNotify, onPermissionChange, onSend,
     permission, requestPlan, session.id, setRequestPlan, submitting, welcome, jumpToLatest, queuedCount, interaction]);
 
   const changeBinding = async (binding: ModelCallBindingPayload) => {
     if (!canControl || modelBindingBusy) return;
-    setModelBindingBusy(true);
+    const model = modelConfigurations.find(item => item.id === binding.connection_id);
+    if (!model) return;
+    const save = { sessionId: session.id, modelName: model.display_name ?? model.model_id };
+    setModelBindingSave(save);
+    setModelOpen(false);
+    setReasoningOpen(false);
     try {
       await onModelCallBindingChange(binding);
-      setModelOpen(false);
-      setReasoningOpen(false);
     } catch (error) {
       onNotify('模型选择未保存', error instanceof Error ? error.message : '请稍后重试。');
     } finally {
-      setModelBindingBusy(false);
+      setModelBindingSave(current => current === save ? null : current);
     }
   };
 
@@ -3162,9 +3169,28 @@ export function WorkbenchView({
                 sessionId={session.id} binding={modelCallBinding!} revision={contextUsageRevision}
                 isRunning={isRunning} readUsage={onReadContextUsage} />}
               <div className="popover-anchor model-picker">
-                <button aria-label={modelBindingMissing ? '模型配置已删除' : selectedModel?.display_name ?? selectedModel?.model_id ?? '选择模型'} className={`mode-chip model-chip${modelOpen ? ' is-active' : ''}${welcome && !modelReady && !modelOpen ? ' needs-selection' : ''}`} title={modelBindingMissing ? '模型配置已删除' : modelConnectionLabel(selectedModel)} onClick={() => { setModelOpen((value) => !value); setAddOpen(false); setReasoningOpen(false); setSkillOpen(false); setPermissionOpen(false); }} aria-expanded={modelOpen} disabled={modelBindingBusy}>
-                  <Bot className="model-chip__icon" size={15} aria-hidden="true" /><span className="model-chip__label">{modelBindingMissing ? '模型配置已删除' : selectedModel?.display_name ?? selectedModel?.model_id ?? '选择模型'}</span><ChevronDown className="model-chip__chevron" size={10} />
+                <button
+                  type="button"
+                  className={`mode-chip model-chip${modelOpen ? ' is-active' : ''}${welcome && !modelReady && !modelOpen && !modelBindingBusy ? ' needs-selection' : ''}`}
+                  aria-label={modelSaveStatus ?? modelLabel}
+                  title={modelSaveStatus ?? (modelBindingMissing ? modelLabel : modelConnectionLabel(selectedModel))}
+                  aria-expanded={modelOpen}
+                  aria-busy={modelBindingBusy || undefined}
+                  disabled={modelBindingBusy}
+                  onClick={() => {
+                    setModelOpen(value => !value);
+                    setAddOpen(false);
+                    setReasoningOpen(false);
+                    setSkillOpen(false);
+                    setPermissionOpen(false);
+                  }}
+                >
+                  {!pendingModelBinding && <Bot className="model-chip__icon" size={15} aria-hidden="true" />}
+                  <span className="model-chip__label">{pendingModelBinding ? `保存中 · ${pendingModelBinding.modelName}` : modelLabel}</span>
+                  {pendingModelBinding ? <LoaderCircle size={13} className="is-spinning" aria-hidden="true" />
+                    : <ChevronDown className="model-chip__chevron" size={10} />}
                 </button>
+                <span className="model-chip__status" aria-live="polite">{modelSaveStatus}</span>
                 {modelOpen && <div className="menu-popover model-menu">
                   <div className="model-menu__header">
                     <span className="menu-label">此会话的模型</span>
@@ -3204,7 +3230,10 @@ export function WorkbenchView({
                     title="停止主助手本轮生成和后续执行；已启动操作仍按各自规则收尾，任务、排队输入和后台命令不会自动取消。"
                   ><Square size={14} fill="currentColor" strokeWidth={0} aria-hidden="true" /></button>
                 ) : (
-                  <button className="send-button" onClick={() => void submit()} disabled={promptPanelOpen || !draft.hasContent || draft.pendingFiles > 0 || draft.failedFiles > 0 || submitting || runtimeStatus !== 'online' || !session.id || (!modelReady && !welcome)} aria-label={isRunning || interaction ? '排队发送' : '发送'}>
+                  <button className="send-button" onClick={() => void submit()}
+                    disabled={promptPanelOpen || !draft.hasContent || draft.pendingFiles > 0 || draft.failedFiles > 0
+                      || submitting || modelBindingBusy || runtimeStatus !== 'online' || !session.id || (!modelReady && !welcome)}
+                    aria-label={isRunning || interaction ? '排队发送' : '发送'}>
                     {isRunning ? <Play size={14} fill="currentColor" /> : <ArrowUp size={16} />}
                   </button>
                 )}

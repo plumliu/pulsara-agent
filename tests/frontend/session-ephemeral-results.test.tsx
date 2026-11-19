@@ -53,6 +53,46 @@ it('keeps only unresolved approval commands after a session view closes', () => 
 });
 
 describe('session ephemeral results', () => {
+  it('uses the published projection for a model change and checks the live cut once when the read settles', async () => {
+    const { props, read } = setup();
+    const project = vi.spyOn(props.connection, 'current');
+    const hook = renderHook(useSessionEphemeralResults, { initialProps: props });
+    await act(async () => {});
+    expect(hook.result.current.suggestion).toBe('如何验证这个假设？');
+    project.mockClear();
+    const pending = deferred<SessionEphemeralResults>();
+    read.mockReturnValueOnce(pending.promise);
+    const nextBinding = { ...binding, connection_id: 'other-model' };
+    hook.rerender({ ...props, binding: nextBinding });
+    const setupCalls = project.mock.calls.length;
+    expect(hook.result.current.suggestion).toBeUndefined();
+    await act(async () => pending.resolve({
+      ...result(), suggestion: { ...result().suggestion, model_call_binding: nextBinding, text: '新模型的问题？' },
+    }));
+    expect(hook.result.current.suggestion).toBe('新模型的问题？');
+    expect({ setup: setupCalls, total: project.mock.calls.length }).toEqual({ setup: 0, total: 1 });
+  });
+
+  it('updates a suggestion without rerendering a different session on the same cache', async () => {
+    const { props, cache } = setup();
+    const other = cache.observe('session-2', props.projection, binding);
+    cache.accept('session-2', other, result('session-2'));
+    const first = renderHook(useSessionEphemeralResults, { initialProps: props });
+    const otherRender = vi.fn();
+    const second = renderHook(() => {
+      otherRender();
+      return useSessionEphemeralResults({ ...props, visible: false, connection: { ...props.connection, sessionId: 'session-2' } });
+    });
+    await act(async () => {});
+    expect(first.result.current.suggestion).toBe('如何验证这个假设？');
+    expect(second.result.current.suggestion).toBe('如何验证这个假设？');
+    otherRender.mockClear();
+    act(() => cache.invalidate('session-1'));
+    expect(first.result.current.suggestion).toBeUndefined();
+    expect(second.result.current.suggestion).toBe('如何验证这个假设？');
+    expect(otherRender).not.toHaveBeenCalled();
+  });
+
   it('receives a whole suggestion behind an existing draft and reveals it when the draft is cleared', async () => {
     const { props, read } = setup();
     const response = deferred<SessionEphemeralResults>();

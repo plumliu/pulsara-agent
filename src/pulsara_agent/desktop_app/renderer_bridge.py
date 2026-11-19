@@ -630,7 +630,10 @@ class RendererBridge:
         await self._connection(item.connection_id)
         return self.file_previews.current(item.connection_id, token)
 
-    async def require_chat_controller(self, connection_id: str, generation: int, *, session_id: str | None = None, require_directory: bool = True) -> None:
+    async def require_chat_controller(
+        self, connection_id: str, generation: int, *, session_id: str | None = None,
+        require_directory: bool = True,
+    ) -> BrowserRuntimeConnection:
         await self._require_browser_controller(connection_id, generation)
         connection = await self._connection(connection_id)
         if session_id is not None and connection.session_id != session_id:
@@ -644,6 +647,7 @@ class RendererBridge:
         # The completed original browser-owner check is the action admission
         # point. Directory/database reads above can yield to a takeover.
         await self._require_browser_controller(connection_id, generation)
+        return connection
 
     async def close_tab(
         self, session_id: str, connection_id: str, generation: int, *,

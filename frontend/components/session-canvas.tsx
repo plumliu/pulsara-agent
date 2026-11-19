@@ -8,7 +8,7 @@ import { createPortal } from 'react-dom';
 import { containOffscreenReplies } from '../lib/history-dom';
 import {
   applyDockResize, clamp, closeWindow, defaultFloat, dividerSpec, dockConflicts, dockDividers, dockPixels, emptyLayout,
-  fillFreeDock, focusWindow, guideDockResize, maximizedWindow, minimizeWindow, placeWindow, reachableFloat, recallWindow,
+  fillFreeDock, focusWindow, guideDockResize, minimizeWindow, placeWindow, reachableFloat,
   releaseDockSide, reorderTabs, resizeDockLine, resizeEdges, resizeFloat, snapRegion, toggleMaximized, wholeCanvas,
   type CanvasRect, type CanvasSize, type DockDivider, type ResizeEdge, type SessionCanvasLayout, type SessionCanvasPlacement, type WindowLayout,
 } from './session-canvas-layout';
@@ -69,7 +69,7 @@ export function useSessionCanvas() {
     current.current = next;
     setLayout(next);
   }, []);
-  const place = useCallback((id: string, placement: SessionCanvasPlacement = { type: 'maximized' }) => {
+  const place = useCallback((id: string, placement: SessionCanvasPlacement = { type: 'open' }) => {
     const handoff = pendingHandoffs.current.get(placement);
     pendingHandoffs.current.delete(placement);
     update(state => placeWindow(state, id, area.current, placement), handoff);
@@ -548,7 +548,7 @@ export function SessionCanvas({ controller, sessions, visible = true, tabHost, o
         const id = next.session.id;
         const index = next.tabIndex;
         if (current.current.windows.has(id)) update(state => reorderTabs(state, id, index));
-        else void openSession.current(id, { type: 'maximized', tabIndex: index });
+        else void openSession.current(id, { type: 'open', tabIndex: index });
       } else if (next?.kind === 'move' && next.where === 'canvas' && next.rect) {
         const id = next.session.id;
         const placement: SessionCanvasPlacement = next.dock ? { type: 'docked', rect: next.dock }
@@ -607,7 +607,6 @@ export function SessionCanvas({ controller, sessions, visible = true, tabHost, o
   const moving = preview?.kind === 'move' && preview.where === 'canvas' ? preview : null;
   const movingId = moving?.session.id;
   const movingShown = movingId !== undefined && layout.admitted.includes(movingId);
-  const full = maximizedWindow(layout);
   const conflicts = moving?.dock ? dockConflicts(layout, moving.session.id, moving.dock) : [];
   const dividers = useMemo(() => dockDividers(layout), [layout]);
   const dockChanges = preview?.kind === 'dock-resize' ? preview.regions : undefined;
@@ -624,7 +623,7 @@ export function SessionCanvas({ controller, sessions, visible = true, tabHost, o
         ref={node => { if (node) tabs.current.set(id, node); else tabs.current.delete(id); }}>
         <button type="button" className="session-canvas__tab-select" role="tab" aria-selected={selected}
           aria-controls={id} aria-description={placementLabel} title={`${session.title} · ${placementLabel}`}
-          onClick={() => update(state => recallWindow(state, id, area.current))}
+          onClick={() => update(state => placeWindow(state, id, area.current))}
           onPointerDown={event => begin(event, { kind: 'move', source: 'tab', session })}>
           {session.pendingApproval ? <span className="session-canvas__approval" title="等待审批" aria-label="等待审批" />
             : session.running && <LoaderCircle size={12} className="is-spinning" aria-label="正在处理" />}
@@ -632,7 +631,7 @@ export function SessionCanvas({ controller, sessions, visible = true, tabHost, o
         </button>
         <SessionTabClose title={session.title} request={closingTab?.id === id ? closingTab : undefined}
           onClose={() => void onCloseSession(id)}
-          onReturnToForm={() => update(state => recallWindow(state, id, area.current))} />
+          onReturnToForm={() => update(state => placeWindow(state, id, area.current))} />
       </div>
     );
   }), [byId, layout.tabs, layout.admitted, layout.focusedId, closingTab, onCloseSession, update, begin, area]);
@@ -656,9 +655,8 @@ export function SessionCanvas({ controller, sessions, visible = true, tabHost, o
           const { id } = session;
           const item = layout.windows.get(id);
           const isMoving = movingId === id && movingShown;
-          const shrunk = !!moving && full === id && !isMoving;
           const floatSize = preview?.kind === 'float-resize' && preview.id === id ? preview.rect : undefined;
-          const floating = isMoving ? moving?.rect : floatSize ?? (shrunk && item ? reachableFloat(item.float, view) : undefined);
+          const floating = isMoving ? moving?.rect : floatSize;
           const dock = dockChanges?.get(id) ?? item?.dock;
           const rect = isMoving && floating
             ? { left: 0, top: 0, width: floating.w, height: floating.h, translate: `${floating.x}px ${floating.y}px` }

@@ -87,7 +87,7 @@ from pulsara_agent.desktop_app.renderer_bridge import (
     BridgeSettlementFailed,
     RendererBridge,
 )
-from pulsara_agent.desktop_app.protocol_client import ProtocolBridgeError
+from pulsara_agent.desktop_app.protocol_client import BrowserRuntimeConnection, ProtocolBridgeError
 from pulsara_agent.desktop_app.file_import import LocalImport, receive_file
 from pulsara_agent.desktop_app.file_preview import FilePreviewError
 from pulsara_agent.desktop_app.file_preview_http import FilePreviewHttp
@@ -1585,15 +1585,21 @@ class LocalHttpServer:
         )
 
     async def _update_model_call_binding(self, request: web.Request) -> web.Response:
+        controller = await self._require_session_chat_controller(
+            request, require_directory=False,
+        )
         body = await self._json_body(request)
         binding = model_call_binding_from_dict(body)
         if binding is None:
             raise ValueError("session model binding cannot be null")
-        return web.json_response(
-            await self.sessions.update_model_call_binding(
-                request.match_info["session_id"], binding
+        try:
+            result = await self.sessions.update_model_call_binding(
+                request.match_info["session_id"], binding,
+                host_session_id=controller.host_session_id,
             )
-        )
+        except SessionControlRejected as exc:
+            raise ProtocolBridgeError(exc.public_code, str(exc)) from exc
+        return web.json_response(result)
 
     async def _settings_read_model(self) -> dict[str, object]:
         try:
@@ -2417,12 +2423,22 @@ class LocalHttpServer:
                 cancelled=lambda: request.transport is None or request.transport.is_closing()))
         return web.json_response(await self._cold_content(session_id, body, tool_output=operation == "read-tool-output"))
 
+    async def _require_session_chat_controller(
+        self, request: web.Request, *, require_directory: bool,
+    ) -> BrowserRuntimeConnection:
+        return await self.bridge.require_chat_controller(
+            request.headers.get("X-Pulsara-Connection-Id", ""),
+            int(request.headers.get("X-Pulsara-Connection-Generation", "0")),
+            session_id=request.match_info["session_id"],
+            require_directory=require_directory,
+        )
+
     @web.middleware
     async def _chat_write_admission(self, request, handler):
         session_id = request.match_info.get("session_id")
         if session_id and request.method not in {"GET", "HEAD", "OPTIONS"}:
             suffix = request.path.split("/api/sessions/", 1)[-1].split("/", 1)[-1]
-            independent = {session_id, "title", "archive", "unarchive", "archived", "connections", "restore-workspace", "path-candidates", "close-tab"}
+            independent = {session_id, "title", "archive", "unarchive", "archived", "connections", "restore-workspace", "path-candidates", "close-tab", "model-call-binding"}
             parts = suffix.split("/")
             sidebar_read = (suffix in {"agents", "queue"}
                 or (len(parts) == 3 and parts[0] == "agents" and parts[2] in {"reader", "queue"})
@@ -2433,10 +2449,9 @@ class LocalHttpServer:
                 or (len(parts) == 2 and parts[0] == "cell-sources")
                 or (len(parts) == 5 and parts[0] == "hosts" and parts[2] == "cells" and parts[4] == "graph"))
             if suffix not in independent and not suffix.startswith("history/") and not sidebar_read:
-                await self.bridge.require_chat_controller(
-                    request.headers.get("X-Pulsara-Connection-Id", ""),
-                    int(request.headers.get("X-Pulsara-Connection-Generation", "0")), session_id=session_id,
-                    require_directory=suffix != "close")
+                await self._require_session_chat_controller(
+                    request, require_directory=suffix != "close",
+                )
         connection_id = request.match_info.get("connection_id")
         if connection_id:
             action = request.path.rsplit("/", 1)[-1]

@@ -894,6 +894,52 @@ describe('empty session welcome composer', () => {
 });
 
 describe('WorkbenchView controls and tool results', () => {
+  it.each([true, false])('shows the pending model and preserves the draft while saving (accepted: %s)', async (accepted) => {
+    const nextModel = { ...model, id: 'model-two', display_name: 'next-model' };
+    const binding = { connection_id: nextModel.id, reasoning: null };
+    let finish!: () => void;
+    let fail!: (error: Error) => void;
+    const onModelCallBindingChange = vi.fn(() => new Promise<void>((resolve, reject) => {
+      finish = resolve;
+      fail = reject;
+    }));
+    const input = props({ isRunning: false, modelConfigurations: [model, nextModel], onModelCallBindingChange });
+    const view = render(<WorkbenchView {...input} />);
+    act(() => promptDraftStore.insertText('session-one', '正在编辑'));
+    fireEvent.click(screen.getByRole('button', { name: 'test-model' }));
+    fireEvent.click(screen.getByRole('button', { name: /Test · next-model/ }));
+
+    const pending = screen.getByRole('button', { name: '正在保存模型配置：next-model' }) as HTMLButtonElement;
+    expect(pending.getAttribute('aria-expanded')).toBe('false');
+    expect(pending.getAttribute('aria-busy')).toBe('true');
+    expect(pending.disabled).toBe(true);
+    expect(screen.queryByRole('button', { name: /Test · next-model/ })).toBeNull();
+    expect(onModelCallBindingChange).toHaveBeenCalledExactlyOnceWith(binding);
+
+    const editor = screen.getByLabelText('发送给 Pulsara');
+    const send = screen.getByRole('button', { name: '发送' }) as HTMLButtonElement;
+    expect(editor.getAttribute('contenteditable')).toBe('true');
+    act(() => promptDraftStore.insertText('session-one', '中的草稿'));
+    expect(send.disabled).toBe(true);
+    fireEvent.click(send);
+    await act(async () => { fireEvent.keyDown(editor, { key: 'Enter' }); });
+    expect(input.onSend).not.toHaveBeenCalled();
+
+    await act(async () => {
+      if (accepted) {
+        view.rerender(<WorkbenchView {...input} modelCallBinding={binding} />);
+        finish();
+      } else {
+        fail(new Error('配置无法保存'));
+      }
+    });
+    expect(screen.getByRole('button', { name: accepted ? 'next-model' : 'test-model' }).getAttribute('aria-busy')).toBeNull();
+    expect(send.disabled).toBe(false);
+    expect(promptDraftStore.summary('session-one').text).toBe('正在编辑中的草稿');
+    if (accepted) expect(input.onNotify).not.toHaveBeenCalled();
+    else expect(input.onNotify).toHaveBeenCalledWith('模型选择未保存', '配置无法保存');
+  });
+
   it('positions latest above the composer, TODO and queue independently of welcome animation', async () => {
     let composerTop = 650;
     const visualOffset = -300;

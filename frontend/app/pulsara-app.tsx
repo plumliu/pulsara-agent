@@ -391,18 +391,18 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   }, [notify, placeSession]);
 
   const requestOpenSession = useCallback((
-    id: string, placement: SessionCanvasPlacement = { type: 'maximized' },
+    id: string, placement: SessionCanvasPlacement = { type: 'open' },
   ): Promise<boolean> => {
     if (deletingSession.current === id || archivingSession.current === id) return Promise.resolve(false);
     const close = closeRequestRef.current;
     if (close?.id === id && close.completion) {
       return close.completion.then(() => requestOpenSession(id, placement));
     }
-    if (placement.type === 'maximized') {
-      // A newer exclusive selection retires earlier attempts that never acquired a tab.
+    if (placement.type === 'open') {
+      // A newer sidebar selection supersedes an unfinished selection without a tab.
       // The current placement stays in view until a replacement is ready.
       for (const [other, pending] of pendingOpens.current) {
-        if (other !== id && pending.placement.type === 'maximized') removeMountedSession(other);
+        if (other !== id && pending.placement.type === 'open') removeMountedSession(other);
       }
     }
     const pending = pendingOpens.current.get(id);
@@ -815,7 +815,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     setNewSessionOpen(true);
   };
 
-  const openSession = (id: string, placement?: SessionCanvasPlacement): Promise<boolean> => {
+  const openSession = useCallback((id: string, placement?: SessionCanvasPlacement): Promise<boolean> => {
     const view = activeViewRef.current;
     const opened = requestOpenSession(id, placement);
     void opened.then(ok => {
@@ -824,7 +824,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
       if (!window.matchMedia?.('(min-width: 1151px)').matches) setSidebarOpen(false);
     });
     return opened;
-  };
+  }, [requestOpenSession]);
 
   const createSession = async (selection: SessionWorkspaceSelection): Promise<boolean> => {
     if (!canCreateSession) return false;

@@ -84,7 +84,7 @@ describe('production session canvas', () => {
     const secondWindow = document.getElementById(second.id)!;
     const secondConnection = adapter.lastConnection!;
     const composer = within(secondWindow).getByLabelText('发送给 Pulsara');
-    expect(first.hidden).toBe(true);
+    expect(first.hidden).toBe(false);
     expect(firstConnection.closed).toBe(false);
 
     await userEvent.click(composer);
@@ -155,6 +155,7 @@ describe('production session canvas', () => {
 
     await userEvent.click(screen.getByRole('button', { name: /另一会话/ }));
     await screen.findByRole('tab', { name: /另一会话/ });
+    await userEvent.click(within(first).getByRole('button', { name: '收起会话窗口' }));
     expect(first.hidden).toBe(true);
     retainHistory.mockClear();
     await act(async () => firstConnection.emit({ ...projection('收起期间仍然接收消息'), eventSequence: 3 }));
@@ -238,6 +239,7 @@ describe('production session canvas', () => {
     const { adapter, first } = await start();
     await userEvent.click(screen.getByRole('button', { name: /另一会话/ }));
     await screen.findByRole('tab', { name: /另一会话/ });
+    await userEvent.click(within(first).getByRole('button', { name: '收起会话窗口' }));
     expect(first.hidden).toBe(true);
     adapter.closeSessionTab.mockResolvedValue({status: 'confirmation_required', formIds: [formId], otherClients: false, visibleForm: true});
     await userEvent.click(closeFirst());

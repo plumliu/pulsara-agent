@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useSyncExternalStore } from 'react';
 import type { ModelCallBindingPayload, RuntimeAdapter, RuntimeConnection, RuntimeProjection, SessionEphemeralResults } from './runtime-adapter';
 
 export type ToolDecisionIntent = {
@@ -71,10 +71,8 @@ function contextOf(projection: RuntimeProjection, binding: ModelCallBindingPaylo
 export class SessionSuggestionCache {
   private slots = new Map<string, Slot>();
   private listeners = new Set<() => void>();
-  private version = 0;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
-  getVersion = () => this.version;
-  private changed() { this.version += 1; for (const listener of this.listeners) listener(); }
+  private changed() { for (const listener of this.listeners) listener(); }
 
   observe(sessionId: string, projection: RuntimeProjection, binding: ModelCallBindingPayload | null | undefined): Slot {
     const context = contextOf(projection, binding);
@@ -139,7 +137,11 @@ export function useSessionEphemeralResults({ cache, adapter, connection, project
   suggestionsEnabled?: boolean;
   refreshSessions: () => Promise<unknown>;
 }) {
-  useSyncExternalStore(cache.subscribe, cache.getVersion, cache.getVersion);
+  const sessionId = connection?.sessionId;
+  const getSuggestion = useCallback(() => (
+    suggestionsEnabled && sessionId ? cache.text(sessionId, projection, binding) : undefined
+  ), [binding, cache, projection, sessionId, suggestionsEnabled]);
+  const suggestion = useSyncExternalStore(cache.subscribe, getSuggestion, getSuggestion);
   useEffect(() => { if (!suggestionsEnabled) cache.invalidateAll(); }, [cache, suggestionsEnabled]);
   const titleLifetime = useMemo(() => ({ adapter, active: true }), [adapter]);
   const titleReads = useRef(new Map<string, { host: string; abort: AbortController; timer?: ReturnType<typeof setTimeout> }>());
@@ -199,36 +201,42 @@ export function useSessionEphemeralResults({ cache, adapter, connection, project
   const stableBinding = useMemo(() => JSON.parse(bindingKey) as ModelCallBindingPayload | null, [bindingKey]);
   const queued = projection.queuedCount > 0;
   const compacting = projection.liveControl.root_compaction_in_progress === true;
+  const observePublishedProjection = useEffectEvent((sessionId: string) => (
+    cache.observe(sessionId, projection, stableBinding)
+  ));
   useEffect(() => {
     if (!connection || !host) return;
-    const current = connection.current();
     const title = titleReads.current.get(connection.sessionId);
     if (title && title.host !== host) {
       title.abort.abort();
       clearTimeout(title.timer);
       titleReads.current.delete(connection.sessionId);
     }
-    cache.observe(connection.sessionId, current, stableBinding);
+    observePublishedProjection(connection.sessionId);
   }, [cache, connection, host, root, queued, compacting, stableBinding]);
 
   useEffect(() => {
     if (!visible || !connection || !host) return;
     const sessionId = connection.sessionId;
-    const owner = cache.observe(sessionId, connection.current(), stableBinding);
+    const owner = observePublishedProjection(sessionId);
     const abort = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const read = async () => {
       try {
         const result = await adapter.ephemeralResults(sessionId, abort.signal);
-        if (abort.signal.aborted || connection.current().hostSessionId !== host) return;
+        if (abort.signal.aborted) return;
         if (result.session_id !== sessionId || result.host_session_id !== host) return;
+        // The live owner can advance before React receives its publication.
+        // Read that cut once so an older suggestion cannot be adopted.
+        const current = connection.current();
+        if (current.hostSessionId !== host) return;
         if (result.title.state === 'pending') observeTitle(sessionId, host);
         else if (result.title.state === 'adopted') void refreshTitle(sessionId, host);
-        cache.observe(sessionId, connection.current(), stableBinding);
+        cache.observe(sessionId, current, stableBinding);
         if (suggestionsEnabled) cache.accept(sessionId, owner, result);
-        if (connection.current().isRunning
+        if (current.isRunning
           || (suggestionsEnabled && (result.suggestion.state === 'pending'
-          || (result.suggestion.state === 'awaiting_completion' && !connection.current().isRunning)))) {
+          || result.suggestion.state === 'awaiting_completion'))) {
           timer = setTimeout(() => void read(), 650);
         }
       } catch { /* A missing ephemeral result never blocks the composer. */ }
@@ -239,7 +247,7 @@ export function useSessionEphemeralResults({ cache, adapter, connection, project
     projection.eventSequence, visible, suggestionsEnabled, observeTitle, refreshTitle]);
 
   return {
-    suggestion: suggestionsEnabled && connection ? cache.text(connection.sessionId, projection, binding) : undefined,
+    suggestion,
     observeTitle,
   };
 }

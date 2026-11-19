@@ -955,6 +955,16 @@ export function SessionWorkbench({
     for (const message of projection.canonicalInputs) if (message.inputSource?.queueItemId) items.delete(message.inputSource.queueItemId);
     return [...items.values()].sort((a,b) => compareSequence(a.sequence,b.sequence));
   }, [projection.queuedPrompts, projection.canonicalInputs, visibleQueuePages, pendingSteerReading.items]);
+  const renderedSubmissions = useMemo(() => localSubmissions.filter(item => (
+    item.sessionId === sessionId
+    && !item.handledByQueueAction
+    && item.outcomeCode !== 'USER_REDIRECTED_TO_STEER'
+    && !queueActions.some(action => action.status === 'accepted' && action.source.commandId === item.commandId)
+    && !projection.canonicalInputs.some(message => canonicalInputMatches(message, item) && canonicalPromptReady(message, projection))
+  )), [localSubmissions, projection, queueActions, sessionId]);
+  const activeSkills = useMemo(() => (
+    (capabilities?.skills.items ?? []).filter(skill => skill.enabled && skill.effective)
+  ), [capabilities?.skills.items]);
 
   useEffect(() => {
     if (!visible || !activeSessionId || databaseState !== 'ready' || runtimeStatus !== 'online') return;
@@ -1024,7 +1034,7 @@ export function SessionWorkbench({
       if (attempt === connectionAttempt.current && activeSessionIdRef.current === sessionId) setRuntimeReopenBusy(false);
     }
   }, [adapter, canControl, notify, openRuntimeSession, ownsConnection, runtimeReopenBusy]);
-  const forkConversation = async (entryId: string): Promise<void> => {
+  const forkConversation = useCallback(async (entryId: string): Promise<void> => {
     const sourceId = activeSessionIdRef.current;
     if (!sourceId || !canControl) return;
     invalidateSessionList();
@@ -1049,7 +1059,7 @@ export function SessionWorkbench({
       onNotify('分叉已打开', '已保留选定回复处的有效上下文。', 'success');
     }
     else notify('分叉已创建，暂未连接', '可以从会话列表重新打开。', 'warning');
-  };
+  }, [adapter, canControl, invalidateSessionList, notify, onNotify, onOpenSession, readSessionList]);
 
   const readContextUsage = useCallback((signal: AbortSignal) => (
     adapter.contextUsage(activeSessionId, signal)
@@ -2024,13 +2034,7 @@ export function SessionWorkbench({
           queueActions={queueActions.filter(item => item.sessionId === activeSession.id && item.connectionGeneration === connection?.generation)}
           onQueueAction={actOnQueuedPrompt}
           onQueueActionHandled={(commandId) => setQueueActions(current => current.map(item => item.commandId === commandId ? { ...item, handled: true } : item))}
-          localSubmissions={localSubmissions.filter((item) => (
-            item.sessionId === activeSession.id
-            && !item.handledByQueueAction
-            && item.outcomeCode !== 'USER_REDIRECTED_TO_STEER'
-            && !queueActions.some(action => action.status === 'accepted' && action.source.commandId === item.commandId)
-            && !projection.canonicalInputs.some(message => canonicalInputMatches(message, item) && canonicalPromptReady(message, projection))
-          ))}
+          localSubmissions={renderedSubmissions}
           runtimeStatus={runtimeStatus}
           runtimeError={sessionId ? runtimeError : userServiceError}
           runtimeErrorDetails={runtimeFailure?.details}
@@ -2054,9 +2058,7 @@ export function SessionWorkbench({
           workspaceRecoveryError={workspaceRecoveryError}
           onRestoreWorkspace={restoreWorkspace}
           onRecheckWorkspace={recheckWorkspace}
-          skills={(capabilities?.skills.items ?? []).filter(
-            (skill) => skill.enabled && skill.effective,
-          )}
+          skills={activeSkills}
           onReconnect={reconnect}
           onTakeControl={() => activeSessionId && void openRuntimeSession(activeSessionId, true, true)}
           onToggleInspector={() => setInspectorOpen((value) => !value)}

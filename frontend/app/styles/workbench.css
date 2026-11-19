@@ -622,6 +622,7 @@
 .model-chip { width: 100%; min-width: 0; }
 .model-chip__icon, .reasoning-chip > svg:first-child { display: none; }
 .model-chip__label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.model-chip__status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .composer-controls .mode-chip, .composer-utilities > .popover-anchor > .mode-chip { padding-inline: clamp(4px, 1cqw, 7px); }
 @container composer (max-width: 340px) {
   .composer-controls .model-picker { flex: none; }
@@ -749,6 +750,7 @@
 @media (prefers-reduced-motion: reduce) {
   .composer-queue__action-busy .is-spinning { animation: none; }
   .provider-retry-status > .is-spinning { animation: none; }
+  .model-chip > .is-spinning { animation: none; }
   .queued-prompt-content__meta button { transition: none; }
   .composer-queue__actions button, .composer-queue__actions button:hover, .composer-queue__actions button:focus-visible, .composer-queue__actions button:active,
   .queue-action-tooltip, .queue-action-tooltip[data-open='true'] { transform: none; transition: none; }

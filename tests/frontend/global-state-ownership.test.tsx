@@ -5,7 +5,7 @@ import { RuntimeApiError, type RuntimeBootstrap } from '../../frontend/lib/runti
 import type { SessionSummary } from '../../frontend/lib/pulsara-types';
 import {
   bootstrap, deferred, FakeAdapter, initialSession, isWelcomeHeading,
-  renderWorkbench, typeComposer,
+  renderWorkbench, typeComposer, focusedPane,
 } from './pulsara-app-fixture';
 
 async function openRetrievalSettings() {
@@ -158,12 +158,12 @@ it('a focus list issued before creation cannot close the new connection or erase
   await waitFor(() => expect(adapter.createSession).toHaveBeenCalledOnce());
   await screen.findByRole('heading', { name: isWelcomeHeading });
   const connection = adapter.lastConnection!;
-  const composer = await typeComposer('keep this new draft');
+  const composer = await typeComposer('keep this new draft', focusedPane());
   await act(async () => stale.resolve(before));
   expect(screen.queryByRole('region', { name: '会话欢迎页' })).toBeNull();
   expect(originalConnection.closed).toBe(false);
   expect(connection.closed).toBe(false);
-  expect(screen.getByRole('textbox', { name: '发送给 Pulsara' })).toBe(composer);
+  expect(focusedPane().getByRole('textbox', { name: '发送给 Pulsara' })).toBe(composer);
   expect(composer.textContent).toContain('keep this new draft');
   expect(screen.getByRole('tab', { name: /新会话/ }).getAttribute('aria-selected')).toBe('true');
   expect(screen.getByRole('tab', { name: new RegExp(initialSession.title) })).toBeTruthy();

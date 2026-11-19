@@ -11,17 +11,23 @@ from aiohttp import ClientSession
 import pytest
 
 from pulsara_agent.capability.management_form import CapabilityFormValues
+from pulsara_agent.conversation_kernel.host import SessionControlRejected
 from pulsara_agent.desktop_app.http_server import LocalHttpServer
 from pulsara_agent.desktop_app.protocol_client import TerminalProtocolClient
 from pulsara_agent.desktop_app.renderer_bridge import RendererBridge
 from pulsara_agent.identity import random_id
 from pulsara_agent.llm.input import PromptContent
+from pulsara_agent.llm.model_connections import ModelConnectionId, model_call_binding_to_dict
 from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.run_permission import RunPermissionAdmissionSource, build_run_permission_snapshot
 from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 as wire
 from pulsara_agent.terminal_protocol.v3_gateway import TerminalKernelProtocolServer
-from tests.support.model_config import test_model_runtime
+from tests.support.model_config import (
+    include_test_runtime_connections,
+    test_model_binding as model_binding,
+    test_model_runtime,
+)
 from tests.test_blocking_steer_host import _wait_for_card
 from tests.test_capability_form_interaction import open_form
 from tests.test_compaction_host_lifecycle import TextModel
@@ -112,6 +118,62 @@ async def listed_session(client, origin, session_id):
 async def observe_unload(client, origin, session_id):
     async with client.post(f"{origin}/api/sessions/wait-for-tab-unload", json={"session_ids": [session_id]}) as response:
         assert response.status == 204
+
+
+def test_model_binding_write_uses_the_exact_attached_host(
+    tmp_path, monkeypatch, stage2_migrated_postgres_database,
+):
+    async def scenario():
+        async with tab_service(
+            tmp_path, monkeypatch, stage2_migrated_postgres_database, TextModel(),
+        ) as (sessions, host, origin, client, _):
+            owner = await connect(client, origin, host.session_id)
+            observer = await connect(client, origin, host.session_id)
+            original = await host.model_call_binding()
+            alternative = test_model_runtime(
+                model_id="alternate",
+                connection_id=ModelConnectionId(random_id("connection")),
+            )
+            include_test_runtime_connections(host._model_runtime, alternative)
+            changed = model_binding(alternative)
+            payload = model_call_binding_to_dict(changed)
+            url = f"{origin}/api/sessions/{host.session_id}/model-call-binding"
+
+            async def unexpected_resume(*args, **kwargs):
+                pytest.fail("model selection should use the attached Host")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(sessions, "resume_session", unexpected_resume)
+                patch.setattr(sessions.core, "read_resumable_session", unexpected_resume)
+                async with client.put(url, headers=connection_headers(observer), json=payload) as response:
+                    assert response.status == 409
+                    assert (await response.json())["error"]["code"] == "CHAT_CONTROLLER_REQUIRED"
+                assert await host.model_call_binding() == original
+
+                workspace = host.workspace.workspace_root
+                renamed = workspace.with_name("removed-workspace")
+                workspace.rename(renamed)
+                try:
+                    async with client.put(url, headers=connection_headers(owner), json=payload) as response:
+                        assert response.status == 409
+                        assert (await response.json())["error"]["code"] == "WORKSPACE_UNAVAILABLE"
+                finally:
+                    renamed.rename(workspace)
+                assert await host.model_call_binding() == original
+
+                with pytest.raises(SessionControlRejected, match="会话运行时已变化"):
+                    await sessions.update_model_call_binding(
+                        host.session_id, changed, host_session_id=random_id("host"),
+                    )
+                async with client.put(url, headers=connection_headers(owner), json=payload) as response:
+                    assert response.status == 200
+                    assert await response.json() == {
+                        "model_call_binding": payload, "reasoning_preference_reset": False,
+                    }
+                assert await host.model_call_binding() == changed
+                assert sessions.session_by_host_id(host.host_session_id) is host
+
+    asyncio.run(scenario())
 
 
 def test_direct_and_browser_observers_are_counted_and_last_disconnect_releases_host(

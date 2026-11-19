@@ -6,7 +6,7 @@ import {
 } from '../../frontend/components/session-canvas';
 import {
   applyDockResize, dockDividers, emptyLayout, fillFreeDock, focusWindow, guideDockResize, minimizeWindow, placeWindow,
-  recallWindow, releaseDockSide, reorderTabs, resizeDockLine,
+  toggleMaximized, releaseDockSide, reorderTabs, resizeDockLine,
 } from '../../frontend/components/session-canvas-layout';
 
 const view = { w: 1200, h: 800 };
@@ -38,26 +38,34 @@ describe('session canvas layout', () => {
     expect(floatingAdmission.admitted).toEqual(['b', 'c', 'd', 'e']);
     const dockedAdmission = placeWindow(layout, 'e', view, docked(left));
     expect(dockedAdmission.admitted).toEqual(['c', 'd', 'e']);
-    expect(dockedAdmission.windows.get('a')).toMatchObject({ mode: 'minimized', dock: topLeft });
-    expect(dockedAdmission.windows.get('b')).toMatchObject({ mode: 'minimized', dock: bottomLeft });
+    expect(dockedAdmission.windows.get('a')).toMatchObject({ mode: 'docked', dock: topLeft });
+    expect(dockedAdmission.windows.get('b')).toMatchObject({ mode: 'docked', dock: bottomLeft });
 
-    const recalled = recallWindow(dockedAdmission, 'a', view);
+    const recalled = placeWindow(dockedAdmission, 'a', view);
     expect(recalled.windows.get('a')?.mode).toBe('floating');
     expect(recalled.windows.get('e')?.dock).toEqual(left);
   });
 
-  it('restores the maximized window and recalls only the chosen tab', () => {
+  it('keeps covered windows in place through maximizing, focusing, minimizing and restoring', () => {
     let layout = placeWindow(emptyLayout, 'a', view, floating);
     layout = placeWindow(layout, 'b', view, docked(right));
+    layout = toggleMaximized(layout, 'b', view);
     layout = placeWindow(layout, 'c', view, full);
-    expect(layout.admitted).toEqual(['c']);
-    const recalled = recallWindow(layout, 'b', view);
-    expect(recalled.admitted).toEqual(['c', 'b']);
-    expect(recalled.windows.get('c')?.mode).toBe('floating');
-    expect(recalled.windows.get('b')?.dock).toEqual(right);
-    expect(recalled.windows.get('a')?.mode).toBe('minimized');
-    expect(minimizeWindow(recalled, 'b').focusedId).toBe('c');
-    expect(minimizeWindow(layout, 'c').focusedId).toBeNull();
+    expect(layout.admitted).toEqual(['a', 'b', 'c']);
+    expect(layout.windows.get('a')?.float).toEqual(floating.rect);
+    expect(layout.windows.get('b')?.mode).toBe('maximized');
+    const behind = placeWindow(layout, 'a', view);
+    expect(behind.stack).toEqual(['b', 'c', 'a']);
+    expect(behind.windows.get('c')?.mode).toBe('maximized');
+    const minimized = minimizeWindow(layout, 'c');
+    expect(minimized.focusedId).toBe('b');
+    expect(placeWindow(minimized, 'c', view).windows.get('c')?.mode).toBe('maximized');
+    expect(toggleMaximized(minimized, 'b', view).windows.get('b')).toMatchObject({ mode: 'docked', dock: right });
+    const occupied = placeWindow(minimized, 'd', view, docked(right));
+    const restored = toggleMaximized(occupied, 'b', view);
+    expect(restored.admitted).toEqual(['a', 'b', 'd']);
+    expect(restored.windows.get('b')?.mode).toBe('floating');
+    expect(restored.windows.get('d')?.dock).toEqual(right);
   });
 
   it('links the full-height divider, retains resized proportions and expands across a collapsed side', () => {
@@ -76,11 +84,13 @@ describe('session canvas layout', () => {
 
     const onLeft = releaseDockSide(layout, divider, true, view);
     expect(onLeft.admitted).toEqual(['b', 'c']);
-    expect(onLeft.windows.get('a')).toMatchObject({ mode: 'minimized', dock: left });
+    expect(onLeft.windows.get('a')).toMatchObject({ mode: 'docked', dock: left });
     expect(onLeft.windows.get('b')?.dock).toEqual({ x: 0, y: 0, w: 1, h: .5 });
     expect(onLeft.windows.get('c')?.dock).toEqual({ x: 0, y: .5, w: 1, h: .5 });
-    const onRight = releaseDockSide(layout, divider, false, view);
-    expect(onRight.admitted).toEqual(['a']);
+    const withFloating = placeWindow(layout, 'd', view, floating);
+    const onRight = releaseDockSide(withFloating, divider, false, view);
+    expect(onRight.admitted).toEqual(['a', 'd']);
+    expect(onRight.windows.get('d')).toBe(withFloating.windows.get('d'));
     expect(onRight.windows.get('a')?.mode).toBe('maximized');
   });
 
@@ -159,7 +169,7 @@ describe('session canvas windows', () => {
     expect(within(first).getByRole('button', { name: '甲 工作区' })).toBeTruthy();
 
     fireEvent.click(screen.getByTestId('open-乙'));
-    expect(first.hidden).toBe(true);
+    expect(first.hidden).toBe(false);
     expect(within(screen.getByRole('tab', { name: /乙/ })).getByLabelText('等待审批')).toBeTruthy();
     fireEvent.click(screen.getByRole('tab', { name: '甲' }));
     expect(first.hidden).toBe(false);
@@ -185,7 +195,7 @@ describe('session canvas windows', () => {
     });
     let settle!: (loaded: boolean) => void;
     const load = vi.fn(() => new Promise<boolean>(resolve => { settle = resolve; }));
-    const { container } = render(<CanvasHarness load={load} />);
+    const { container } = render(<CanvasHarness load={load} placements={{ 甲: full }} />);
     fireEvent.click(screen.getByTestId('open-甲'));
     const first = screen.getByRole('region', { name: '甲' });
     const draft = within(first).getByRole('textbox');
@@ -216,7 +226,7 @@ describe('session canvas windows', () => {
     await moveIntoCanvas();
     release();
     await act(async () => { settle(true); });
-    expect(first.getAttribute('data-mode')).toBe('floating');
+    expect(first.getAttribute('data-mode')).toBe('maximized');
     expect(screen.getByRole('region', { name: '乙' }).getAttribute('data-mode')).toBe('docked');
   });
 
@@ -240,11 +250,11 @@ describe('session canvas windows', () => {
     await act(async () => { await new Promise(requestAnimationFrame); });
     expect(host.querySelector('.session-canvas__insertion')).toBeTruthy();
     await act(async () => { fireEvent.pointerUp(document, { clientX: 240, clientY: 20, pointerId: 1 }); });
-    expect(load).toHaveBeenCalledWith('乙', { type: 'maximized', tabIndex: 0 });
-    expect(within(host).getAllByRole('tab').map(tab => tab.title)).toEqual(['乙 · 在画布中', '甲 · 已收起']);
-    expect(within(host).getByRole('tab', { name: '甲' }).getAttribute('aria-description')).toBe('已收起');
+    expect(load).toHaveBeenCalledWith('乙', { type: 'open', tabIndex: 0 });
+    expect(within(host).getAllByRole('tab').map(tab => tab.title)).toEqual(['乙 · 在画布中', '甲 · 在画布中']);
+    expect(within(host).getByRole('tab', { name: '甲' }).getAttribute('aria-description')).toBe('在画布中');
     const second = screen.getByRole('region', { name: '乙' });
-    expect(second.getAttribute('data-mode')).toBe('maximized');
+    expect(second.getAttribute('data-mode')).toBe('floating');
 
     fireEvent.pointerDown(within(host).getByRole('tab', { name: /乙/ }), { button: 0, clientX: 280, clientY: 20, pointerId: 2 });
     fireEvent.pointerMove(document, { clientX: 1210, clientY: 300, pointerId: 2 });
@@ -266,6 +276,7 @@ describe('session canvas windows', () => {
     fireEvent.pointerUp(document, { clientX: 525, clientY: 250, pointerId: 3 });
     expect(second.getAttribute('data-mode')).toBe('floating');
 
+    expect(screen.getByRole('region', { name: '甲' }).hidden).toBe(false);
     fireEvent.click(screen.getByRole('button', { name: '切换页面' }));
     expect(within(host).queryByRole('tablist')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: '切换页面' }));

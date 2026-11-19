@@ -1,14 +1,13 @@
 export interface CanvasRect { x: number; y: number; w: number; h: number }
 export interface CanvasSize { w: number; h: number }
-export type SessionCanvasPlacement =
-  | { type: 'maximized'; tabIndex?: number }
+type WindowPlacement =
   | { type: 'floating'; rect: CanvasRect }
-  | { type: 'docked'; rect: CanvasRect };
-
-type WindowMode = SessionCanvasPlacement['type'] | 'minimized';
+  | { type: 'docked'; rect: CanvasRect }
+  | { type: 'maximized' };
+export type SessionCanvasPlacement = WindowPlacement | { type: 'open'; tabIndex?: number };
 
 export interface WindowLayout {
-  mode: WindowMode;
+  mode: WindowPlacement['type'];
   float: CanvasRect;
   dock?: CanvasRect;
 }
@@ -88,13 +87,7 @@ export function focusWindow(layout: SessionCanvasLayout, id: string) {
 
 function removeWindows(layout: SessionCanvasLayout, ids: ReadonlySet<string>, close: boolean): SessionCanvasLayout {
   if (!ids.size) return layout;
-  const windows = new Map(layout.windows);
-  for (const id of ids) {
-    const item = windows.get(id);
-    if (!item) continue;
-    if (close) windows.delete(id);
-    else windows.set(id, { ...item, mode: 'minimized' });
-  }
+  const windows = close ? new Map([...layout.windows].filter(([id]) => !ids.has(id))) : layout.windows;
   const stack = layout.stack.filter(id => !ids.has(id));
   return {
     ...layout, windows, stack, focusedId: stack.at(-1) ?? null,
@@ -111,40 +104,40 @@ export function closeWindow(layout: SessionCanvasLayout, id: string) {
   return layout.windows.has(id) ? removeWindows(layout, new Set([id]), true) : layout;
 }
 
-export function maximizedWindow(layout: SessionCanvasLayout) {
-  return layout.admitted.find(id => layout.windows.get(id)?.mode === 'maximized');
+function restoredPlacement(layout: SessionCanvasLayout, id: string, float: CanvasRect, dock?: CanvasRect): WindowPlacement {
+  return dock && !dockConflicts(layout, id, dock).length ? { type: 'docked', rect: dock } : { type: 'floating', rect: float };
 }
 
 export function placeWindow(
   layout: SessionCanvasLayout,
   id: string,
   view: CanvasSize,
-  placement: SessionCanvasPlacement,
+  placement: SessionCanvasPlacement = { type: 'open' },
 ): SessionCanvasLayout {
   const prior = layout.windows.get(id);
-  const float = prior?.float ?? defaultFloat(view, layout.tabs.length);
   const alreadyPlaced = layout.admitted.includes(id);
-  const removed = new Set<string>();
-  if (placement.type === 'maximized') {
-    for (const other of layout.admitted) if (other !== id) removed.add(other);
+  if (placement.type === 'open' && alreadyPlaced) {
+    const focused = focusWindow(layout, id);
+    return placement.tabIndex === undefined ? focused : reorderTabs(focused, id, placement.tabIndex);
+  }
+  const float = prior?.float ?? defaultFloat(view, layout.tabs.length);
+  let target: WindowPlacement;
+  if (placement.type === 'open') {
+    target = prior?.mode === 'maximized' ? { type: 'maximized' } : restoredPlacement(layout, id, float, prior?.dock);
   } else {
-    if (placement.type === 'docked') {
-      for (const other of dockConflicts(layout, id, placement.rect)) removed.add(other);
-    }
-    // The four-window limit is applied after dock collisions and only on admission.
-    if (!alreadyPlaced && layout.admitted.length - removed.size >= maximumPlaced) {
-      const oldest = layout.admitted.find(other => !removed.has(other));
-      if (oldest) removed.add(oldest);
-    }
+    target = placement;
+  }
+  const removed = new Set(target.type === 'docked' ? dockConflicts(layout, id, target.rect) : []);
+  if (!alreadyPlaced && layout.admitted.length - removed.size >= maximumPlaced) {
+    const oldest = layout.admitted.find(other => !removed.has(other));
+    if (oldest) removed.add(oldest);
   }
   const retained = removeWindows(layout, removed, false);
   const windows = new Map(retained.windows);
-  const full = maximizedWindow(retained);
-  if (full && full !== id) windows.set(full, { ...windows.get(full)!, mode: 'floating' });
   windows.set(id, {
-    float: placement.type === 'floating' ? placement.rect : float,
-    mode: placement.type,
-    dock: placement.type === 'docked' ? placement.rect : undefined,
+    float: target.type === 'floating' ? target.rect : float,
+    mode: target.type,
+    dock: target.type === 'docked' ? target.rect : target.type === 'maximized' ? prior?.dock : undefined,
   });
   const next = {
     tabs: prior ? retained.tabs : [...retained.tabs, id],
@@ -153,24 +146,15 @@ export function placeWindow(
     stack: [...retained.stack.filter(other => other !== id), id],
     focusedId: id,
   };
-  return placement.type === 'maximized' && placement.tabIndex !== undefined
+  return placement.type === 'open' && placement.tabIndex !== undefined
     ? reorderTabs(next, id, placement.tabIndex) : next;
-}
-
-export function recallWindow(layout: SessionCanvasLayout, id: string, view: CanvasSize) {
-  const item = layout.windows.get(id);
-  if (!item) return layout;
-  if (item.mode !== 'minimized') return focusWindow(layout, id);
-  return placeWindow(layout, id, view, item.dock && !dockConflicts(layout, id, item.dock).length
-    ? { type: 'docked', rect: item.dock }
-    : { type: 'floating', rect: item.float });
 }
 
 export function toggleMaximized(layout: SessionCanvasLayout, id: string, view: CanvasSize) {
   const item = layout.windows.get(id);
   if (!item) return layout;
   return placeWindow(layout, id, view, item.mode === 'maximized'
-    ? { type: 'floating', rect: item.float } : { type: 'maximized' });
+    ? restoredPlacement(layout, id, item.float, item.dock) : { type: 'maximized' });
 }
 
 export function snapRegion(point: { x: number; y: number }, view: CanvasSize, previous?: CanvasRect) {
@@ -355,7 +339,7 @@ export function releaseDockSide(layout: SessionCanvasLayout, divider: DockDivide
     else removed.add(part.id);
   }
   for (const [id, region] of expanding) {
-    if (sameLine(region.w, 1) && sameLine(region.h, 1)) return placeWindow(layout, id, view, { type: 'maximized' });
+    if (sameLine(region.w, 1) && sameLine(region.h, 1)) return placeWindow(removeWindows(layout, removed, false), id, view, { type: 'maximized' });
     for (const other of dockConflicts(layout, id, region)) {
       if (!expanding.has(other)) removed.add(other);
     }

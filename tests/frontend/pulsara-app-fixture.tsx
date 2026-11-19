@@ -1,5 +1,5 @@
 import { uiPreferences } from '../../frontend/lib/ui-preferences';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, vi } from 'vitest';
 import { LocalMemoryApi } from '../../frontend/lib/memory-api';
@@ -31,8 +31,14 @@ function stubClipboard(writeText: (value: string) => Promise<void>) {
   Object.defineProperty(window, 'pulsaraDesktop', { configurable: true, writable: true, value: { writeClipboardText: writeText } });
 }
 
-async function typeComposer(value: string): Promise<HTMLElement> {
-  const composer = await screen.findByRole('textbox', { name: '发送给 Pulsara' });
+function focusedPane() {
+  const pane = document.querySelector<HTMLElement>('.session-canvas-window[data-focused]:not([hidden])');
+  if (!pane) throw new Error('No focused session window');
+  return within(pane);
+}
+
+async function typeComposer(value: string, pane: Pick<typeof screen, 'findByRole'> = screen): Promise<HTMLElement> {
+  const composer = await pane.findByRole('textbox', { name: '发送给 Pulsara' });
   await userEvent.click(composer);
   await userEvent.type(composer, value, { skipClick: true });
   return composer;
@@ -872,4 +878,4 @@ function renderWorkbench(ui: Parameters<typeof render>[0]) {
   return render(ui);
 }
 
-export { isWelcomeHeading, deferred, textPrompt, stubClipboard, typeComposer, composerIsDisabled, bootstrap, initialSession, SOURCE_FIDELITY_MARKDOWN, SOURCE_FIDELITY_USER_TEXT, capabilitySnapshot, userCapabilitySnapshot, projection, FakeConnection, FakeAdapter, renderWorkbench, sessionMenuClipping };
+export { focusedPane, isWelcomeHeading, deferred, textPrompt, stubClipboard, typeComposer, composerIsDisabled, bootstrap, initialSession, SOURCE_FIDELITY_MARKDOWN, SOURCE_FIDELITY_USER_TEXT, capabilitySnapshot, userCapabilitySnapshot, projection, FakeConnection, FakeAdapter, renderWorkbench, sessionMenuClipping };

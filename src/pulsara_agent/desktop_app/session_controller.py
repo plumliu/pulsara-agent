@@ -82,6 +82,7 @@ from pulsara_agent.tool_permission import EffectivePermissionPolicy
 from pulsara_agent.workspace_identity import (
     HostWorkspaceInput,
     observe_workspace,
+    require_workspace,
     resolve_workspace,
 )
 
@@ -1381,9 +1382,21 @@ class LocalSessionController(SessionCapabilities):
         }
 
     async def update_model_call_binding(
-        self, session_id: str, binding: ModelCallBinding
+        self, session_id: str, binding: ModelCallBinding, *, host_session_id: str,
     ) -> dict[str, object]:
-        handle = await self.resume_session(session_id)
+        # The browser controller already owns this exact published Host. Its
+        # workspace is fixed at open, and the binding write revalidates its
+        # canonical writer under the same session row lock as prompt admission.
+        async with self._lock:
+            if self._closing:
+                raise KernelHostCoreClosing("Desktop application is draining")
+            handle = self._by_session.get(session_id)
+            if (handle is None or handle.host_session_id != host_session_id
+                    or session_id in self._operations):
+                raise SessionControlRejected(
+                    "SESSION_CONTROL_BUSY", "会话运行时已变化，请重新连接。",
+                )
+        require_workspace(handle.session.workspace.workspace_root)
         accepted = await handle.session.update_model_call_binding(binding)
         return {
             "model_call_binding": model_call_binding_to_dict(accepted),
