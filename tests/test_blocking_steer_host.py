@@ -315,7 +315,7 @@ if __name__ == "__main__":
         async def resume(_):
             return SimpleNamespace(session_id=session.session_id, host_session_id=session.host_session_id, session=session)
 
-        bridge = RendererBridge(sessions=SimpleNamespace(resume_session=resume, runtime_closing=AsyncMock(return_value=False), host_writer_unavailable=lambda _host: False), protocol_server=gateway)
+        bridge = RendererBridge(sessions=SimpleNamespace(resume_session=resume, reopen_tab=lambda _id: None, runtime_closing=AsyncMock(return_value=False), host_writer_unavailable=lambda _host: False), protocol_server=gateway)
         try:
             await gateway.start()
             connection = await bridge.connect(session.session_id, browser_instance_id='00000000-0000-4000-8000-000000000001')

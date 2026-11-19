@@ -1,4 +1,5 @@
-import { Copy, LoaderCircle, Minus, Square, X } from 'lucide-react';
+import { Copy, LoaderCircle, Minus, Square } from 'lucide-react';
+import { SessionTabClose, type SessionTabCloseRequest } from './session-tab-close';
 import {
   createContext, useCallback, useContext, useLayoutEffect, useMemo, useRef, useState,
   type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode,
@@ -93,6 +94,7 @@ interface SessionCanvasProps {
   tabHost: HTMLElement | null;
   onOpenSession: (id: string, placement: SessionCanvasPlacement) => unknown;
   onCloseSession: (id: string) => unknown;
+  closingTab?: SessionTabCloseRequest & { id: string };
   emptyContent?: ReactNode;
 }
 
@@ -248,7 +250,7 @@ type MotionSnapshot = {
   handoff?: Handoff;
 };
 
-export function SessionCanvas({ controller, sessions, visible = true, tabHost, onOpenSession, onCloseSession, emptyContent }: SessionCanvasProps) {
+export function SessionCanvas({ controller, sessions, visible = true, tabHost, onOpenSession, onCloseSession, closingTab, emptyContent }: SessionCanvasProps) {
   const { layout, area, current, update, focus, minimize, capture, sidebarDrag, cancelGesture, pendingHandoffs } = controller;
   const rootRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -618,8 +620,9 @@ export function SessionCanvas({ controller, sessions, visible = true, tabHost, o
                       : <span className="session-canvas__tab-dot" aria-hidden="true" />}
                   <span className="session-canvas__tab-title">{session.title}</span>
                 </button>
-                <button type="button" className="session-canvas__tab-close" aria-label={`关闭会话 ${session.title}`} title="关闭会话"
-                  onClick={() => void onCloseSession(id)}><X size={13} /></button>
+                <SessionTabClose title={session.title} request={closingTab?.id === id ? closingTab : undefined}
+                  onClose={() => void onCloseSession(id)}
+                  onReturnToForm={() => update(state => recallWindow(state, id, area.current))} />
               </div>
             );
           })}

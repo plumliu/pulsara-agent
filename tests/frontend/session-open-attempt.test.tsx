@@ -24,11 +24,11 @@ it('shares the original background attempt with early navigation without publish
   const startup = vi.fn();
   const view = render(<PulsaraApp adapter={adapter} onStartupSettled={startup}/>);
   await waitFor(() => expect(startup).toHaveBeenCalledTimes(1));
-  expect(connect.mock.calls).toEqual([[initialSession.id, false]]);
+  expect(connect.mock.calls).toEqual([[initialSession.id, false, true]]);
   expect(screen.getByRole('button', {name:'会话',exact:true}).getAttribute('aria-current')).toBe('page');
   selectSession();
   await act(async () => {});
-  expect(connect.mock.calls).toEqual([[initialSession.id, false]]);
+  expect(connect.mock.calls).toEqual([[initialSession.id, false, true]]);
   expect(screen.queryByRole('textbox', {name:'发送给 Pulsara'})).toBeNull();
   expect(adapter.lastConnection).toBeUndefined();
   expect(uiPreferences.getItem('pulsara-active-session')).toBeNull();
@@ -63,7 +63,7 @@ it('preserves different-target cancellation and closes a late superseded backgro
   await screen.findByRole('textbox', {name:'发送给 Pulsara'});
   await act(async () => pending.resolve());
   expect(close).toHaveBeenCalledTimes(1);
-  expect(connect.mock.calls).toEqual([[initialSession.id,false],[other.id,false]]);
+  expect(connect.mock.calls).toEqual([[initialSession.id,false,true],[other.id,false,true]]);
   expect(screen.getByRole('heading', {name:other.title})).toBeTruthy();
 });
 
@@ -132,13 +132,13 @@ it.each(['takeover','reconnecting'] as const)('keeps an in-flight %s intent when
   selectSession();
   expect(originalWindow?.getAttribute('data-mode')).toBe('maximized');
   expect(screen.getByRole('tab', {name:/准备发布/})).toBe(originalTab);
-  expect(connect.mock.calls).toEqual([[initialSession.id,intent === 'takeover']]);
+  expect(connect.mock.calls).toEqual([[initialSession.id,intent === 'takeover',false]]);
   await act(async () => pending.resolve());
   await waitFor(() => expect(screen.getByRole('textbox', {name:'发送给 Pulsara'}).getAttribute('contenteditable')).toBe('true'));
   expect(first.closed).toBe(true);
   expect(adapter.lastConnection?.closed).toBe(false);
   expect(adapter.lastConnection?.role).toBe('controller');
   expect(document.getElementById(initialSession.id)).toBe(originalWindow);
-  expect(connect.mock.calls).toEqual([[initialSession.id,intent === 'takeover']]);
+  expect(connect.mock.calls).toEqual([[initialSession.id,intent === 'takeover',false]]);
   if (intent === 'reconnecting') expect(first.submitPrompt).toHaveBeenCalledTimes(1);
 });

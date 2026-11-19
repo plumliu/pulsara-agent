@@ -10,7 +10,7 @@ from pulsara_agent.identity import derive_id, random_id
 
 import asyncio
 from contextlib import suppress
-from typing import TYPE_CHECKING, Final, Literal
+from typing import Final, Literal
 
 from google.protobuf.message import Message
 
@@ -22,10 +22,6 @@ from pulsara_agent.terminal_protocol.v3_gateway import (
     MAXIMUM_FRAME_BYTES,
     TerminalKernelProtocolServer,
 )
-
-if TYPE_CHECKING:
-    from pulsara_agent.conversation_kernel.host_controls import SessionCloseWork
-
 
 class ProtocolBridgeError(RuntimeError):
     """Typed, browser-safe Protocol-v3 failure."""
@@ -245,8 +241,8 @@ class TerminalProtocolClient:
         self._closing = True
         # Save/use the exact original binding before clearing client fields.
         # This Host release does not queue behind the stream's in-flight I/O.
-        if self.role == wire.ATTACHMENT_ROLE_CONTROLLER and self.attachment_id:
-            await self._server.controller_attachment_closed(
+        if self.attachment_id:
+            await self._server.browser_attachment_closed(
                 session_id=self._session_id, host_session_id=self._host_session_id,
                 attachment_id=self.attachment_id,
             )
@@ -287,7 +283,6 @@ class BrowserRuntimeConnection:
         self.live_hello = live_hello
         self.initial_snapshot = initial_snapshot
         self.initial_live_control = initial_live_control
-        self.close_work_observation: tuple[str, SessionCloseWork] | None = None
         self._close_task: asyncio.Task[None] | None = None
 
     @classmethod
@@ -386,7 +381,6 @@ class BrowserRuntimeConnection:
         return self.controller.is_open and self.observer.is_open
 
     async def _close_owner(self) -> None:
-        self.close_work_observation = None
         await asyncio.gather(
             self.observer.aclose(), self.controller.aclose(), return_exceptions=True
         )

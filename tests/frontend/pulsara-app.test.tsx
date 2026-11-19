@@ -37,6 +37,7 @@ describe('PulsaraApp', () => {
     await act(async () => disconnect(new RuntimeApiError('SESSION_WRITER_UNAVAILABLE', '连接已中断。', true)));
     expect(await screen.findByText('连接中断，正在恢复会话…')).toBeTruthy();
     await waitFor(() => expect(adapter.connectCalls).toHaveLength(2));
+    expect(adapter.connectCalls[1]).toMatchObject({reopenTab: false});
     await waitFor(() => expect(adapter.lastConnection).not.toBe(old));
     expect(old.closed).toBe(true);
     expect(old.submitPrompt).not.toHaveBeenCalled();
@@ -232,7 +233,7 @@ describe('PulsaraApp', () => {
     expect(screen.getByRole('button', { name: '会话', exact: true }).getAttribute('aria-current')).toBe('page');
     expect(startup).not.toHaveBeenCalled();
     await act(async () => boot.resolve(bootstrap));
-    expect(adapter.connect).toHaveBeenCalledExactlyOnceWith(initialSession.id, false);
+    expect(adapter.connect).toHaveBeenCalledExactlyOnceWith(initialSession.id, false, true);
     expect(startup).toHaveBeenCalledOnce();
     expect(screen.getByRole('region', { name: '会话加载页' })).toHaveProperty('textContent', expect.stringContaining(initialSession.title));
     expect(screen.queryByRole('textbox', { name: '发送给 Pulsara' })).toBeNull();
@@ -1324,7 +1325,7 @@ describe('PulsaraApp', () => {
     expect(await screen.findByLabelText('发送给 Pulsara')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: '更多会话操作' }));
     expect(screen.getByRole('button', { name: '压缩上下文' })).toBeTruthy();
-    expect(adapter.connectCalls).toContainEqual({ sessionId: 'session:bwpogagzox7onyn52iumyctnkq', takeover: true });
+    expect(adapter.connectCalls).toContainEqual({ sessionId: 'session:bwpogagzox7onyn52iumyctnkq', takeover: true, reopenTab: false });
   });
 
   it('explains when manual context compaction cannot shrink the current context', async () => {
@@ -4187,9 +4188,10 @@ describe('explicit runtime reopen owner', () => {
     renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     const original = adapter.lastConnection!;
+    const stop = vi.spyOn(original, 'stopActiveTurn');
     fireEvent.click(screen.getByRole('button', { name: '更多会话操作' }));
     fireEvent.click(screen.getByRole('button', { name: '关闭会话标签' }));
-    expect(adapter.sessionCloseWork).toHaveBeenCalledExactlyOnceWith(initialSession.id);
+    await waitFor(() => expect(adapter.closeSessionTab).toHaveBeenCalledExactlyOnceWith(original, { formIds: [], otherClients: false }));
     await waitFor(() => expect(original.closed).toBe(true));
     expect(screen.getByRole('region', { name: '会话欢迎页' })).toBeTruthy();
     expect(screen.getByRole('button', { name: /^新建会话/ })).toBeTruthy();
@@ -4197,16 +4199,16 @@ describe('explicit runtime reopen owner', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(adapter.sessions.some(session => session.id === initialSession.id)).toBe(true);
     expect(adapter.deleteSession).not.toHaveBeenCalled();
-    expect(adapter.stopSessionCloseWork).not.toHaveBeenCalled();
+    expect(stop).not.toHaveBeenCalled();
     expect(adapter.connectCalls).toHaveLength(1);
   });
 
-  it('does not detach a newly selected session when an older idle inspection finishes', async () => {
+  it('does not detach a newly selected session when another tab finishes closing', async () => {
     const adapter = new FakeAdapter();
     const other = { ...initialSession, id: 'session:agtwi5siitkjqcaje6pp3y6ixu', title: '其他会话' };
     adapter.sessions.push(other);
-    const work = deferred<Awaited<ReturnType<RuntimeAdapter['sessionCloseWork']>>>();
-    adapter.sessionCloseWork.mockReturnValueOnce(work.promise);
+    const closed = deferred<Awaited<ReturnType<RuntimeAdapter['closeSessionTab']>>>();
+    adapter.closeSessionTab.mockReturnValueOnce(closed.promise);
     renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     const original = adapter.lastConnection!;
@@ -4216,7 +4218,7 @@ describe('explicit runtime reopen owner', () => {
     await screen.findByRole('heading', { name: '其他会话' });
     const current = adapter.lastConnection!;
     expect(current).not.toBe(original);
-    await act(async () => work.resolve({ requiresConfirmation: false, hasTerminalProcesses: true, observationId: null }));
+    await act(async () => closed.resolve({ status: 'closed' }));
     await waitFor(() => expect(original.closed).toBe(true));
     expect(current.closed).toBe(false);
     expect(screen.getByLabelText('发送给 Pulsara')).toBeTruthy();

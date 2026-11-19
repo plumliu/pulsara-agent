@@ -442,8 +442,7 @@ class ScheduledTaskService:
         )
         if self._stopped:
             raise KernelHostCoreClosing("Scheduled task service is stopping")
-        host = await self._core.resume_scheduled_session(a.session_id)
-        outcome = await self._submit(host, a)
+        outcome = await self._submit(a)
         if outcome.status == "REJECTED" and outcome.prompt_delivery is None:
             raise ScheduledTaskError(
                 outcome.public_code or "PREPARE_REJECTED",
@@ -455,14 +454,16 @@ class ScheduledTaskService:
             raise RuntimeError("accepted run-once command has no queue target")
         return self._run_result(accepted)
 
-    async def _submit(self, host, admission):
+    async def _submit(self, admission):
         command = admission.client_command_id or derive_id("command", "scheduled-tick", admission.task_id, str(admission.revision), admission.due_at.astimezone(utc_timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"))
-        return await host.submit_prompt(
-            command_id=command,
-            content=PromptContent((LLMTextPart(admission.prompt),)),
-            requested_permission_mode=admission.permission_mode,
-            _scheduled=admission,
-        )
+        async with self._core.scheduled_session_admission(admission.session_id):
+            host = await self._core.resume_scheduled_session(admission.session_id)
+            return await host.submit_prompt(
+                command_id=command,
+                content=PromptContent((LLMTextPart(admission.prompt),)),
+                requested_permission_mode=admission.permission_mode,
+                _scheduled=admission,
+            )
 
     async def _dispatch(self, row):
         a = ScheduledAdmission(
@@ -487,8 +488,7 @@ class ScheduledTaskService:
                 return
             if self._stopped:
                 raise KernelHostCoreClosing("Scheduled task service is stopping")
-            host = await self._core.resume_scheduled_session(a.session_id)
-            outcome = await self._submit(host, a)
+            outcome = await self._submit(a)
             if outcome.status == "REJECTED" and outcome.public_code in {
                 "MODEL_CONFIGURATION_REQUIRED",
                 "MODEL_CONFIGURATION_UNAVAILABLE",

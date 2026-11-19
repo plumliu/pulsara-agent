@@ -74,10 +74,6 @@
 .session-dialog-alert { margin: 12px 0 0; padding: 10px 12px; border: 1px solid color-mix(in srgb,var(--red) 22%,var(--line)); border-radius: 8px; background: var(--red-soft); color: var(--red); font-size: var(--type-small); line-height: 1.6; overflow-wrap: anywhere; }
 .session-dialog > footer { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; flex: none; padding: 14px 25px; border-top: 1px solid var(--line); }
 .session-dialog > footer button { min-height: 35px; padding: 7px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); color: var(--ink-soft); }
-.session-close-dialog { margin: auto; width: min(480px, calc(100% - 40px)); }
-.session-close-dialog:not([open]) { display: none; }
-.session-close-dialog::backdrop { background: #0006; }
-.session-close-dialog > footer .is-danger { border-color: var(--red); color: var(--red); }
 @media (max-width: 600px) { .session-dialog-overlay { padding: 10px; } .session-dialog { max-height: calc(100dvh - 20px); } }
 
 .session-rename-dialog { width: min(440px, calc(100vw - 32px)); }

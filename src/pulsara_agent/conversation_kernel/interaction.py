@@ -173,6 +173,9 @@ class KernelInteractionCoordinator:
         self._dormant: deque[_PendingToolInteraction] = deque()
         self._closed = False
 
+    def has_pending_requests(self) -> bool:
+        return self._pending is not None or bool(self._dormant)
+
     async def attach_controller(self, attachment_id: str) -> bool:
         if not attachment_id:
             return False
@@ -720,31 +723,36 @@ class KernelInteractionCoordinator:
                 )
             await self._promote_next()
 
-    async def controller_detached(self, attachment_id: str) -> None:
-        if not self.detach_controller(attachment_id):
-            return
-        # Revocation is already effective. A parsing form retains its original
-        # parser owner and observes cancellation before transferring input.
+    def _pending_forms(self) -> tuple[_PendingToolInteraction, ...]:
+        candidates = (*((self._pending,) if self._pending is not None else ()), *self._dormant)
+        return tuple(item for item in candidates if item.capability_form is not None and item.invalidation is None)
+
+    def _detach_locked(self, attachment_id: str) -> None:
+        if self.detach_controller(attachment_id):
+            for form in self._pending_forms():
+                self._invalidate_locked(form, (
+                    "interaction:controller-detached",
+                    "capability form ended because the controller detached",
+                ))
+                if not form.resolving:
+                    self._discard_hooks(form)
+
+    async def close_tab_attachment(
+        self, attachment_id: str, *, confirmed_forms: frozenset[str],
+        can_disconnect: Callable[[], bool],
+    ) -> tuple[tuple[str, ...], bool] | None:
+        """Recheck the actual forms and other connections at the point of revocation."""
         async with self._lock:
-            forms = tuple(
-                candidate
-                for candidate in (
-                    *((self._pending,) if self._pending is not None else ()),
-                    *self._dormant,
-                )
-                if candidate.capability_form is not None
-            )
-            for candidate in forms:
-                self._invalidate_locked(
-                    candidate,
-                    (
-                        "interaction:controller-detached",
-                        "capability form ended because the controller detached",
-                    ),
-                )
-        for candidate in forms:
-            if not candidate.resolving:
-                self._discard_hooks(candidate)
+            forms = self._pending_forms() if self.is_current_controller(attachment_id) else ()
+            form_ids = tuple(form.interaction_id for form in forms)
+            if not can_disconnect() or not confirmed_forms.issuperset(form_ids):
+                return form_ids, any(form.visible for form in forms)
+            self._detach_locked(attachment_id)
+            return None
+
+    async def controller_detached(self, attachment_id: str) -> None:
+        async with self._lock:
+            self._detach_locked(attachment_id)
 
     async def cancel_tool_confirmations(
         self,

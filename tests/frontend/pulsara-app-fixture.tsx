@@ -588,7 +588,7 @@ class FakeAdapter implements RuntimeAdapter {
   connectionRole: 'controller' | 'observer' = 'controller';
   queryCommandResult?: CommandReceipt;
   connectionValues = new Map<string, RuntimeProjection>();
-  connectCalls: Array<{ sessionId: string; takeover: boolean }> = [];
+  connectCalls: Array<{ sessionId: string; takeover: boolean; reopenTab: boolean }> = [];
   pickWorkspaceDirectory = vi.fn(async (): Promise<string | null> => '/tmp/project');
   completeWorkspacePaths = vi.fn(async () => ({ directory: '/tmp/project', items: [], next_cursor: null }));
   createSession = vi.fn(async (selection: SessionWorkspaceSelection, modelCallBinding?: ModelCallBindingPayload) => {
@@ -714,15 +714,7 @@ class FakeAdapter implements RuntimeAdapter {
     return { status: 'reopened' as const };
   }
 
-  sessionCloseWork = vi.fn(async (_sessionId: string): Promise<import('../../frontend/lib/runtime-adapter').SessionCloseWork> => ({
-    requiresConfirmation: false,
-    hasTerminalProcesses: false,
-    observationId: null,
-  }));
-
-  stopSessionCloseWork = vi.fn(async (_sessionId: string, _work: import('../../frontend/lib/runtime-adapter').SessionCloseWork) => ({
-    status: 'stopped' as const,
-  }));
+  closeSessionTab = vi.fn<RuntimeAdapter['closeSessionTab']>(async () => ({ status: 'closed' }));
 
   listSessions = vi.fn(async () => this.sessions.map((session) => ({ ...session })));
 
@@ -854,8 +846,8 @@ class FakeAdapter implements RuntimeAdapter {
 
   openCapabilityRoot = vi.fn(async () => {});
 
-  async connect(sessionId: string, takeover = false) {
-    this.connectCalls.push({ sessionId, takeover });
+  async connect(sessionId: string, takeover = false, reopenTab = true) {
+    this.connectCalls.push({ sessionId, takeover, reopenTab });
     if (takeover) this.connectionRole = 'controller';
     this.sessions = this.sessions.map((session) => (
       session.id === sessionId ? { ...session, live: true } : session

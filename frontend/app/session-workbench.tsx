@@ -8,14 +8,14 @@ import { randomIdentity } from '../lib/identity';
 import { DesktopWorkspaceProvider } from '../components/desktop-workspace';
 import { FilePreviewProvider } from '../components/file-browser';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { CapabilityTab } from '../components/capability-view';
 import type { LocalScheduledTasksApi } from '../lib/scheduled-tasks-api';
 import { InspectorPanel } from '../components/inspector-panel';
 import type { SettingsSection } from '../components/settings-view';
 import { WorkbenchView } from '../components/workbench-view';
 import type { PromptDraftStore } from '../lib/prompt-draft';
-import { type SessionSuggestionCache, useSessionEphemeralResults } from '../lib/session-ephemeral-results';
+import { type SessionSuggestionCache, type SessionToolDecisionStore, type ToolDecisionIntent, useSessionEphemeralResults } from '../lib/session-ephemeral-results';
 import {
   CanonicalHistoryView,
   compareSequence,
@@ -172,18 +172,13 @@ function promptWasAccepted(receipt: CommandReceipt): boolean {
   return receipt.status !== 'rejected';
 }
 
-type ToolDecisionIntent = {
-  sessionId: string; hostSessionId: string; interactionId: string;
-  commandId: string; decision: 'allow' | 'deny'; connectionGeneration: number;
-  status: 'submitting' | 'unknown' | 'accepted' | 'rejected' | 'retired';
-};
-
 export interface SessionWorkbenchObservation {
   status: RuntimeStatus;
   role?: RuntimeConnection['role'];
   error?: string;
   failure?: { details: string; requiresRestart: boolean };
   ready: boolean;
+  historyOnly: boolean;
   approvalPending: boolean;
   running: boolean;
   retry: () => void;
@@ -202,6 +197,8 @@ interface SessionWorkbenchProps {
   scheduledApi: LocalScheduledTasksApi;
   promptDraftStore: PromptDraftStore;
   suggestionCache: SessionSuggestionCache;
+  toolDecisionStore: SessionToolDecisionStore;
+  pendingTabClose: (connection: RuntimeConnection) => Promise<boolean> | undefined;
   changeSessionList: (update: (sessions: SessionSummary[]) => SessionSummary[]) => void;
   invalidateSessionList: () => void;
   readSessionList: (canPublish?: () => boolean) => Promise<SessionSummary[] | undefined>;
@@ -222,7 +219,7 @@ interface SessionWorkbenchProps {
 
 export function SessionWorkbench({
   adapter, session: activeSession, loaded, visible, focused, bootstrap, userServiceStatus, userServiceError, userCapabilityMutation,
-  scheduledApi, promptDraftStore, suggestionCache, changeSessionList, invalidateSessionList, readSessionList,
+  scheduledApi, promptDraftStore, suggestionCache, toolDecisionStore, pendingTabClose, changeSessionList, invalidateSessionList, readSessionList,
   notify: onNotify, runMcpAuthorization, onObservation, onConnection, onPublishStatus, onSessionMissing, onClose, onOpenSession, onRenameSession,
   onOpenScheduledTask, onOpenUserCapabilities, onOpenSettings, onBrowserShortcut,
 }: SessionWorkbenchProps) {
@@ -262,7 +259,7 @@ export function SessionWorkbench({
   const activeSessionIdRef = useRef('');
   const connectionAttempt = useRef(0);
   const connectionInFlight = useRef<{
-    sessionId: string; reconnecting: boolean; takeover: boolean; attempt: number;
+    sessionId: string; reconnecting: boolean; takeover: boolean; reopenTab: boolean; attempt: number;
     promise: Promise<RuntimeConnection | undefined>;
   } | undefined>(undefined);
   const promptReconciliationInFlight = useRef(new Set<string>());
@@ -274,20 +271,13 @@ export function SessionWorkbench({
   const runtimeReopenOwner = useRef<RuntimeConnection | undefined>(undefined);
   const [localSubmissions, setLocalSubmissions] = useState<LocalPromptSubmission[]>([]);
   const [queueActions, setQueueActions] = useState<QueuedPromptAction[]>([]);
-  const [toolDecisions, setToolDecisions] = useState<ToolDecisionIntent[]>([]);
-  const toolDecisionsRef = useRef<ToolDecisionIntent[]>([]);
+  const readToolDecisions = useCallback(() => toolDecisionStore.read(sessionId), [sessionId, toolDecisionStore]);
+  const toolDecisions = useSyncExternalStore(toolDecisionStore.subscribe, readToolDecisions, readToolDecisions);
   const toolDecisionQueries = useRef(new Map<string, { cut: string; generation: number; inFlight: boolean }>());
   const saveToolDecision = useCallback((intent: ToolDecisionIntent) => {
-    const previous = toolDecisionsRef.current.find(item => item.commandId === intent.commandId);
-    // A late empty/error response cannot downgrade an exact known decision or
-    // revive a retired query. A newer click has its own command identity.
-    if (previous && ['accepted', 'rejected', 'retired'].includes(previous.status)
-      && intent.status !== 'accepted') return;
-    const next = [...toolDecisionsRef.current.filter(item => item.commandId !== intent.commandId), intent];
     if (['accepted', 'rejected', 'retired'].includes(intent.status)) toolDecisionQueries.current.delete(intent.commandId);
-    toolDecisionsRef.current = next;
-    setToolDecisions(next);
-  }, []);
+    toolDecisionStore.save(intent);
+  }, [toolDecisionStore]);
   const queueActionsInFlight = useRef(new Set<string>());
   const [inspectorOpen, setInspectorOpenState] = useState(() => uiPreferences.getItem('pulsara-workspace-open') === 'true');
   const inspectorOpenRef = useRef(inspectorOpen);
@@ -545,8 +535,9 @@ export function SessionWorkbench({
   });
   const openRuntimeSessionAttempt = useCallback(async (
     sessionId: string,
-    reconnecting = false,
-    takeover = false,
+    reconnecting: boolean,
+    takeover: boolean,
+    reopenTab: boolean,
   ): Promise<RuntimeConnection | undefined> => {
     historyReadAbort.current.abort();
     historyReadAbort.current = new AbortController();
@@ -573,7 +564,7 @@ export function SessionWorkbench({
       if (previousHistory && previousHistory !== retainedHistory) await previousHistory.close();
       if (previous) await previous.close();
       if (attempt !== connectionAttempt.current) return undefined;
-      const next = await adapter.connect(sessionId, takeover);
+      const next = await adapter.connect(sessionId, takeover, reopenTab);
       if (attempt !== connectionAttempt.current) {
         await next.close();
         return undefined;
@@ -642,16 +633,16 @@ export function SessionWorkbench({
     }
   }, [adapter, publishProjection, changeSessionList, onConnection, onSessionMissing, readSessionList]);
 
-  const openRuntimeSession = useCallback((sessionId: string, reconnecting = false, takeover = false): Promise<RuntimeConnection | undefined> => {
+  const openRuntimeSession = useCallback((sessionId: string, reconnecting = false, takeover = false, reopenTab = !reconnecting): Promise<RuntimeConnection | undefined> => {
     const current = connectionInFlight.current;
     if (current && current.attempt === connectionAttempt.current && current.sessionId === sessionId
-      && current.reconnecting === reconnecting && current.takeover === takeover) return current.promise;
+      && current.reconnecting === reconnecting && current.takeover === takeover && current.reopenTab === reopenTab) return current.promise;
     // Share the complete original attempt, including publication and stale
     // cleanup. Sharing only adapter.connect would let a second attempt close
     // the same connection as its stale result. Different intents retain the
     // original attempt counter and cancellation boundary.
-    const promise = openRuntimeSessionAttempt(sessionId, reconnecting, takeover);
-    const owner = {sessionId, reconnecting, takeover, attempt: connectionAttempt.current, promise};
+    const promise = openRuntimeSessionAttempt(sessionId, reconnecting, takeover, reopenTab);
+    const owner = {sessionId, reconnecting, takeover, reopenTab, attempt: connectionAttempt.current, promise};
     connectionInFlight.current = owner;
     void promise.finally(() => {
       if (connectionInFlight.current === owner) connectionInFlight.current = undefined;
@@ -726,8 +717,8 @@ export function SessionWorkbench({
         const value = await adapter.workspaceAvailability(activeSessionId, controller.signal);
         if (!disposed && activeSessionIdRef.current === activeSessionId) {
           setWorkspaceObservation({sessionId: activeSessionId, value});
-          if (value.outcome === 'AVAILABLE' && historyRef.current?.sessionId === activeSessionId) {
-            await openRuntimeSession(activeSessionId);
+          if (value.outcome === 'AVAILABLE' && historyRef.current?.sessionId === activeSessionId && !historyRef.current.runtimeCloseFailed) {
+            await openRuntimeSession(activeSessionId, true);
           }
         }
       } catch { /* A read error cannot establish missing or available. */ }
@@ -741,13 +732,15 @@ export function SessionWorkbench({
     error: unknown,
     expectedConnection: RuntimeConnection,
   ) => {
+    const closing = pendingTabClose(expectedConnection);
+    if (closing && await closing) return undefined;
     if (!ownsConnection(expectedConnection)) return undefined;
     if (!(error instanceof RuntimeApiError) || !error.retryable) return expectedConnection;
     setRuntimeStatus('reconnecting');
     setRuntimeError(productMessage(error.message, '连接已中断，正在重新连接。'));
     const recovered = await openRuntimeSession(expectedConnection.sessionId, true);
     return recovered && ownsConnection(recovered) ? recovered : undefined;
-  }, [openRuntimeSession, ownsConnection]);
+  }, [openRuntimeSession, ownsConnection, pendingTabClose]);
   useEffect(() => {
     if (!connection) return;
     const abort = new AbortController();
@@ -763,6 +756,8 @@ export function SessionWorkbench({
           }
           setRuntimeStatus('online');
         } catch (error) {
+          const closing = pendingTabClose(connection);
+          if (closing && await closing) return;
           if (abort.signal.aborted || !active || !ownsConnection(connection)
             || runtimeReopenOwner.current === connection) return;
           setRuntimeStatus('reconnecting');
@@ -771,7 +766,9 @@ export function SessionWorkbench({
             details: error instanceof RuntimeApiError ? `${error.code}: ${error.message}` : `${error.name}: ${error.message}`,
             requiresRestart: error instanceof RuntimeApiError && error.code === 'SESSION_RECOVERY_CLOSE_FAILED',
           } : undefined);
-          window.setTimeout(() => {
+          window.setTimeout(async () => {
+            const closing = pendingTabClose(connection);
+            if (closing && await closing) return;
             if (active && ownsConnection(connection) && runtimeReopenOwner.current !== connection) {
               void openRuntimeSession(connection.sessionId, true);
             }
@@ -784,7 +781,7 @@ export function SessionWorkbench({
       active = false;
       abort.abort();
     };
-  }, [connection, notify, openRuntimeSession, ownsConnection, publishProjection]);
+  }, [connection, notify, openRuntimeSession, ownsConnection, pendingTabClose, publishProjection]);
 
   useEffect(() => {
     if (!connection || connection.sessionId !== activeSessionId) return;
@@ -1567,11 +1564,12 @@ export function SessionWorkbench({
           // The original live confirmation has ended. Retire its empty query,
           // without calling it rejected or reopening any confirmation button.
           saveToolDecision({ ...intent, status: 'retired' });
+          notify('决定结果未确认');
         }
       }).catch(() => { /* Keep this command unknown; other queries still advance. */ }).finally(() => {
         if (toolDecisionQueries.current.get(intent.commandId) !== attempt) return;
         attempt.inFlight = false;
-        const latest = toolDecisionsRef.current.find(item => item.commandId === intent.commandId);
+        const latest = readToolDecisions().find(item => item.commandId === intent.commandId);
         if (latest && ownsConnection(connection)
           && (latest.status === 'unknown' || (latest.status === 'submitting'
             && latest.connectionGeneration !== connection.generation))) {
@@ -1581,7 +1579,7 @@ export function SessionWorkbench({
         }
       });
     }
-  }, [connection, toolDecisions, projection.eventSequence, projection.liveControlRevision, projection.interaction, acceptToolDecision, saveToolDecision, ownsConnection, notify]);
+  }, [connection, toolDecisions, projection.eventSequence, projection.liveControlRevision, projection.interaction, acceptToolDecision, saveToolDecision, readToolDecisions, ownsConnection, notify]);
 
   const submitToolDecision = useCallback(async (
     active: RuntimeConnection, interaction: Extract<RuntimeInteractionSummary, { kind: 'tool-confirmation' }>,
@@ -1590,7 +1588,7 @@ export function SessionWorkbench({
     const hostSessionId = active.current().hostSessionId;
     if (!hostSessionId || interaction.decisionInProgress
       || !interaction.expiresAtUtc || Date.parse(interaction.expiresAtUtc) <= Date.now()
-      || toolDecisionsRef.current.some(item => item.sessionId === active.sessionId
+      || readToolDecisions().some(item => item.sessionId === active.sessionId
         && item.hostSessionId === hostSessionId && item.interactionId === interaction.id
         && item.status !== 'rejected')) return false;
     const intent: ToolDecisionIntent = {
@@ -1626,7 +1624,7 @@ export function SessionWorkbench({
         rejected ? '请查看当前确认后重新选择。' : '正在查询原决定，操作结果尚待核实。', 'warning');
       return false;
     }
-  }, [acceptToolDecision, saveToolDecision, ownsConnection, notify, recoverConnectionAfterOperation]);
+  }, [acceptToolDecision, saveToolDecision, readToolDecisions, ownsConnection, notify, recoverConnectionAfterOperation]);
 
   const resolveInteraction = useCallback(async (
     interaction: RuntimeInteractionSummary,
@@ -1949,7 +1947,7 @@ export function SessionWorkbench({
   const retryHistory = useCallback(() => { void loadHistory().catch(() => {}); }, [loadHistory]);
   const retry = useCallback(() => {
     if (initialHistoryPending) retryHistory();
-    else void openRuntimeSession(sessionId, true);
+    else void openRuntimeSession(sessionId, true, false, true);
   }, [initialHistoryPending, openRuntimeSession, retryHistory, sessionId]);
 
   const approvalPending = Boolean(projection.interaction);
@@ -1961,6 +1959,7 @@ export function SessionWorkbench({
       error: runtimeError ?? (initialHistoryPending ? projection.history?.initialError : undefined),
       failure: runtimeFailure,
       ready: Boolean(activeReader && !initialHistoryPending),
+      historyOnly: activeReader instanceof CanonicalHistoryView,
       approvalPending,
       running: projection.isRunning || Boolean(projection.manualCompactionCommandId),
       retry,
@@ -2039,6 +2038,7 @@ export function SessionWorkbench({
           canControl={canControl}
           historyOnly={historyRef.current?.sessionId === activeSessionId}
           runtimeClosing={historyRef.current?.sessionId === activeSessionId && historyRef.current.runtimeClosing}
+          runtimeCloseFailed={historyRef.current?.sessionId === activeSessionId && historyRef.current.runtimeCloseFailed}
           isObserver={isObserver}
           workspaceAvailability={workspaceAvailability}
           workspaceRecoveryBusy={workspaceRecoveryBusy}

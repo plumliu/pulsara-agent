@@ -213,7 +213,7 @@ def test_gateway_retains_revoked_attachment_until_old_stream_cleanup(
             await readers[0].put(hello())
             a = await asyncio.wait_for(writers[0].responses.get(), 2)
             assert a.hello.attachment_id == first
-            await server.controller_attachment_closed(
+            await server.browser_attachment_closed(
                 session_id=host.session_id,
                 host_session_id=host.host_session_id,
                 attachment_id=first,

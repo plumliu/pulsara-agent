@@ -202,6 +202,8 @@ class DesktopApplication:
                 protocol_server = TerminalKernelProtocolServer(
                     socket_path=runtime_directory / "terminal-v3.sock",
                     session_provider=self.sessions.session_by_host_id,
+                    on_attachment_closed=self.sessions.attachment_closed,
+                    wait_for_idle_unload=self.sessions.core.wait_for_idle_unload,
                 )
                 await protocol_server.start()
                 if self.state is not DesktopApplicationState.STARTING or self._close_task is not None:

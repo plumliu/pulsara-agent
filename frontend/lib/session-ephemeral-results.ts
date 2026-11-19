@@ -1,6 +1,52 @@
 import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
 import type { ModelCallBindingPayload, RuntimeAdapter, RuntimeConnection, RuntimeProjection, SessionEphemeralResults } from './runtime-adapter';
 
+export type ToolDecisionIntent = {
+  sessionId: string; hostSessionId: string; interactionId: string;
+  commandId: string; decision: 'allow' | 'deny'; connectionGeneration: number;
+  status: 'submitting' | 'unknown' | 'accepted' | 'rejected' | 'retired';
+};
+
+const noToolDecisions: readonly ToolDecisionIntent[] = [];
+const isPendingDecision = (intent: ToolDecisionIntent) => intent.status === 'submitting' || intent.status === 'unknown';
+
+/** Pending decisions survive the tab view, within this application run. */
+export class SessionToolDecisionStore {
+  private readonly sessions = new Map<string, readonly ToolDecisionIntent[]>();
+  private readonly listeners = new Set<() => void>();
+  constructor(private readonly hasSessionView: (sessionId: string) => boolean) {}
+  subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
+  read = (sessionId: string) => this.sessions.get(sessionId) ?? noToolDecisions;
+  private changed() { for (const listener of this.listeners) listener(); }
+  private replace(sessionId: string, intents: readonly ToolDecisionIntent[]) {
+    if (intents.length) this.sessions.set(sessionId, intents);
+    else this.sessions.delete(sessionId);
+    this.changed();
+  }
+
+  save(intent: ToolDecisionIntent) {
+    const current = this.read(intent.sessionId);
+    const previous = current.find(item => item.commandId === intent.commandId);
+    if (!previous && intent.status !== 'submitting') return;
+    // A late empty/error response cannot downgrade a settled decision.
+    if (previous && !isPendingDecision(previous) && intent.status !== 'accepted') return;
+    const next = current.filter(item => item.commandId !== intent.commandId);
+    // A shown card can still need the accepted decision to disable duplicate clicks.
+    if (isPendingDecision(intent) || this.hasSessionView(intent.sessionId)) next.push(intent);
+    this.replace(intent.sessionId, next);
+  }
+
+  releaseSessionView(sessionId: string) {
+    const current = this.read(sessionId);
+    const pending = current.filter(isPendingDecision);
+    if (pending.length !== current.length) this.replace(sessionId, pending);
+  }
+
+  forget(sessionId: string) {
+    if (this.sessions.delete(sessionId)) this.changed();
+  }
+}
+
 type Context = { host: string; root: string; binding: string; queued: boolean; sequence: number; compacting: boolean; running: boolean };
 type Slot = { context: Context; result?: SessionEphemeralResults['suggestion']; blocked: boolean };
 

@@ -20,7 +20,7 @@ from pathlib import Path
 import secrets
 import stat
 from time import monotonic
-from typing import Callable
+from collections.abc import Awaitable, Callable
 
 from google.protobuf.message import DecodeError, Message
 
@@ -131,6 +131,7 @@ class _Connection:
     live_control_revision: int = 0
     granted_role: int = wire.ATTACHMENT_ROLE_UNSPECIFIED
     authenticated: bool = False
+    released: bool = False
     provider_retry_key: tuple | None = None
 
 
@@ -155,6 +156,8 @@ class TerminalKernelProtocolServer:
         socket_path: Path,
         session_provider: SessionProvider,
         maximum_frame_bytes: int = MAXIMUM_FRAME_BYTES,
+        on_attachment_closed: Callable[[KernelHostSession], None] | None = None,
+        wait_for_idle_unload: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         if not 1024 <= maximum_frame_bytes <= MAXIMUM_FRAME_BYTES:
             raise ValueError("Protocol v3 frame bound is invalid")
@@ -166,6 +169,8 @@ class TerminalKernelProtocolServer:
         self._launch_id = random_id("launch")
         self._launch_capability = secrets.token_bytes(32)
         self._attachment_generation = 0
+        self.on_attachment_closed = on_attachment_closed
+        self._wait_for_idle_unload = wait_for_idle_unload
 
     @property
     def launch_id(self) -> str:
@@ -206,7 +211,18 @@ class TerminalKernelProtocolServer:
             pass
         self._launch_capability = b""
 
-    async def controller_attachment_closed(
+    def has_session_attachments(
+        self, host: KernelHostSession, *, excluding: frozenset[str] = frozenset(),
+        include_children: bool = False, include_pending: bool = False,
+    ) -> bool:
+        return any(
+            not state.released and (include_pending or state.authenticated) and state.attachment_id not in excluding
+            and state.host_session is not None
+            and (state.host_session is host or (include_children and state.host_session.root_session_id == host.session_id))
+            for state in self._connections.values()
+        )
+
+    async def browser_attachment_closed(
         self, *, session_id: str, host_session_id: str, attachment_id: str,
     ) -> None:
         """Private bridge adaptation of its own exact attachment lifecycle.
@@ -215,13 +231,18 @@ class TerminalKernelProtocolServer:
         the original Host now; its later gateway finally is a compare-and-detach
         of the same unique attachment and cannot revoke a replacement.
         """
-        try:
-            session = self._session_provider(host_session_id)
-        except (KeyError, RuntimeError):
+        for state in self._connections.values():
+            if state.attachment_id != attachment_id or state.released:
+                continue
+            session = state.host_session
+            if session is None or session.session_id != session_id or session.host_session_id != host_session_id:
+                raise ConversationKernelConflict("browser attachment Host binding changed")
+            if state.granted_role == wire.ATTACHMENT_ROLE_CONTROLLER:
+                await session.controller_detached(attachment_id)
+            state.released = True
+            if self.on_attachment_closed is not None:
+                self.on_attachment_closed(session)
             return
-        if session.session_id != session_id or session.host_session_id != host_session_id:
-            raise ConversationKernelConflict("browser attachment Host binding changed")
-        await session.controller_detached(attachment_id)
 
     async def _accept(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -269,11 +290,15 @@ class TerminalKernelProtocolServer:
             except OSError:
                 pass
             self._connections.pop(task, None)
+            if state.host_session is not None and self.on_attachment_closed is not None:
+                self.on_attachment_closed(state.host_session)
 
     async def _dispatch(
         self, state: _Connection, frame: wire.ClientFrame
     ) -> wire.ServerFrame:
         kind = frame.WhichOneof("request")
+        if state.released:
+            return _error(_request_id(frame), "STALE_ATTACHMENT")
         if kind == "hello":
             return await self._hello(state, frame.hello)
         if not state.authenticated or state.host_session is None:
@@ -336,6 +361,8 @@ class TerminalKernelProtocolServer:
         try:
             session = self._session_provider(request.host_session_id)
         except (KeyError, RuntimeError):
+            if self._wait_for_idle_unload is not None:
+                await self._wait_for_idle_unload(request.session_id)
             return _error(request.request_id, "HOST_SESSION_NOT_FOUND")
         if session.session_id != request.session_id:
             return _error(request.request_id, "SESSION_BINDING_MISMATCH")
@@ -360,10 +387,24 @@ class TerminalKernelProtocolServer:
         state.attachment_generation = attachment_generation
         state.host_session = session
         state.granted_role = request.requested_role
+        if self._wait_for_idle_unload is not None:
+            await self._wait_for_idle_unload(session.root_session_id or session.session_id)
+            try:
+                current = self._session_provider(request.host_session_id)
+            except (KeyError, RuntimeError):
+                current = None
+            if current is not session:
+                state.host_session = None
+                if self.on_attachment_closed is not None:
+                    self.on_attachment_closed(session)
+                return _error(request.request_id, "HOST_SESSION_NOT_FOUND")
         if (
             request.requested_role == wire.ATTACHMENT_ROLE_CONTROLLER
             and not await session.attach_controller(attachment_id)
         ):
+            state.host_session = None
+            if self.on_attachment_closed is not None:
+                self.on_attachment_closed(session)
             return _error(request.request_id, "CONTROLLER_UNAVAILABLE")
         state.protocol_reader = CanonicalProtocolReader(
             session.repository.connection_provider

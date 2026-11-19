@@ -1,4 +1,4 @@
-"""Exercise tab-close admission, stop settlement, and detach through the local service."""
+"""Close and reopen real session tabs through HTTP, the protocol gateway, and PostgreSQL."""
 
 from __future__ import annotations
 
@@ -10,22 +10,35 @@ from tempfile import TemporaryDirectory
 from aiohttp import ClientSession
 import pytest
 
-from pulsara_agent.code_mode import CodeModeToolResult
+from pulsara_agent.capability.management_form import CapabilityFormValues
 from pulsara_agent.desktop_app.http_server import LocalHttpServer
+from pulsara_agent.desktop_app.protocol_client import TerminalProtocolClient
 from pulsara_agent.desktop_app.renderer_bridge import RendererBridge
 from pulsara_agent.identity import random_id
 from pulsara_agent.llm.input import PromptContent
+from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.primitives.run_permission import RunPermissionAdmissionSource, build_run_permission_snapshot
+from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 as wire
 from pulsara_agent.terminal_protocol.v3_gateway import TerminalKernelProtocolServer
 from tests.support.model_config import test_model_runtime
-from tests.test_agent_session_host import AgentModel
+from tests.test_blocking_steer_host import _wait_for_card
+from tests.test_capability_form_interaction import open_form
 from tests.test_compaction_host_lifecycle import TextModel
 from tests.test_desktop_http_surface import _model_server_dependencies_for_runtime
 from tests.test_scheduled_tasks_host import setup
 from tests.test_stage2_kernel_host_dogfood import _SteerModelPort
-from tests.test_stage2_terminal_host_lifetime import _start_background_process
+from tests.test_tool_permission_settlement import ApprovalModel, _accepted_result, _assert_delivery, UNAUTHORIZED_TEXT
 
 pytestmark = pytest.mark.postgres
+
+
+@pytest.fixture
+def form_permission():
+    return build_run_permission_snapshot(
+        snapshot_id=random_id("permission"), requested_mode=PermissionMode.READ_ONLY,
+        effective_mode=PermissionMode.READ_ONLY, admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
+    )
 
 
 @asynccontextmanager
@@ -36,6 +49,7 @@ async def tab_service(tmp_path, monkeypatch, database, model):
     with TemporaryDirectory(prefix="pulsara-close-", dir="/tmp") as socket_directory:
         protocol = TerminalKernelProtocolServer(
             socket_path=Path(socket_directory) / "kernel.sock", session_provider=sessions.session_by_host_id,
+            on_attachment_closed=sessions.attachment_closed, wait_for_idle_unload=core.wait_for_idle_unload,
         )
         await protocol.start()
         bridge = RendererBridge(sessions=sessions, protocol_server=protocol)
@@ -48,7 +62,7 @@ async def tab_service(tmp_path, monkeypatch, database, model):
         await server.start()
         try:
             async with ClientSession(headers={"Origin": server.origin, "Sec-Fetch-Site": "same-origin"}) as client:
-                yield core, handle.session, server.origin, client
+                yield sessions, handle.session, server.origin, client, protocol
         finally:
             await server.aclose()
             await bridge.aclose()
@@ -71,246 +85,305 @@ def connection_headers(connection):
             "X-Pulsara-Connection-Generation": str(connection["connection_generation"])}
 
 
-async def inspect_close(client, url, controller):
-    async with client.get(url, headers=connection_headers(controller)) as response:
-        payload = await response.json()
-        assert response.status == 200, payload
-        return payload
+async def close_tab(client, origin, session_id, connection, confirmation=None):
+    confirmation = confirmation or {}
+    async with client.post(
+        f"{origin}/api/sessions/{session_id}/close-tab", headers=connection_headers(connection),
+        json={"confirmed_form_ids": confirmation.get("form_ids", []),
+              "confirmed_other_clients": confirmation.get("other_clients", False)},
+    ) as response:
+        result = await response.json()
+        assert response.status == 200, result
+        return result
 
 
-async def stop_observed(client, url, connection, work):
-    async with client.post(url, headers=connection_headers(connection),
-                           json={"observation_id": work["observation_id"]}) as response:
-        return response.status, await response.json()
+async def wait_until(check):
+    async with asyncio.timeout(8):
+        while not check():
+            await asyncio.sleep(0.015)
 
 
-async def stop_detached_cell(host, client, url, controller):
-    entered, cancelled, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
-
-    async def accepted_tool(invocation):
-        entered.set()
-        await invocation.cancelled.wait()
-        cancelled.set()
-        await release.wait()
-        return CodeModeToolResult(value={"settled": True})
-
-    cell = await host._code_mode.start(
-        source="await tools.read_file({});", source_exec_attempt_id=random_id("attempt"),
-        turn_id=random_id("turn"), snapshot=None, tool_catalog={"decide": {}, "read_file": {}},
-        invoke=accepted_tool, decision_available=False,
-    )
-    pending = None
-    try:
-        await asyncio.wait_for(entered.wait(), 10)
-        assert host.active_root_turn_id() is None
-        work = await inspect_close(client, url, controller)
-        assert work["requires_confirmation"]
-        pending = asyncio.create_task(stop_observed(client, url, controller, work))
-        await asyncio.wait_for(cancelled.wait(), 10)
-        assert not pending.done()
-        release.set()
-        assert await pending == (200, {"status": "stopped"})
-        assert cell not in host._code_mode.live_cell_ids()
-        assert not (await inspect_close(client, url, controller))["requires_confirmation"]
-    finally:
-        release.set()
-        if pending is not None:
-            await asyncio.gather(pending, return_exceptions=True)
-
-
-class _SettlingRoot(_SteerModelPort):
-    def __init__(self):
-        super().__init__()
-        self.interrupted = asyncio.Event()
-        self.can_settle = asyncio.Event()
-
-    async def _stream(self, request):
-        try:
-            async for event in super()._stream(request):
-                yield event
-        except asyncio.CancelledError:
-            self.interrupted.set()
-            await self.can_settle.wait()
-            raise
-
-
-def test_tab_stop_waits_for_root_without_terminating_background_process(tmp_path, monkeypatch, stage2_migrated_postgres_database):
-    async def scenario():
-        model = _SettlingRoot()
-        async with tab_service(tmp_path, monkeypatch, stage2_migrated_postgres_database, model) as (_, root, origin, client):
-            controller = await connect(client, origin, root.session_id)
-            observer = await connect(client, origin, root.session_id)
-            assert (controller["role"], observer["role"]) == ("controller", "observer")
-            url = f"{origin}/api/sessions/{root.session_id}/close-work"
-            assert await inspect_close(client, url, controller) == {
-                "requires_confirmation": False, "has_terminal_processes": False, "observation_id": None,
-            }
-            process_id, _, _ = await _start_background_process(root._tools, session_id=root.session_id)
-            assert await inspect_close(client, url, controller) == {
-                "requires_confirmation": False, "has_terminal_processes": True, "observation_id": None,
-            }
-            command_id = random_id("command")
-            queued_id = random_id("command")
-            pending = None
-            try:
-                await root.submit_prompt(command_id=command_id, content=PromptContent.text("Hold this turn."))
-                await asyncio.wait_for(model.started.wait(), 10)
-                await root.submit_prompt(command_id=queued_id, content=PromptContent.text("Run after the held turn."))
-                work = await inspect_close(client, url, controller)
-                assert work["requires_confirmation"] and work["has_terminal_processes"]
-                denied, error = await stop_observed(client, url, observer, work)
-                assert denied == 409 and error["error"]["code"] == "CHAT_CONTROLLER_REQUIRED"
-                async with client.delete(f'{origin}/api/connections/{observer["connection_id"]}') as response:
-                    assert response.status in {200, 204}
-                assert not model.interrupted.is_set()
-                pending = asyncio.create_task(stop_observed(client, url, controller, work))
-                await asyncio.wait_for(model.interrupted.wait(), 10)
-                assert not pending.done()
-                repeat, error = await stop_observed(client, url, controller, work)
-                assert repeat == 409 and error["error"]["code"] == "SESSION_CLOSE_WORK_CHANGED"
-                model.can_settle.set()
-                assert await pending == (200, {"status": "stopped"})
-                settled = await root.query_command(command_id)
-                assert settled.prompt_delivery.execution.terminal_reason == "USER_STOPPED"
-                queued = await root.query_command(queued_id)
-                assert queued.prompt_delivery.queue_status == "CANCELLED"
-                async with client.delete(f'{origin}/api/connections/{controller["connection_id"]}') as response:
-                    assert response.status in {200, 204}
-                reopened = await connect(client, origin, root.session_id)
-                assert reopened["live_control_snapshot"]["snapshot"]["host_session_id"] == root.host_session_id
-                assert [process.process_id for process in root._tools.list_background_terminal_processes()
-                        if process.physical_state == "RUNNING"] == [process_id]
-            finally:
-                model.can_settle.set()
-                model.release.set()
-                if pending is not None:
-                    await asyncio.gather(pending, return_exceptions=True)
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.parametrize("consumed_during_confirmation", [False, True])
-def test_tab_stop_observes_queued_root_and_follows_consumption(
-    tmp_path, monkeypatch, stage2_migrated_postgres_database, consumed_during_confirmation,
+def test_direct_and_browser_observers_are_counted_and_last_disconnect_releases_host(
+    tmp_path, monkeypatch, stage2_migrated_postgres_database,
 ):
     async def scenario():
-        model = _SettlingRoot()
-        model.can_settle.set()
-        async with tab_service(tmp_path, monkeypatch, stage2_migrated_postgres_database, model) as (_, root, origin, client):
-            controller = await connect(client, origin, root.session_id)
-            url = f"{origin}/api/sessions/{root.session_id}/close-work"
-            preparing, release = asyncio.Event(), asyncio.Event()
-
-            async def pause_delivery(_candidate):
-                preparing.set()
-                await release.wait()
-                return True
-
-            monkeypatch.setattr(root, "_prepare_queued_prompt_hook", pause_delivery)
-            command_id = random_id("command")
+        async with tab_service(tmp_path, monkeypatch, stage2_migrated_postgres_database, TextModel()) as (
+            sessions, host, origin, client, protocol,
+        ):
+            owner = await connect(client, origin, host.session_id)
+            viewer = await connect(client, origin, host.session_id)
+            direct, _ = await TerminalProtocolClient.connect(
+                server=protocol, host_session_id=host.host_session_id, session_id=host.session_id,
+                role=wire.ATTACHMENT_ROLE_OBSERVER, client_instance_id=random_id("transport"),
+            )
             try:
-                await root.submit_prompt(command_id=command_id, content=PromptContent.text("A pending ROOT input."))
-                await asyncio.wait_for(preparing.wait(), 10)
-                assert root.active_root_turn_id() is None
-                work = await inspect_close(client, url, controller)
-                assert work["requires_confirmation"]
-                if consumed_during_confirmation:
-                    release.set()
-                    await asyncio.wait_for(model.started.wait(), 10)
-                assert await stop_observed(client, url, controller, work) == (200, {"status": "stopped"})
-                settled = await root.query_command(command_id)
-                if consumed_during_confirmation:
-                    assert settled.prompt_delivery.execution.terminal_reason == "USER_STOPPED"
-                else:
-                    assert settled.prompt_delivery.queue_status == "CANCELLED"
-                    assert not model.started.is_set()
+                for connection in (viewer, owner):
+                    prompt = await close_tab(client, origin, host.session_id, connection)
+                    assert prompt == {"status": "confirmation_required", "form_ids": [],
+                                      "visible_form": False, "other_clients": True}
+                    assert await close_tab(client, origin, host.session_id, connection, prompt) == {"status": "closed"}
+                assert host.host_session_id in sessions.core._sessions
+            finally:
+                # A direct peer can close its Unix socket without a browser notification.
+                direct._writer.close()
+                await direct._writer.wait_closed()
+            await wait_until(lambda: host.host_session_id not in sessions.core._sessions)
+            reopened = await connect(client, origin, host.session_id)
+            assert reopened["live_control_snapshot"]["snapshot"]["host_session_id"] != host.host_session_id
+            assert reopened["role"] == "controller"
+            assert (await sessions.read_session(host.session_id))["lifecycle"] == "OPEN"
+
+    asyncio.run(scenario())
+
+
+def test_background_turn_reopens_same_host_and_late_transport_cleanup_cannot_unload_it(
+    tmp_path, monkeypatch, stage2_migrated_postgres_database,
+):
+    async def scenario():
+        model = _SteerModelPort()
+        async with tab_service(tmp_path, monkeypatch, stage2_migrated_postgres_database, model) as (
+            sessions, host, origin, client, _,
+        ):
+            first = await connect(client, origin, host.session_id)
+            running = asyncio.create_task(host.run_turn(PromptContent.text("Keep working.")))
+            try:
+                await asyncio.wait_for(model.started.wait(), 5)
+                assert await close_tab(client, origin, host.session_id, first) == {"status": "closed"}
+                assert not running.done()
+                assert host.session_id in sessions._pending_tab_unloads
+                reopened = await connect(client, origin, host.session_id)
+                assert reopened["live_control_snapshot"]["snapshot"]["host_session_id"] == host.host_session_id
+                assert host.session_id not in sessions._pending_tab_unloads
+                for connection in (first, reopened):
+                    async with client.delete(f'{origin}/api/connections/{connection["connection_id"]}') as reply:
+                        assert reply.status == 200
+            finally:
+                model.release.set()
+                await asyncio.wait_for(running, 5)
+            assert not sessions._pending_tab_unloads
+            assert not host._closing
+
+    asyncio.run(scenario())
+
+
+def test_tab_confirmation_rechecks_new_forms_and_only_revokes_its_controller(
+    tmp_path, monkeypatch, stage2_migrated_postgres_database, form_permission,
+):
+    async def scenario():
+        async with tab_service(tmp_path, monkeypatch, stage2_migrated_postgres_database, TextModel()) as (
+            _, host, origin, client, _protocol,
+        ):
+            owner = await connect(client, origin, host.session_id)
+            viewer = await connect(client, origin, host.session_id)
+
+            async def must_not_submit(_):
+                pytest.fail("closing a tab cannot submit form input")
+
+            first = await open_form(host._interactions, form_permission, must_not_submit)
+            prompt = await close_tab(client, origin, host.session_id, owner)
+            assert prompt["visible_form"] and prompt["other_clients"] and len(prompt["form_ids"]) == 1
+            second = await open_form(host._interactions, form_permission, must_not_submit)
+            updated = await close_tab(client, origin, host.session_id, owner, prompt)
+            assert updated["status"] == "confirmation_required" and len(updated["form_ids"]) == 2
+            viewer_prompt = await close_tab(client, origin, host.session_id, viewer)
+            assert viewer_prompt["form_ids"] == [] and viewer_prompt["other_clients"]
+            assert await close_tab(client, origin, host.session_id, viewer, viewer_prompt) == {"status": "closed"}
+            assert not first.done() and not second.done()
+            assert await close_tab(client, origin, host.session_id, owner, updated) == {"status": "closed"}
+            for form in (first, second):
+                assert (await form).reference == "interaction:controller-detached"
+
+    asyncio.run(scenario())
+
+
+def test_closed_tab_expiry_waits_for_workspace_and_final_model_delivery_before_unload(
+    tmp_path, monkeypatch, stage2_migrated_postgres_database,
+):
+    from pulsara_agent.conversation_kernel import interaction
+
+    async def scenario():
+        model = ApprovalModel("write_file", {"target": {"kind": "PATH", "path": "blocked.txt"}, "content": "blocked"})
+        monkeypatch.setattr(interaction, "INTERACTION_TIMEOUT_SECONDS", 0.6)
+        async with tab_service(tmp_path, monkeypatch, stage2_migrated_postgres_database, model) as (
+            sessions, host, origin, client, _,
+        ):
+            owner = await connect(client, origin, host.session_id)
+            workspace = host.workspace.workspace_root
+            moved = workspace.with_name("moved")
+            running = asyncio.create_task(host.run_turn(PromptContent.text("Write a file."),
+                                                       requested_permission_mode=PermissionMode.ASK_PERMISSIONS))
+            try:
+                await _wait_for_card(host)
+                assert await close_tab(client, origin, host.session_id, owner) == {"status": "closed"}
+                workspace.rename(moved)
+                row = await _accepted_result(host)
+                assert row["result_state"] == "CANCELLED_BEFORE_DISPATCH" and not row["attempts"]
+                assert not running.done() and not host._closing
+                assert host.live_control.current_snapshot().current_interaction is None
+            finally:
+                if moved.exists():
+                    moved.rename(workspace)
+                host.workspace_gate.wake()
+                await asyncio.wait_for(running, 8)
+            _assert_delivery(host, model, row, "CANCELLED", UNAUTHORIZED_TEXT)
+            assert not (workspace / "blocked.txt").exists()
+            await wait_until(lambda: host.host_session_id not in sessions.core._sessions)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("close_confirmed", [True, False], ids=["closed", "unconfirmed"])
+def test_open_during_committed_unload_waits_then_returns_live_or_saved_history(
+    tmp_path, monkeypatch, stage2_migrated_postgres_database, close_confirmed,
+):
+    async def scenario():
+        async with tab_service(tmp_path, monkeypatch, stage2_migrated_postgres_database, TextModel()) as (
+            sessions, host, origin, client, _protocol,
+        ):
+            owner = await connect(client, origin, host.session_id)
+            await host.run_turn(PromptContent.text("Keep this in history."))
+            closing = asyncio.Event()
+            release = asyncio.Event()
+            original_close = sessions.core._close_session_owner
+
+            async def settle(**kwargs):
+                closing.set()
+                await release.wait()
+                await original_close(**kwargs)
+                if not close_confirmed:
+                    raise RuntimeError("could not confirm settlement")
+
+            monkeypatch.setattr(sessions.core, "_close_session_owner", settle)
+            assert await close_tab(client, origin, host.session_id, owner) == {"status": "closed"}
+            await asyncio.wait_for(closing.wait(), 5)
+            opening = asyncio.create_task(connect(client, origin, host.session_id))
+            try:
+                await asyncio.sleep(0.05)
+                assert not opening.done()
             finally:
                 release.set()
-                model.release.set()
+            view = await asyncio.wait_for(opening, 8)
+            if close_confirmed:
+                assert view["role"] == "controller"
+                assert view["live_control_snapshot"]["snapshot"]["host_session_id"] != host.host_session_id
+            else:
+                assert view["view"] == "history" and view["runtime_close_failed"]
+                assert "connection_id" not in view
+                assert view["snapshot"]["snapshot"]["snapshot"]["entries"]
+                again = await connect(client, origin, host.session_id)
+                assert again["view"] == "history" and again["runtime_close_failed"]
 
     asyncio.run(scenario())
 
 
-class _BlockedAgents(AgentModel):
-    async def stream(self, request):
-        if request.session_id != self.root_id and self.child_requests:
-            await self.first_child_release.wait()
-        async for event in super().stream(request):
-            yield event
-
-
-def test_tab_stop_cancels_observed_agent_requests_after_root_reply(tmp_path, monkeypatch, stage2_migrated_postgres_database):
+def test_transport_reconnect_preserves_existing_intent_and_only_explicit_open_clears_it(
+    tmp_path, monkeypatch, stage2_migrated_postgres_database,
+):
     async def scenario():
-        model = _BlockedAgents()
-        async with tab_service(tmp_path, monkeypatch, stage2_migrated_postgres_database, model) as (core, root, origin, client):
-            model.root_id = root.session_id
-            controller = await connect(client, origin, root.session_id)
-            url = f"{origin}/api/sessions/{root.session_id}/close-work"
-
-            async def delegate():
-                await asyncio.wait_for(root.run_turn(
-                    PromptContent.text("Delegate a separate assignment."), command_id=random_id("command"),
-                    requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
-                ), 15)
-                assert root.active_root_turn_id() is None
-
-            async def works():
-                return await root._io.run(root.repository.list_agent_works, root_session_id=root.session_id,
-                    agent_id=model.agent_id, deadline_monotonic=root._canonical_deadline())
-
+        model = _SteerModelPort()
+        async with tab_service(tmp_path, monkeypatch, stage2_migrated_postgres_database, model) as (
+            sessions, host, origin, client, _,
+        ):
+            owner = await connect(client, origin, host.session_id)
+            running = asyncio.create_task(host.run_turn(PromptContent.text("Keep running.")))
             try:
-                await delegate()
-                await asyncio.wait_for(model.first_child_started.wait(), 15)
-                (model.agent_id,) = await root._io.run(root.repository.list_root_agent_session_ids,
-                    root_session_id=root.session_id, deadline_monotonic=root._canonical_deadline())
-                await delegate()
-                work = await inspect_close(client, url, controller)
-                assert work["requires_confirmation"] and not work["has_terminal_processes"]
-                await delegate()
-                assert [item["status"] for item in await works()] == ["running", "queued", "queued"]
-                status, error = await stop_observed(client, url, controller, work)
-                assert status == 409 and error["error"]["code"] == "SESSION_CLOSE_WORK_PENDING"
-                first, second, third = await works()
-                assert [first["status"], second["status"]] == ["stopped", "stopped"]
-                assert third["status"] in {"queued", "running"}
-                work = await inspect_close(client, url, controller)
-                assert await stop_observed(client, url, controller, work) == (200, {"status": "stopped"})
-                assert [item["status"] for item in await works()] == ["stopped"] * 3
-                assert not (await inspect_close(client, url, controller))["requires_confirmation"]
-                await stop_detached_cell(core._live_agent_session(model.agent_id), client, url, controller)
+                await asyncio.wait_for(model.started.wait(), 5)
+                assert await close_tab(client, origin, host.session_id, owner) == {"status": "closed"}
+                async with client.post(f"{origin}/api/sessions/{host.session_id}/connections", json={
+                    "browser_instance_id": random_id("transport"), "reopen_tab": False,
+                }) as res:
+                    assert res.status == 201
+                    recovered = await res.json()
+                assert recovered["live_control_snapshot"]["snapshot"]["host_session_id"] == host.host_session_id
+                assert host.session_id in sessions._pending_tab_unloads
             finally:
-                model.first_child_release.set()
+                model.release.set()
+                await asyncio.wait_for(running, 5)
+            assert not host._closing
+            async with client.delete(f'{origin}/api/connections/{recovered["connection_id"]}') as res:
+                assert res.status == 200
+            await wait_until(lambda: host.host_session_id not in sessions.core._sessions)
 
     asyncio.run(scenario())
 
 
-def test_tab_stop_joins_idle_compaction_and_detached_cell_tools(tmp_path, monkeypatch, stage2_migrated_postgres_database):
+def test_direct_protocol_hello_during_idle_check_keeps_exact_host(
+    tmp_path, monkeypatch, stage2_migrated_postgres_database,
+):
     async def scenario():
-        async with tab_service(tmp_path, monkeypatch, stage2_migrated_postgres_database, TextModel()) as (_, root, origin, client):
-            controller = await connect(client, origin, root.session_id)
-            url = f"{origin}/api/sessions/{root.session_id}/close-work"
-            await root.run_turn(PromptContent.text("Make a completed turn for manual compaction."),
-                                command_id=random_id("command"))
+        async with tab_service(tmp_path, monkeypatch, stage2_migrated_postgres_database, TextModel()) as (
+            sessions, host, origin, client, protocol,
+        ):
+            owner = await connect(client, origin, host.session_id)
+            checking, release = asyncio.Event(), asyncio.Event()
+            run = host._io.run
+
+            async def pause_check(operation, *args, **kwargs):
+                if operation == host.repository.archive_session and kwargs.get("check_only"):
+                    checking.set()
+                    await release.wait()
+                return await run(operation, *args, **kwargs)
+
+            monkeypatch.setattr(host._io, "run", pause_check)
+            assert await close_tab(client, origin, host.session_id, owner) == {"status": "closed"}
+            await asyncio.wait_for(checking.wait(), 5)
+            joining = asyncio.create_task(TerminalProtocolClient.connect(
+                server=protocol, host_session_id=host.host_session_id, session_id=host.session_id,
+                role=wire.ATTACHMENT_ROLE_CONTROLLER, client_instance_id=random_id("transport"),
+            ))
+            try:
+                await wait_until(lambda: protocol.has_session_attachments(host, include_pending=True))
+                assert not joining.done()
+            finally:
+                release.set()
+            direct, hello = await asyncio.wait_for(joining, 5)
+            try:
+                assert host.has_controller_attachment(hello.attachment_id)
+                assert not host._closing
+            finally:
+                await direct.aclose()
+            await wait_until(lambda: host.host_session_id not in sessions.core._sessions)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("submitted", [True, False], ids=["transferred", "validating"])
+def test_close_warns_only_until_form_input_transfers(
+    tmp_path, monkeypatch, stage2_migrated_postgres_database, form_permission, submitted,
+):
+    async def scenario():
+        async with tab_service(tmp_path, monkeypatch, stage2_migrated_postgres_database, TextModel()) as (
+            _, host, origin, client, _protocol,
+        ):
+            owner = await connect(client, origin, host.session_id)
             entered, release = asyncio.Event(), asyncio.Event()
 
-            async def blocking_summary(**kwargs):
+            async def validate(body):
                 entered.set()
                 await release.wait()
-                raise RuntimeError("The test never releases an active compaction normally")
+                return CapabilityFormValues(freeze_json(body))
 
-            monkeypatch.setattr(root._runner, "compact_idle_turn", blocking_summary)
-            compaction = asyncio.create_task(root.compact_context(command_id=random_id("command")))
+            form = await open_form(host._interactions, form_permission, validate)
+            snapshot = host.live_control.current_snapshot()
+            saving = asyncio.create_task(host.resolve_capability_form(
+                attachment_id=host._interactions.current_controller_id(),
+                interaction_id=snapshot.current_interaction.interaction_id,
+                expected_owner_epoch=snapshot.owner_epoch, expected_live_revision=snapshot.revision,
+                decision="SUBMIT", submission={"address": "B"},
+            ))
             try:
-                await asyncio.wait_for(entered.wait(), 10)
-                assert root.active_root_turn_id() is None
-                work = await inspect_close(client, url, controller)
-                assert work["requires_confirmation"]
-                assert await stop_observed(client, url, controller, work) == (200, {"status": "stopped"})
-                assert (await compaction).public_code == "COMPACTION_CANCELLED"
+                await asyncio.wait_for(entered.wait(), 5)
+                if submitted:
+                    release.set()
+                    await saving
+                result = await close_tab(client, origin, host.session_id, owner)
+                if not submitted:
+                    assert result["visible_form"] and result["form_ids"] == [snapshot.current_interaction.interaction_id]
+                    result = await close_tab(client, origin, host.session_id, owner, result)
+                assert result == {"status": "closed"}
             finally:
                 release.set()
-                await asyncio.gather(compaction, return_exceptions=True)
-
-            await stop_detached_cell(root, client, url, controller)
+                await saving
+            assert (await form).decision == ("SUBMIT" if submitted else "CANCEL")
 
     asyncio.run(scenario())

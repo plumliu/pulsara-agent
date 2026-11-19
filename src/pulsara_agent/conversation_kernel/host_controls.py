@@ -3,14 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable
-from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from pulsara_agent.conversation_kernel.cancellation import ForegroundCancellationCause
-from pulsara_agent.conversation_kernel.contracts import TurnStatus
 from pulsara_agent.conversation_kernel.runner import KernelRunResult
-from pulsara_agent.conversation_kernel.steer import build_queued_root_turn_identity
 from pulsara_agent.conversation_kernel.user_control import (
     CONTROL_ADMISSION_WINDOW_MS,
     CONTROL_RESULT_RETENTION_MS,
@@ -26,13 +22,12 @@ from pulsara_agent.conversation_kernel.user_control import (
     UserControlTargetKind,
 )
 from pulsara_agent.model_input.continuity import RuntimeObservationItem
-from pulsara_agent.identity import is_valid_id, random_id
+from pulsara_agent.identity import is_valid_id
 from pulsara_agent.terminal_process.models import TerminalProcessInfo
 
 from .host_contracts import (
     KernelCommandOutcome,
     KernelControlQueryResult,
-    SessionControlRejected,
     _ProcessControlObservation,
     _UserControlAttempt,
 )
@@ -42,174 +37,11 @@ from .host_tasks import (
 )
 
 
-@dataclass(frozen=True, slots=True)
-class SessionCloseWork:
-    root_turn_id: str | None
-    queued_root_ids: tuple[str, ...]
-    manual_compaction_id: str | None
-    compaction_settling: bool
-    cells: tuple[tuple[str, str], ...]
-    agent_work: tuple[tuple[str, str], ...]
-    has_terminal_processes: bool
-
-    @property
-    def requires_confirmation(self) -> bool:
-        return bool(
-            self.root_turn_id or self.queued_root_ids or self.manual_compaction_id
-            or self.compaction_settling or self.cells or self.agent_work
-        )
-
-
-async def _join_tab_stop_operations(*operations: Awaitable[None]) -> None:
-    for outcome in await asyncio.gather(*operations, return_exceptions=True):
-        if isinstance(outcome, BaseException):
-            raise outcome
-
-
 class _HostControlOperations:
     """User-control admission, execution, and transient result retention on the Host session.
 
     Operations share the concrete Host's existing state and admission locks.
     """
-
-    def _tab_close_cell_owners(self):
-        return {self.host_session_id: self._code_mode,
-                **self._agent_runtime.cell_owners(self.session_id)}
-
-    async def observe_session_close_work(self) -> SessionCloseWork:
-        # Re-read if the ROOT finishes during inspection. Its final tool
-        # effects may have admitted work after the first database snapshot.
-        original_turn_id = self._session_close_root_turn_id()
-        while True:
-            queued_root_ids, agent_work = await asyncio.gather(
-                self._io.run(
-                    self.repository.list_pending_new_turn_ids, session_id=self.session_id,
-                    deadline_monotonic=self._canonical_deadline(),
-                ),
-                self._io.run(
-                    self.repository.list_unfinished_agent_work, root_session_id=self.session_id,
-                    deadline_monotonic=self._canonical_deadline(),
-                ),
-            )
-            async with self._lock:
-                self._require_open()
-                root_turn_id = self._session_close_root_turn_id()
-                if original_turn_id is not None and root_turn_id is None:
-                    original_turn_id = None
-                    continue
-                manual_compaction_id = self.active_manual_compaction_command_id()
-                return SessionCloseWork(
-                    root_turn_id=root_turn_id,
-                    queued_root_ids=queued_root_ids,
-                    manual_compaction_id=manual_compaction_id,
-                    compaction_settling=(root_turn_id is None and manual_compaction_id is None
-                                         and self._compaction.has_active_work()),
-                    cells=tuple((host_id, cell_id)
-                                for host_id, owner in self._tab_close_cell_owners().items()
-                                for cell_id in owner.live_cell_ids()),
-                    agent_work=agent_work,
-                    has_terminal_processes=self.archive_has_terminal_work(),
-                )
-
-    def _session_close_root_turn_id(self) -> str | None:
-        if self._active_task is not None and not self._active_task.done():
-            return self._active_turn_id
-        intent = self._external_new_turn_cancellation_intent
-        return None if intent is None else intent.turn_id
-
-    async def stop_session_close_work(self, work: SessionCloseWork) -> None:
-        await _join_tab_stop_operations(
-            self._stop_session_close_root(work),
-            self._stop_session_close_agents(work.agent_work),
-        )
-        if (await self.observe_session_close_work()).requires_confirmation:
-            raise SessionControlRejected("SESSION_CLOSE_WORK_PENDING", "会话仍有未完成的任务。请检查任务状态后再关闭。")
-
-    async def _stop_session_close_root(self, work: SessionCloseWork) -> None:
-        try:
-            # Cancel observed pending inputs before interrupting the ROOT that
-            # currently holds delivery. If consumption already won, the queue
-            # identity still identifies the exact turn we were asked to stop.
-            turns: dict[str, bool] = {}
-            if work.root_turn_id is not None:
-                turns[work.root_turn_id] = False
-            for queue_id in work.queued_root_ids:
-                status = await self._io.run(
-                    self.repository.cancel_prompt, self._lease.guard,
-                    queue_item_id=queue_id, occurred_at=datetime.now(timezone.utc),
-                    actor_id=self.host_session_id, deadline_monotonic=self._canonical_deadline(),
-                )
-                turn_id = build_queued_root_turn_identity(self.session_id, queue_id).turn_id
-                if status == "CONSUMED":
-                    turns[turn_id] = False
-                else:
-                    self._hook_context.retire_prompt_candidate(
-                        scope=self._hook_root_scope, prompt_candidate_id=queue_id,
-                    )
-                    if turn_id in turns:
-                        turns[turn_id] = True
-            if work.queued_root_ids:
-                self._queue_wake.set()
-                if self._scheduled_tasks is not None:
-                    self._scheduled_tasks.wake()
-            await _join_tab_stop_operations(
-                self._stop_session_close_turn(None, work.manual_compaction_id),
-                *(self._stop_session_close_turn(turn_id, None, cancelled_before_start=cancelled)
-                  for turn_id, cancelled in turns.items()),
-            )
-        finally:
-            owners = self._tab_close_cell_owners()
-            await _join_tab_stop_operations(*(
-                owners[host_id].stop_and_settle(cell_id)
-                for host_id, cell_id in work.cells if host_id in owners
-            ))
-
-    async def _stop_session_close_turn(
-        self, turn_id: str | None, compaction_id: str | None, *, cancelled_before_start: bool = False,
-    ) -> None:
-        if turn_id is None and (compaction_id is None or self.active_manual_compaction_command_id() != compaction_id):
-            return
-        command_id = random_id("command")
-        args = dict(command_id=command_id, admission_deadline_ms=self.control_admission_deadline_ms(),
-                    expected_session_id=self.session_id, expected_host_session_id=self.host_session_id)
-        if turn_id is not None:
-            result = await self.request_stop_turn(target_turn_id=turn_id, **args)
-        else:
-            result = await self.request_stop_context_compaction(target_command_id=compaction_id, **args)
-        if result.status == "PENDING":
-            attempt = self._user_control_attempts[command_id]
-            assert attempt.task is not None
-            await asyncio.shield(attempt.task)
-            result = attempt.outcome
-        control = result.user_control
-        root = None if control is None else control.root
-        if result.status == "SUCCEEDED" or (root is not None and root.status in {TurnStatus.COMPLETED, TurnStatus.INTERRUPTED}):
-            return
-        if cancelled_before_start and self._session_close_root_turn_id() != turn_id:
-            # The exact queue item is terminal and never installed a turn.
-            return
-        raise SessionControlRejected("SESSION_CLOSE_STOP_FAILED", "无法确认会话任务已停止。" + result.public_message)
-
-    async def _stop_session_close_agents(self, work: tuple[tuple[str, str], ...]) -> None:
-        work_by_agent: dict[str, list[str]] = {}
-        for agent_id, work_id in work:
-            work_by_agent.setdefault(agent_id, []).append(work_id)
-        running_work = []
-        for agent_id, work_ids in work_by_agent.items():
-            rows = await self._io.run(
-                self.repository.cancel_agent_requests,
-                self._lease.guard,
-                agent_id=agent_id,
-                work_ids=work_ids,
-                occurred_at=datetime.now(timezone.utc),
-                actor_id=self.host_session_id,
-                deadline_monotonic=self._canonical_deadline(),
-            )
-            running_work.extend((agent_id, row["work_id"]) for row in rows if row["status"] == "running")
-        await _join_tab_stop_operations(*(
-            self._agent_runtime.stop_active_work(agent_id=agent_id, work_id=work_id)
-            for agent_id, work_id in running_work
-        ))
 
     def _control_rejection(
         self,

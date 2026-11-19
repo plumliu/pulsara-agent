@@ -21,18 +21,18 @@ import { SessionOpeningView } from '../components/session-opening-view';
 import { SessionSearchDialog } from '../components/session-search-dialog';
 import { SessionRenameDialog } from '../components/session-rename-dialog';
 import { SessionDeletionDialog } from '../components/session-deletion-dialog';
-import { SessionCloseDialog } from '../components/session-close-dialog';
 import { SettingsView, type SettingsSection } from '../components/settings-view';
 import { ToolResultDisplayContext, readSavedToolResultDisplay } from '../lib/tool-result-display';
 import { PromptDraftStore } from '../lib/prompt-draft';
-import { SessionSuggestionCache } from '../lib/session-ephemeral-results';
+import { SessionSuggestionCache, SessionToolDecisionStore } from '../lib/session-ephemeral-results';
 import {
   LocalHttpRuntimeAdapter,
   RuntimeApiError,
   type RuntimeAdapter,
   type RuntimeBootstrap,
   type RuntimeConnection,
-  type SessionCloseWork,
+  type SessionTabCloseConfirmation,
+  type SessionTabCloseOutcome,
   type ModelCallBindingPayload,
 } from '../lib/runtime-adapter';
 
@@ -70,8 +70,8 @@ type PendingOpen = {
 type CloseRequest = {
   id: string;
   connection: RuntimeConnection;
-  work?: SessionCloseWork;
-  stopping?: boolean;
+  confirmation?: Extract<SessionTabCloseOutcome, { status: 'confirmation_required' }>;
+  completion?: Promise<boolean>;
   error?: string;
 };
 
@@ -120,16 +120,27 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     closeRequestRef.current = request;
     setCloseRequest(request);
   }, []);
+  const pendingTabClose = useCallback((connection: RuntimeConnection) => {
+    const request = closeRequestRef.current;
+    return request?.connection === connection ? request.completion : undefined;
+  }, []);
+  const dismissTabClose = useCallback(() => {
+    if (!closeRequestRef.current?.completion) publishCloseRequest();
+  }, [publishCloseRequest]);
   const [startupSettled, setStartupSettled] = useState(false);
   useEffect(() => {
     if (startupSettled) onStartupSettled?.();
   }, [startupSettled, onStartupSettled]);
   const [promptDraftStore] = useState(() => new PromptDraftStore());
   const [suggestionCache] = useState(() => new SessionSuggestionCache());
+  const [toolDecisionStore] = useState(() => new SessionToolDecisionStore(id => mountedSessionIdsRef.current.includes(id)));
   const scheduledApi = useMemo(() => new LocalScheduledTasksApi(), []);
   const [activeView, setActiveView] = useState<AppView>('workbench');
   const activeViewRef = useRef(activeView);
   activeViewRef.current = activeView;
+  useEffect(() => {
+    if (activeView !== 'workbench') dismissTabClose();
+  }, [activeView, dismissTabClose]);
   const [capabilityTab, setCapabilityTab] = useState<CapabilityTab>('plugins');
   const [settingsInitialSection, setSettingsInitialSection] = useState<SettingsSection>();
   const [settingsHighlightHome, setSettingsHighlightHome] = useState(false);
@@ -329,6 +340,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     const next = mountedSessionIdsRef.current.filter(item => item !== id);
     mountedSessionIdsRef.current = next;
     setMountedSessionIds(next);
+    toolDecisionStore.releaseSessionView(id);
     const observations = { ...observationsRef.current };
     delete observations[id];
     observationsRef.current = observations;
@@ -336,13 +348,14 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     suggestionCache.forget(id);
     if (readSavedSessionId() === id) saveSessionId('');
     removePlacement(id);
-  }, [publishCloseRequest, removePlacement, suggestionCache]);
+  }, [publishCloseRequest, removePlacement, suggestionCache, toolDecisionStore]);
 
   const forgetSession = useCallback((id: string) => {
     removeMountedSession(id);
     promptDraftStore.removeSession(id);
+    toolDecisionStore.forget(id);
     changeSessionList(current => current.filter(session => session.id !== id));
-  }, [changeSessionList, promptDraftStore, removeMountedSession]);
+  }, [changeSessionList, promptDraftStore, removeMountedSession, toolDecisionStore]);
 
   const removeAllSessions = useCallback(() => {
     for (const id of mountedSessionIdsRef.current) removeMountedSession(id);
@@ -354,7 +367,8 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     const previous = observationsRef.current[id];
     if (previous?.status === observation.status && previous.role === observation.role
       && previous.error === observation.error && previous.failure === observation.failure
-      && previous.ready === observation.ready && previous.approvalPending === observation.approvalPending
+      && previous.ready === observation.ready && previous.historyOnly === observation.historyOnly
+      && previous.approvalPending === observation.approvalPending
       && previous.running === observation.running && previous.retry === observation.retry) return;
     const observations = { ...observationsRef.current, [id]: observation };
     observationsRef.current = observations;
@@ -376,6 +390,10 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     id: string, placement: SessionCanvasPlacement = { type: 'maximized' },
   ): Promise<boolean> => {
     if (deletingSession.current === id || archivingSession.current === id) return Promise.resolve(false);
+    const close = closeRequestRef.current;
+    if (close?.id === id && close.completion) {
+      return close.completion.then(() => requestOpenSession(id, placement));
+    }
     if (placement.type === 'maximized') {
       // A newer exclusive selection retires earlier attempts that never acquired a tab.
       // The current placement stays in view until a replacement is ready.
@@ -1026,57 +1044,65 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   const openingSession = sessionList.find(session => session.id === openingSessionId);
   const openingObservation = sessionObservations[openingSessionId];
   const releaseSession = (id: string) => {
-    removeMountedSession(id);
+    // A reopen queued on the close acknowledgement must mount a new reader,
+    // even when React would batch both placements into the same render.
+    flushSync(() => removeMountedSession(id));
     void readSessionList().catch(() => {});
   };
-  const ownsCloseRequest = (request: CloseRequest) => closeRequestRef.current === request;
-  const closeSession = async (id: string) => {
-    if (!mountedSessionIdsRef.current.includes(id) || closeRequestRef.current) return;
-    const connection = sessionConnections.current.get(id);
-    if (connection?.role !== 'controller') {
-      if (!connection && observationsRef.current[id]?.role === 'controller') {
-        notify('暂时无法关闭会话', '会话正在重新连接。请在连接恢复后重试。', 'warning');
-      } else releaseSession(id);
-      return;
-    }
-    const request: CloseRequest = { id, connection };
-    publishCloseRequest(request);
-    try {
-      const work = await adapter.sessionCloseWork(id);
-      if (!ownsCloseRequest(request)) return;
-      if (sessionConnections.current.get(id) !== connection) {
-        throw new Error('连接已改变，请重新关闭会话。');
+  const submitTabClose = (request: CloseRequest, confirmation: SessionTabCloseConfirmation) => {
+    const pending: CloseRequest = { ...request, error: undefined };
+    const ownsRequest = () => closeRequestRef.current === pending;
+    pending.completion = Promise.resolve().then(async () => {
+      if (!ownsRequest()) return false;
+      try {
+        if (sessionConnections.current.get(pending.id) !== pending.connection) {
+          throw new Error('会话连接已改变，请重新关闭标签。');
+        }
+        const outcome = await adapter.closeSessionTab(pending.connection, confirmation);
+        if (!ownsRequest()) return false;
+        if (sessionConnections.current.get(pending.id) !== pending.connection) {
+          throw new Error('会话连接已改变，请重新关闭标签。');
+        }
+        if (outcome.status === 'closed') {
+          releaseSession(pending.id);
+          return true;
+        }
+        publishCloseRequest(activeViewRef.current === 'workbench'
+          ? { id: pending.id, connection: pending.connection, confirmation: outcome }
+          : undefined);
+      } catch (error) {
+        if (!ownsRequest()) return false;
+        const message = productMessage(error instanceof Error ? error.message : undefined, '无法确认这次标签关闭，请稍后重试。');
+        if (pending.confirmation && activeViewRef.current === 'workbench') publishCloseRequest({ ...pending, completion: undefined, error: message });
+        else {
+          publishCloseRequest();
+          notify('暂时无法关闭标签', message, 'warning');
+        }
       }
-      if (work.requiresConfirmation) publishCloseRequest({ ...request, work });
-      else releaseSession(id);
-    } catch (error) {
-      if (!ownsCloseRequest(request)) return;
-      publishCloseRequest();
-      notify('暂时无法关闭会话', productMessage(error instanceof Error ? error.message : undefined,
-        '无法确认这个会话是否还有任务，请稍后重试。'), 'warning');
-    }
+      return false;
+    });
+    publishCloseRequest(pending);
   };
-  const stopAndCloseSession = async () => {
-    const request = closeRequestRef.current;
-    if (!request?.work || request.stopping || request.error) return;
-    if (sessionConnections.current.get(request.id) !== request.connection) {
-      publishCloseRequest({ ...request, error: '连接已改变，请重新关闭会话。' });
+  const closeSession = (id: string) => {
+    if (!mountedSessionIdsRef.current.includes(id)) return;
+    const current = closeRequestRef.current;
+    if (current) {
+      if (!current.completion && current.id === id) dismissTabClose();
       return;
     }
-    const stopping = { ...request, stopping: true };
-    publishCloseRequest(stopping);
-    try {
-      const outcome = await adapter.stopSessionCloseWork(request.id, request.work);
-      if (!ownsCloseRequest(stopping)) return;
-      if (sessionConnections.current.get(request.id) !== request.connection) {
-        throw new Error('连接已改变，请重新关闭会话。');
-      }
-      if (outcome.status !== 'stopped') throw new Error('尚未确认会话任务已停止。');
-      releaseSession(request.id);
-    } catch (error) {
-      if (!ownsCloseRequest(stopping)) return;
-      publishCloseRequest({ ...request, error: productMessage(error instanceof Error ? error.message : undefined,
-        '无法确认会话任务已停止。') });
+    const connection = sessionConnections.current.get(id);
+    if (!connection) {
+      if (observationsRef.current[id]?.historyOnly) releaseSession(id);
+      else notify('暂时无法关闭标签', '会话正在重新连接。请在连接恢复后重试。', 'warning');
+      return;
+    }
+    submitTabClose({ id, connection }, { formIds: [], otherClients: false });
+  };
+  const confirmTabClose = () => {
+    const request = closeRequestRef.current;
+    if (request?.confirmation && !request.completion) {
+      const { formIds, otherClients } = request.confirmation;
+      submitTabClose(request, { formIds, otherClients });
     }
   };
   const onBrowserShortcut = (command: 'search' | 'new-session') => {
@@ -1096,6 +1122,8 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     scheduledApi={scheduledApi}
     promptDraftStore={promptDraftStore}
     suggestionCache={suggestionCache}
+    toolDecisionStore={toolDecisionStore}
+    pendingTabClose={pendingTabClose}
     changeSessionList={changeSessionList}
     invalidateSessionList={invalidateSessionList}
     readSessionList={readSessionList}
@@ -1105,7 +1133,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     onConnection={onSessionConnection}
     onPublishStatus={publishSessionStatus}
     onSessionMissing={forgetSession}
-    onClose={id => void closeSession(id)}
+    onClose={closeSession}
     onOpenSession={openSession}
     onRenameSession={setRenameTarget}
     onOpenScheduledTask={id => {
@@ -1206,7 +1234,9 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
 
       </div>
       <SessionCanvas controller={canvas} visible={showWorkbench} sessions={canvasSessions} tabHost={canvasTabHost}
-        onOpenSession={openSession} onCloseSession={id => void closeSession(id)} emptyContent={emptyContent} />
+        onOpenSession={openSession} onCloseSession={closeSession} emptyContent={emptyContent}
+        closingTab={closeRequest ? { id: closeRequest.id, confirmation: closeRequest.confirmation,
+          busy: Boolean(closeRequest.completion), error: closeRequest.error, onKeep: dismissTabClose, onConfirm: confirmTabClose } : undefined} />
       {activeView === 'workbench' && databaseBlocked && databaseState && (
         <div className="database-workbench-mask">
           <DatabaseSetupGuide
@@ -1318,14 +1348,6 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           if (!bulkDeletion.running) setBulkNoticeDismissed(true);
         }}
         onRetry={() => requestBulkDelete(bulkDeletion.items.filter(item => ['failed', 'unknown'].includes(item.status)).map(item => item.session))} />}
-      {closeRequest?.work && <SessionCloseDialog
-        title={sessionList.find(session => session.id === closeRequest.id)?.title ?? '会话'}
-        hasTerminalProcesses={closeRequest.work.hasTerminalProcesses}
-        stopping={Boolean(closeRequest.stopping)}
-        error={closeRequest.error}
-        onKeep={() => publishCloseRequest()}
-        onStop={() => void stopAndCloseSession()}
-      />}
     </main>
     </ToolResultDisplayContext.Provider>
     </McpAuthorizationContext.Provider>

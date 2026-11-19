@@ -891,23 +891,6 @@ class _SubagentOperations:
                 connection, root_session_id=root_session_id, work_id=work_id
             )
 
-    def list_unfinished_agent_work(self, *, root_session_id, deadline_monotonic):
-        with self._provider.connection(
-            lane=PostgresConnectionLane.INSPECTOR,
-            deadline_monotonic=deadline_monotonic,
-        ) as connection:
-            rows = connection.execute(
-                """SELECT q.session_id, q.id FROM pulsara_v3.prompt_queue_items q
-                   JOIN pulsara_v3.sessions s ON s.id=q.session_id
-                   LEFT JOIN pulsara_v3.transcript_entries e ON e.session_id=q.session_id AND e.id=q.consumed_entry_id
-                   LEFT JOIN pulsara_v3.turns t ON t.session_id=e.session_id AND t.id=e.turn_id
-                   WHERE s.root_session_id=%s AND q.input_origin='AGENT_INSTRUCTION'
-                     AND (q.status='PENDING' OR t.status='RUNNING')
-                   ORDER BY q.session_id, q.queue_sequence""",
-                (root_session_id,),
-            ).fetchall()
-            return tuple((str(agent_id), str(work_id)) for agent_id, work_id in rows)
-
     def query_visible_agent_work(
         self, *, root_session_id, observer_session_id, work_id, deadline_monotonic
     ):
@@ -1294,18 +1277,11 @@ class _SubagentOperations:
         *,
         agent_id,
         work_id=None,
-        work_ids=None,
         reason="USER_CANCELLED",
         occurred_at,
         actor_id,
         deadline_monotonic,
     ):
-        if work_id is not None:
-            if work_ids is not None:
-                raise ValueError("Select either an exact Work or a set of Works")
-            work_ids = [work_id]
-        elif work_ids is not None:
-            work_ids = list(work_ids)
         with self._writer_transaction(
             root_guard,
             deadline_monotonic=deadline_monotonic,
@@ -1322,8 +1298,8 @@ class _SubagentOperations:
             )
             rows = connection.execute(
                 _WORK_SELECT
-                + " AND q.session_id=%s AND (%s::text[] IS NULL OR q.id=ANY(%s::text[])) AND (q.status='PENDING' OR qt.status='RUNNING' OR %s::text[] IS NOT NULL) ORDER BY q.queue_sequence FOR UPDATE OF q",
-                (root_guard.session_id, agent_id, work_ids, work_ids, work_ids),
+                + " AND q.session_id=%s AND (%s::text IS NULL OR q.id=%s) AND (q.status='PENDING' OR qt.status='RUNNING' OR %s::text IS NOT NULL) ORDER BY q.queue_sequence FOR UPDATE OF q",
+                (root_guard.session_id, agent_id, work_id, work_id, work_id),
             ).fetchall()
             ids = []
             for row in rows:

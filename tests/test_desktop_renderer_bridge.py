@@ -51,6 +51,9 @@ def test_pr03_background_reads_use_attached_protocol_requests() -> None:
 
 
 class _Sessions:
+    def reopen_tab(self, session_id):
+        pass
+
     async def runtime_closing(self, session_id):
         return False
 
@@ -861,6 +864,7 @@ def _runtime_reopen_controller(
     controller._by_session = {}
     controller._by_host = {}
     controller._operations = {}
+    controller._pending_tab_unloads = {}
     controller._forks = set()
     controller._lock = asyncio.Lock()
     controller._closing = False

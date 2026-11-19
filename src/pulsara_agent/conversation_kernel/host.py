@@ -10,7 +10,9 @@ acquires a new writer generation and rehydrates canonical rows only.
 
 from __future__ import annotations
 
-from pulsara_agent.conversation_kernel.repository_errors import UnpublishedIdentityCollision
+from pulsara_agent.conversation_kernel.repository_errors import (
+    SessionDeletionBusy, SessionWriterConflict, UnpublishedIdentityCollision,
+)
 
 from pulsara_agent.identity import derive_id, random_id, is_valid_id
 
@@ -21,7 +23,7 @@ from pulsara_agent.conversation_kernel.annotations import AnnotationSourceInvali
 import asyncio
 import logging
 import json
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -407,6 +409,7 @@ class KernelSessionOpenAttempt:
     ) = None
     candidate_session: KernelHostSession | None = None
     io_owner: KernelSessionIO | None = None
+    idle_unload: bool = False
 
 @dataclass(slots=True)
 class HostSessionCloseAttempt:
@@ -417,6 +420,7 @@ class HostSessionCloseAttempt:
     deadline_monotonic: float
     task: asyncio.Task[None]
     state: HostSessionCloseState = HostSessionCloseState.TASK_INSTALLED
+    idle_unload: bool = False
 
 
 @dataclass(slots=True)
@@ -1897,20 +1901,35 @@ class KernelHostSession(
 
         async with self._lock:
             self._require_open()
-            self._retire_done_active_root_locked()
-            self._retire_control_attempts_locked()
-            if self._has_runtime_work():
+            quiescence = self._freeze_idle_runtime_locked()
+            if quiescence is None:
                 raise RuntimeError("HostSession is not quiescent for runtime reopen")
-            quiescence = KernelRuntimeReopenQuiescence(
-                session_id=self.session_id,
-                host_session_id=self.host_session_id,
-                writer_generation=self._lease.guard.writer_generation,
-                operation_nonce=random_id("operation"),
-                owner=self,
-                _seal=_KERNEL_RUNTIME_REOPEN_QUIESCENCE_SEAL,
-            )
-            self._runtime_reopen_quiescence = quiescence
             return quiescence
+
+    def _freeze_idle_runtime_locked(self) -> KernelRuntimeReopenQuiescence | None:
+        self._retire_done_active_root_locked()
+        self._retire_control_attempts_locked()
+        if self._has_runtime_work():
+            return None
+        quiescence = KernelRuntimeReopenQuiescence(
+            session_id=self.session_id,
+            host_session_id=self.host_session_id,
+            writer_generation=self._lease.guard.writer_generation,
+            operation_nonce=random_id("operation"),
+            owner=self,
+            _seal=_KERNEL_RUNTIME_REOPEN_QUIESCENCE_SEAL,
+        )
+        self._runtime_reopen_quiescence = quiescence
+        return quiescence
+
+    async def _try_freeze_idle_unload(self) -> KernelRuntimeReopenQuiescence | None:
+        async with self._lock:
+            if (self._closing or self._closed or self.writer_unavailable
+                    or self._runtime_reopen_quiescence is not None
+                    or self._interactions.has_pending_requests()
+                    or self.archive_has_terminal_work()):
+                return None
+            return self._freeze_idle_runtime_locked()
 
     def provider_retry_observation(self) -> dict[str, object] | None:
         return None if self._closing else self._runner.provider_retry_observation()
@@ -1946,9 +1965,12 @@ class KernelHostSession(
         """Consume the exact gate while keeping admission closed for teardown."""
 
         async with self._lock:
-            if self._runtime_reopen_quiescence is not quiescence:
-                raise RuntimeError("runtime-reopen quiescence is stale")
-            quiescence._consume(self)
+            self._commit_runtime_quiescence(quiescence)
+
+    def _commit_runtime_quiescence(self, quiescence: KernelRuntimeReopenQuiescence) -> None:
+        if self._runtime_reopen_quiescence is not quiescence:
+            raise RuntimeError("runtime-reopen quiescence is stale")
+        quiescence._consume(self)
 
 
     async def query_command(self, command_id: str) -> KernelCommandOutcome | None:
@@ -2185,6 +2207,13 @@ class KernelHostSession(
     async def controller_detached(self, attachment_id: str) -> None:
         self._presentation_notices.pop(attachment_id, None)
         await self._interactions.controller_detached(attachment_id)
+
+    async def close_tab_attachment(
+        self, attachment_id: str, *, confirmed_forms: frozenset[str], can_disconnect: Callable[[], bool],
+    ) -> tuple[tuple[str, ...], bool] | None:
+        return await self._interactions.close_tab_attachment(
+            attachment_id, confirmed_forms=confirmed_forms, can_disconnect=can_disconnect,
+        )
 
     async def resolve_tool_interaction(
         self,
@@ -2954,7 +2983,7 @@ class KernelHostCore(_HostCoreManagementOperations):
 
     async def resume_scheduled_session(self, session_id: str) -> KernelHostSession:
         """Restore a selected ROOT through the same kernel open owner as the UI."""
-        async with self._lock:
+        async with self._session_admission_lock(session_id):
             self._require_session_control_available_locked(session_id)
             pending = any(session_id in attempt.session_ids
                           and (attempt.task is None or (attempt.configuration is not None
@@ -2985,7 +3014,7 @@ class KernelHostCore(_HostCoreManagementOperations):
 
     async def scheduled_management_host(self, session_id: str, *, memory_domain_id: str | None = None) -> KernelHostSession | None:
         """Locate the canonical live writer without opening a session for management."""
-        async with self._lock:
+        async with self._session_admission_lock(session_id):
             self._require_session_control_available_locked(session_id)
             if any(session_id in attempt.session_ids
                    and (attempt.task is None or (attempt.configuration is not None
@@ -2999,7 +3028,7 @@ class KernelHostCore(_HostCoreManagementOperations):
 
     async def reserve_session_operation(self, session_id: str) -> asyncio.Future[None]:
         """Fence kernel execution while a host-facing lifecycle operation settles."""
-        async with self._lock:
+        async with self._session_admission_lock(session_id):
             self._require_session_control_available_locked(session_id)
             if any(session_id in attempt.session_ids
                    and (attempt.task is None or (attempt.configuration is not None
@@ -3012,6 +3041,42 @@ class KernelHostCore(_HostCoreManagementOperations):
 
     async def release_session_operation(self, operation: asyncio.Future[None]) -> None:
         await self._settle_session_open(operation)
+
+    @asynccontextmanager
+    async def _session_admission_lock(self, *session_ids: str):
+        ids = frozenset(session_ids)
+        while True:
+            async with self._lock:
+                waiting = tuple(
+                    settlement for settlement, attempt in self._open_attempts.items()
+                    if attempt.idle_unload and ids.intersection(attempt.session_ids)
+                )
+                if not waiting:
+                    if any(
+                        attempt.idle_unload and (
+                            attempt.session.session_id in ids or attempt.session.root_session_id in ids
+                        ) for attempt in self._close_attempts.values()
+                    ):
+                        raise SessionControlRejected(
+                            "SESSION_RECOVERY_CLOSE_FAILED", "无法确认旧会话已关闭，当前只能查看已保存的历史。",
+                        )
+                    yield
+                    return
+            await asyncio.gather(*(asyncio.shield(settlement) for settlement in waiting))
+
+    async def wait_for_idle_unload(self, session_id: str) -> None:
+        """Join a current unload check/close before attaching to a reserved Host."""
+        async with self._session_admission_lock(session_id):
+            pass
+
+    @asynccontextmanager
+    async def scheduled_session_admission(self, session_id: str):
+        """Keep the selected Host between scheduled resumption and prompt admission."""
+        settlement = await self._admit_session_open(session_id)
+        try:
+            yield
+        finally:
+            await self._settle_session_open(settlement)
 
     def _require_session_control_available_locked(self, session_id: str) -> None:
         if self._closing:
@@ -3072,7 +3137,7 @@ class KernelHostCore(_HostCoreManagementOperations):
         effective_policy = permission_policy or self._root_permission_policy
         effective_skills = self._root_active_skill_names if active_skill_names is None else active_skill_names
         configuration = (normalized_workspace, effective_policy, system_prompt, effective_skills)
-        async with self._lock:
+        async with self._session_admission_lock(session_id):
             self._require_session_control_available_locked(session_id)
             if operation is not None:
                 reserved = self._open_attempts.get(operation)
@@ -3142,7 +3207,7 @@ class KernelHostCore(_HostCoreManagementOperations):
                 )
                 root_id = None if state is None else state["root_session_id"]
                 if root_id is not None:
-                    async with self._lock:
+                    async with self._session_admission_lock(str(root_id)):
                         self._require_session_control_available_locked(str(root_id))
                         attempt = self._open_attempts.get(settlement)
                         if attempt is None or attempt.task is not asyncio.current_task():
@@ -3174,7 +3239,7 @@ class KernelHostCore(_HostCoreManagementOperations):
             await self._settle_session_open(settlement)
 
     async def _admit_session_open(self, *session_ids: str) -> asyncio.Future[None]:
-        async with self._lock:
+        async with self._session_admission_lock(*session_ids):
             if self._closing:
                 raise KernelHostCoreClosing("Kernel Host core is closing")
             if any(s in self._session_retirements for s in session_ids):
@@ -3515,7 +3580,7 @@ class KernelHostCore(_HostCoreManagementOperations):
         session_id: str,
         memory_domain_id: str,
     ) -> KernelSessionRetirement:
-        async with self._lock:
+        async with self._session_admission_lock(session_id):
             if self._closing or session_id in self._session_retirements:
                 raise SessionDeleteRejected(
                     "SESSION_DELETE_BUSY", "会话正在处理另一项操作。"
@@ -3540,20 +3605,100 @@ class KernelHostCore(_HostCoreManagementOperations):
         return operation
 
 
+    async def try_unload_idle_session(
+        self, host_session_id: str, *, can_close: Callable[[], bool],
+    ) -> HostSessionCloseAttempt | None:
+        """Freeze the exact Host family and install close only for idle work."""
+        async with self._lock:
+            root = self._sessions.get(host_session_id)
+            if self._closing or root is None:
+                return None
+            sessions = tuple(
+                session for session in self._sessions.values()
+                if session is root or session.root_session_id == root.session_id
+            )
+            session_ids = frozenset(session.session_id for session in sessions)
+            if (any(other.session.session_id in session_ids or other.session.root_session_id == root.session_id
+                    for other in self._close_attempts.values())
+                    or session_ids.intersection(self._session_retirements)
+                    or any(session_ids.intersection(other.session_ids) for other in self._open_attempts.values())):
+                return None
+            settlement = asyncio.get_running_loop().create_future()
+            self._open_attempts[settlement] = KernelSessionOpenAttempt(session_ids, idle_unload=True)
+        gates = []
+        installed = False
+        try:
+            for session in sessions:
+                gate = await session._try_freeze_idle_unload()
+                if gate is None:
+                    return None
+                gates.append((session, gate))
+            status = await root._io.run(
+                root.repository.archive_session,
+                session_id=root.session_id,
+                memory_domain_id=root._memory_domain_id,
+                closed_writer=root._lease.guard,
+                child_writers=tuple(session._lease.guard for session in sessions if session is not root),
+                check_only=True,
+                deadline_monotonic=self._canonical_deadline(),
+            )
+            async with self._lock:
+                if status != "OPEN" or self._closing or any(
+                    self._sessions.get(session.host_session_id) is not session
+                    or session._closing or session.writer_unavailable
+                    or session._runtime_reopen_quiescence is not gate
+                    or session._has_runtime_work() or session.archive_has_terminal_work()
+                    or session._interactions.has_pending_requests()
+                    for session, gate in gates
+                ):
+                    return None
+                if not can_close():
+                    return None
+                for session, gate in gates:
+                    session._commit_runtime_quiescence(gate)
+                attempt = self._install_session_close_locked(
+                    root, idle_unload=True, unload_settlement=settlement,
+                )
+                installed = True
+                return attempt
+        except (KeyError, SessionDeletionBusy, SessionWriterConflict):
+            return None
+        finally:
+            if not installed:
+                try:
+                    for session, gate in reversed(gates):
+                        await session.abort_safe_runtime_reopen(gate)
+                finally:
+                    await self._settle_session_open(settlement)
+
     async def close_session(self, host_session_id: str) -> None:
         attempt = await self.request_close_session(host_session_id)
         if attempt is not None:
             # Cancellation detaches only this waiter from the installed owner.
             await asyncio.shield(attempt.task)
 
-    def _install_session_close_locked(self, session: KernelHostSession) -> HostSessionCloseAttempt:
+    def _install_session_close_locked(
+        self, session: KernelHostSession, *, idle_unload: bool = False,
+        unload_settlement: asyncio.Future[None] | None = None,
+    ) -> HostSessionCloseAttempt:
         attempt = self._close_attempts.get(session.host_session_id)
         if attempt is None:
             deadline = self._deadlines.deadline(KernelWatchdogOwner.HOST_SESSION_CLOSE)
-            task = asyncio.create_task(self._close_session_owner(
-                host_session_id=session.host_session_id, session=session, deadline_monotonic=deadline,
-            ), name=f"kernel-host-close:{session.host_session_id}")
-            attempt = HostSessionCloseAttempt(session.host_session_id, session, deadline, task)
+
+            async def close_owner() -> None:
+                try:
+                    await self._close_session_owner(
+                        host_session_id=session.host_session_id,
+                        session=session,
+                        deadline_monotonic=deadline,
+                        idle_unload=idle_unload,
+                    )
+                finally:
+                    if unload_settlement is not None:
+                        await self._settle_session_open(unload_settlement)
+
+            task = asyncio.create_task(close_owner(), name=f"kernel-host-close:{session.host_session_id}")
+            attempt = HostSessionCloseAttempt(session.host_session_id, session, deadline, task, idle_unload=idle_unload)
             self._close_attempts[session.host_session_id] = attempt
         # The event-loop-local admission flag does not wait behind an already
         # accepted preview/database read holding the Session lock.
@@ -3581,8 +3726,9 @@ class KernelHostCore(_HostCoreManagementOperations):
     def session_runtime_closing(self, session_id: str) -> bool:
         return any(
             attempt.session.session_id == session_id
-            and attempt.state in {HostSessionCloseState.TASK_INSTALLED,
-                                  HostSessionCloseState.CLOSE_FAILED_QUARANTINED}
+            and (attempt.idle_unload or attempt.state in {
+                HostSessionCloseState.TASK_INSTALLED, HostSessionCloseState.CLOSE_FAILED_QUARANTINED,
+            })
             for attempt in self._close_attempts.values()
         )
 
@@ -3622,6 +3768,7 @@ class KernelHostCore(_HostCoreManagementOperations):
         host_session_id: str,
         session: KernelHostSession,
         deadline_monotonic: float,
+        idle_unload: bool = False,
     ) -> None:
         close_error: BaseException | None = None
         if session.root_session_id is None:
@@ -3631,12 +3778,15 @@ class KernelHostCore(_HostCoreManagementOperations):
                 owned.update((attempt.host_session_id, attempt.session) for attempt in self._close_attempts.values())
                 children = tuple(child for child in owned.values()
                     if child.root_session_id == session.session_id)
-            child_closes = tuple(asyncio.create_task(self.close_session(child.host_session_id)) for child in children)
+                child_closes = tuple(
+                    self._install_session_close_locked(child, idle_unload=idle_unload).task
+                    for child in children
+                )
             if children:
                 terminal_stop = asyncio.create_task(session._tools.stop_terminal_physical_owners(
                     timeout_seconds=max(0.001, deadline_monotonic - monotonic())))
                 await session._stop_close_admission()
-                outcomes = await asyncio.gather(*child_closes, return_exceptions=True)
+                outcomes = await asyncio.gather(*(asyncio.shield(task) for task in child_closes), return_exceptions=True)
                 try:
                     await terminal_stop
                 except BaseException as error:
@@ -3662,8 +3812,7 @@ class KernelHostCore(_HostCoreManagementOperations):
                 raise
         if session.root_session_id is not None:
             await self._agent_runtime.release(session.session_id)
-        # Physical completion is independent of a best-effort exact lease
-        # release. A failure here never turns full close into false uncertainty.
+        release_error = None
         try:
             repository = self._repository
             if repository is None:
@@ -3672,13 +3821,19 @@ class KernelHostCore(_HostCoreManagementOperations):
                 repository.release_host_writer, session._lease.guard,
                 deadline_monotonic=self._canonical_deadline(),
             )
-        except Exception:
+        except Exception as exc:
+            release_error = exc
             logging.getLogger(__name__).exception("clean Host writer release was not confirmed")
+        # A lazy unload promises that new work can safely resume. A failed
+        # writer release or unconfirmed child settlement must remain visible.
+        unconfirmed = not session.necessary_settlement_complete or (
+            idle_unload and (release_error is not None or isinstance(close_error, KernelSessionSettlementUnconfirmed))
+        )
         async with self._lock:
             attempt = self._close_attempts.get(host_session_id)
             if attempt is not None:
-                attempt.state = (HostSessionCloseState.CLOSED if session.necessary_settlement_complete
-                                 else HostSessionCloseState.CLOSED_SETTLEMENT_UNCONFIRMED)
+                attempt.state = (HostSessionCloseState.CLOSED_SETTLEMENT_UNCONFIRMED if unconfirmed
+                                 else HostSessionCloseState.CLOSED)
             if self._sessions.get(host_session_id) is session:
                 self._sessions.pop(host_session_id, None)
             route = self._extension_routes.get(session.session_id)
@@ -3688,8 +3843,10 @@ class KernelHostCore(_HostCoreManagementOperations):
             # attempt would retain its completed task and the entire session
             # object graph for the lifetime of KernelHostCore.  Failed attempts
             # remain quarantined above; successful attempts retire immediately.
-            if self._close_attempts.get(host_session_id) is attempt:
+            if self._close_attempts.get(host_session_id) is attempt and not (idle_unload and unconfirmed):
                 self._close_attempts.pop(host_session_id, None)
+        if idle_unload and unconfirmed:
+            raise KernelSessionSettlementUnconfirmed("Host unload settlement is unconfirmed") from (close_error or release_error)
         if close_error is not None:
             if not session.necessary_settlement_complete or isinstance(close_error, KernelSessionSettlementUnconfirmed):
                 raise KernelSessionSettlementUnconfirmed("Host canonical settlement is unconfirmed") from close_error

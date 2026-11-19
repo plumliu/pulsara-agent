@@ -224,6 +224,7 @@ class RendererBridge:
         *,
         browser_instance_id: str,
         takeover: bool = False,
+        reopen_tab: bool = True,
     ) -> dict[str, object]:
         if not session_id:
             raise ValueError("session_id is required")
@@ -235,9 +236,12 @@ class RendererBridge:
         if await self.sessions.runtime_closing(session_id):
             return {"view": "history", "session_id": session_id,
                     "runtime_closing": True,
+                    "runtime_close_failed": self.sessions.lazy_close_failed(session_id),
                     "workspace_availability": await self.sessions.workspace_availability(session_id),
                     "snapshot": protobuf_json(await self.sessions.history_snapshot(session_id))}
         async with self._session_gate(session_id):
+            if reopen_tab:
+                self.sessions.reopen_tab(session_id)
             old: BrowserRuntimeConnection | None = None
             async with self._lock:
                 controller_id = self._controller_by_session.get(session_id)
@@ -268,6 +272,7 @@ class RendererBridge:
                 await self._disconnect_session_under_gate(session_id)
                 return {"view": "history", "session_id": session_id,
                         "runtime_closing": True,
+                        "runtime_close_failed": self.sessions.lazy_close_failed(session_id),
                         "workspace_availability": await self.sessions.workspace_availability(session_id),
                         "snapshot": protobuf_json(await self.sessions.history_snapshot(session_id))}
             except WorkspaceUnavailable as exc:
@@ -640,30 +645,42 @@ class RendererBridge:
         # point. Directory/database reads above can yield to a takeover.
         await self._require_browser_controller(connection_id, generation)
 
-    async def session_close_work(self, session_id: str, connection_id: str, generation: int) -> dict[str, object]:
-        await self.require_chat_controller(connection_id, generation, session_id=session_id, require_directory=False)
-        connection = await self._connection(connection_id)
-        host = await self.sessions.require_tab_close_host(session_id, connection.host_session_id)
-        work = await host.observe_session_close_work()
-        await self.require_chat_controller(connection_id, generation, session_id=session_id, require_directory=False)
-        observation_id = random_id("operation") if work.requires_confirmation else None
-        connection.close_work_observation = None if observation_id is None else (observation_id, work)
-        return {"requires_confirmation": work.requires_confirmation,
-                "has_terminal_processes": work.has_terminal_processes,
-                "observation_id": observation_id}
+    async def close_tab(
+        self, session_id: str, connection_id: str, generation: int, *,
+        confirmed_forms: frozenset[str], confirmed_other_clients: bool,
+    ) -> dict[str, object]:
+        async with self._session_gate(session_id):
+            connection = await self._connection(connection_id)
+            if (connection.session_id != session_id or connection.generation != generation
+                    or connection_id in self._agent_reader_targets):
+                raise ProtocolBridgeError("STALE_ATTACHMENT", "连接已改变，请重新关闭会话。")
+            host = await self.sessions.require_tab_close_host(session_id, connection.host_session_id)
+            own = frozenset((connection.hello.attachment_id, connection.live_hello.attachment_id))
+            other_clients = False
 
-    async def stop_session_close_work(self, session_id: str, connection_id: str, generation: int, observation_id: str) -> None:
-        await self.require_chat_controller(connection_id, generation, session_id=session_id, require_directory=False)
-        connection = await self._connection(connection_id)
-        host = await self.sessions.require_tab_close_host(session_id, connection.host_session_id)
-        await self._require_browser_controller(connection_id, generation)
-        observation = connection.close_work_observation
-        if observation is None or observation[0] != observation_id:
-            raise ProtocolBridgeError("SESSION_CLOSE_WORK_CHANGED", "任务状态已变化，请重新检查后再关闭。")
-        connection.close_work_observation = None
-        task = asyncio.create_task(host.stop_session_close_work(observation[1]))
-        # A disconnected HTTP waiter cannot cancel an admitted stop.
-        await asyncio.shield(task)
+            def can_disconnect() -> bool:
+                nonlocal other_clients
+                if self._connections.get(connection_id) is not connection or not connection.is_open:
+                    raise ProtocolBridgeError("STALE_ATTACHMENT", "连接已改变，请重新关闭会话。")
+                other_clients = self.protocol_server.has_session_attachments(host, excluding=own)
+                return not other_clients or confirmed_other_clients
+
+            remaining = await host.close_tab_attachment(
+                connection.hello.attachment_id, confirmed_forms=confirmed_forms, can_disconnect=can_disconnect,
+            )
+            if remaining is not None:
+                form_ids, visible = remaining
+                return {"status": "confirmation_required", "form_ids": list(form_ids),
+                        "visible_form": visible, "other_clients": other_clients}
+            self.sessions.defer_tab_unload(
+                host, has_connections=lambda: self.protocol_server.has_session_attachments(
+                    host, include_children=True, include_pending=True,
+                ),
+                browser_gate_busy=lambda: session_id in self._session_gate_users,
+            )
+            await self.disconnect(connection_id)
+        self.sessions.attachment_closed(host)
+        return {"status": "closed"}
 
     async def restore_workspace(self, session_id: str, connection_id: str | None, generation: int):
         async with self._session_gate(session_id):

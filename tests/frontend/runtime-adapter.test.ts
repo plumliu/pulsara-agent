@@ -18,57 +18,68 @@ const connectedWorkspaceAvailability = {path: '/tmp/project', outcome: 'AVAILABL
 let historyOwnerFixture: Record<string, unknown> = {};
 afterEach(() => { delete window.pulsaraDesktop; vi.unstubAllGlobals(); historyOwnerFixture = {}; });
 
-it('queries and stops observed tab work using its live controller identity', async () => {
+it.each(['controller', 'observer'] as const)('closes a tab with its exact %s connection', async role => {
   const sessionId = deriveIdentity('session', 'close-test', 'selected');
-  const observationId = deriveIdentity('operation', 'close-test', 'observed');
+  const formId = deriveIdentity('interaction', 'close-test', 'observed');
   const payload = connectPayload();
+  payload.role = role;
   payload.session_id = payload.snapshot.snapshot.session_id = sessionId;
   payload.connection_generation = 7;
+  const scope = {status: 'confirmation_required', form_ids: role === 'controller' ? [formId] : [], visible_form: role === 'controller', other_clients: true};
   const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(JSON.stringify(payload)))
-    .mockImplementation(async (_url, init) => {
-      const headers = new Headers(init?.headers);
-      const authorized = headers.get('X-Pulsara-Connection-Id') === payload.connection_id
-        && headers.get('X-Pulsara-Connection-Generation') === '7';
-      const expected = init?.method === 'GET'
-        ? {requires_confirmation: true, has_terminal_processes: true, observation_id: observationId}
-        : {status:'stopped'};
-      return new Response(JSON.stringify(authorized ? expected : {
-        error: {code:'CHAT_CONTROLLER_REQUIRED', message:'当前窗口没有会话控制权，请重新连接。'},
-      }), {status: authorized ? 200 : 409});
-    });
+    .mockResolvedValueOnce(new Response(JSON.stringify(scope)))
+    .mockResolvedValueOnce(new Response(JSON.stringify({status: 'closed'})));
   vi.stubGlobal('fetch', fetchMock);
   const adapter = new LocalHttpRuntimeAdapter();
-  await adapter.connect(sessionId);
-  const work = await adapter.sessionCloseWork(sessionId);
-  expect(work).toEqual({requiresConfirmation: true, hasTerminalProcesses: true, observationId});
-  expect(await adapter.stopSessionCloseWork(sessionId, work)).toEqual({status:'stopped'});
+  const connection = await adapter.connect(sessionId);
+  if (connection instanceof CanonicalHistoryView) throw new Error('Expected a live connection');
+  const confirmation = await adapter.closeSessionTab(connection, { formIds: [], otherClients: false });
+  expect(confirmation).toEqual({status: 'confirmation_required', formIds: scope.form_ids, visibleForm: scope.visible_form, otherClients: true});
+  if (confirmation.status !== 'confirmation_required') throw new Error('Expected confirmation');
+  expect(await adapter.closeSessionTab(connection, confirmation)).toEqual({status: 'closed'});
+  await connection.close();
   expect(fetchMock).toHaveBeenCalledTimes(3);
-  expect(fetchMock).toHaveBeenLastCalledWith(`/api/sessions/${encodeURIComponent(sessionId)}/close-work`,
-    expect.objectContaining({method:'POST',body:JSON.stringify({observation_id: observationId}),headers:expect.objectContaining({
-      'X-Pulsara-Connection-Id':payload.connection_id,'X-Pulsara-Connection-Generation':'7',
-    })}));
+  const closeRequests = fetchMock.mock.calls.slice(1);
+  expect(closeRequests.map(([path, init]) => [path, init?.method, JSON.parse(String(init?.body))])).toEqual([
+    [`/api/sessions/${encodeURIComponent(sessionId)}/close-tab`, 'POST', {confirmed_form_ids: [], confirmed_other_clients: false}],
+    [`/api/sessions/${encodeURIComponent(sessionId)}/close-tab`, 'POST', {confirmed_form_ids: scope.form_ids, confirmed_other_clients: true}],
+  ]);
+  for (const [, init] of closeRequests) {
+    const headers = new Headers(init?.headers);
+    expect(headers.get('X-Pulsara-Connection-Id')).toBe(payload.connection_id);
+    expect(headers.get('X-Pulsara-Connection-Generation')).toBe('7');
+  }
 });
 
-it.each(['disconnected','observer','other-session','closed'] as const)('does not submit close from a %s connection', async mode => {
+it.each(['foreign', 'replaced', 'closed'] as const)('does not close a tab from a %s connection', async mode => {
   const payload = connectPayload();
-  if (mode === 'observer') payload.role = 'observer';
   const fetchMock = vi.fn().mockImplementation(async (_url, init) => new Response(JSON.stringify(
     init?.method === 'DELETE' ? {} : payload,
   )));
   vi.stubGlobal('fetch', fetchMock);
   const adapter = new LocalHttpRuntimeAdapter();
-  if (mode !== 'disconnected') {
-    const connection = await adapter.connect(payload.session_id);
-    if (mode === 'closed') await connection.close();
-  }
-  await expect(adapter.sessionCloseWork(mode === 'other-session' ? 'other-session' : payload.session_id))
-    .rejects.toMatchObject({code:'CHAT_CONTROLLER_REQUIRED'});
-  expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/close-work'))).toEqual([]);
+  const connection = await (mode === 'foreign' ? new LocalHttpRuntimeAdapter() : adapter).connect(payload.session_id);
+  if (connection instanceof CanonicalHistoryView) throw new Error('Expected a live connection');
+  if (mode === 'closed') await connection.close();
+  if (mode === 'replaced') await adapter.connect(payload.session_id, false, false);
+  await expect(adapter.closeSessionTab(connection, {formIds: [], otherClients: false}))
+    .rejects.toMatchObject({code: 'CHAT_CONNECTION_CHANGED'});
+  expect(fetchMock.mock.calls.filter(([path]) => String(path).endsWith('/close-tab'))).toEqual([]);
+});
+
+it('marks explicit opens but not transport reconnects as reopening the tab', async () => {
+  const payload = connectPayload();
+  const fetchMock = vi.fn().mockImplementation(async () => new Response(JSON.stringify(payload)));
+  vi.stubGlobal('fetch', fetchMock);
+  const adapter = new LocalHttpRuntimeAdapter();
+  await adapter.connect(payload.session_id);
+  await adapter.connect(payload.session_id, false, false);
+  expect(fetchMock.mock.calls.map(([, init]) => JSON.parse(init.body).reopen_tab)).toEqual([true, false]);
 });
 
 it('keeps an unconfirmed closing runtime as a read-only history view', async () => {
   const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
-    view: 'history', session_id: 'session-1', runtime_closing: true,
+    view: 'history', session_id: 'session-1', runtime_closing: true, runtime_close_failed: true,
     workspace_availability: connectedWorkspaceAvailability,
     snapshot: { snapshot: { snapshot: { session_id: 'session-1', entries: [], control: {}, event_sequence_cut: '0' } } },
   }), { status: 200 }));
@@ -76,6 +87,7 @@ it('keeps an unconfirmed closing runtime as a read-only history view', async () 
   const view = await new LocalHttpRuntimeAdapter().connect('session-1');
   expect(view).toBeInstanceOf(CanonicalHistoryView);
   expect((view as CanonicalHistoryView).runtimeClosing).toBe(true);
+  expect((view as CanonicalHistoryView).runtimeCloseFailed).toBe(true);
   expect(view.current().isRunning).toBe(false);
   expect(fetchMock).toHaveBeenCalledOnce();
   await view.close();
@@ -2224,11 +2236,12 @@ describe('LocalHttpRuntimeAdapter connection ownership', () => {
 
     const connection = await new LocalHttpRuntimeAdapter(
       '00000000-0000-4000-8000-000000000001',
-    ).connect('session-1', true);
+    ).connect('session-1', true, false);
 
     expect(requestBody).toEqual({
       browser_instance_id: '00000000-0000-4000-8000-000000000001',
       takeover: true,
+      reopen_tab: false,
     });
     expect(connection.role).toBe('controller');
   });

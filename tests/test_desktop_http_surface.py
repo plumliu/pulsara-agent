@@ -358,6 +358,7 @@ class _Bridge:
         *,
         browser_instance_id: str,
         takeover: bool = False,
+        reopen_tab: bool = True,
     ) -> dict[str, object]:
         self.connect_calls.append((session_id, browser_instance_id, takeover))
         return {

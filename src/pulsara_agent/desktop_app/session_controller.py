@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -277,6 +278,18 @@ class _WorkspaceRestoreInFlight(_ResumeInFlight):
 
 
 @dataclass(slots=True)
+class _IdleUnloadInFlight:
+    task: asyncio.Task
+
+
+@dataclass(slots=True)
+class _PendingTabUnload:
+    host: KernelHostSession
+    wake: asyncio.Event
+    task: asyncio.Task | None = None
+
+
+@dataclass(slots=True)
 class _RawCloseInFlight:
     operation: PreparedRawCloseOperation
     physical_close_full: bool = False
@@ -312,7 +325,7 @@ class SessionRetirementOperation:
 
 
 _SessionOperation = (
-    _ResumeInFlight | _RawCloseInFlight | _RuntimeReopenInFlight | _Quarantined | SessionRetirementOperation
+    _ResumeInFlight | _IdleUnloadInFlight | _RawCloseInFlight | _RuntimeReopenInFlight | _Quarantined | SessionRetirementOperation
 )
 
 
@@ -354,6 +367,7 @@ class LocalSessionController(SessionCapabilities):
         self._by_session: dict[str, HostSessionHandle] = {}
         self._by_host: dict[str, HostSessionHandle] = {}
         self._operations: dict[str, _SessionOperation] = {}
+        self._pending_tab_unloads: dict[str, _PendingTabUnload] = {}
         self._forks: set[asyncio.Task[dict[str, object]]] = set()
         self._fork_sessions: dict[asyncio.Task, frozenset[str]] = {}
         self._lock = asyncio.Lock()
@@ -725,6 +739,97 @@ class LocalSessionController(SessionCapabilities):
                 raise SessionControlRejected("SESSION_CLOSE_HOST_CHANGED", "会话运行时已变化，请重新检查任务。")
             return handle.session
 
+    def defer_tab_unload(
+        self, host: KernelHostSession, *, has_connections: Callable[[], bool], browser_gate_busy: Callable[[], bool],
+    ) -> None:
+        """Only an explicitly closed exact tab may create this process-local intent."""
+        pending = self._pending_tab_unloads.get(host.session_id)
+        if pending is not None and pending.host is host:
+            pending.wake.set()
+            return
+        if pending is not None:
+            pending.wake.set()
+        pending = _PendingTabUnload(host, asyncio.Event())
+        self._pending_tab_unloads[host.session_id] = pending
+        pending.task = asyncio.create_task(self._unload_when_idle(pending, has_connections, browser_gate_busy),
+                                           name=f"tab-unload:{host.host_session_id}")
+
+    def attachment_closed(self, host: KernelHostSession) -> None:
+        pending = self._pending_tab_unloads.get(host.root_session_id or host.session_id)
+        if pending is not None:
+            pending.wake.set()
+
+    def reopen_tab(self, session_id: str) -> None:
+        pending = self._pending_tab_unloads.pop(session_id, None)
+        if pending is not None:
+            pending.wake.set()
+
+    def lazy_close_failed(self, session_id: str) -> bool:
+        operation = self._operations.get(session_id)
+        return isinstance(operation, _Quarantined) and operation.public_code == "SESSION_TAB_UNLOAD_UNCONFIRMED"
+
+    async def _unload_when_idle(
+        self, pending: _PendingTabUnload, has_connections: Callable[[], bool], browser_gate_busy: Callable[[], bool],
+    ) -> None:
+        host = pending.host
+        session_id = host.session_id
+        confirmed_closed = False
+
+        def still_pending():
+            return not self._closing and self._pending_tab_unloads.get(session_id) is pending
+
+        def admit_close():
+            # Core calls synchronously at its final admission point. A reconnect,
+            # scheduled task or direct protocol HELLO that won the race stays live.
+            if (not still_pending() or self._operations.get(session_id) is not None
+                    or self._by_host.get(host.host_session_id) is None or browser_gate_busy() or has_connections()):
+                return False
+            self._operations[session_id] = _IdleUnloadInFlight(asyncio.current_task())
+            return True
+
+        try:
+            while still_pending():
+                pending.wake.clear()
+                current = self._operations.get(session_id)
+                if (self.core._sessions.get(host.host_session_id) is not host
+                        or (not isinstance(current, _ResumeInFlight) and host.host_session_id not in self._by_host)):
+                    return
+                if has_connections():
+                    await pending.wake.wait()
+                    continue
+                if current is None and not browser_gate_busy():
+                    try:
+                        attempt = await self.core.try_unload_idle_session(host.host_session_id, can_close=admit_close)
+                    except Exception:
+                        if isinstance(self._operations.get(session_id), _IdleUnloadInFlight):
+                            raise
+                        logging.getLogger(__name__).warning("Could not check idle Host %s", host.host_session_id, exc_info=True)
+                        attempt = None
+                    if attempt is not None:
+                        await asyncio.shield(attempt.task)
+                        confirmed_closed = True
+                        return
+                # Queues, Cells, and terminal processes have independent owners.
+                # A connection closing wakes this immediately. The timer also observes
+                # physical work settling without adding a durable event or a lifetime cap.
+                try:
+                    await asyncio.wait_for(pending.wake.wait(), 0.5)
+                except TimeoutError:
+                    pass
+        except Exception:
+            logging.getLogger(__name__).exception("Could not settle tab unload for %s", host.host_session_id)
+        finally:
+            operation = self._operations.get(session_id)
+            if isinstance(operation, _IdleUnloadInFlight) and operation.task is asyncio.current_task():
+                self._by_host.pop(host.host_session_id, None)
+                self._by_session.pop(session_id, None)
+                if confirmed_closed:
+                    self._operations.pop(session_id)
+                else:
+                    self._operations[session_id] = _Quarantined("SESSION_TAB_UNLOAD_UNCONFIRMED")
+            if self._pending_tab_unloads.get(session_id) is pending:
+                self._pending_tab_unloads.pop(session_id)
+
     async def sidebar_cells(self, root_session_id: str, host_session_id: str, body: dict):
         if set(body) - {"cursor", "max_items"}:
             raise ValueError("Cell page parameters are invalid")
@@ -999,7 +1104,10 @@ class LocalSessionController(SessionCapabilities):
                     current.public_code,
                     "会话仍在停止，当前只能查看已保存的历史。",
                 )
-            if live is not None:
+            waiting_for_unload = isinstance(current, _IdleUnloadInFlight)
+            if waiting_for_unload:
+                task = current.task
+            elif live is not None:
                 if no_live_observation is not None or current is not None:
                     raise RuntimeError("Session has another current operation")
                 # UI publication is a handle cache. Core decides whether its
@@ -1035,7 +1143,10 @@ class LocalSessionController(SessionCapabilities):
                     name=f"desktop-resume:{session_id}",
                 )
                 self._operations[session_id] = _ResumeInFlight(task, core_operation)
-        return await asyncio.shield(task)
+        result = await asyncio.shield(task)
+        if waiting_for_unload:
+            return await self.resume_session(session_id, no_live_observation=no_live_observation)
+        return result
 
     def host_writer_unavailable(self, host_session_id: str) -> bool:
         handle = self._by_host.get(host_session_id)
@@ -1044,7 +1155,10 @@ class LocalSessionController(SessionCapabilities):
     async def runtime_closing(self, session_id: str) -> bool:
         async with self._lock:
             current = self._operations.get(session_id)
-            return isinstance(current, (_RawCloseInFlight, _Quarantined)) or self.core.session_runtime_closing(session_id)
+            if not isinstance(current, _IdleUnloadInFlight):
+                return isinstance(current, (_RawCloseInFlight, _Quarantined)) or self.core.session_runtime_closing(session_id)
+        await asyncio.shield(current.task)
+        return await self.runtime_closing(session_id)
 
     async def _resume_owner(self, session_id: str, *, restore_missing_workspace: bool = False) -> HostSessionHandle:
         task = asyncio.current_task()
@@ -1192,10 +1306,13 @@ class LocalSessionController(SessionCapabilities):
     def session_by_host_id(self, host_session_id: str) -> KernelHostSession:
         handle = self._by_host.get(host_session_id)
         if handle is not None:
+            if isinstance(self._operations.get(handle.session_id), _IdleUnloadInFlight):
+                raise KeyError(host_session_id)
             return handle.session
         # Agent Hosts are owned by Core's scheduler, not Desktop's ROOT map.
         session = self.core._sessions.get(host_session_id)
-        if session is None or session.root_session_id is None or session._closing or session._closed:
+        if (session is None or session.root_session_id is None or session._closing or session._closed
+                or isinstance(self._operations.get(session.root_session_id), _IdleUnloadInFlight)):
             raise KeyError(host_session_id)
         return session
 
@@ -1921,11 +2038,14 @@ class LocalSessionController(SessionCapabilities):
     async def _close_owner(self) -> None:
         async with self._lock:
             self._closing = True
+            for pending in self._pending_tab_unloads.values():
+                pending.wake.set()
             resumes = (
+                *(pending.task for pending in self._pending_tab_unloads.values() if pending.task is not None),
                 *(
                     operation.task
                     for operation in self._operations.values()
-                    if isinstance(operation, (_ResumeInFlight, _RawCloseInFlight, SessionRetirementOperation)) and operation.task is not None
+                    if isinstance(operation, (_ResumeInFlight, _IdleUnloadInFlight, _RawCloseInFlight, SessionRetirementOperation)) and operation.task is not None
                 ),
                 *self._forks,
             )

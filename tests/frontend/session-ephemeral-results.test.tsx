@@ -2,7 +2,7 @@ import { act, cleanup, render, renderHook, screen } from '@testing-library/react
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PromptComposer } from '../../frontend/components/prompt-composer';
 import { PromptDraftStore } from '../../frontend/lib/prompt-draft';
-import { SessionSuggestionCache, useSessionEphemeralResults } from '../../frontend/lib/session-ephemeral-results';
+import { SessionSuggestionCache, SessionToolDecisionStore, type ToolDecisionIntent, useSessionEphemeralResults } from '../../frontend/lib/session-ephemeral-results';
 import { LocalHttpRuntimeAdapter, type ModelCallBindingPayload, type RuntimeAdapter, type RuntimeConnection, type RuntimeProjection, type SessionEphemeralResults } from '../../frontend/lib/runtime-adapter';
 
 const binding: ModelCallBindingPayload = { connection_id: 'deepseek', reasoning: { kind: 'effort', value: 'high' } };
@@ -28,6 +28,29 @@ function setup() {
   return { cache, read, props, setProjection: (next: RuntimeProjection) => { current = next; return { ...props, projection: next }; } };
 }
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
+
+it('keeps only unresolved approval commands after a session view closes', () => {
+  let open = true;
+  const store = new SessionToolDecisionStore(() => open);
+  const base = { sessionId: 'session-1', hostSessionId: 'host-1', interactionId: 'interaction-1',
+    decision: 'allow' as const, connectionGeneration: 1 };
+  const intents = (['accepted', 'rejected', 'retired', 'unknown', 'submitting'] as const).map(status => {
+    const intent: ToolDecisionIntent = { ...base, commandId: status, status };
+    store.save({ ...intent, status: 'submitting' });
+    store.save(intent);
+    return intent;
+  });
+  expect(store.read(base.sessionId)).toEqual(intents);
+
+  open = false;
+  store.releaseSessionView(base.sessionId);
+  expect(store.read(base.sessionId)).toEqual(intents.slice(3));
+  store.save({ ...intents[3], status: 'accepted' });
+  expect(store.read(base.sessionId)).toEqual([intents[4]]);
+  open = true;
+  store.save(intents[0]);
+  expect(store.read(base.sessionId)).toEqual([intents[4]]);
+});
 
 describe('session ephemeral results', () => {
   it('receives a whole suggestion behind an existing draft and reveals it when the draft is cleared', async () => {

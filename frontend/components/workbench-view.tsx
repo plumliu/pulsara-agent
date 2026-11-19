@@ -213,6 +213,7 @@ interface WorkbenchViewProps {
   canControl: boolean;
   historyOnly?: boolean;
   runtimeClosing?: boolean;
+  runtimeCloseFailed?: boolean;
   isObserver: boolean;
   workspaceAvailability?: import('../lib/runtime-adapter').WorkspaceAvailability;
   workspaceRecoveryBusy?: boolean;
@@ -2319,6 +2320,7 @@ export function WorkbenchView({
   canControl,
   historyOnly = false,
   runtimeClosing = false,
+  runtimeCloseFailed = false,
   isObserver,
   workspaceAvailability,
   workspaceRecoveryBusy = false,
@@ -2385,8 +2387,8 @@ export function WorkbenchView({
   const [compacting, setCompacting] = useState(false);
   const compactionBusy = compacting || contextCompactionInProgress;
   const directoryReadOnly = workspaceAvailability?.outcome === 'MISSING' || workspaceAvailability?.outcome === 'UNAVAILABLE';
-  const readOnlyDock = isObserver || directoryReadOnly || historyOnly || runtimeClosing;
-  const sessionStatusLabel = runtimeClosing ? '任务仍在停止' : isObserver ? '观察中'
+  const readOnlyDock = isObserver || directoryReadOnly || historyOnly || runtimeClosing || runtimeCloseFailed;
+  const sessionStatusLabel = runtimeCloseFailed ? '暂时无法接入' : runtimeClosing ? '任务仍在停止' : isObserver ? '观察中'
     : workspaceAvailability?.outcome === 'MISSING' ? '目录丢失'
     : workspaceAvailability?.outcome === 'UNAVAILABLE' ? '目录不可用'
     : session.status === 'running' ? '进行中'
@@ -3193,9 +3195,9 @@ export function WorkbenchView({
       </div> : (
         <div className="observer-wrap composer-wrap" ref={composerWrapRef}>
           {composerQueue}
-          {runtimeClosing ? <div className="observer-dock readonly-dock">
+          {runtimeClosing || runtimeCloseFailed ? <div className="observer-dock readonly-dock">
             <span className="observer-dock__icon"><Square size={15} /></span>
-            <strong role="status">任务仍在停止</strong>
+            <strong role="status">{runtimeCloseFailed ? '暂时无法接入会话，已显示保存的历史。' : '任务仍在停止'}</strong>
             {desktopHost() && <button type="button" onClick={() => {
               void desktopHost()!.restartWorkbench().catch(error => onNotify('工作台未能重启',
                 error instanceof Error ? error.message : '请重新打开 Pulsara。', 'warning'));

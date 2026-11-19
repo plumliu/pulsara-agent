@@ -1342,27 +1342,6 @@ class CodeModeHost:
             raise CodeModeError("unavailable", "Code Mode Host is closed")
         return await self._stop_cell(self._cell(cell_id))
 
-    def live_cell_ids(self) -> tuple[str, ...]:
-        return tuple(
-            cell.cell_id for cell in self._cells.values()
-            if cell.state not in _TERMINAL or cell.pending
-        )
-
-    async def stop_and_settle(self, cell_id: str) -> None:
-        """Stop an observed Cell and join the invocations still owned by it."""
-        if self._closed:
-            raise CodeModeError("unavailable", "Code Mode Host is closed")
-        cell = self._cells.get(cell_id)
-        if cell is None:
-            # Only fully settled cells can leave this Host's index.
-            return
-        if cell.state not in _TERMINAL:
-            await self._stop_cell(cell)
-        await asyncio.gather(*(
-            asyncio.shield(pending.task) for pending in cell.pending.values()
-            if pending.task is not None
-        ))
-
     async def stop_turn(self, turn_id: str) -> None:
         self.mark_turn_stopped(turn_id)
         for cell in tuple(self._cells.values()):

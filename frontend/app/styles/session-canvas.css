@@ -96,6 +96,38 @@
   height: 24px;
   margin-right: 3px;
 }
+.session-tab-close-menu.menu-popover {
+  position: fixed;
+  inset: auto;
+  z-index: 110;
+  width: max-content;
+  min-width: 0;
+  max-width: min(360px, calc(100vw - 16px));
+  padding: 10px;
+  color: var(--ink);
+  -webkit-app-region: no-drag;
+}
+.session-tab-close-menu > p {
+  margin: 0 0 8px;
+  font-size: var(--type-small);
+  line-height: 1.5;
+}
+.session-tab-close-menu > p[role=alert] { color: var(--red); }
+.session-tab-close-menu__actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.session-tab-close-menu__actions > button {
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: var(--type-small);
+}
+.session-tab-close-menu__actions > button:last-child { color: var(--red); }
+.session-tab-close-menu__actions > button:hover { background: var(--paper-deep); }
+.session-tab-close-menu__actions > button:focus-visible { outline: 1px solid var(--blue); }
+.session-tab-close-menu__actions > button:disabled { opacity: .55; }
 .session-canvas__tab-close:hover,
 .session-canvas-window__actions > button:hover {
   background: var(--paper-deep);
