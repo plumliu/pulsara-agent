@@ -67,6 +67,7 @@ import {
 } from 'lucide-react';
 import {
   Fragment,
+  memo,
   type ReactNode,
   createContext,
   useCallback,
@@ -756,11 +757,13 @@ function TodoDock({
 }
 
 function reasoningPreview(body: string, running: boolean): string {
-  const lines = body
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-  return (running ? lines.at(-1) : lines[0]) ?? body.trim();
+  if (running) {
+    const text = body.trimEnd();
+    return text.slice(text.lastIndexOf('\n') + 1).trimStart();
+  }
+  const text = body.trimStart();
+  const end = text.indexOf('\n');
+  return (end < 0 ? text : text.slice(0, end)).trimEnd();
 }
 
 function ReasoningRow({ block, ownerId, onNotify }: { block: ReasoningBlock; ownerId: string; onNotify: MarkdownNotify }) {
@@ -1007,7 +1010,7 @@ function AssistantMessage({
   const [forking, setForking] = useState(false);
   const forkInFlight = useRef(false);
   const sourceEntryId = messageSourceEntryId(message);
-  const visualization = useMemo(() => message.visualizations && sourceEntryId ? {
+  const visualization = useMemo(() => message.visualizations?.length && sourceEntryId ? {
     entryId: sourceEntryId, items: message.visualizations,
     onRead: onReadVisualization, onReadThumbnail: onReadVisualizationThumbnail,
   } : undefined, [sourceEntryId, message.visualizations, onReadVisualization, onReadVisualizationThumbnail]);
@@ -1365,7 +1368,7 @@ function findToolChainConnections(messages: Message[]): {
   return { before, after };
 }
 
-export function ConversationMessages({
+export const ConversationMessages = memo(function ConversationMessages({
   history, onLoadHistory, localSubmissions = [], activeTurnId, canAutoCollapse, onReadProcessEnd, onProcessLayout, revealEarlierProcess,
   messages,
   interruptionNotices = [],
@@ -1444,7 +1447,8 @@ export function ConversationMessages({
         : assistant(message)}
     </HistoryMessageHost>;
   };
-  const latestMessage = messages.filter(message => !isEmptyLiveAssistant(message)).at(-1);
+  const latestMessage = messages.findLast(message => !isEmptyLiveAssistant(message));
+  const loadedEntries = new Set(messages.map(messageSourceEntryId));
   const completedTurns = new Set(messages.filter(message => isCompleteAnswer(message)).map(message => message.turnId).filter(Boolean));
   const content: ReactNode[] = [];
   if (history?.error && !history.windows.some(window => window.error === history.error)) {
@@ -1467,15 +1471,15 @@ export function ConversationMessages({
     const focused = sourceInProcess
       ? focusedEntry
       : undefined;
-    const runIds = new Set(run.map(messageSourceEntryId).filter((id): id is string => Boolean(id)));
+    const runIds = history?.compactions?.length ? new Set(run.map(messageSourceEntryId)) : undefined;
     content.push(<ConversationRun key={`${outputOwnerKey}:${processIdentity(run[0])}:${interruptionBoundaries.get(run[0].turnId ?? '') ?? 'start'}`} messages={run}
       renderMessage={renderMessage} focusRequest={focused} assistantLabel={assistantLabel}
       tail={Boolean(latestMessage && run.includes(latestMessage))}
       completed={Boolean(run[0].turnId && completedTurns.has(run[0].turnId))}
       revealEarlierProcess={revealEarlierProcess} canAutoCollapse={canAutoCollapse} onReadProcessEnd={onReadProcessEnd} onProcessLayout={onProcessLayout} onNotify={onNotify}
       earlierProcess={Boolean(run.some(message => isCompleteAnswer(message)
-        && message.historyInitialEntryId && !messages.some(candidate => messageSourceEntryId(candidate) === message.historyInitialEntryId)))}
-      compactions={history?.compactions?.filter(marker => runIds.has(marker.displayBeforeEntryId ?? marker.displayAfterEntryId ?? ''))}
+        && message.historyInitialEntryId && !loadedEntries.has(message.historyInitialEntryId)))}
+      compactions={runIds ? history?.compactions?.filter(marker => runIds.has(marker.displayBeforeEntryId ?? marker.displayAfterEntryId ?? '')) : undefined}
       compactionInProgress={contextCompactionInProgress && isRunning && run[0].turnId === activeTurnId}
       active={isRunning && run[0].turnId === activeTurnId} />);
     run = [];
@@ -1574,7 +1578,7 @@ export function ConversationMessages({
   </div>);
   if (contextCompactionInProgress && !messages.some(message => message.role === 'assistant' && message.turnId === activeTurnId && isRunning)) content.push(<ContextCompactionDivider key="compaction-progress" inProgress />);
   return content;
-}
+});
 
 function nestedScrollConsumes(target: EventTarget | null, thread: HTMLElement, deltaY: number): boolean {
   for (let node = target instanceof Element ? target : null; node && node !== thread; node = node.parentElement) {

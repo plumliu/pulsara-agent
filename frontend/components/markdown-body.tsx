@@ -323,7 +323,13 @@ function MarkdownImage({ src, alt, onNotify, selectable }: { src?: string | Blob
 
 const VisualizationContext = createContext<InlineVisualizationContext | undefined>(undefined);
 
-export const MarkdownBody = memo(function MarkdownBody({ body, onNotify, streaming = false, annotationSource = false, visualization, assistantChat = false }: MarkdownProps) {
+export function MarkdownBody({ visualization, ...props }: MarkdownProps) {
+  return <VisualizationContext.Provider value={visualization}><MarkdownContent {...props} /></VisualizationContext.Provider>;
+}
+
+// Bound visualization controls receive context updates directly. New reader
+// metadata doesn't require parsing the Markdown or rebuilding its source map.
+const MarkdownContent = memo(function MarkdownContent({ body, onNotify, streaming = false, annotationSource = false, assistantChat = false }: Omit<MarkdownProps, 'visualization'>) {
   const normalized = useMemo(() => normalizeMarkdownWithSource(body), [body]);
   const sourceMapping = useMemo(() => () => annotationSource ? rehypeSourceMapping(normalized) : () => {}, [normalized, annotationSource]);
   const components = useMemo<Components>(() => ({
@@ -362,7 +368,7 @@ export const MarkdownBody = memo(function MarkdownBody({ body, onNotify, streami
     },
   }), [onNotify, streaming, annotationSource]);
   return (
-    <AssistantChatContext.Provider value={assistantChat}><VisualizationContext.Provider value={visualization}>
+    <AssistantChatContext.Provider value={assistantChat}>
     <MarkdownCopySurface onNotify={onNotify} annotationSource={annotationSource}>
       <ReactMarkdown
         urlTransform={(url, key, node) => assistantChat && isCanonicalIdentity(url, 'image') ? url : markdownUrl(url, key, node)}
@@ -373,11 +379,11 @@ export const MarkdownBody = memo(function MarkdownBody({ body, onNotify, streami
         {normalized.text}
       </ReactMarkdown>
     </MarkdownCopySurface>
-    </VisualizationContext.Provider></AssistantChatContext.Provider>
+    </AssistantChatContext.Provider>
   );
 });
 
-export function MarkdownInline({ body, onNotify }: MarkdownProps) {
+export const MarkdownInline = memo(function MarkdownInline({ body, onNotify }: MarkdownProps) {
   return (
     <MarkdownCopySurface inline onNotify={onNotify}>
       <ReactMarkdown
@@ -394,4 +400,4 @@ export function MarkdownInline({ body, onNotify }: MarkdownProps) {
       </ReactMarkdown>
     </MarkdownCopySurface>
   );
-}
+});

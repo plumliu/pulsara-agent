@@ -3208,8 +3208,15 @@ describe('PulsaraApp', () => {
     expect(await screen.findByText('second page')).toBeTruthy();
     expect(screen.queryByRole('button', {name:'加载更多排队任务'})).toBeNull();
     const active = adapter.lastConnection!;
+    const reads = active.readQueuePage.mock.calls.length;
+    await act(async () => active.emit({...active.current(),liveRevision:active.current().liveRevision + 1,
+      queuedPrompts:[{...first}]}));
+    expect(active.readQueuePage).toHaveBeenCalledTimes(reads);
     active.readQueuePage.mockImplementation(async () => ({items:[first],nextCursor:null}));
-    act(() => active.emit({...active.current(),eventSequence:9}));
+    active.readQueuePage.mockRejectedValueOnce(new Error('暂时无法读取'));
+    await act(async () => active.emit({...active.current(),eventSequence:9}));
+    expect(screen.getByText('second page')).toBeTruthy();
+    await act(async () => active.emit({...active.current(),queuedPrompts:[{...first}]}));
     await waitFor(() => expect(active.readQueueItem).toHaveBeenCalledWith('queue-page-2',expect.any(AbortSignal)));
     expect(screen.getByText('second page')).toBeTruthy();
     active.readQueueItem.mockResolvedValue(null);

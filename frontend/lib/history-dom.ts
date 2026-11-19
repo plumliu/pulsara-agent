@@ -11,6 +11,36 @@ export interface HistoryReadingAnchor {
   top: number;
 }
 
+/** Let Chromium skip offscreen completed replies while a pane is resizing.
+ * Seed each placeholder with its actual height before any containment is applied.
+ * The browser can still reveal content for selection, focus, or scrolling. */
+export function containOffscreenReplies(windows: readonly HTMLElement[]): () => void {
+  const replies: { body: HTMLElement; height: string }[] = [];
+  for (const pane of windows) {
+    const thread = pane.querySelector<HTMLElement>('.workbench > .thread-scroll');
+    if (!thread) continue;
+    const viewport = thread.getBoundingClientRect();
+    for (const body of thread.querySelectorAll<HTMLElement>('.assistant-copy > .assistant-markdown:has(> [data-annotation-entry])')) {
+      const bounds = body.getBoundingClientRect();
+      if (bounds.height && (bounds.bottom <= viewport.top || bounds.top >= viewport.bottom)) {
+        // Canvas placement can still be animating. Intrinsic sizes are in
+        // layout pixels; the viewport rectangle includes that transform.
+        replies.push({ body, height: getComputedStyle(body).height });
+      }
+    }
+  }
+  for (const { body, height } of replies) {
+    body.style.containIntrinsicBlockSize = height;
+    body.style.contentVisibility = 'auto';
+  }
+  return () => {
+    for (const { body } of replies) {
+      body.style.removeProperty('content-visibility');
+      body.style.removeProperty('contain-intrinsic-block-size');
+    }
+  };
+}
+
 export function hasHistorySelection(root: HTMLElement): boolean {
   const selection = root.ownerDocument.getSelection();
   if (!selection || selection.isCollapsed) return false;

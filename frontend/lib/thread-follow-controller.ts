@@ -181,7 +181,9 @@ export class ThreadFollowController {
       this.intent = 'follow';
       this.coordinate();
     } else {
-      if (!this.canFollow) this.anchor = captureHistoryAnchor(root) ?? this.anchor;
+      // Our own scroll correction can expose an earlier line as text rewraps.
+      // Keep the original semantic target throughout successive resize frames.
+      if (!programmed && !this.canFollow) this.anchor = captureHistoryAnchor(root) ?? this.anchor;
       this.publish();
     }
   }

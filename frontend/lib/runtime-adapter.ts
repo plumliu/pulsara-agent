@@ -2071,18 +2071,19 @@ abstract class CanonicalHistoryReader {
       this.interruptionNotices.set(key, notice);
     }
   }
-  protected projectInterruptionNotices(messages: Message[]): TurnInterruptionNotice[] {
+  private projectInterruptionNotices(windows: BrowserHistoryState['windows'], hosts: ReadonlyMap<string, string>): TurnInterruptionNotice[] {
+    if (!this.interruptionNotices.size) return [];
     const mounted: TurnInterruptionNotice[] = [];
-    const readingIds = this.readingIds();
+    const sources = new Map<string, string>();
+    for (const window of windows) for (const id of window.entryIds) {
+      sources.set(decimal(this.entries.get(id)!.entry_sequence), id);
+    }
     for (const notice of this.interruptionNotices.values()) {
-      const sequence = numeric(notice.display_after_entry_sequence);
-      if (![...this.entries.values()].some(entry => numeric(entry.entry_sequence) === sequence)) continue;
-      const source = [...this.entries.values()].find(entry => numeric(entry.entry_sequence) === sequence);
-      if (!source || !readingIds.has(source.entry_id)) continue;
-      const message = source && messages.find(message => !message.viewSource && (message.id === source.entry_id || message.sourceEntryIds?.includes(source.entry_id)));
+      const sourceId = sources.get(decimal(notice.display_after_entry_sequence));
+      if (!sourceId) continue;
       mounted.push({ownerKind: notice.owner_kind, ownerId: notice.owner_id, reason: notice.reason,
         publicDetail: notice.public_detail, terminalAtUtc: notice.terminal_at_utc,
-        displayAfterEntrySequence: sequence, displayAfterEntryId: source?.entry_id, displayAfterMessageId: message?.id});
+        displayAfterEntrySequence: numeric(notice.display_after_entry_sequence), displayAfterEntryId: sourceId, displayAfterMessageId: hosts.get(sourceId)});
     }
     return mounted.sort((a,b) => a.displayAfterEntrySequence-b.displayAfterEntrySequence || a.ownerId.localeCompare(b.ownerId));
   }
@@ -2203,10 +2204,7 @@ abstract class CanonicalHistoryReader {
   }
   private readingIds(): Set<string> { return new Set(this.readingCluster().flatMap(page => page.entryIds)); }
   private readingAtLatest(): boolean { return !this.tailPage || this.readingIds().has(this.tailPage.entryIds.at(-1)!); }
-  protected readingMessages(messages: Message[]): Message[] {
-    const ids = this.readingIds(), atLatest = this.readingAtLatest();
-    return messages.filter(message => message.viewSource ? atLatest : ids.has(message.id));
-  }
+
 
   async readLatestHistory(signal?: AbortSignal): Promise<RuntimeProjection> {
     signal?.throwIfAborted();
@@ -2400,7 +2398,9 @@ abstract class CanonicalHistoryReader {
       if (bodies.has(id)) continue;
       for (const ref of [entry.content, ...entry.blocks?.map(block => block.content) ?? [], ...entry.reasoning_blocks?.map(block => block.content) ?? []]) {
         if (ref?.inline_content !== undefined && this.supplementalBodies.has(ref)) {
-          delete ref.inline_content; changed = true;
+          delete ref.inline_content;
+          decodedBodies.delete(ref);
+          changed = true;
         }
       }
     }
@@ -2582,12 +2582,14 @@ abstract class CanonicalHistoryReader {
         contextState: cluster.some(page => page.contextState === 'error') ? 'error' as const : cluster.some(page => page.contextState !== 'ready') ? 'loading' as const : 'ready' as const,
         contextError: cluster.find(page => page.contextError)?.contextError};
     });
+    const tailId = this.tailPage?.entryIds.at(-1);
+    const atLatest = !this.tailPage || (tailId !== undefined && windows.some(window => window.entryIds.includes(tailId)));
     const compactions = new Map<string, BrowserPageContext['compactions'][number]>();
     for (const page of reading) for (const item of page.context?.compactions ?? []) {
       // A boundary belongs here only when the actual canonical edge is held.
       if (page.entryIds.some(id => compareSequence(this.entries.get(id)!.entry_sequence, item.adopted_after_entry_sequence) === 0)) compactions.set(item.event_id, item);
     }
-    return {readingOwner: this.readingOwner, atLatest: this.readingAtLatest(), initialReady: this.initialContextReady || !this.pages.length, initialError: this.initialContextReady ? undefined : this.pages[0]?.contextError, windows, hasOlder: Boolean(windows[0]?.hasOlder), loading: windows.some(window => window.loading), error: this.boundaryError ?? windows.find(window => window.error)?.error,
+    return {readingOwner: this.readingOwner, atLatest, initialReady: this.initialContextReady || !this.pages.length, initialError: this.initialContextReady ? undefined : this.pages[0]?.contextError, windows, hasOlder: Boolean(windows[0]?.hasOlder), loading: windows.some(window => window.loading), error: this.boundaryError ?? windows.find(window => window.error)?.error,
       compactions: [...compactions.values()].map(item => ({eventId: item.event_id, adoptedAfterEntrySequence: numeric(item.adopted_after_entry_sequence), turnId: item.turn_id, displayAfterEntryId: [...this.entries.values()].find(entry => compareSequence(entry.entry_sequence, item.adopted_after_entry_sequence) === 0)?.entry_id}))};
   }
   async readHistory(windowId?: string, direction: 'older' | 'newer' = 'older', signal?: AbortSignal): Promise<RuntimeProjection> {
@@ -2762,15 +2764,19 @@ abstract class CanonicalHistoryReader {
     signal?.throwIfAborted();
     return this.project();
   }
-  protected presentationHistory(messages: Message[]): BrowserHistoryState {
-    const state = this.historyState();
-    const host = (id?: string) => messages.find(message => !message.viewSource && (message.id === id || message.sourceEntryIds?.includes(id ?? '')))?.id;
-    for (const window of state.windows) {
-      window.firstEntryId = host(window.firstEntryId) ?? window.entryIds.map(id => host(id)).find(Boolean);
-      window.lastEntryId = host(window.lastEntryId) ?? window.entryIds.map(id => host(id)).filter(Boolean).at(-1);
+  protected projectReading(history: BrowserHistoryState, allMessages: Message[]) {
+    const messages = allMessages.filter(message => message.viewSource ? history.atLatest : message.historyWindowId !== undefined);
+    const hosts = new Map<string, string>();
+    for (const message of messages) {
+      if (!message.viewSource) for (const id of message.sourceEntryIds ?? [message.id]) hosts.set(id, message.id);
     }
-    for (const item of state.compactions) item.displayAfterEntryId = host(item.displayAfterEntryId);
-    return state;
+    const host = (id?: string) => id === undefined ? undefined : hosts.get(id);
+    for (const window of history.windows) {
+      window.firstEntryId = host(window.firstEntryId) ?? host(window.entryIds.find(id => hosts.has(id)));
+      window.lastEntryId = host(window.lastEntryId) ?? host(window.entryIds.findLast(id => hosts.has(id)));
+    }
+    for (const item of history.compactions) item.displayAfterEntryId = host(item.displayAfterEntryId);
+    return {messages, history, interruptionNotices: this.projectInterruptionNotices(history.windows, hosts)};
   }
   protected windowJoinPredicate(): (a: string, b: string) => boolean {
     const membership = new Map<string, number>();
@@ -2784,33 +2790,43 @@ abstract class CanonicalHistoryReader {
       this.knownQueuedContent.set(item.queue_item_id, decodePromptContent(item.content, {kind:'queue', queueItemId: item.queue_item_id}));
     }
   }
-  protected decorateHistory(messages: Message[]): Message[] {
-    const contexts = new Map<string, {entry: BrowserPageContext['entry_contexts'][number]; page: BrowserHistoryPage}>();
-    for (const page of this.pages) for (const entry of page.context?.entry_contexts ?? []) {
-      const previous = contexts.get(entry.entry_id);
-      if (!previous || compareSequence(page.context!.event_sequence_cut, previous.page.context!.event_sequence_cut) >= 0) contexts.set(entry.entry_id, {entry, page});
+  protected decorateHistory(messages: Message[], windows: BrowserHistoryState['windows']) {
+    const windowByEntry = new Map<string, string>();
+    for (const window of windows) for (const id of window.entryIds) windowByEntry.set(id, window.id);
+    const pageByEntry = new Map<string, BrowserHistoryPage>();
+    const contexts = new Map<string, {entry: BrowserPageContext['entry_contexts'][number]; page: BrowserHistoryPage; group?: BrowserPageContext['groups'][number]}>();
+    for (const page of this.pages) {
+      for (const id of page.entryIds) if (!pageByEntry.has(id)) pageByEntry.set(id, page);
+      if (!page.context) continue;
+      const groups = new Map<string, BrowserPageContext['groups'][number]>();
+      for (const group of page.context.groups) {
+        const key = group.owner_kind + ':' + group.owner_id;
+        if (!groups.has(key)) groups.set(key, group);
+      }
+      for (const entry of page.context.entry_contexts) {
+        const previous = contexts.get(entry.entry_id);
+        if (previous && compareSequence(page.context.event_sequence_cut, previous.page.context!.event_sequence_cut) < 0) continue;
+        contexts.set(entry.entry_id, {entry, page, group: groups.get(entry.owner_kind + ':' + entry.owner_id)});
+      }
     }
-    const windows = this.historyState().windows;
     for (const message of messages) {
       if (message.viewSource) continue;
       const sourceIds = message.sourceEntryIds ?? [message.id];
       message.sourceEntryIds = sourceIds;
       const context = contexts.get(message.id);
-      const page = context?.page ?? this.pages.find(page => page.entryIds.includes(message.id));
+      const page = context?.page ?? pageByEntry.get(message.id);
       message.historyGroupId = context?.entry.segment_id;
       // Context may name a final after its historical cut. This is only an
       // explicit navigation target, never evidence that this slice completed.
-      message.historyFinalEntryId = context?.page.context?.groups.find(group =>
-        group.owner_kind === context.entry.owner_kind && group.owner_id === context.entry.owner_id)?.final_entry_id;
-      message.historyInitialEntryId = context?.page.context?.groups.find(group =>
-        group.owner_kind === context.entry.owner_kind && group.owner_id === context.entry.owner_id)?.initial_entry_id;
+      message.historyFinalEntryId = context?.group?.final_entry_id;
+      message.historyInitialEntryId = context?.group?.initial_entry_id;
       // Installed exact-entry context remains usable while its page refreshes.
       // The page/window owns refresh loading and errors; new entries without
       // installed context still wait before receiving a semantic group.
       message.historyContextState = context ? 'ready' : page?.contextState;
       message.historyContextError = context ? undefined : page?.contextError;
-      message.historyWindowId = windows.find(window => window.entryIds.includes(message.id))?.id;
-      message.historyEarlierUnloaded = Boolean(context && context.entry.segment_start_entry_id && !windows.some(window => window.entryIds.includes(context.entry.segment_start_entry_id)));
+      message.historyWindowId = windowByEntry.get(message.id);
+      message.historyEarlierUnloaded = Boolean(context && context.entry.segment_start_entry_id && !windowByEntry.has(context.entry.segment_start_entry_id));
       // Live observations keep their advisory presentation until canonical
       // metadata supplies a stable host; they are never verified bodies.
       if (!this.entries.has(message.id)) continue;
@@ -2832,7 +2848,6 @@ abstract class CanonicalHistoryReader {
       message.reasoningContentError = this.contentErrors.get(`${message.id}:reasoning`);
 
     }
-    return messages;
   }
 
   async readCanonicalEntryContent(
@@ -3141,9 +3156,9 @@ export class CanonicalHistoryView extends CanonicalHistoryReader {
     const sameWindow = this.windowJoinPredicate();
     const messages = projectEntries(canonical, new Set(), sameWindow);
     const canonicalTurnIds = orderedTurnIdsFromEntries(canonical, this.scopeKind);
-    this.decorateHistory(messages);
-    const readingMessages = this.readingMessages(messages);
-    return {messages: readingMessages, canonicalInputs: canonicalInputs(messages), history: this.presentationHistory(readingMessages), interruptionNotices: this.projectInterruptionNotices(readingMessages), canonicalTurnIds,
+    const history = this.historyState();
+    this.decorateHistory(messages, history.windows);
+    return {...this.projectReading(history, messages), canonicalInputs: canonicalInputs(messages), canonicalTurnIds,
       presentationNotices: [], contextCompaction: projectContextCompaction(this.control),
       initialContextBase: this.control.initial_context_base, isRunning: this.scopeKind === 'SUBAGENT' && Boolean(this.control.active_turns?.length),
       pendingSteerPage: projectPendingSteerPage(this.control),
@@ -3995,8 +4010,11 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
   private async hydrateQueuedPromptContent(): Promise<void> {
     if (this.queueRead) return this.queueRead;
     const operation = (async () => {
+      let requestedBody = false;
       for (const item of this.control.prompt_queue ?? []) {
+        if (!item.content || item.content.inline_content !== undefined || numeric(item.content.size) === 0) continue;
         if (['consumed', 'cancelled', 'rejected'].includes(this.promptTransitions.get(item.command_id ?? '')?.status ?? '')) continue;
+        requestedBody = true;
         try { await this.hydrateContentReference(item.content, {queue_item_id: item.queue_item_id!}, '等待处理的输入暂时无法完整读取。'); }
         catch (error) {
           if (error instanceof RuntimeApiError && error.code === 'CONTENT_QUEUE_NOT_PENDING') {
@@ -4005,7 +4023,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
         }
       }
       this.rememberQueueContent(this.control);
-      this.changed();
+      if (requestedBody) this.changed();
     })();
     this.queueRead = operation;
     try { await operation; } finally { if (this.queueRead === operation) this.queueRead = undefined; }
@@ -4422,7 +4440,8 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
         traces: draft.traces.length ? draft.traces : undefined,
       });
     }
-    this.decorateHistory(messages);
+    const history = this.historyState();
+    this.decorateHistory(messages, history.windows);
     for (const [identity, draft] of this.drafts) {
       if (!draft.committedEntryId) continue;
       const message = messages.find(item => !item.viewSource && (item.id === draft.committedEntryId || item.sourceEntryIds?.includes(draft.committedEntryId!)));
@@ -4445,12 +4464,9 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     const activeTurn = manualCommandId ? undefined : this.control.active_turns?.[0];
     const todo = projectTodo(this.liveControl, this.scopeKind);
     const interaction = projectInteraction(this.liveControl, this.control);
-    const readingMessages = this.readingMessages(messages);
     return {
-      messages: readingMessages,
+      ...this.projectReading(history, messages),
       canonicalInputs: canonicalInputs(messages),
-      history: this.presentationHistory(readingMessages),
-      interruptionNotices: this.projectInterruptionNotices(readingMessages),
       canonicalTurnIds,
       presentationNotices: this.presentationNotices,
       providerRetry: this.providerRetry,
@@ -4493,6 +4509,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
   }
 
   private projectPromptTransitions(): LocalPromptSubmission[] {
+    if (!this.promptTransitions.size) return [];
     const consumedCommands = new Set([...this.entries.values()].flatMap((entry) => (
       entry.input_source?.command_id ? [entry.input_source.command_id] : []
     )));
@@ -4508,6 +4525,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
   }
 
   private applyProjectedLiveResults(messages: Message[], activeTurnIds: Set<string>) {
+    if (!this.liveResults.size) return;
     const traceTargets = new Map<string, ToolTrace>();
     for (const message of messages) {
       if (!message.viewSource) for (const trace of message.traces ?? []) traceTargets.set(JSON.stringify([message.id, trace.id]), trace);
@@ -5026,6 +5044,8 @@ function projectEntries(
   sameWindow: (a: string, b: string) => boolean = () => true,
 ): Message[] {
   const messages: Message[] = [];
+  const requests = new Map<string, Message>();
+  const programResults: ProtocolEntry[] = [];
   for (const entry of entries) {
     if (
       entry.entry_kind === 'USER_MESSAGE'
@@ -5075,7 +5095,7 @@ function projectEntries(
         .filter((block) => block.block_kind === 'TOOL_CALL')
         .map(projectToolBlock);
       const reasoning = projectReasoningBlocks(entry);
-      messages.push({
+      const message: Message = {
         id: entry.entry_id,
         turnId: entry.turn_id,
         entrySequence: numeric(entry.entry_sequence),
@@ -5090,18 +5110,22 @@ function projectEntries(
         status: 'completed',
         traces: traces.length ? traces : undefined,
         visualizations: projectVisualizations(entry.visualizations),
-      });
+      };
+      messages.push(message);
+      if (traces.length) requests.set(message.id, message);
       continue;
     }
     if (entry.entry_kind === 'TOOL_RESULT') {
-      if (entry.tool_result?.source_kind === 'CODE_MODE_CALL') continue;
+      if (entry.tool_result?.source_kind === 'CODE_MODE_CALL') {
+        programResults.push(entry);
+        continue;
+      }
       const resultRef = entry.tool_result;
       const projectedResult = decodeToolResultContent(entry);
-      const target = resultRef
-        ? messages.find((message) => message.id === resultRef.assistant_entry_id && sameWindow(message.id, entry.entry_id))
-        : undefined;
-      const pendingTrace = target?.traces?.find((item) => item.id === resultRef?.tool_call_id);
-      if (pendingTrace) {
+      const target = resultRef?.assistant_entry_id ? requests.get(resultRef.assistant_entry_id) : undefined;
+      const pendingTrace = target && sameWindow(target.id, entry.entry_id)
+        ? target.traces?.find(item => item.id === resultRef?.tool_call_id) : undefined;
+      if (target && pendingTrace) {
         const result = projectedResult.text;
         const resultState = resultRef?.result_state;
         const succeeded = resultState === 'SUCCESS';
@@ -5114,7 +5138,7 @@ function projectEntries(
         pendingTrace.businessValue = projectedResult.businessValue;
         pendingTrace.resultEntryId = entry.entry_id;
         pendingTrace.attemptId = resultRef?.attempt_id;
-        target!.sourceEntryIds = [...(target!.sourceEntryIds ?? [target!.id]), entry.entry_id];
+        (target.sourceEntryIds ??= [target.id]).push(entry.entry_id);
         pendingTrace.resultState = resultState;
         pendingTrace.resultSummary = summarizeToolResult(pendingTrace.toolName, result);
         pendingTrace.outputBody = projectToolOutput(resultRef);
@@ -5155,12 +5179,17 @@ function projectEntries(
   }
   // Program calls retain their real entries and render inside their source
   // exec card. A page without that source never creates an orphan bubble.
-  for (const entry of entries) {
-    const source = entry.tool_result;
-    if (entry.entry_kind !== 'TOOL_RESULT' || source?.source_kind !== 'CODE_MODE_CALL') continue;
-    const owner = messages.find(message => message.traces?.some(trace => trace.attemptId === source.source_exec_attempt_id));
-    const parent = owner?.traces?.find(trace => trace.attemptId === source.source_exec_attempt_id);
-    if (!parent || !owner) continue;
+  const attempts = new Map<string, {owner: Message; trace: ToolTrace}>();
+  if (programResults.length) {
+    for (const owner of requests.values()) for (const trace of owner.traces ?? []) {
+      if (trace.attemptId && !attempts.has(trace.attemptId)) attempts.set(trace.attemptId, {owner, trace});
+    }
+  }
+  for (const entry of programResults) {
+    const source = entry.tool_result!;
+    const binding = source.source_exec_attempt_id && attempts.get(source.source_exec_attempt_id);
+    if (!binding) continue;
+    const {owner, trace: parent} = binding;
     const result = decodeToolResultContent(entry);
     const child: ToolTrace = {
       id: source.invocation_id || entry.entry_id, attemptId: source.attempt_id,
@@ -5171,8 +5200,8 @@ function projectEntries(
       resultSummary: summarizeToolResult(source.tool_name, result.text), outputBody: projectToolOutput(source),
       resultFacts: projectToolResultFacts(source),
     };
-    parent.programCalls = [...(parent.programCalls ?? []), child];
-    owner.sourceEntryIds = [...(owner.sourceEntryIds ?? [owner.id]), entry.entry_id];
+    (parent.programCalls ??= []).push(child);
+    (owner.sourceEntryIds ??= [owner.id]).push(entry.entry_id);
   }
   for (const message of messages) {
     if (message.turnId && activeTurnIds.has(message.turnId)) continue;
@@ -5694,12 +5723,25 @@ function projectBackgroundProcess(value: ProtocolBackgroundProcess): BackgroundP
   };
 }
 
+// Projection may revisit the same immutable bytes for every live delta. Evict
+// the decoded text with a supplemental body, even while its metadata survives.
+const decodedBodies = new WeakMap<ProtocolContent, {encoded: string; text: string}>();
+function decodedBody(content: ProtocolContent): string {
+  const encoded = content.inline_content;
+  if (!encoded) return '';
+  const previous = decodedBodies.get(content);
+  if (previous?.encoded === encoded) return previous.text;
+  const text = decodeBase64(encoded);
+  decodedBodies.set(content, {encoded, text});
+  return text;
+}
+
 function decodeContent(
   content?: ProtocolContent,
   promptOwner?: { kind: 'entry'; entryId: string } | { kind: 'queue'; queueItemId: string },
 ): string {
   if (!content?.inline_content) return '';
-  const decoded = decodeBase64(content.inline_content);
+  const decoded = decodedBody(content);
   if (content.media_type !== PROMPT_BODY_MEDIA_TYPE) return decoded;
   if (!promptOwner) {
     throw new RuntimeApiError(
@@ -5723,7 +5765,7 @@ function decodeToolResultContent(entry: ProtocolEntry): {
 } {
   if (entry.content?.media_type === TOOL_BUSINESS_MEDIA_TYPE) {
     if (entry.content.inline_content === undefined) return {text: ''};
-    const businessValue = decodeToolBusinessValue(decodeBase64(entry.content.inline_content));
+    const businessValue = decodeToolBusinessValue(decodedBody(entry.content));
     return {text: toolBusinessText(businessValue), businessValue};
   }
   return {text: decodeContent(entry.content)};
@@ -5741,7 +5783,7 @@ function decodePromptContent(
     throw new RuntimeApiError('CONTENT_INTEGRITY_INVALID', '输入正文格式无效。', true);
   }
   try {
-    return decodeCanonicalPromptContent(decodeBase64(content.inline_content), owner);
+    return decodeCanonicalPromptContent(decodedBody(content), owner);
   } catch {
     throw new RuntimeApiError('CONTENT_INTEGRITY_INVALID', '输入正文格式无效。', true);
   }
@@ -5782,7 +5824,9 @@ async function verifyContentIntegrity(
 
 function decodeBase64Bytes(value: string): Uint8Array {
   const decoded = atob(value);
-  return Uint8Array.from(decoded, (character) => character.charCodeAt(0));
+  const bytes = new Uint8Array(decoded.length);
+  for (let index = 0; index < bytes.length; index++) bytes[index] = decoded.charCodeAt(index);
+  return bytes;
 }
 
 function encodeBase64Bytes(value: Uint8Array): string {
@@ -5805,15 +5849,14 @@ function numeric(value: unknown): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+const messageTimeFormat = new Intl.DateTimeFormat('zh-CN', {hour: '2-digit', minute: '2-digit'});
+
 function formatTime(value?: string): string {
   if (!value) return '';
   const date = new Date(value);
   return Number.isNaN(date.getTime())
     ? ''
-    : new Intl.DateTimeFormat('zh-CN', {
-      hour: '2-digit',
-      minute: '2-digit',
-    }).format(date);
+    : messageTimeFormat.format(date);
 }
 
 function formatRelativeTime(value: string): string {

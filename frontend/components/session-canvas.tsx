@@ -5,6 +5,7 @@ import {
   type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode,
 } from 'react';
 import { createPortal } from 'react-dom';
+import { containOffscreenReplies } from '../lib/history-dom';
 import {
   applyDockResize, clamp, closeWindow, defaultFloat, dividerSpec, dockConflicts, dockDividers, dockPixels, emptyLayout,
   fillFreeDock, focusWindow, guideDockResize, maximizedWindow, minimizeWindow, placeWindow, reachableFloat, recallWindow,
@@ -422,12 +423,15 @@ export function SessionCanvas({ controller, sessions, visible = true, tabHost, o
     if (!visible) return;
     let frame = 0;
     let pending: PointerEvent | undefined;
+    let releaseReplies: (() => void) | undefined;
     const target = canvasRef.current;
     const changePreview = (next: Preview | null) => {
       previewState.current = next;
       setPreview(next);
     };
     const reset = () => {
+      releaseReplies?.();
+      releaseReplies = undefined;
       const drag = gesture.current;
       gesture.current = null;
       cancelAnimationFrame(frame);
@@ -516,6 +520,12 @@ export function SessionCanvas({ controller, sessions, visible = true, tabHost, o
       if (!drag.started) {
         if (Math.hypot(event.clientX - drag.x, event.clientY - drag.y) < 5) return;
         drag.started = true;
+        const resizing = drag.kind === 'dock-resize'
+          ? drag.divider.participants.map(part => part.id)
+          : drag.kind === 'float-resize' ? [drag.id] : [];
+        if (resizing.length) releaseReplies = containOffscreenReplies(
+          resizing.flatMap(id => windows.current.get(id) ?? []),
+        );
         target?.setPointerCapture?.(event.pointerId);
       }
       if (event.cancelable) event.preventDefault();
@@ -593,42 +603,44 @@ export function SessionCanvas({ controller, sessions, visible = true, tabHost, o
     };
   }, [area, cancelGesture, current, pendingHandoffs, recordMotion, update, visible]);
 
-  const byId = new Map(sessions.map(session => [session.id, session]));
+  const byId = useMemo(() => new Map(sessions.map(session => [session.id, session])), [sessions]);
   const moving = preview?.kind === 'move' && preview.where === 'canvas' ? preview : null;
   const movingId = moving?.session.id;
   const movingShown = movingId !== undefined && layout.admitted.includes(movingId);
   const full = maximizedWindow(layout);
   const conflicts = moving?.dock ? dockConflicts(layout, moving.session.id, moving.dock) : [];
-  const dividers = dockDividers(layout);
+  const dividers = useMemo(() => dockDividers(layout), [layout]);
   const dockChanges = preview?.kind === 'dock-resize' ? preview.regions : undefined;
+
+  const tabItems = useMemo(() => layout.tabs.map(id => {
+    const session = byId.get(id);
+    if (!session) return null;
+    const selected = layout.focusedId === id;
+    const placed = layout.admitted.includes(id);
+    const placementLabel = placed ? '在画布中' : '已收起';
+    return (
+      <div key={id} className="session-canvas__tab" data-selected={selected || undefined}
+        data-placed={placed || undefined}
+        ref={node => { if (node) tabs.current.set(id, node); else tabs.current.delete(id); }}>
+        <button type="button" className="session-canvas__tab-select" role="tab" aria-selected={selected}
+          aria-controls={id} aria-description={placementLabel} title={`${session.title} · ${placementLabel}`}
+          onClick={() => update(state => recallWindow(state, id, area.current))}
+          onPointerDown={event => begin(event, { kind: 'move', source: 'tab', session })}>
+          {session.pendingApproval ? <span className="session-canvas__approval" title="等待审批" aria-label="等待审批" />
+            : session.running && <LoaderCircle size={12} className="is-spinning" aria-label="正在处理" />}
+          <span className="session-canvas__tab-title">{session.title}</span>
+        </button>
+        <SessionTabClose title={session.title} request={closingTab?.id === id ? closingTab : undefined}
+          onClose={() => void onCloseSession(id)}
+          onReturnToForm={() => update(state => recallWindow(state, id, area.current))} />
+      </div>
+    );
+  }), [byId, layout.tabs, layout.admitted, layout.focusedId, closingTab, onCloseSession, update, begin, area]);
 
   const tabBar = visible && tabHost ? createPortal(
       <div className="session-canvas__tabs" data-dragging={preview ? true : undefined}>
         <div ref={tabStrip} className="session-canvas__tab-strip" role="tablist" aria-label="已载入会话">
-          {layout.tabs.map(id => {
-            const session = byId.get(id);
-            if (!session) return null;
-            const selected = layout.focusedId === id;
-            const placed = layout.admitted.includes(id);
-            const placementLabel = placed ? '在画布中' : '已收起';
-            return (
-              <div key={id} className="session-canvas__tab" data-selected={selected || undefined}
-                data-placed={placed || undefined}
-                ref={node => { if (node) tabs.current.set(id, node); else tabs.current.delete(id); }}>
-                <button type="button" className="session-canvas__tab-select" role="tab" aria-selected={selected}
-                  aria-controls={id} aria-description={placementLabel} title={`${session.title} · ${placementLabel}`}
-                  onClick={() => update(state => recallWindow(state, id, area.current))}
-                  onPointerDown={event => begin(event, { kind: 'move', source: 'tab', session })}>
-                  {session.pendingApproval ? <span className="session-canvas__approval" title="等待审批" aria-label="等待审批" />
-                    : session.running && <LoaderCircle size={12} className="is-spinning" aria-label="正在处理" />}
-                  <span className="session-canvas__tab-title">{session.title}</span>
-                </button>
-                <SessionTabClose title={session.title} request={closingTab?.id === id ? closingTab : undefined}
-                  onClose={() => void onCloseSession(id)}
-                  onReturnToForm={() => update(state => recallWindow(state, id, area.current))} />
-              </div>
-            );
-          })}
+          {tabItems}
         </div>
         {preview?.kind === 'move' && preview.markerX !== undefined && <div className="session-canvas__insertion" style={{ left: preview.markerX }} />}
       </div>,
@@ -648,7 +660,9 @@ export function SessionCanvas({ controller, sessions, visible = true, tabHost, o
           const floatSize = preview?.kind === 'float-resize' && preview.id === id ? preview.rect : undefined;
           const floating = isMoving ? moving?.rect : floatSize ?? (shrunk && item ? reachableFloat(item.float, view) : undefined);
           const dock = dockChanges?.get(id) ?? item?.dock;
-          const rect = floating ? pixels(floating) : item?.mode === 'maximized' ? percentages(wholeCanvas)
+          const rect = isMoving && floating
+            ? { left: 0, top: 0, width: floating.w, height: floating.h, translate: `${floating.x}px ${floating.y}px` }
+            : floating ? pixels(floating) : item?.mode === 'maximized' ? percentages(wholeCanvas)
             : item?.mode === 'docked' && dock ? percentages(dock) : item ? pixels(reachableFloat(item.float, view)) : {};
           return <SessionCanvasWindow key={id} session={session} mode={item?.mode}
             shown={layout.admitted.includes(id)} focused={layout.focusedId === id} canvasVisible={visible}

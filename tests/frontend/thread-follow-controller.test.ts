@@ -290,3 +290,26 @@ it('keeps the programmed scroll event owned when new geometry arrives before res
   geometry.height = 1200; controller.scroll(); controller.coordinate();
   expect(controller.intent).toBe('follow'); expect(geometry.top).toBe(800);
 });
+
+it('keeps the same text anchor when rewrapping exposes an earlier line after a scroll correction', () => {
+  const { controller, geometry, root } = setup();
+  const article = root.querySelector('article')!;
+  article.innerHTML = '<span data-source-text="[[0,1]]">甲</span><span data-source-text="[[1,2]]">乙</span>';
+  const [earlier, reading] = article.querySelectorAll('span');
+  let firstTop = 550, secondTop = 600;
+  vi.spyOn(earlier, 'getBoundingClientRect').mockImplementation(() => new DOMRect(0, firstTop - geometry.top, 100, 20));
+  vi.spyOn(reading, 'getBoundingClientRect').mockImplementation(() => new DOMRect(0, secondTop - geometry.top, 100, 20));
+  controller.read();
+  expect(controller.anchor?.sourceOffset).toBe(1);
+
+  // The earlier inline fragment now wraps onto the same line as the reader.
+  geometry.height += 100;
+  firstTop = secondTop = 650;
+  controller.coordinate();
+  expect(geometry.top).toBe(650);
+  controller.scroll();
+  expect(controller.anchor?.sourceOffset).toBe(1);
+  firstTop = 550; secondTop = 600;
+  controller.coordinate();
+  expect(geometry.top).toBe(600);
+});

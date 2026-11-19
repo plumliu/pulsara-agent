@@ -241,7 +241,7 @@ export function SessionWorkbench({
   const [queuePages, setQueuePages] = useState<{owner: RuntimeConnection | CanonicalHistoryView; items: QueuedPrompt[]; absent: Set<string>}>();
   const queuePagesRef = useRef(queuePages);
   queuePagesRef.current = queuePages;
-  const queueReadGeneration = useRef(0);
+  const queuePageRead = useRef<AbortController | undefined>(undefined);
   const [capabilities, setCapabilities] = useState<CapabilitySnapshot>();
   const [capabilityLoading, setCapabilityLoading] = useState(false);
   const [capabilityError, setCapabilityError] = useState<string>();
@@ -420,11 +420,18 @@ export function SessionWorkbench({
 
   const activeReader = connection ?? historyRef.current;
   const pendingSteerReading = usePendingSteerPages(activeReader, projection);
+  // The preview can also change at the same event cut (e.g. exact queue reads).
+  // Streaming text changes neither queue membership nor body availability.
+  const queuePreview = JSON.stringify(projection.queuedPrompts.map(item => [item.queueItemId, item.contentUnavailable]));
+  useEffect(() => () => {
+    queuePageRead.current?.abort();
+    queuePageRead.current = undefined;
+  }, [activeReader, activeSessionId, projection.eventSequence, projection.control, projection.queuedCount, queuePreview]);
   useEffect(() => {
     const reader = activeReader;
-    if (!reader || !activeSessionId || reader.sessionId !== activeSessionId) return;
+    if (!reader || !activeSessionId || reader.sessionId !== activeSessionId || queuePageRead.current) return;
     const controller = new AbortController();
-    const generation = ++queueReadGeneration.current;
+    queuePageRead.current = controller;
     const previous = queuePagesRef.current?.owner === reader ? queuePagesRef.current : undefined;
     void (async () => {
       const found = new Map<string, QueuedPrompt>();
@@ -445,12 +452,14 @@ export function SessionWorkbench({
         const exact = await reader.readQueueItem(item.queueItemId, controller.signal);
         if (exact) found.set(exact.queueItemId, exact); else absent.add(item.queueItemId);
       }
-      if (!controller.signal.aborted && generation === queueReadGeneration.current && ownsHistoryReader(reader)) {
+      if (!controller.signal.aborted && ownsHistoryReader(reader)) {
         setQueuePages({owner:reader, items:[...found.values()], absent});
       }
-    })().catch(() => { /* A failed read retains the last confirmed queue. */ });
-    return () => controller.abort();
-  }, [activeReader, activeSessionId, ownsHistoryReader, projection.eventSequence, projection.queuedPrompts]);
+    })().catch(() => {
+      // Keep the last confirmed queue and retry on the next publication.
+      if (queuePageRead.current === controller) queuePageRead.current = undefined;
+    });
+  }, [activeReader, activeSessionId, ownsHistoryReader, projection.eventSequence, projection.control, projection.queuedCount, queuePreview, projection.queuedPrompts]);
 
   useEffect(() => {
     if (!activeReader || !ownsHistoryReader(activeReader)) return;

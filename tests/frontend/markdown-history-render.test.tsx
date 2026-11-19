@@ -30,7 +30,8 @@ it('does not reparse unchanged history on draft input, while real response updat
 
   const current = adapter.lastConnection!.current();
   await act(async () => adapter.lastConnection!.emit({...current, eventSequence:current.eventSequence + 1,
-    messages:current.messages.map((message, index) => index === 1 ? {...message,body:'真正更新的回复'} : message)}));
+    messages:current.messages.map((message, index) => ({...message, visualizations: [],
+      body: index === 1 ? '真正更新的回复' : message.body}))}));
   expect(await screen.findByText('真正更新的回复')).toBeTruthy();
   expect(parsing.calls).toBe(1);
   expect(screen.getByRole('textbox', {name:'发送给 Pulsara'}).textContent).toBe('未发送草稿');
