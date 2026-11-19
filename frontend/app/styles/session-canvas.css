@@ -56,9 +56,11 @@
   min-width: 0;
   align-self: stretch;
   padding: 0 5px 0 9px;
+  font: 500 var(--type-small) var(--sans);
   text-align: left;
   user-select: none;
 }
+.session-canvas__tab[data-selected] .session-canvas__tab-select { font-weight: 600; }
 .session-canvas__tab-select svg { flex: none; }
 .session-canvas__tab-title,
 .session-canvas-window__identity > strong,
@@ -69,17 +71,14 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.session-canvas__tab-dot,
 .session-canvas__approval {
   display: inline-block;
   flex: none;
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--muted);
+  background: var(--amber);
 }
-.session-canvas__tab[data-placed] .session-canvas__tab-dot { background: var(--green); }
-.session-canvas__approval { background: var(--amber); }
 .session-canvas__tab-close,
 .session-canvas-window__actions > button {
   display: grid;

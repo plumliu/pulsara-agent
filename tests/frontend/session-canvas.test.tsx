@@ -218,7 +218,8 @@ describe('session canvas windows', () => {
     expect(host.querySelector('.session-canvas__insertion')).toBeTruthy();
     await act(async () => { fireEvent.pointerUp(document, { clientX: 240, clientY: 20, pointerId: 1 }); });
     expect(load).toHaveBeenCalledWith('乙', { type: 'maximized', tabIndex: 0 });
-    expect(within(host).getAllByRole('tab').map(tab => tab.getAttribute('title'))).toEqual(['乙', '甲']);
+    expect(within(host).getAllByRole('tab').map(tab => tab.title)).toEqual(['乙 · 在画布中', '甲 · 已收起']);
+    expect(within(host).getByRole('tab', { name: '甲' }).getAttribute('aria-description')).toBe('已收起');
     const second = screen.getByRole('region', { name: '乙' });
     expect(second.getAttribute('data-mode')).toBe('maximized');
 
@@ -245,6 +246,6 @@ describe('session canvas windows', () => {
     fireEvent.click(screen.getByRole('button', { name: '切换页面' }));
     expect(within(host).queryByRole('tablist')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: '切换页面' }));
-    expect(within(host).getAllByRole('tab').map(tab => tab.getAttribute('title'))).toEqual(['乙', '甲']);
+    expect(within(host).getAllByRole('tab').map(tab => tab.textContent)).toEqual(['乙', '甲']);
   });
 });

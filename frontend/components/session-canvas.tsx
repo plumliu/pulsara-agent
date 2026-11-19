@@ -607,17 +607,18 @@ export function SessionCanvas({ controller, sessions, visible = true, tabHost, o
             const session = byId.get(id);
             if (!session) return null;
             const selected = layout.focusedId === id;
+            const placed = layout.admitted.includes(id);
+            const placementLabel = placed ? '在画布中' : '已收起';
             return (
               <div key={id} className="session-canvas__tab" data-selected={selected || undefined}
-                data-placed={layout.admitted.includes(id) || undefined}
+                data-placed={placed || undefined}
                 ref={node => { if (node) tabs.current.set(id, node); else tabs.current.delete(id); }}>
                 <button type="button" className="session-canvas__tab-select" role="tab" aria-selected={selected}
-                  aria-controls={id} title={session.title}
+                  aria-controls={id} aria-description={placementLabel} title={`${session.title} · ${placementLabel}`}
                   onClick={() => update(state => recallWindow(state, id, area.current))}
                   onPointerDown={event => begin(event, { kind: 'move', source: 'tab', session })}>
                   {session.pendingApproval ? <span className="session-canvas__approval" title="等待审批" aria-label="等待审批" />
-                    : session.running ? <LoaderCircle size={12} className="is-spinning" aria-label="正在处理" />
-                      : <span className="session-canvas__tab-dot" aria-hidden="true" />}
+                    : session.running && <LoaderCircle size={12} className="is-spinning" aria-label="正在处理" />}
                   <span className="session-canvas__tab-title">{session.title}</span>
                 </button>
                 <SessionTabClose title={session.title} request={closingTab?.id === id ? closingTab : undefined}
