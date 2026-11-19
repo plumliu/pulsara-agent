@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, createEvent, fireEvent, render, screen, within } from '@testing-library/react';
 import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -106,7 +106,10 @@ function Conversation({ title }: { title: string }) {
   </>;
 }
 
-function CanvasHarness({ load }: { load?: (id: string, placement: SessionCanvasPlacement) => Promise<boolean> }) {
+function CanvasHarness({ load, placements }: {
+  load?: (id: string, placement: SessionCanvasPlacement) => Promise<boolean>;
+  placements?: Record<string, SessionCanvasPlacement>;
+}) {
   const canvas = useSessionCanvas();
   const [visible, setVisible] = useState(true);
   const [tabHost, setTabHost] = useState<HTMLDivElement | null>(null);
@@ -115,7 +118,7 @@ function CanvasHarness({ load }: { load?: (id: string, placement: SessionCanvasP
     <header className="desktop-titlebar"><div ref={setTabHost} data-testid="titlebar-host" /></header>
     {sessions.map(session => <button key={session.id} type="button" data-testid={`open-${session.id}`}
       onPointerDown={event => canvas.beginSidebarDrag(event, session)}
-      onClick={() => canvas.place(session.id)}>{session.title}</button>)}
+      onClick={() => canvas.place(session.id, placements?.[session.id])}>{session.title}</button>)}
     <button type="button" onClick={() => setVisible(shown => !shown)}>切换页面</button>
     <SessionCanvas controller={canvas} sessions={sessions} visible={visible} tabHost={tabHost}
       onCloseSession={id => canvas.close(id)}
@@ -126,6 +129,26 @@ function CanvasHarness({ load }: { load?: (id: string, placement: SessionCanvasP
 }
 
 describe('session canvas windows', () => {
+  it('reserves the initial mouse press on resize grips while keeping the conversation selectable', () => {
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, view.w, view.h));
+    const { container } = render(<CanvasHarness placements={{ 甲: docked(left), 乙: docked(right), 丙: floating }} />);
+    fireEvent.click(screen.getByTestId('open-甲'));
+    fireEvent.click(screen.getByTestId('open-乙'));
+    fireEvent.click(screen.getByTestId('open-丙'));
+    const divider = screen.getByRole('separator', { name: '调整停靠窗口大小' });
+    const corner = container.querySelector('.session-canvas-window__resize[data-edge="se"]')!;
+    const press = (target: Element, button = 0) => {
+      const event = createEvent.pointerDown(target, { button, pointerId: 1, pointerType: 'mouse' });
+      fireEvent(target, event);
+      fireEvent.pointerUp(document, { button, pointerId: 1 });
+      return event.defaultPrevented;
+    };
+    expect(press(divider)).toBe(true);
+    expect(press(corner)).toBe(true);
+    expect(press(divider, 2)).toBe(false);
+    expect(press(within(screen.getByRole('region', { name: '甲' })).getByRole('textbox'))).toBe(false);
+  });
+
   it('retains the mounted form, title actions and approval signal through minimize and navigation', () => {
     render(<CanvasHarness />);
     fireEvent.click(screen.getByTestId('open-甲'));

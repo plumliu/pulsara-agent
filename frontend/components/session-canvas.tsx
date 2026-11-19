@@ -407,7 +407,9 @@ export function SessionCanvas({ controller, sessions, visible = true, tabHost, o
     | Omit<Extract<Gesture, { kind: 'float-resize' }>, keyof GestureBase>
     | Omit<Extract<Gesture, { kind: 'dock-resize' }>, keyof GestureBase>) => {
     if (event.button !== 0 || gesture.current || event.pointerType === 'touch') return;
-    if (next.kind === 'move' && (next.source === 'sidebar' || next.source === 'title')) event.preventDefault();
+    // Resize grips own the press even before the drag threshold is crossed.
+    // A tab click still needs the native focus behavior.
+    if (next.kind !== 'move' || next.source !== 'tab') event.preventDefault();
     suppressClick.current = false;
     gesture.current = { ...next, pointerId: event.pointerId, x: event.clientX, y: event.clientY, started: false };
   }, []);

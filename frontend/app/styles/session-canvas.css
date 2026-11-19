@@ -285,6 +285,7 @@
   position: absolute;
   z-index: 2;
   touch-action: none;
+  user-select: none;
 }
 .session-canvas-window__resize[data-edge="n"] { inset: -1px 9px auto; height: 5px; cursor: ns-resize; }
 .session-canvas-window__resize[data-edge="s"] { inset: auto 9px -1px; height: 5px; cursor: ns-resize; }
@@ -298,7 +299,7 @@
 .session-canvas-window__resize[data-edge="ne"] { top: -1px; right: -1px; cursor: nesw-resize; }
 .session-canvas-window__resize[data-edge="sw"] { bottom: -1px; left: -1px; cursor: nesw-resize; }
 .session-canvas-window__resize[data-edge="se"] { bottom: -1px; right: -1px; cursor: nwse-resize; }
-.session-canvas__divider { position: absolute; touch-action: none; }
+.session-canvas__divider { position: absolute; touch-action: none; user-select: none; }
 .session-canvas__divider[data-axis="x"] { cursor: ew-resize; }
 .session-canvas__divider[data-axis="y"] { cursor: ns-resize; }
 .session-canvas__divider::after {
