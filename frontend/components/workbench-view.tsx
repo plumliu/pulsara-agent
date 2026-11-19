@@ -112,7 +112,7 @@ import { SessionCanvasTitleActions, SessionCanvasTitleIdentity, useSessionCanvas
 import { ToolBusinessContent } from './tool-business-content';
 import { WelcomeTypewriter } from './welcome-typewriter';
 import { AnimatedDisclosure } from './animated-disclosure';
-import { AnimatedPromptQueue, queuePreviewCapacity } from './animated-prompt-queue';
+import { AnimatedPromptQueue, PROMPT_QUEUE_TRANSITION_MS, queuePreviewCapacity } from './animated-prompt-queue';
 import { builtinToolSummary } from '../lib/builtin-tool-summary';
 import { ToolResultDisplayContext, isUserFacingToolResult, toolResultCanExpand, toolResultDiagnosticText } from '../lib/tool-result-display';
 import { PromptDraftStore } from '../lib/prompt-draft';
@@ -2445,20 +2445,43 @@ export function WorkbenchView({
     ));
   const canonicalSubmission = (item: LocalPromptSubmission) => messages.some(message => message.inputSource?.commandId === item.commandId
     && (!item.queueItemId || message.inputSource.queueItemId === item.queueItemId));
-  const conversationSubmissions = localSubmissions.filter(item => !canonicalSubmission(item) && !queuedPrompts.some(queued => queued.commandId === item.commandId) && item.displayAsMessage
+  const inlineSubmissions = localSubmissions.filter(item => !canonicalSubmission(item) && item.displayAsMessage
     && item.deliveryMode === 'new-turn' && item.outcomeCode !== 'USER_REDIRECTED_TO_STEER');
-  const preparingSubmission = !isRunning && runtimeStatus === 'online'
-    && conversationSubmissions.find(item => ['synchronizing', 'queued'].includes(item.status));
-  const awaitingFirstActivity = isRunning && runtimeStatus === 'online' && activeTurnId && !interaction
-    && !messages.some(message => message.role === 'assistant' && message.turnId === activeTurnId && !isEmptyLiveAssistant(message));
   const terminalQueueIds = new Set(localSubmissions.filter(item => ['cancelled', 'rejected', 'consumed'].includes(item.status))
     .map(item => item.queueItemId));
   for (const action of activeQueueActions) if (action.status === 'accepted') terminalQueueIds.add(action.source.queueItemId);
   for (const message of messages) if (message.inputSource?.queueItemId) terminalQueueIds.add(message.inputSource.queueItemId);
-  const visibleQueue = queuedPrompts.filter(item => item.deliveryMode === 'new-turn'
-    && !terminalQueueIds.has(item.queueItemId));
-  const queuedDisplayCount = Math.max(0, queuedCount - queuedPrompts.filter(item => item.deliveryMode === 'new-turn'
-    && terminalQueueIds.has(item.queueItemId)).length);
+  const newTurnQueue = queuedPrompts.filter(item => item.deliveryMode === 'new-turn');
+  const pendingQueue = newTurnQueue.filter(item => !terminalQueueIds.has(item.queueItemId));
+  const admittedIdleSubmission = pendingQueue.find(queued => inlineSubmissions.some(item =>
+    ['sending', 'synchronizing', 'queued'].includes(item.status) && queued.commandId === item.commandId
+    && (!item.queueItemId || queued.queueItemId === item.queueItemId)));
+  const admittedIdleQueueId = admittedIdleSubmission?.queueItemId;
+  const [shownIdleQueueId, setShownIdleQueueId] = useState<string>();
+  const canDeferIdleQueue = pendingQueue.length === 1 && queuedCount <= 1
+    && history?.atLatest !== false && runtimeStatus === 'online'
+    && !readOnlyDock && !interaction && !compactionBusy && !manualCompactionCommandId;
+  // An idle send often crosses the durable queue within a single queue animation.
+  // Keep its inline bubble through that handoff. A row still waiting after
+  // this visual grace period gets the ordinary queue controls.
+  useEffect(() => {
+    if (!admittedIdleQueueId || shownIdleQueueId === admittedIdleQueueId) return;
+    if (!canDeferIdleQueue) {
+      setShownIdleQueueId(admittedIdleQueueId);
+      return;
+    }
+    const reveal = setTimeout(() => setShownIdleQueueId(admittedIdleQueueId), PROMPT_QUEUE_TRANSITION_MS);
+    return () => clearTimeout(reveal);
+  }, [admittedIdleQueueId, canDeferIdleQueue, shownIdleQueueId]);
+  const deferredQueueId = canDeferIdleQueue && admittedIdleQueueId !== shownIdleQueueId ? admittedIdleQueueId : undefined;
+  const visibleQueue = pendingQueue.filter(item => item.queueItemId !== deferredQueueId);
+  const queuedDisplayCount = Math.max(0, queuedCount - newTurnQueue.length + visibleQueue.length);
+  const conversationSubmissions = inlineSubmissions.filter(item => !visibleQueue.some(queued =>
+    queued.commandId === item.commandId && (!item.queueItemId || queued.queueItemId === item.queueItemId)));
+  const preparingSubmission = !isRunning && runtimeStatus === 'online'
+    && conversationSubmissions.find(item => ['synchronizing', 'queued'].includes(item.status));
+  const awaitingFirstActivity = isRunning && runtimeStatus === 'online' && activeTurnId && !interaction
+    && !messages.some(message => message.role === 'assistant' && message.turnId === activeTurnId && !isEmptyLiveAssistant(message));
   const pendingSteers = queuedPrompts.filter(item => item.deliveryMode === 'steer' && item.targetTurnId === activeTurnId
     && !messages.some(message => message.userKind === 'steer'
       && message.inputSource?.queueItemId === item.queueItemId));

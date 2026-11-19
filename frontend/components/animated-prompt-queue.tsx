@@ -6,7 +6,8 @@ export function queuePreviewCapacity(availableHeight: number, width: number): nu
   return Math.max(2, Math.floor((availableHeight - 24) / (width <= 480 ? 80 : 60)));
 }
 
-const timing = { duration: 240, easing: 'cubic-bezier(.2,.7,.2,1)' };
+export const PROMPT_QUEUE_TRANSITION_MS = 240;
+const timing = { duration: PROMPT_QUEUE_TRANSITION_MS, easing: 'cubic-bezier(.2,.7,.2,1)' };
 const reducedMotion = () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
 
 function QueueBubble({ children, exiting, onExitComplete }: {

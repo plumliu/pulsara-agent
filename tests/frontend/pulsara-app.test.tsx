@@ -10,6 +10,7 @@ import type { CommandReceipt, LocalPromptSubmission, RuntimeAdapter, RuntimeBoot
 import type { CapabilitySnapshot, ProjectCapabilityMutationResult, SessionSummary, UserCapabilitySnapshot } from '../../frontend/lib/pulsara-types';
 
 import PulsaraApp from '../../frontend/app/pulsara-app';
+import { PROMPT_QUEUE_TRANSITION_MS } from '../../frontend/components/animated-prompt-queue';
 import { PromptDraftStore } from '../../frontend/lib/prompt-draft';
 
 import { isWelcomeHeading, deferred, textPrompt, stubClipboard, typeComposer, composerIsDisabled, bootstrap, initialSession, SOURCE_FIDELITY_MARKDOWN, SOURCE_FIDELITY_USER_TEXT, capabilitySnapshot, userCapabilitySnapshot, projection, FakeConnection, FakeAdapter, renderWorkbench, sessionMenuClipping } from './pulsara-app-fixture';
@@ -3273,7 +3274,7 @@ describe('PulsaraApp', () => {
     expect(screen.queryByText('适用权限：只读')).toBeNull();
   });
 
-  it('moves an accepted idle submission into the real ordered queue until canonical adoption', async () => {
+  it.each(['starts promptly', 'keeps waiting', 'another row is already waiting'] as const)('keeps an idle send inline until it %s', async (outcome) => {
     const adapter = new FakeAdapter();
     adapter.connectionValue = {
       ...projection(''), messages: [], isRunning: false, activeTurnId: undefined,
@@ -3292,25 +3293,53 @@ describe('PulsaraApp', () => {
     expect(bubble.textContent).toContain('空闲时直接显示的输入');
     expect(bubble.textContent).toContain('正在发送');
     expect(screen.queryByRole('region', { name: '等待处理的输入' })).toBeNull();
-    await act(async () => receipt.resolve({ commandId, status: 'pending', promptDelivery: {
-      queueItemId: 'idle-queue', queueStatus: 'PENDING', deliveryMode: 'new-turn',
-    } }));
-    act(() => active.emit({ ...projection(''), messages: [], eventSequence: 2, queuedCount: 1,
-      queuedPrompts: [{ queueItemId: 'idle-queue', sourceKind: 'command', commandId, sequence: '1', status: 'pending',
-        deliveryMode: 'new-turn', content: textPrompt('空闲时直接显示的输入'), permission: 'read-only' }],
-    }));
-    await waitFor(() => expect(document.querySelector(`[data-pending-message="${commandId}"]`)).toBeNull());
-    expect(screen.getByRole('region', { name: '等待处理的输入' }).textContent).toContain('空闲时直接显示的输入');
-    expect(screen.getByText(/1 条等待处理/)).toBeTruthy();
-    expect(screen.getAllByText('空闲时直接显示的输入')).toHaveLength(1);
-    act(() => active.emit({ ...projection(''), eventSequence: 3, messages: [{
-      id: 'idle-entry', role: 'user', userKind: 'prompt', turnId: 'turn-1', time: '现在',
-      body: '空闲时直接显示的输入',
-      inputSource: { identityKind: 'queue', sourceKind: 'command', commandId, queueItemId: 'idle-queue', deliveryMode: 'new-turn' },
-    }] }));
-    await waitFor(() => expect(document.querySelector('[data-pending-message]')).toBeNull());
-    expect(screen.getAllByText('空闲时直接显示的输入')).toHaveLength(1);
-    expect(active.submitPrompt).toHaveBeenCalledTimes(1);
+    const queued: RuntimeProjection['queuedPrompts'] = [{
+      queueItemId: 'idle-queue', sourceKind: 'command', commandId, sequence: '2', status: 'pending',
+      deliveryMode: 'new-turn', content: textPrompt('空闲时直接显示的输入'), permission: 'read-only',
+    }];
+    if (outcome === 'another row is already waiting') {
+      queued.unshift({ ...queued[0], queueItemId: 'other-queue', commandId: 'other-command',
+        sequence: '1', sourceKind: 'command', content: textPrompt('另一条等待处理的输入') });
+    }
+    vi.useFakeTimers();
+    try {
+      await act(async () => receipt.resolve({ commandId, status: 'pending', promptDelivery: {
+        queueItemId: 'idle-queue', queueStatus: 'PENDING', deliveryMode: 'new-turn',
+      } }));
+      await act(async () => active.emit({ ...projection(''), messages: [], eventSequence: 2,
+        queuedCount: queued.length, queuedPrompts: queued, isRunning: false, activeTurnId: undefined,
+      }));
+      if (outcome !== 'another row is already waiting') {
+        expect(document.querySelector(`[data-pending-message="${commandId}"]`)).toBe(bubble);
+        expect(screen.getByText('准备开始…')).toBeTruthy();
+        expect(screen.queryByRole('region', { name: '等待处理的输入' })).toBeNull();
+        expect(screen.queryByText(/条等待处理/)).toBeNull();
+      }
+      if (outcome === 'keeps waiting') {
+        await act(async () => vi.advanceTimersByTimeAsync(PROMPT_QUEUE_TRANSITION_MS));
+      }
+      if (outcome !== 'starts promptly') {
+        expect(document.querySelector(`[data-pending-message="${commandId}"]`)).toBeNull();
+        const queue = screen.getByRole('region', { name: '等待处理的输入' });
+        const row = within(queue).getByText('空闲时直接显示的输入').closest('article')!;
+        expect(within(row).getByRole('button', { name: '编辑' })).toBeTruthy();
+        expect(within(row).getByRole('button', { name: '删除' })).toBeTruthy();
+        expect(screen.getByText(`${queued.length} 条等待处理`)).toBeTruthy();
+      }
+      await act(async () => active.emit({ ...projection(''), eventSequence: 3, messages: [{
+        id: 'idle-entry', role: 'user', userKind: 'prompt', turnId: 'turn-1', time: '现在',
+        body: '空闲时直接显示的输入',
+        inputSource: { identityKind: 'queue', sourceKind: 'command', commandId, queueItemId: 'idle-queue', deliveryMode: 'new-turn' },
+      }] }));
+      await act(async () => vi.advanceTimersByTimeAsync(PROMPT_QUEUE_TRANSITION_MS));
+      expect(document.querySelector('[data-pending-message]')).toBeNull();
+      expect(screen.getAllByText('空闲时直接显示的输入')).toHaveLength(1);
+      expect(screen.queryByRole('region', { name: '等待处理的输入' })).toBeNull();
+      expect(active.submitPrompt).toHaveBeenCalledTimes(1);
+    } finally {
+      cleanup();
+      vi.useRealTimers();
+    }
   });
 
   it.each(['USER_STOPPED', 'HOST_TAKEOVER'])('separates consumed input delivery from stopped execution with reason %s', async terminalReason => {
