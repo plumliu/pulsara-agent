@@ -822,6 +822,7 @@ async def _exercise_model_configuration_edit(
                     draft = {
                         "source": source,
                         "configuration_name": "Private",
+                        "streaming": False,
                         "base_url": "https://private.example/v1",
                         "model_id": "private-model",
                         "wire_api": "openai_chat_completions",

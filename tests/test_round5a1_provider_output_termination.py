@@ -22,6 +22,7 @@ from pulsara_agent.conversation_kernel.direct_model import (
 from pulsara_agent.llm.adapters.openai.chat_completions import (
     ChatCompletionAccumulator,
     OpenAIChatCompletionsTransport,
+    _chat_completion_event,
     chat_tool_wire_items,
 )
 from pulsara_agent.llm.adapters.openai.events import ProviderLiveItemBuilder
@@ -293,6 +294,21 @@ def test_chat_completed_text_reasoning_replay_is_explicit_and_exact() -> None:
         "content": "answer",
         "reasoning_content": "reason",
     }
+
+
+def test_nonstream_chat_projects_complete_tool_calls_and_preserves_reasoning_for_replay() -> None:
+    message = {
+        "role": "assistant", "content": "Checking both.", "reasoning_content": "Need two results.",
+        "tool_calls": [
+            {"id": call_id, "type": "function", "function": {"name": "lookup", "arguments": args}}
+            for call_id, args in (("call_1", '{"x": 1}'), ("call_2", '{"x": 2}'))
+        ],
+    }
+    accumulator = ChatCompletionAccumulator(builder=ProviderLiveItemBuilder(), route_wire_profile=_chat_profile())
+    accumulator.apply(_chat_completion_event({"choices": [{"index": 0, "finish_reason": "tool_calls", "message": message}]}))
+    terminal = accumulator.finish()
+    assert isinstance(terminal, ProviderAdapterTerminal)
+    assert thaw_json(terminal.completed_replay_payload.ordered_items[0]) == message
 
 
 def test_chat_null_reasoning_deltas_do_not_erase_or_forge_a_replay_carrier() -> None:

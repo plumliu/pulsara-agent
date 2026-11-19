@@ -120,3 +120,53 @@ def test_probe_content_bound_is_independent_of_fragments_and_closes_transport(
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+@pytest.mark.parametrize("wire", [WireApi.OPENAI_CHAT_COMPLETIONS, WireApi.OPENAI_RESPONSES])
+@pytest.mark.parametrize("streaming", [True, False], ids=["unsupported-stream", "full-reply"])
+def test_custom_connection_uses_only_its_configured_output_mode(wire, streaming):
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+
+    async def scenario():
+        requests = []
+
+        async def complete(request):
+            body = await request.json()
+            requests.append(body)
+            if body["stream"]:
+                return web.json_response({"error": {"message": "streaming unsupported"}}, status=400)
+            if wire is WireApi.OPENAI_CHAT_COMPLETIONS:
+                return web.json_response({
+                    "id": "chatcmpl_probe", "object": "chat.completion", "created": 1, "model": "local-model",
+                    "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "OK"}}],
+                })
+            return web.json_response({
+                "id": "resp_probe", "object": "response", "model": "local-model", "status": "completed",
+                "output": [{"type": "message", "role": "assistant", "status": "completed",
+                            "content": [{"type": "output_text", "text": "OK", "annotations": []}]}],
+            })
+
+        app = web.Application()
+        path = "chat/completions" if wire is WireApi.OPENAI_CHAT_COMPLETIONS else "responses"
+        app.router.add_post("/v1/" + path, complete)
+        async with TestServer(app) as server:
+            routes = production_route_wire_registry()
+            resolved = create_user_declared_model_connection(
+                model_id="local-model", wire_api=wire, base_url=str(server.make_url("/v1")),
+                declaration=UserDeclaredModelTarget(
+                    "custom", 256_000, 8192, True, ReasoningProviderDefault(),
+                    ModelConnectionAuthentication.NONE, streaming=streaming,
+                ),
+                route_wires=routes, reasoning_wire_profile=ReasoningWireProfile.PROVIDER_DEFAULT,
+            )
+            probe = probe_model_connection(resolved=resolved, catalog=None, route_wires=routes, api_key=None)
+            if streaming:
+                with pytest.raises(ModelConnectionProbeFailure, match="streaming unsupported"):
+                    await probe
+            else:
+                await probe
+            assert [request["stream"] for request in requests] == [streaming]
+            assert ("stream_options" in requests[0]) == (streaming and wire is WireApi.OPENAI_CHAT_COMPLETIONS)
+
+    asyncio.run(scenario())

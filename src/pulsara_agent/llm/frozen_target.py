@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 class FrozenModelConnectionExecutionContract:
     connection_id: ModelConnectionId
     authentication_mode: ModelConnectionAuthentication
+    streaming: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,6 +220,7 @@ def _freeze_provider_physical_call_target(
         connection=FrozenModelConnectionExecutionContract(
             connection_id=target.connection.id,
             authentication_mode=target.connection.authentication,
+            streaming=target.connection.streaming,
         ),
         target_fact=target.fact,
         reasoning_contract=target.contract.reasoning,

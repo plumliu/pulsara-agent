@@ -185,6 +185,7 @@ export type ModelConfigurationInput =
     context_tokens: number;
     max_output_tokens: number;
     tool_call: boolean;
+    streaming: boolean;
     input_modalities: string[] | null;
     reasoning:
       | { kind: 'provider_default' }

@@ -270,17 +270,24 @@ async def close_sdk_resource(resource, *, scrub, primary=None, closure=None):
 
 
 @asynccontextmanager
-async def closed_sdk_stream(stream, *, scrub):
-    """SDK owns close; join it before replacement, including cancellation races."""
+async def sdk_response_items(result, *, streaming, completion_event, scrub):
+    """Join an SDK stream, or project the single reply already read by the SDK."""
+    if not streaming:
+        async def completed():
+            yield completion_event(result)
+
+        yield completed(), None
+        return
+
     primary = None
     closure = _SDKStreamClosure()
     try:
-        yield closure
+        yield result, closure
     except BaseException as exc:
         primary = exc
         raise
     finally:
-        await close_sdk_resource(stream, scrub=scrub, primary=primary, closure=closure)
+        await close_sdk_resource(result, scrub=scrub, primary=primary, closure=closure)
 
 
 def _hex_equivalent_pattern(value: str, *, percent: bool) -> bytes:

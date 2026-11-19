@@ -1121,6 +1121,7 @@ class LocalHttpServer:
                 context_tokens=declared.total_context_tokens,
                 max_output_tokens=declared.max_output_tokens,
                 tool_call=declared.tool_call,
+                streaming=declared.streaming,
                 input_modalities=declared.input_modalities,
                 reasoning=raw["reasoning"],
             )
@@ -1266,7 +1267,7 @@ class LocalHttpServer:
             "input_modalities",
             "reasoning",
         }
-        if set(body) != expected:
+        if set(body) - {"streaming"} != expected:
             raise ValueError("custom model configuration has an invalid closed shape")
         name = body["configuration_name"]
         base_url = body["base_url"]
@@ -1308,6 +1309,7 @@ class LocalHttpServer:
             total_context_tokens=context_tokens,
             max_output_tokens=max_output_tokens,
             tool_call=tool_call,
+            streaming=body.get("streaming", True),
             input_modalities=None if input_modalities is None else tuple(input_modalities),
             reasoning=reasoning,
             authentication=authentication,

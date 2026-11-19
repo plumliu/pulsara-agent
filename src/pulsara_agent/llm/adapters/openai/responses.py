@@ -16,6 +16,7 @@ from pulsara_agent.llm.adapters.openai.client import (
     OpenAITransportTimeoutPolicy,
     admit_provider_request,
     build_async_openai_client,
+    bounded_json_response_hook,
     prepare_openai_sdk,
     openai_auth_request_options,
 )
@@ -41,7 +42,7 @@ from pulsara_agent.llm.adapters.openai.retrying import (
     sdk_max_retries_for_transport,
     provider_diagnostic_await,
     capture_retry_scrubber,
-    closed_sdk_stream,
+    sdk_response_items,
     close_sdk_resource,
     _SDKStreamClosure,
     PhysicalStreamCloseError,
@@ -156,6 +157,7 @@ class OpenAIResponsesTransport:
             yield accumulator.finish()
             return
 
+        streaming = call.target.connection.streaming
         payload = build_responses_payload(call=call, context=context)
         retry_config = retry_config_for_purpose(self.retry_config, call.fact.purpose)
         agent_loop = call.fact.purpose is ModelCallPurpose.AGENT_MODEL_LOOP
@@ -181,6 +183,7 @@ class OpenAIResponsesTransport:
                 base_url=model.base_url,
                 timeout_policy=self.timeout_policy,
                 credential_boundary=credential_boundary,
+                response_hooks=None if streaming else [bounded_json_response_hook(MAX_COMPLETED_PROVIDER_RESPONSE_AGGREGATE_BYTES)],
                 max_retries=sdk_max_retries_for_transport(
                     retry_config=retry_config, purpose=call.fact.purpose
                 ),
@@ -207,13 +210,13 @@ class OpenAIResponsesTransport:
                 stream_closed = True  # no physical stream exists until open succeeds
                 closure = None
                 try:
-                    stream = await provider_diagnostic_await(
+                    result = await provider_diagnostic_await(
                         admit_provider_request(
                             credential_boundary=credential_boundary,
                             payload=payload,
                             operation=lambda: client.responses.create(
                                 **payload,
-                                stream=True,
+                                stream=streaming,
                                 **openai_auth_request_options(
                                     requires_api_key=call.target.connection.requires_api_key
                                 ),
@@ -221,11 +224,11 @@ class OpenAIResponsesTransport:
                         ),
                         error_scrubber,
                     )
-                    stream_closed = False
-                    phase = "streaming"
-                    async with closed_sdk_stream(
-                        stream, scrub=error_scrubber
-                    ) as closure:
+                    stream_closed = not streaming
+                    phase = "streaming" if streaming else "decoding"
+                    async with sdk_response_items(
+                        result, streaming=streaming, completion_event=_responses_completion_event, scrub=error_scrubber,
+                    ) as (stream, closure):
                         while True:
                             try:
                                 raw_item = await provider_diagnostic_await(
@@ -774,6 +777,16 @@ def _thaw_wire_objects(
             raise TypeError("provider wire item did not thaw to an object")
         result.append(thawed)
     return result
+
+
+def _responses_completion_event(result: Any) -> dict[str, Any]:
+    response = sdk_event_to_dict(result)
+    status = response.get("status")
+    if status not in ("completed", "incomplete", "failed"):
+        raise LLMTransportContractError(
+            "expected a terminal Responses status", reason_code="transport_responses_completed_invalid"
+        )
+    return {"type": f"response.{status}", "response": response}
 
 
 @dataclass(slots=True)

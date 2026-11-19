@@ -229,6 +229,7 @@ class ModelRuntime:
         if (
             target.connection.id != bundle.connection.connection_id
             or target.connection.authentication is not bundle.connection.authentication_mode
+            or target.connection.streaming != bundle.connection.streaming
         ):
             raise ModelRuntimeUnavailable(
                 "current model connection differs from the installed epoch contract"

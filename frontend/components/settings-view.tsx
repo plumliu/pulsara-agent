@@ -222,6 +222,7 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
   const [contextTokens, setContextTokens] = useState('256000');
   const [catalogContextTokens, setCatalogContextTokens] = useState<string>();
   const [maxOutputTokens, setMaxOutputTokens] = useState('8192');
+  const [streaming, setStreaming] = useState(true);
   const [toolCall, setToolCall] = useState(true);
   const [inputModalities, setInputModalities] = useState<string[] | null>(['text']);
   const [catalogReasoningProfile, setCatalogReasoningProfile] = useState<ReasoningWireProfile>('catalog_standard');
@@ -340,7 +341,7 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
     setAuthentication('bearer_api_key');
     setContextTokens('256000'); setMaxOutputTokens('8192');
     setCatalogContextTokens(undefined);
-    setToolCall(true); setCatalogReasoningProfile('catalog_standard');
+    setStreaming(true); setToolCall(true); setCatalogReasoningProfile('catalog_standard');
     setCustomReasoning('provider_default');
     setInputModalities(['text']);
     setEffortValues('low, medium, high');
@@ -366,7 +367,7 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
       } else {
         setConfigurationName(value.configuration_name); setBaseUrl(value.base_url);
         setAuthentication(value.authentication); setContextTokens(String(value.context_tokens));
-        setMaxOutputTokens(String(value.max_output_tokens)); setToolCall(value.tool_call);
+        setMaxOutputTokens(String(value.max_output_tokens)); setToolCall(value.tool_call); setStreaming(value.streaming);
         setInputModalities(value.input_modalities); setCustomReasoning(value.reasoning.kind);
         if ('values' in value.reasoning) setEffortValues(value.reasoning.values.join(', '));
       }
@@ -399,7 +400,7 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
       source: 'user_declared', configuration_name: configurationName.trim(),
       base_url: baseUrl.trim(), model_id: modelId.trim(), wire_api: wireApi,
       authentication, api_key: authentication === 'none' ? null : apiKey,
-      context_tokens: context, max_output_tokens: output, tool_call: toolCall,
+      context_tokens: context, max_output_tokens: output, tool_call: toolCall, streaming,
       input_modalities: inputModalities,
       reasoning: reasoningProfilePayload(customReasoning, efforts),
     };
@@ -631,6 +632,7 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
                 <label><span>上下文窗口大小</span><input type="number" min={minimumContextTokens} step="1" value={contextTokens} onChange={(event) => setContextTokens(event.target.value)} /></label>
                 <label><span>Reasoning 请求形状</span><select aria-label="Reasoning 请求形状" value={incompatibleCustomProfile ? '' : customReasoning} onChange={(event) => setCustomReasoning(event.target.value as CustomReasoningKind)}>{incompatibleCustomProfile && <option value="" disabled>原请求形状不支持此协议，请重新选择</option>}<option value="provider_default">由服务端决定</option><option value="effort">标准 effort</option><option value="toggle">推理开关</option>{wireApi !== 'openai_responses' && <><option value="enable_thinking">enable_thinking 开关</option><option value="thinking_type">thinking.type 开关</option><option value="thinking_effort">thinking.type + effort</option><option value="broad_compat">多字段兼容组合</option></>}</select><small>{reasoningProfileDescription(customReasoning)}</small></label>
                 {effortReasoningProfiles.has(customReasoning) && <label><span>Effort 列表</span><input value={effortValues} onChange={(event) => setEffortValues(event.target.value)} placeholder="low, medium, high" /></label>}
+                <label className="model-boolean-field"><input type="checkbox" checked={streaming} onChange={(event) => setStreaming(event.target.checked)} /><span>流式输出</span></label>
                 <label className="model-boolean-field"><input type="checkbox" checked={toolCall} onChange={(event) => setToolCall(event.target.checked)} /><span>支持 tool calling</span></label>
                 <label className="model-boolean-field"><input type="checkbox" checked={inputModalities?.includes('image') ?? false} onChange={(event) => { const checked = event.target.checked; setInputModalities((values) => checked ? [...(values ?? ['text']), 'image'] : (values ?? ['text']).filter((value) => value !== 'image')); }} /><span>支持图像输入</span></label>
               </div>

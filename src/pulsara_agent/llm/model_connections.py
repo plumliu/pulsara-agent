@@ -65,6 +65,7 @@ class UserDeclaredModelTarget:
     reasoning: ReasoningControlContract
     authentication: ModelConnectionAuthentication
     input_modalities: tuple[str, ...] | None = None
+    streaming: bool = True
 
     def __post_init__(self) -> None:
         if (
@@ -79,6 +80,8 @@ class UserDeclaredModelTarget:
             self.total_context_tokens,
             self.max_output_tokens,
         )
+        if not isinstance(self.streaming, bool):
+            raise ValueError("custom model streaming must be boolean")
         if not isinstance(self.tool_call, bool):
             raise TypeError("custom model tool-call support must be boolean")
         if self.input_modalities is not None and (
@@ -142,6 +145,10 @@ class ModelConnectionConfig:
                 or self.context_window_tokens < MINIMUM_SELECTABLE_CONTEXT_TOKENS
             ):
                 raise ValueError("context allowance is below the product minimum or not an integer")
+
+    @property
+    def streaming(self) -> bool:
+        return self.user_declared is None or self.user_declared.streaming
 
     @property
     def authentication(self) -> ModelConnectionAuthentication:
@@ -293,6 +300,7 @@ def _user_declared_model_target_to_dict(
         "total_context_tokens": value.total_context_tokens,
         "max_output_tokens": value.max_output_tokens,
         "tool_call": value.tool_call,
+        "streaming": value.streaming,
         "reasoning": _user_declared_reasoning_to_dict(
             profile, value.reasoning
         ),
@@ -316,7 +324,7 @@ def _user_declared_model_target_from_dict(
         "reasoning",
         "authentication",
     }
-    if not isinstance(value, dict) or set(value) - {"input_modalities"} != expected:
+    if not isinstance(value, dict) or set(value) - {"input_modalities", "streaming"} != expected:
         raise ValueError("custom model target has an invalid closed shape")
     name = value["configuration_name"]
     total = value["total_context_tokens"]
@@ -344,6 +352,7 @@ def _user_declared_model_target_from_dict(
             total_context_tokens=total,
             max_output_tokens=output,
             tool_call=tool_call,
+            streaming=value.get("streaming", True),
             reasoning=reasoning,
             authentication=ModelConnectionAuthentication(authentication),
             input_modalities=(

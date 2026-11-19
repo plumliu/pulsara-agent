@@ -87,10 +87,18 @@ def test_user_declared_connection_closed_codec_preserves_asserted_facts() -> Non
         "total_context_tokens": 256_000,
         "max_output_tokens": 16_384,
         "tool_call": True,
+        "streaming": True,
         "reasoning": {"kind": "effort", "values": ["low", "high"]},
         "authentication": "none",
     }
     assert value.requires_api_key is False
+    del encoded["user_declared"]["streaming"]
+    assert model_connection_from_dict(encoded).streaming is True
+    encoded["user_declared"]["streaming"] = False
+    assert model_connection_from_dict(encoded).streaming is False
+    encoded["user_declared"]["streaming"] = "false"
+    with pytest.raises(ValueError, match="streaming"):
+        model_connection_from_dict(encoded)
 
 
 @pytest.mark.parametrize(

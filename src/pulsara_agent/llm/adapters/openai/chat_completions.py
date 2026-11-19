@@ -16,6 +16,7 @@ from pulsara_agent.llm.adapters.openai.client import (
     OpenAITransportTimeoutPolicy,
     admit_provider_request,
     build_async_openai_client,
+    bounded_json_response_hook,
     prepare_openai_sdk,
     openai_auth_request_options,
 )
@@ -41,7 +42,7 @@ from pulsara_agent.llm.adapters.openai.retrying import (
     sdk_max_retries_for_transport,
     provider_diagnostic_await,
     capture_retry_scrubber,
-    closed_sdk_stream,
+    sdk_response_items,
     close_sdk_resource,
     _SDKStreamClosure,
     PhysicalStreamCloseError,
@@ -74,6 +75,7 @@ from pulsara_agent.llm.model_target import reasoning_wire_fields
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.llm.stream_limits import (
     MAX_CHAT_REASONING_REPLAY_AGGREGATE_BYTES,
+    MAX_COMPLETED_PROVIDER_RESPONSE_AGGREGATE_BYTES,
 )
 from pulsara_agent.ports.live_agent_event import ProviderStreamPayload
 from pulsara_agent.ports.provider_stream import (
@@ -160,6 +162,7 @@ class OpenAIChatCompletionsTransport:
             yield accumulator.finish()
             return
 
+        streaming = call.target.connection.streaming
         payload = build_chat_completions_payload(call=call, context=context)
         retry_config = retry_config_for_purpose(self.retry_config, call.fact.purpose)
         agent_loop = call.fact.purpose is ModelCallPurpose.AGENT_MODEL_LOOP
@@ -185,6 +188,7 @@ class OpenAIChatCompletionsTransport:
                 base_url=model.base_url,
                 timeout_policy=self.timeout_policy,
                 credential_boundary=credential_boundary,
+                response_hooks=None if streaming else [bounded_json_response_hook(MAX_COMPLETED_PROVIDER_RESPONSE_AGGREGATE_BYTES)],
                 max_retries=sdk_max_retries_for_transport(
                     retry_config=retry_config, purpose=call.fact.purpose
                 ),
@@ -212,13 +216,13 @@ class OpenAIChatCompletionsTransport:
                 stream_closed = True  # no physical stream exists until open succeeds
                 closure = None
                 try:
-                    stream = await provider_diagnostic_await(
+                    result = await provider_diagnostic_await(
                         admit_provider_request(
                             credential_boundary=credential_boundary,
                             payload=payload,
                             operation=lambda: client.chat.completions.create(
                                 **payload,
-                                stream=True,
+                                stream=streaming,
                                 **openai_auth_request_options(
                                     requires_api_key=call.target.connection.requires_api_key
                                 ),
@@ -226,11 +230,11 @@ class OpenAIChatCompletionsTransport:
                         ),
                         error_scrubber,
                     )
-                    stream_closed = False
-                    phase = "streaming"
-                    async with closed_sdk_stream(
-                        stream, scrub=error_scrubber
-                    ) as closure:
+                    stream_closed = not streaming
+                    phase = "streaming" if streaming else "decoding"
+                    async with sdk_response_items(
+                        result, streaming=streaming, completion_event=_chat_completion_event, scrub=error_scrubber,
+                    ) as (stream, closure):
                         while True:
                             try:
                                 raw_item = await provider_diagnostic_await(
@@ -646,9 +650,10 @@ def build_chat_completions_payload(
         {
             "model": model.id,
             "n": 1,
-            "stream_options": {"include_usage": True},
         }
     )
+    if call.target.connection.streaming:
+        payload["stream_options"] = {"include_usage": True}
     for key, value in route_wire_profile.request_defaults.items():
         payload.setdefault(key, mutable_provider_value(value))
     payload["max_completion_tokens"] = resolve_wire_output_tokens(
@@ -800,6 +805,26 @@ def _chat_message_items_with_sources(
 
 def _is_empty_chat_extension_value(value: object) -> bool:
     return value is None or value == "" or value == [] or value == {}
+
+
+def _chat_completion_event(result: Any) -> dict[str, Any]:
+    chunk = sdk_event_to_dict(result)
+    choices = chunk.get("choices")
+    if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
+        raise LLMTransportContractError(
+            "expected one completed Chat choice", reason_code="transport_chat_choice_contract_invalid"
+        )
+    choice = choices[0]
+    message = choice.get("message")
+    if not isinstance(message, dict) or message.get("role") != "assistant" or not choice.get("finish_reason"):
+        raise LLMTransportContractError(
+            "missing completed assistant message", reason_code="transport_chat_choice_contract_invalid"
+        )
+    message = dict(message)
+    # Text and calls use the delta assembler. Keep reasoning and extensions
+    # on the final carrier so each field is validated and charged only once.
+    delta = {key: message.pop(key) for key in ("content", "tool_calls") if key in message}
+    return {**chunk, "choices": [{**choice, "delta": delta, "message": message}]}
 
 
 @dataclass(slots=True)

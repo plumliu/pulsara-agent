@@ -105,7 +105,7 @@ function customDetail(inputModalities: string[] | null = null): ModelConfigurati
     configuration: {
       source: 'user_declared', configuration_name: 'Saved Custom', base_url: 'https://private.example/v1',
       model_id: 'custom-model', wire_api: 'openai_chat_completions', authentication: 'bearer_api_key', api_key: null,
-      context_tokens: 300_000, max_output_tokens: 16_384, tool_call: false, input_modalities: inputModalities,
+      context_tokens: 300_000, max_output_tokens: 16_384, tool_call: false, streaming: false, input_modalities: inputModalities,
       reasoning: { kind: 'broad_compat', values: ['none', 'medium', 'high'] },
     },
   };
@@ -121,6 +121,7 @@ it.each([{ modalities: null }, { modalities: ['text', 'image', 'audio', 'future-
   expect(within(dialog).getByLabelText('配置名称')).toHaveProperty('value', 'Saved Custom');
   expect(within(dialog).getByLabelText('上下文窗口大小')).toHaveProperty('value', '300000');
   expect(within(dialog).queryByText('最大输出长度')).toBeNull();
+  expect(within(dialog).getByLabelText('流式输出')).toHaveProperty('checked', false);
   expect(within(dialog).getByLabelText('支持 tool calling')).toHaveProperty('checked', false);
   expect(within(dialog).getByLabelText('Reasoning 请求形状')).toHaveProperty('value', 'broad_compat');
   expect(within(dialog).getByLabelText('Effort 列表')).toHaveProperty('value', 'none, medium, high');

@@ -2392,6 +2392,9 @@ describe('PulsaraApp', () => {
 
     const imageInput = screen.getByLabelText('支持图像输入') as HTMLInputElement;
     expect(imageInput.checked).toBe(false);
+    const streaming = screen.getByLabelText('流式输出') as HTMLInputElement;
+    expect(streaming.checked).toBe(true);
+    fireEvent.click(streaming);
     fireEvent.click(imageInput);
     fireEvent.click(screen.getByRole('button', { name: '测试连接' }));
     await waitFor(() => expect(test).toHaveBeenCalledWith(expect.objectContaining({
@@ -2405,7 +2408,7 @@ describe('PulsaraApp', () => {
       api_key: secret,
       context_tokens: 256000,
       max_output_tokens: 8192,
-      tool_call: true,
+      tool_call: true, streaming: false,
       reasoning: { kind: 'effort', values: ['low', 'high'] },
     })));
     expect(add).not.toHaveBeenCalled();
