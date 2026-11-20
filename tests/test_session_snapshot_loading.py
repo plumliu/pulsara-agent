@@ -6,12 +6,18 @@ from time import monotonic
 
 import pytest
 
-from pulsara_agent.conversation_kernel.repository import AssistantToolCallBlock
+from pulsara_agent.conversation_kernel.content_parts import ResultPart
+from pulsara_agent.conversation_kernel.repository import (
+    AssistantToolCallBlock,
+    build_prepared_tool_result_acceptance,
+)
 from pulsara_agent.identity import random_id
 from pulsara_agent.primitives.context import freeze_json
+from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader
 from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 as wire
 from tests.test_conversation_fork import final, new_session, repo as repo, turn
+from tests.test_history_projection_cut import append, question
 from tests.test_stage2_canonical_reader import _permission_fingerprint, _start_turn
 from tests.test_turn_interruption_history import stop
 
@@ -19,8 +25,7 @@ from tests.test_turn_interruption_history import stop
 pytestmark = pytest.mark.postgres
 
 
-def _interrupted_attempt(repository, lease):
-    turn_id = _start_turn(repository, lease, b"tool request")
+def _tool_attempt(repository, lease, turn_id):
     cut = repository.prepare_provider_input_cut(
         lease.guard, turn_id=turn_id, deadline_monotonic=monotonic() + 30,
     )
@@ -45,6 +50,12 @@ def _interrupted_attempt(repository, lease):
         permission_snapshot_fingerprint=_permission_fingerprint(repository, lease, turn_id),
         occurred_at=datetime.now(timezone.utc), deadline_monotonic=monotonic() + 30,
     )
+    return entry_id, call_id, attempt_id
+
+
+def _interrupted_attempt(repository, lease):
+    turn_id = _start_turn(repository, lease, b"tool request")
+    _, _, attempt_id = _tool_attempt(repository, lease, turn_id)
     stop(repository, lease.guard, turn_id)
     return attempt_id
 
@@ -66,6 +77,105 @@ def _assert_exact_fingerprint(snapshot):
         + unsigned.SerializeToString(deterministic=True)
     ).hexdigest()
     assert snapshot.snapshot_fingerprint == expected
+
+
+def test_interactive_snapshot_only_widens_for_the_running_turn_and_latest_reply(repo):
+    lease = new_session(repo)
+    for index in range(13):
+        turn(repo, lease.guard, f"history {index}")
+    _, _, previous_reply = turn(repo, lease.guard, "previous prompt")
+    reader = CanonicalProtocolReader(repo.connection_provider)
+    session_id = lease.guard.session_id
+    idle = _snapshot(reader, session_id, preferred_history_entries=24)
+    assert idle == _snapshot(reader, session_id, maximum_entries=24)
+
+    active, initial = question(repo, lease.guard, "new prompt")
+    short = _snapshot(reader, session_id, preferred_history_entries=24)
+    assert short == _snapshot(reader, session_id, maximum_entries=24)
+    for index in range(26):
+        append(repo, lease.guard, active, "progress " * 100 + str(index))
+    value = _snapshot(reader, session_id, preferred_history_entries=24)
+    assert value == _snapshot(reader, session_id, maximum_entries=28)
+    assert value.entries[0].entry_id == previous_reply
+    assert value.entries[1].entry_id == initial
+    assert [entry.turn_id for entry in value.entries[1:]] == [active] * 27
+    assert [observed.turn_id for observed in value.control.active_turns] == [active]
+    _assert_exact_fingerprint(value)
+
+    # A turn extending beyond the entry budget keeps a recent suffix.
+    assert _snapshot(reader, session_id, maximum_entries=25, preferred_history_entries=24) == (
+        _snapshot(reader, session_id, maximum_entries=24)
+    )
+    assert _snapshot(reader, session_id, preferred_history_entries=24, maximum_serialized_bytes=4096) == (
+        _snapshot(reader, session_id, maximum_serialized_bytes=4096)
+    )
+
+    # The stored cursor remains at the initial cut even as the live run
+    # commits, and the older page abuts the first readable reply.
+    final(repo, lease.guard, active)
+    cursor = value.older_history_cursor
+    page = reader.history_page(
+        session_id=session_id, cut_sequence=cursor.cut_sequence,
+        event_sequence_cut=cursor.event_sequence_cut,
+        before_entry_sequence=cursor.entry_sequence, maximum_entries=128,
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert cursor.cut_sequence == value.entry_sequence_cut
+    assert cursor.event_sequence_cut == value.event_sequence_cut
+    assert page.entries[-1].entry_sequence + 1 == value.entries[0].entry_sequence
+
+
+def test_oversized_turn_keeps_latest_text_and_names_unsettled_tools(repo, monkeypatch):
+    lease = new_session(repo)
+    active, _ = question(repo, lease.guard, "running")
+    append(repo, lease.guard, active, "earlier process")
+    source, call, older_attempt = _tool_attempt(repo, lease, active)
+    result_entry_id = random_id("entry")
+    result = build_prepared_tool_result_acceptance(
+        guard=lease.guard,
+        workspace_id=repo.read_session_workspace_id(lease.guard, deadline_monotonic=monotonic() + 30),
+        result_id=random_id("result"), result_entry_id=result_entry_id,
+        turn_id=active, assistant_entry_id=source, tool_call_id=call, attempt_id=older_attempt,
+        result_state="SUCCESS", public_fields={}, content_parts=(ResultPart("text", "done"),),
+        observed_at=datetime.now(timezone.utc), observation_duration_microseconds=None,
+        observation_origin_kind=ToolObservationOrigin.TERMINAL_PROCESS,
+        trusted_tool_reported_duration_microseconds=None, actor_id="terminal",
+    )
+    repo.accept_tool_result(lease.guard, candidate=result, deadline_monotonic=monotonic() + 30)
+    latest_text, _ = append(repo, lease.guard, active, "latest text")
+    _, _, attempt_id = _tool_attempt(repo, lease, active)
+    reader = CanonicalProtocolReader(repo.connection_provider)
+    session_id = lease.guard.session_id
+    floors = []
+    set_attempts = reader._set_tool_attempt_control
+
+    def record_attempt_read(*args, **kwargs):
+        floors.append(kwargs["entry_sequence_floor"])
+        return set_attempts(*args, **kwargs)
+
+    monkeypatch.setattr(reader, "_set_tool_attempt_control", record_attempt_read)
+
+    value = _snapshot(reader, session_id, maximum_entries=5, preferred_history_entries=1)
+    assert floors == [value.entry_sequence_cut + 1]
+    assert value == _snapshot(reader, session_id, maximum_entries=2)
+    # The preferred page begins at a result whose source is earlier. Both
+    # stay behind the same cursor when reading the recent process.
+    assert _snapshot(reader, session_id, maximum_entries=5, preferred_history_entries=3) == value
+    assert value.entries[0].entry_id == latest_text
+    assert value.entries[1].entry_kind == wire.ASSISTANT_TOOL_REQUEST
+    [attempt] = value.control.tool_attempts
+    assert (attempt.attempt_id, attempt.turn_id, attempt.tool_name) == (attempt_id, active, "exec_process")
+    cursor = value.older_history_cursor
+    assert cursor.entry_sequence == value.entries[0].entry_sequence
+    page = reader.history_page(
+        session_id=session_id, cut_sequence=cursor.cut_sequence,
+        event_sequence_cut=cursor.event_sequence_cut, before_entry_sequence=cursor.entry_sequence,
+        maximum_entries=128, deadline_monotonic=monotonic() + 30,
+    )
+    assert page.entries[-2].entry_id == source
+    assert page.entries[-1].entry_id == result_entry_id
+    assert page.entries[-1].tool_result.assistant_entry_id == source
+    _assert_exact_fingerprint(value)
 
 
 def test_opening_byte_boundary_preserves_attempt_window_and_exact_fingerprint(repo):

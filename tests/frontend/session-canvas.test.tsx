@@ -139,6 +139,31 @@ function CanvasHarness({ load, placements }: {
 }
 
 describe('session canvas windows', () => {
+  it('maximizes the only placed floating window and restores its bounds on another double-click', () => {
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, view.w, view.h));
+    render(<CanvasHarness placements={{ 甲: floating }} />);
+    fireEvent.click(screen.getByTestId('open-甲'));
+    fireEvent.click(screen.getByTestId('open-乙'));
+    const first = screen.getByRole('region', { name: '甲' });
+    const second = screen.getByRole('region', { name: '乙' });
+    const title = within(first).getByText('甲 状态');
+    const bounds = { left: first.style.left, top: first.style.top, width: first.style.width, height: first.style.height };
+
+    fireEvent.doubleClick(within(second).getByText('乙 状态'));
+    expect(second.dataset.mode).toBe('docked');
+    fireEvent.click(within(second).getByRole('button', { name: '收起会话窗口' }));
+    expect(second.hidden).toBe(true);
+    expect(screen.getByRole('tab', { name: /乙/ }).getAttribute('aria-description')).toBe('已收起');
+
+    fireEvent.doubleClick(title);
+    expect(first.dataset.mode).toBe('maximized');
+    expect(first.style).toMatchObject({ width: '100%', height: '100%' });
+    fireEvent.doubleClick(title);
+    expect(first.dataset.mode).toBe('floating');
+    expect(first.style).toMatchObject(bounds);
+    expect(second.hidden).toBe(true);
+  });
+
   it('reserves the initial mouse press on resize grips while keeping the conversation selectable', () => {
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, view.w, view.h));
     const { container } = render(<CanvasHarness placements={{ 甲: docked(left), 乙: docked(right), 丙: floating }} />);

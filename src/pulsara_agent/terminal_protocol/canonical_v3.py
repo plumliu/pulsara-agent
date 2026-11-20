@@ -74,6 +74,13 @@ MAXIMUM_REASONING_INLINE_BYTES = STAGE2_LIMITS.inline_content_hard_bytes
 _SNAPSHOT_FINGERPRINT_WIRE_BYTES = wire.CanonicalSessionSnapshot(
     snapshot_fingerprint="sha256:" + "0" * 64
 ).ByteSize()
+_ENTRY_ROOT_FINAL_SQL = """
+CASE e.entry_owner_kind
+  WHEN 'EXECUTED_TURN' THEN t.status IN ('COMPLETED', 'INTERRUPTED') AND t.final_entry_id=e.id
+  WHEN 'IMPORTED_HISTORY' THEN g.status IN ('COMPLETED', 'INTERRUPTED') AND g.final_entry_id=e.id
+  ELSE FALSE
+END
+"""
 
 
 def browser_history_uint64(value: object, label: str) -> int:
@@ -210,9 +217,12 @@ class CanonicalProtocolReader:
         maximum_control_items: int,
         deadline_monotonic: float,
         maximum_serialized_bytes: int = MAXIMUM_SNAPSHOT_BYTES,
+        preferred_history_entries: int = 0,
     ) -> wire.CanonicalSessionSnapshot:
         _bounded(maximum_entries, MAXIMUM_SNAPSHOT_ENTRIES, "snapshot entries")
         _bounded(maximum_control_items, MAXIMUM_CONTROL_ITEMS, "control items")
+        if preferred_history_entries:
+            _bounded(preferred_history_entries, maximum_entries, "preferred history entries")
         _bounded_bytes(
             maximum_serialized_bytes, MAXIMUM_SNAPSHOT_BYTES, "snapshot bytes"
         )
@@ -252,8 +262,14 @@ class CanonicalProtocolReader:
                 raise CanonicalProtocolResourceExhausted(
                     "canonical control cannot fit snapshot"
                 )
-            relations = self._entry_relations(connection, rows[:maximum_entries])
-            for row, entry in self._entry_candidates(connection, rows[:maximum_entries], relations):
+            running_turn_ids = {turn.turn_id for turn in control.active_turns}
+            if preferred_history_entries and session["root_session_id"] is None:
+                maximum_entries = self._opening_history_entry_count(
+                    connection, rows, control, preferred_history_entries, maximum_entries,
+                )
+            candidates = rows[:maximum_entries]
+            relations = self._entry_relations(connection, candidates)
+            for row, entry in self._entry_candidates(connection, candidates, relations):
                 mounted = self._notices(
                     connection, session_id, event_cut, row, relations=relations,
                 )
@@ -273,7 +289,7 @@ class CanonicalProtocolReader:
                 # The previous quote already covered RUNNING turns and every
                 # newer entry. Lowering the floor can only add this exact row's
                 # unresolved attempts, observed in the same RR transaction.
-                if row["has_unresolved_tool_attempts"]:
+                if row["has_unresolved_tool_attempts"] and row["turn_id"] not in running_turn_ids:
                     self._set_tool_attempt_control(
                         snapshot.control,
                         connection,
@@ -309,6 +325,88 @@ class CanonicalProtocolReader:
                 "terminal-canonical-snapshot:v3", snapshot
             )
             return snapshot
+
+    @staticmethod
+    def _opening_history_entry_count(
+        connection, rows, control, preferred_entries: int, maximum_entries: int,
+    ) -> int:
+        if len(rows) <= preferred_entries:
+            return len(rows)
+
+        active_ids = {turn.turn_id for turn in control.active_turns}
+        if len(rows) > maximum_entries and rows[maximum_entries]["turn_id"] in active_ids:
+            # This run already extends beyond a complete snapshot. Keep its
+            # latest assistant text without reading earlier tool bodies.
+            # Unsettled attempts remain available through current control.
+            return CanonicalProtocolReader._opening_active_tail_count(
+                connection, rows[:maximum_entries], active_ids, preferred_entries,
+            )
+        rows = rows[:maximum_entries]
+        if control.active_turn_total_count != len(active_ids):
+            return len(rows)
+        if active_ids:
+            # Keep each running turn's committed process contiguous: tool
+            # results, Code Mode calls and live previews join to request rows.
+            process_floor = max(
+                (index for index, row in enumerate(rows, 1) if row["turn_id"] in active_ids),
+                default=len(rows),
+            )
+            if process_floor == len(rows):
+                return process_floor
+            candidates = rows
+        else:
+            process_floor = 0
+            latest = control.latest_root_turn.turn_id
+            candidates = [row for row in rows[:preferred_entries] if row["turn_id"] == latest]
+
+        # Inspect final ownership without hydrating the candidate bodies.
+        # The active turn has no final yet. Include its latest preceding reply
+        # when the reply is within the ordinary snapshot's admitted suffix.
+        assistant_ids = [row["id"] for row in candidates if row["entry_kind"] == "ASSISTANT_MESSAGE"]
+        if assistant_ids:
+            final = connection.execute(
+                f"""SELECT e.id FROM pulsara_v3.transcript_entries e
+                    LEFT JOIN pulsara_v3.turns t ON e.session_id=t.session_id AND e.turn_id=t.id
+                    LEFT JOIN pulsara_v3.imported_history_groups g
+                      ON e.session_id=g.session_id AND e.imported_history_group_id=g.id
+                    WHERE e.session_id=%s AND e.id=ANY(%s) AND ({_ENTRY_ROOT_FINAL_SQL})
+                    ORDER BY e.entry_sequence DESC LIMIT 1""",
+                (rows[0]["session_id"], assistant_ids),
+            ).fetchone()
+            if final is not None:
+                reply_floor = next(index for index, row in enumerate(rows, 1) if row["id"] == final["id"])
+                return max(preferred_entries, process_floor, reply_floor)
+        return max(preferred_entries, process_floor) if active_ids else len(rows)
+
+    @staticmethod
+    def _opening_active_tail_count(connection, rows, active_ids: set[str], preferred_entries: int) -> int:
+        assistant_ids = [
+            row["id"] for row in rows if row["turn_id"] in active_ids
+            and row["entry_kind"] in {"ASSISTANT_MESSAGE", "ASSISTANT_TOOL_REQUEST"}
+        ]
+        selected = preferred_entries
+        if assistant_ids:
+            latest_text = connection.execute(
+                """SELECT e.id FROM pulsara_v3.transcript_entries e
+                   WHERE e.session_id=%s AND e.id=ANY(%s) AND EXISTS (
+                       SELECT 1 FROM pulsara_v3.content_parts p
+                       LEFT JOIN pulsara_v3.blobs b ON b.id=p.blob_id
+                       WHERE p.session_id=e.session_id AND p.entry_id=e.id AND p.type='text'
+                         AND coalesce(octet_length(p.inline_value), b.logical_size)>0
+                   )
+                   ORDER BY e.entry_sequence DESC LIMIT 1""",
+                (rows[0]["session_id"], assistant_ids),
+            ).fetchone()
+            if latest_text is not None:
+                text_floor = next(index for index, row in enumerate(rows, 1) if row["id"] == latest_text["id"])
+                selected = max(selected, text_floor)
+        # A result at the older edge has its source outside the window.
+        # Defer that prefix with its source when the newer suffix has a
+        # canonical anchor. Keep the ordinary tail if it only has results.
+        return next(
+            (count for count in range(selected, 0, -1) if rows[count - 1]["entry_kind"] != "TOOL_RESULT"),
+            selected,
+        )
 
     @staticmethod
     def _notice_wire(notice: TurnInterruptionNotice) -> wire.TurnInterruptionNotice:
@@ -1493,7 +1591,7 @@ class CanonicalProtocolReader:
         row = connection.execute(
             """
             SELECT id, workspace_id, lifecycle, writer_generation,
-                   latest_entry_sequence, latest_event_sequence,
+                   latest_entry_sequence, latest_event_sequence, root_session_id,
                    latest_prompt_queue_sequence
             FROM pulsara_v3.sessions WHERE id = %s
             """,
@@ -1687,7 +1785,7 @@ class CanonicalProtocolReader:
         if any(str(row["session_id"]) != session_id for row in rows):
             raise ValueError("entry relation set crosses canonical sessions")
         values = connection.execute(
-            """SELECT e.id AS relation_entry_id,
+            f"""SELECT e.id AS relation_entry_id,
                       CASE WHEN session.root_session_id IS NULL THEN 'ROOT' ELSE 'SUBAGENT' END AS session_scope,
                       result.id AS tool_result_id, result.attempt_id, result.tool_call_entry_id, result.tool_call_id,
                       invocation.id AS invocation_id, invocation.source_kind, invocation.source_exec_attempt_id,
@@ -1698,10 +1796,7 @@ class CanonicalProtocolReader:
                       queue.id AS queue_item_id, queue.command_id, queue.delivery_mode, queue.source_session_id, queue.source_work_id,
                       queue.source_turn_id, queue.source_tool_attempt_id, queue.work_title,
                       queue.source_cell_id, queue.source_record_sequence, queue.cell_output_kind,
-                      CASE e.entry_owner_kind
-                        WHEN 'EXECUTED_TURN' THEN t.status IN ('COMPLETED', 'INTERRUPTED') AND t.final_entry_id=e.id
-                        WHEN 'IMPORTED_HISTORY' THEN g.status IN ('COMPLETED', 'INTERRUPTED') AND g.final_entry_id=e.id
-                        ELSE FALSE END AS root_final,
+                      {_ENTRY_ROOT_FINAL_SQL} AS root_final,
                       CASE e.entry_owner_kind
                         WHEN 'EXECUTED_TURN' THEN t.status='INTERRUPTED'
                         WHEN 'IMPORTED_HISTORY' THEN g.interruption_outcome IS NOT NULL
@@ -1772,12 +1867,7 @@ class CanonicalProtocolReader:
             root_final = bool(related["root_final"])
         elif root_assistant:
             final = connection.execute(
-                """SELECT CASE e.entry_owner_kind
-                         WHEN 'EXECUTED_TURN' THEN
-                           t.status IN ('COMPLETED', 'INTERRUPTED') AND t.final_entry_id = e.id
-                         WHEN 'IMPORTED_HISTORY' THEN
-                           g.status IN ('COMPLETED', 'INTERRUPTED') AND g.final_entry_id = e.id
-                         ELSE FALSE END AS root_final
+                f"""SELECT {_ENTRY_ROOT_FINAL_SQL} AS root_final
                    FROM pulsara_v3.transcript_entries AS e
                    LEFT JOIN pulsara_v3.turns AS t
                      ON e.entry_owner_kind = 'EXECUTED_TURN'
@@ -2288,20 +2378,28 @@ class CanonicalProtocolReader:
         maximum_items: int,
         entry_sequence_floor: int,
     ) -> None:
+        # The schema admits at most one result per invocation and binds any
+        # result attempt to that invocation. The scalar lookup uses the unique
+        # key without a join plan that can rescan the whole session per attempt.
         attempts = tuple(connection.execute(
-            """SELECT a.*, r.result_state, r.result_entry_id,
-                      invocation.source_kind, invocation.source_exec_attempt_id,
+            """SELECT a.id, a.assistant_entry_id, a.invocation_id, a.tool_call_id,
+                      invocation.source_kind, invocation.source_exec_attempt_id, invocation.turn_id,
+                      coalesce(invocation.tool_name, part.tool_name) AS tool_name,
                       count(*) OVER () AS unresolved_total
                FROM pulsara_v3.tool_execution_attempts AS a
                JOIN pulsara_v3.tool_invocations invocation
                  ON invocation.session_id=a.session_id AND invocation.id=a.invocation_id
+               LEFT JOIN pulsara_v3.content_parts AS part
+                 ON part.session_id=invocation.session_id AND part.entry_id=invocation.assistant_entry_id
+                AND part.tool_call_id=invocation.tool_call_id
                LEFT JOIN pulsara_v3.transcript_entries AS e
                  ON e.entry_owner_kind = 'EXECUTED_TURN' AND e.session_id = a.session_id AND e.id = a.assistant_entry_id
                JOIN pulsara_v3.turns AS t
                  ON t.session_id=invocation.session_id AND t.id=invocation.turn_id
-               LEFT JOIN pulsara_v3.tool_results AS r
-                 ON r.session_id = a.session_id AND r.attempt_id = a.id
-               WHERE a.session_id = %s AND r.id IS NULL
+               WHERE a.session_id = %s
+                 AND (SELECT r.attempt_id FROM pulsara_v3.tool_results AS r
+                      WHERE r.session_id=a.session_id AND r.invocation_id=a.invocation_id)
+                     IS DISTINCT FROM a.id
                  AND (e.entry_sequence >= %s OR t.status = 'RUNNING' OR invocation.source_kind='CODE_MODE_CALL')
                ORDER BY a.started_at, a.id LIMIT %s""",
             (session_id, entry_sequence_floor, maximum_items),
@@ -2315,9 +2413,9 @@ class CanonicalProtocolReader:
                 invocation_id=str(row["invocation_id"]),
                 source_kind=str(row["source_kind"]),
                 source_exec_attempt_id=str(row["source_exec_attempt_id"] or ""),
+                turn_id=str(row["turn_id"]),
+                tool_name=str(row["tool_name"] or ""),
                 tool_call_id=str(row["tool_call_id"]),
-                result_state=str(row["result_state"] or ""),
-                result_entry_id=str(row["result_entry_id"] or ""),
             )
 
 

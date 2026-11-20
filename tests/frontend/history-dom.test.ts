@@ -22,11 +22,12 @@ describe('rendered history selections', () => {
   });
 });
 
-it('retains viewport preparation, selection aliases and focus without pinning every expanded disclosure', () => {
+it.each([1, 0.1])('retains viewport preparation, selection aliases and focus at viewport scale %s', scale => {
  const root=document.createElement('div');document.body.append(root);
  root.innerHTML='<div data-source-entry="near" data-source-entries="near result"><article data-result-entry="result">visible</article></div><div data-source-entry="selected">selected text</div><div data-source-entry="focused"><button>focus</button></div><div data-source-entry="expanded" data-process-expanded="true">far expanded</div><section inert><div data-source-entry="hidden">closed</div></section>';
- vi.spyOn(root,'getBoundingClientRect').mockReturnValue(new DOMRect(0,0,600,500));
- for(const node of root.querySelectorAll<HTMLElement>('[data-source-entry], [data-result-entry]')) vi.spyOn(node,'getBoundingClientRect').mockReturnValue(new DOMRect(0,node.dataset.sourceEntry==='near'||node.dataset.resultEntry?550:2000,600,40));
+ Object.defineProperty(root, 'offsetHeight', { value: 500 });
+ vi.spyOn(root,'getBoundingClientRect').mockReturnValue(new DOMRect(0,0,600,500*scale));
+ for(const node of root.querySelectorAll<HTMLElement>('[data-source-entry], [data-result-entry]')) vi.spyOn(node,'getBoundingClientRect').mockReturnValue(new DOMRect(0,(node.dataset.sourceEntry==='near'||node.dataset.resultEntry?550:2000)*scale,600,40*scale));
  root.querySelector('button')!.focus();
  const range=document.createRange();range.selectNodeContents(root.querySelector('[data-source-entry="selected"]')!);document.getSelection()!.removeAllRanges();document.getSelection()!.addRange(range);
  expect(collectHistoryResidence(root)).toEqual({visibleEntryIds:['near','result'],pinnedEntryIds:['selected','focused']});
@@ -109,6 +110,30 @@ describe('canonical history DOM completion and anchors', () => {
     rect.mockReturnValue(new DOMRect(0, 140, 60, 20));
     restoreHistoryAnchor(root, anchor);
     expect(root.scrollTop).toBe(120);
+  });
+
+  it.each([1, 0.2])('keeps a text anchor captured at viewport scale %s through the recall animation', initialScale => {
+    const root = document.createElement('div'); document.body.append(root);
+    root.innerHTML = '<div data-source-entry="answer"><article><span data-source-text="[[10,11]]">正文</span></article></div>';
+    Object.defineProperty(root, 'offsetHeight', { value: 400 });
+    root.scrollTop = 100;
+    let scale = initialScale;
+    let textTop = 180;
+    vi.spyOn(root, 'getBoundingClientRect').mockImplementation(() => new DOMRect(0, 50, 600, 400 * scale));
+    vi.spyOn(root.querySelector('span')!, 'getBoundingClientRect').mockImplementation(() =>
+      new DOMRect(0, 50 + (textTop - root.scrollTop) * scale, 60, 20 * scale));
+    const anchor = captureHistoryAnchor(root)!;
+    expect(anchor).toMatchObject({ entryId: 'answer', sourceOffset: 10, top: 80 });
+
+    scale = 0.6;
+    restoreHistoryAnchor(root, anchor);
+    expect(root.scrollTop).toBe(100);
+    textTop += 60;
+    restoreHistoryAnchor(root, anchor);
+    expect(root.scrollTop).toBe(160);
+    scale = 1;
+    restoreHistoryAnchor(root, anchor);
+    expect(root.scrollTop).toBe(160);
   });
 
   it.each(['process', 'final'] as const)('restores the %s view when one canonical reply has both process and final hosts', viewRole => {

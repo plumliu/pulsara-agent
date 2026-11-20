@@ -288,6 +288,7 @@ class RendererBridge:
                     raise RuntimeError("Desktop application is draining")
                 self._next_generation += 1
                 generation = self._next_generation
+            initial_reading_page = reopen_tab and not takeover and old is None
             try:
                 connection = await BrowserRuntimeConnection.open(
                     server=self.protocol_server,
@@ -295,6 +296,7 @@ class RendererBridge:
                     host_session_id=handle.host_session_id,
                     generation=generation,
                     role=role,
+                    initial_reading_page=initial_reading_page,
                 )
             except ProtocolBridgeError as exc:
                 if (
@@ -310,6 +312,7 @@ class RendererBridge:
                     host_session_id=handle.host_session_id,
                     generation=generation,
                     role=role,
+                    initial_reading_page=initial_reading_page,
                 )
             try:
                 async with self._lock:
@@ -1303,7 +1306,6 @@ class RendererBridge:
             "connection_generation": connection.generation,
             "session_id": connection.session_id,
             "role": connection.role,
-            "hello": protobuf_json(connection.hello),
             "live_hello": protobuf_json(connection.live_hello),
             "snapshot": protobuf_json(connection.initial_snapshot)["snapshot"],
             "live_control_snapshot": protobuf_json(connection.initial_live_control)[

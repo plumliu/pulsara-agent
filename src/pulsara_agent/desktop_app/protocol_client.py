@@ -17,7 +17,10 @@ from google.protobuf.message import Message
 from pulsara_agent.terminal_protocol.generated_v3 import (
     terminal_kernel_v3_pb2 as wire,
 )
-from pulsara_agent.terminal_protocol.canonical_v3 import MAXIMUM_CONTROL_ITEMS
+from pulsara_agent.terminal_protocol.canonical_v3 import (
+    MAXIMUM_CONTROL_ITEMS,
+    MAXIMUM_SNAPSHOT_ENTRIES,
+)
 from pulsara_agent.terminal_protocol.v3_gateway import (
     MAXIMUM_FRAME_BYTES,
     TerminalKernelProtocolServer,
@@ -35,6 +38,11 @@ class ProtocolBridgeError(RuntimeError):
 class ProtocolTransportClosed(ProtocolBridgeError):
     def __init__(self) -> None:
         super().__init__("PROTOCOL_TRANSPORT_CLOSED", "本地连接已经关闭。")
+
+
+# Interactive first paint uses the 24-entry starting page verified by the
+# continuous history contract. Older pages retain the original reader budget.
+_INITIAL_READING_PAGE_ENTRIES: Final = 24
 
 
 _ATTACHED_FIELDS: Final = frozenset(
@@ -99,6 +107,7 @@ class TerminalProtocolClient:
         session_id: str,
         role: int,
         client_instance_id: str,
+        without_live_observation: bool = False,
     ) -> tuple["TerminalProtocolClient", wire.HelloAccepted]:
         try:
             reader, writer = await asyncio.open_unix_connection(
@@ -119,6 +128,7 @@ class TerminalProtocolClient:
                         host_session_id=host_session_id,
                         session_id=session_id,
                         requested_role=role,
+                        without_live_observation=without_live_observation,
                     )
                 )
             )
@@ -294,6 +304,7 @@ class BrowserRuntimeConnection:
         host_session_id: str,
         generation: int,
         role: Literal["controller", "observer"] = "controller",
+        initial_reading_page: bool = False,
     ) -> "BrowserRuntimeConnection":
         connection_id = random_id("transport")
         control_role = (
@@ -307,6 +318,7 @@ class BrowserRuntimeConnection:
             session_id=session_id,
             role=control_role,
             client_instance_id=derive_id("transport", "client-instance", connection_id, "controller"),
+            without_live_observation=True,
         )
         observer: TerminalProtocolClient | None = None
         try:
@@ -335,7 +347,10 @@ class BrowserRuntimeConnection:
                 snapshot = await controller.require(
                     "snapshot",
                     wire.SnapshotRequest(
-                        maximum_entries=256,
+                        maximum_entries=MAXIMUM_SNAPSHOT_ENTRIES,
+                        preferred_history_entries=(
+                            _INITIAL_READING_PAGE_ENTRIES if initial_reading_page else 0
+                        ),
                         maximum_control_items=MAXIMUM_CONTROL_ITEMS,
                     ),
                     "snapshot",

@@ -1,5 +1,5 @@
 import { AlarmClock, Bot, LoaderCircle } from 'lucide-react';
-import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { RuntimeAdapter } from '../lib/runtime-adapter';
 import { AvatarCropDialog } from './avatar-crop-dialog';
 
@@ -28,13 +28,18 @@ export function UserAvatarProvider({ adapter, children }: { adapter: RuntimeAdap
     window.addEventListener('focus', refresh);
     return () => { disposed = true; window.removeEventListener('focus', refresh); };
   }, [adapter, publish]);
-  const mutate = async (operation: () => Promise<{ configured: boolean }>) => {
+  const mutate = useCallback(async (operation: () => Promise<{ configured: boolean }>) => {
     mutating.current = true;
     ++requestOrder.current;
     try { publish((await operation()).configured); }
     finally { mutating.current = false; }
-  };
-  return <AvatarContext.Provider value={{ src, upload: file => mutate(() => adapter.uploadUserAvatar(file)), clear: () => mutate(() => adapter.clearUserAvatar()) }}>{children}</AvatarContext.Provider>;
+  }, [publish]);
+  const avatar = useMemo(() => ({
+    src,
+    upload: (file: File) => mutate(() => adapter.uploadUserAvatar(file)),
+    clear: () => mutate(() => adapter.clearUserAvatar()),
+  }), [adapter, mutate, src]);
+  return <AvatarContext.Provider value={avatar}>{children}</AvatarContext.Provider>;
 }
 
 export function UserAvatar({ className = '' }: { className?: string }) {

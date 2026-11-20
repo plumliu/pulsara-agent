@@ -1,7 +1,7 @@
 import { Copy, LoaderCircle, Minus, Square } from 'lucide-react';
 import { SessionTabClose, type SessionTabCloseRequest } from './session-tab-close';
 import {
-  createContext, useCallback, useContext, useLayoutEffect, useMemo, useRef, useState,
+  createContext, memo, useCallback, useContext, useLayoutEffect, useMemo, useRef, useState,
   type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode,
 } from 'react';
 import { createPortal } from 'react-dom';
@@ -52,7 +52,7 @@ export function SessionCanvasTitleActions({ children }: { children: ReactNode })
 
 type LayoutChange = (layout: SessionCanvasLayout) => SessionCanvasLayout;
 type Handoff = { id: string; rect: CanvasRect };
-type Capture = (handoff?: Handoff) => void;
+type Capture = (handoff?: Handoff, next?: SessionCanvasLayout) => void;
 
 export function useSessionCanvas() {
   const [layout, setLayout] = useState(emptyLayout);
@@ -63,9 +63,10 @@ export function useSessionCanvas() {
   const pendingHandoffs = useRef(new Map<SessionCanvasPlacement, Handoff>());
   const sidebarDrag = useRef<((event: ReactPointerEvent, session: SessionTitle) => void) | null>(null);
   const update = useCallback((change: LayoutChange, handoff?: Handoff) => {
-    const next = change(current.current);
-    if (next === current.current) return;
-    capture.current?.(handoff);
+    const previous = current.current;
+    const next = change(previous);
+    if (next === previous) return;
+    capture.current?.(handoff, next);
     current.current = next;
     setLayout(next);
   }, []);
@@ -142,31 +143,43 @@ function windowBox(item: WindowLayout, view: CanvasSize) {
   return reachableFloat(item.float, view);
 }
 
-function SessionCanvasWindow({
-  session, mode, focused, shown, rect, z, conflict, canvasVisible, activateWindow, onMinimize, onMaximize, onTitle,
-  onDoubleTitle, onResize, windowRef, rememberFocus,
-}: {
-  session: SessionCanvasSession;
-  mode: WindowLayout['mode'] | undefined;
+type GestureStart = Omit<MoveGesture, keyof GestureBase>
+  | Omit<Extract<Gesture, { kind: 'float-resize' }>, keyof GestureBase>
+  | Omit<Extract<Gesture, { kind: 'dock-resize' }>, keyof GestureBase>;
+
+const SessionCanvasWindow = memo(function SessionCanvasWindow({
+  id, title, content, item, view, focused, shown, floating, dock, moving, z, conflict, canvasVisible,
+  activateWindow, onMinimize, onMaximize, onDoubleTitle, begin, registerWindow, rememberFocus,
+}: SessionTitle & {
+  content: ReactNode;
+  item: WindowLayout | undefined;
+  view: CanvasSize;
   focused: boolean;
   shown: boolean;
-  rect: CSSProperties;
+  floating?: CanvasRect;
+  dock?: CanvasRect;
+  moving: boolean;
   z: number;
   conflict: boolean;
   canvasVisible: boolean;
   activateWindow: (id: string) => void;
-  onMinimize: () => void;
-  onMaximize: () => void;
-  onTitle: (event: ReactPointerEvent) => void;
-  onDoubleTitle: () => void;
-  onResize: (event: ReactPointerEvent, edge: ResizeEdge) => void;
-  windowRef: (node: HTMLElement | null) => void;
+  onMinimize: (id: string) => void;
+  onMaximize: (id: string) => void;
+  onDoubleTitle: (id: string) => void;
+  begin: (event: ReactPointerEvent, gesture: GestureStart) => void;
+  registerWindow: (id: string, node: HTMLElement | null) => void;
   rememberFocus: (id: string, element: HTMLElement) => void;
 }) {
+  const { mode } = item ?? {};
+  const rect = moving && floating
+    ? { left: 0, top: 0, width: floating.w, height: floating.h, translate: `${floating.x}px ${floating.y}px` }
+    : floating ? pixels(floating) : mode === 'maximized' ? percentages(wholeCanvas)
+    : mode === 'docked' && dock ? percentages(dock) : item ? pixels(reachableFloat(item.float, view)) : {};
+  const windowRef = useCallback((node: HTMLElement | null) => registerWindow(id, node), [id, registerWindow]);
   const [identityHost, setIdentityHost] = useState<HTMLDivElement | null>(null);
   const [actionsHost, setActionsHost] = useState<HTMLDivElement | null>(null);
   const [hasIdentity, setHasIdentity] = useState(false);
-  const activate = useCallback(() => { if (shown && canvasVisible) activateWindow(session.id); }, [activateWindow, canvasVisible, session.id, shown]);
+  const activate = useCallback(() => { if (shown && canvasVisible) activateWindow(id); }, [activateWindow, canvasVisible, id, shown]);
   const context = useMemo<WindowContextValue>(() => ({
     inCanvas: true, visible: shown && canvasVisible, focused: focused && canvasVisible, activate,
     identityHost, actionsHost, showIdentity: setHasIdentity,
@@ -176,8 +189,8 @@ function SessionCanvasWindow({
     <WindowContext.Provider value={context}>
       <section
         ref={windowRef}
-        id={session.id}
-        aria-label={session.title}
+        id={id}
+        aria-label={title}
         className="session-canvas-window"
         data-mode={mode}
         data-focused={focused || undefined}
@@ -188,7 +201,7 @@ function SessionCanvasWindow({
         style={{ ...rect, zIndex: z }}
         onFocusCapture={event => {
           if (event.target instanceof HTMLElement && event.target.closest('.session-canvas-window__body')) {
-            rememberFocus(session.id, event.target);
+            rememberFocus(id, event.target);
           }
           activate();
         }}
@@ -196,36 +209,71 @@ function SessionCanvasWindow({
           if (event.button !== 0) return;
           // Title identity is rendered from the workbench through a portal.
           // Capture at the window so the same gesture handles both DOM paths.
-          if (isTitleGrip(event.target)) onTitle(event);
+          if (isTitleGrip(event.target)) {
+            if (item) begin(event, { kind: 'move', source: 'title', session: { id, title }, origin: windowBox(item, view) });
+          }
           else activate();
         }}
         onClickCapture={event => { if (isTitleGrip(event.target)) activate(); }}
-        onDoubleClickCapture={event => { if (isTitleGrip(event.target)) onDoubleTitle(); }}
+        onDoubleClickCapture={event => { if (isTitleGrip(event.target)) onDoubleTitle(id); }}
       >
         <header className="session-canvas-window__title">
           <div className="session-canvas-window__identity">
-            {!hasIdentity && <strong title={session.title}>{session.title}</strong>}
+            {!hasIdentity && <strong title={title}>{title}</strong>}
             <div className="session-canvas-window__identity-host" ref={setIdentityHost} />
           </div>
           <div className="session-canvas-window__actions" data-canvas-no-drag>
             <div className="session-canvas-window__actions-host" ref={setActionsHost} />
-            <button type="button" aria-label={maximized ? '还原会话窗口' : '铺满会话窗口'} onClick={onMaximize}>
+            <button type="button" aria-label={maximized ? '还原会话窗口' : '铺满会话窗口'} onClick={() => onMaximize(id)}>
               {maximized ? <Copy size={13} /> : <Square size={13} />}
             </button>
-            <button type="button" aria-label="收起会话窗口" onClick={onMinimize}>
+            <button type="button" aria-label="收起会话窗口" onClick={() => onMinimize(id)}>
               <Minus size={15} />
             </button>
           </div>
         </header>
-        <div className="session-canvas-window__body">{session.content}</div>
+        <div className="session-canvas-window__body">{content}</div>
         {mode === 'floating' && resizeEdges.map(edge => (
           <div key={edge} className="session-canvas-window__resize" data-edge={edge}
-            aria-hidden="true" onPointerDown={event => onResize(event, edge)} />
+            aria-hidden="true" onPointerDown={event => {
+              if (item) begin(event, { kind: 'float-resize', id, edge, origin: windowBox(item, view) });
+            }} />
         ))}
       </section>
     </WindowContext.Provider>
   );
-}
+});
+
+const SessionCanvasTab = memo(function SessionCanvasTab({
+  id, title, selected, placed, pendingApproval, running, closing, begin, recall, onClose, registerTab,
+}: SessionTitle & {
+  selected: boolean;
+  placed: boolean;
+  pendingApproval?: boolean;
+  running?: boolean;
+  closing?: SessionTabCloseRequest;
+  begin: (event: ReactPointerEvent, gesture: GestureStart) => void;
+  recall: (id: string) => void;
+  onClose: (id: string) => unknown;
+  registerTab: (id: string, node: HTMLElement | null) => void;
+}) {
+  const tabRef = useCallback((node: HTMLElement | null) => registerTab(id, node), [id, registerTab]);
+  const placementLabel = placed ? '在画布中' : '已收起';
+  return (
+    <div className="session-canvas__tab" data-selected={selected || undefined}
+      data-placed={placed || undefined} ref={tabRef}>
+      <button type="button" className="session-canvas__tab-select" role="tab" aria-selected={selected}
+        aria-controls={id} aria-description={placementLabel} title={`${title} · ${placementLabel}`}
+        onClick={() => recall(id)}
+        onPointerDown={event => begin(event, { kind: 'move', source: 'tab', session: { id, title } })}>
+        {pendingApproval ? <span className="session-canvas__approval" title="等待审批" aria-label="等待审批" />
+          : running && <LoaderCircle size={12} className="is-spinning" aria-label="正在处理" />}
+        <span className="session-canvas__tab-title">{title}</span>
+      </button>
+      <SessionTabClose title={title} request={closing} onClose={() => void onClose(id)} onReturnToForm={() => recall(id)} />
+    </div>
+  );
+});
 
 const duration = { tab: 185, lift: 150, snap: 205, place: 250, open: 305, tuck: 270 };
 const easing = 'cubic-bezier(.18,.78,.24,1)';
@@ -244,8 +292,9 @@ function animateRect(node: HTMLElement, from: CanvasRect, to: CanvasRect, ms: nu
 }
 
 type MotionSnapshot = {
-  windows: Map<string, CanvasRect>;
+  windows?: Map<string, CanvasRect>;
   tabs: Map<string, CanvasRect>;
+  animateTabs: boolean;
   flightRects: Map<string, CanvasRect>;
   preview?: CanvasRect;
   handoff?: Handoff;
@@ -292,22 +341,36 @@ export function SessionCanvas({ controller, sessions, visible = true, tabHost, o
     return () => observer.disconnect();
   }, [area, visible]);
 
-  const recordMotion = useCallback<Capture>((handoff) => {
+  const recordMotion = useCallback<Capture>((handoff, next) => {
     if (!rootRef.current || rootRef.current.hidden || prefersReducedMotion()) return;
-    if (snapshot.current) {
-      if (handoff) snapshot.current.handoff = handoff;
-      return;
-    }
+    const previous = current.current;
+    const animateTabs = !next || previous.tabs !== next.tabs;
+    const animateWindows = Boolean(handoff || !next || previous.windows !== next.windows || previous.admitted !== next.admitted);
+    if (!animateTabs && !animateWindows) return;
     const measure = (nodes: Map<string, HTMLElement>) => new Map([...nodes].flatMap(([id, node]) =>
       node.hidden ? [] : [[id, fromDom(node.getBoundingClientRect())]]));
-    const previewNode = previewRef.current ?? cardRef.current;
-    snapshot.current = {
-      windows: measure(windows.current), tabs: measure(tabs.current),
+    const before: MotionSnapshot = snapshot.current ?? {
+      tabs: new Map<string, CanvasRect>(),
+      animateTabs: false,
       flightRects: new Map([...flights.current].map(([id, { node }]) => [id, fromDom(node.getBoundingClientRect())])),
-      preview: previewNode ? fromDom(previewNode.getBoundingClientRect()) : undefined,
-      handoff,
     };
-  }, []);
+    const previewNode = previewRef.current ?? cardRef.current;
+    if (previewNode) before.preview ??= fromDom(previewNode.getBoundingClientRect());
+    if (animateTabs && !before.animateTabs) {
+      before.tabs = measure(tabs.current);
+      before.animateTabs = true;
+    } else if (next && !before.animateTabs) {
+      // Recall and minimize only need the tabs at the ends of the two motions.
+      for (const id of [...previous.admitted, ...next.admitted]) {
+        if (previous.admitted.includes(id) === next.admitted.includes(id) || before.tabs.has(id)) continue;
+        const node = tabs.current.get(id);
+        if (node) before.tabs.set(id, fromDom(node.getBoundingClientRect()));
+      }
+    }
+    if (handoff) before.handoff = handoff;
+    if (animateWindows) before.windows ??= measure(windows.current);
+    snapshot.current = before;
+  }, [current]);
 
   useLayoutEffect(() => {
     capture.current = recordMotion;
@@ -324,39 +387,64 @@ export function SessionCanvas({ controller, sessions, visible = true, tabHost, o
     const before = snapshot.current;
     snapshot.current = null;
     if (!before || !visible || prefersReducedMotion()) return;
-    const play = (node: HTMLElement, from: CanvasRect, ms: number, initial?: Keyframe) => {
-      const previous = motions.current.get(node);
-      previous?.cancel();
-      const animation = animateRect(node, from, fromDom(node.getBoundingClientRect()), ms, initial);
+    const trackMotion = (node: HTMLElement, animation: Animation | undefined) => {
       if (!animation) return;
       motions.current.set(node, animation);
       const clean = () => { if (motions.current.get(node) === animation) motions.current.delete(node); };
       void animation.finished.then(clean, clean);
     };
-    const tabPositions = new Map<string, CanvasRect>();
-    for (const [id, node] of tabs.current) {
+    const play = (node: HTMLElement, from: CanvasRect, to: CanvasRect, ms: number, initial?: Keyframe) =>
+      trackMotion(node, animateRect(node, from, to, ms, initial));
+    // Cancel the old transforms, read each final rectangle once, then start
+    // the new animations. Interleaving these phases forces repeated layout as
+    // each tab's width can affect all the tabs that follow it.
+    const presentedWindows = before.windows ? layout.admitted.flatMap(id => {
+      const node = windows.current.get(id);
+      return node && !node.hidden ? [{ id, node }] : [];
+    }) : [];
+    const motionTabs = before.animateTabs ? [...tabs.current] : [...before.tabs.keys()].flatMap(id => {
+      const node = tabs.current.get(id);
+      return node ? [[id, node] as const] : [];
+    });
+    const target = preview?.kind === 'move' ? previewRef.current : null;
+    for (const [, node] of motionTabs) motions.current.get(node)?.cancel();
+    for (const { id, node } of presentedWindows) {
       motions.current.get(node)?.cancel();
-      tabPositions.set(id, fromDom(node.getBoundingClientRect()));
-      const old = before.tabs.get(id);
-      if (old) play(node, old, duration.tab);
+      flights.current.get(id)?.animation.cancel();
     }
-    for (const [id, node] of windows.current) {
-      if (node.hidden) continue;
-      if (preview?.kind === 'move' && preview.where === 'canvas' && preview.session.id === id && node.dataset.mode === 'floating') {
-        motions.current.get(node)?.cancel();
-        continue;
+    if (target) motions.current.get(target)?.cancel();
+    const tabViewport = tabStrip.current?.getBoundingClientRect();
+    const tabPositions = new Map(motionTabs.map(([id, node]) => [id, fromDom(node.getBoundingClientRect())]));
+    const windowPositions = new Map(presentedWindows.map(({ id, node }) => [id, fromDom(node.getBoundingClientRect())]));
+    const previewPosition = target ? fromDom(target.getBoundingClientRect()) : undefined;
+    const inTabStrip = (rect: CanvasRect) => !tabViewport || !tabViewport.width
+      || rect.x + rect.w > tabViewport.left && rect.x < tabViewport.right;
+
+    if (before.animateTabs) {
+      for (const [id, node] of motionTabs) {
+        const old = before.tabs.get(id);
+        const to = tabPositions.get(id)!;
+        if (old && (inTabStrip(old) || inTabStrip(to))) play(node, old, to, duration.tab);
       }
-      const flight = flights.current.get(id);
-      flight?.animation.cancel();
-      const existing = before.windows.get(id);
-      const supplied = before.handoff?.id === id ? before.handoff.rect : undefined;
-      const from = supplied ?? existing ?? before.flightRects.get(id) ?? before.tabs.get(id) ?? tabPositions.get(id);
-      if (from) play(node, from, existing || supplied ? duration.place : duration.open, existing || supplied ? {} : { opacity: .6 });
     }
-    for (const [id, from] of before.windows) {
+    for (const { id, node } of presentedWindows) {
+      if (preview?.kind === 'move' && preview.where === 'canvas' && preview.session.id === id && node.dataset.mode === 'floating') continue;
+      const existing = before.windows?.get(id);
+      const supplied = before.handoff?.id === id ? before.handoff.rect : undefined;
+      const tab = before.tabs.get(id) ?? tabPositions.get(id);
+      const from = supplied ?? existing ?? before.flightRects.get(id) ?? (tab && inTabStrip(tab) ? tab : undefined);
+      if (!from) continue;
+      if (node.dataset.mode === 'maximized' && !existing && !supplied && !before.tabs.has(id) && !before.flightRects.has(id)) {
+        // The first readable frame uses the final text size.
+        trackMotion(node, node.animate?.([{ opacity: .85 }, { opacity: 1 }], { duration: duration.lift, easing }));
+      } else {
+        play(node, from, windowPositions.get(id)!, existing || supplied ? duration.place : duration.open, existing || supplied ? {} : { opacity: .6 });
+      }
+    }
+    for (const [id, from] of before.windows ?? []) {
       const tab = tabs.current.get(id);
       const to = tabPositions.get(id);
-      if (!tab || !to || !windows.current.get(id)?.hidden || !flightLayer.current || !from.w || !from.h || !to.w || !to.h || !tab.animate) continue;
+      if (!tab || !to || !inTabStrip(to) || !windows.current.get(id)?.hidden || !flightLayer.current || !from.w || !from.h || !to.w || !to.h || !tab.animate) continue;
       flights.current.get(id)?.animation.cancel();
       const ghost = document.createElement('div');
       ghost.className = 'session-canvas__flight';
@@ -376,10 +464,9 @@ export function SessionCanvas({ controller, sessions, visible = true, tabHost, o
       tab.animate([{ boxShadow: 'none' }, { boxShadow: 'inset 0 0 0 1px var(--blue)', offset: .35 }, { boxShadow: 'none' }],
         { duration: 215, delay: duration.tuck - 70, easing });
     }
-    const target = previewRef.current;
-    if (target && preview?.kind === 'move') {
-      const from = before.preview ?? before.windows.get(preview.session.id) ?? before.tabs.get(preview.session.id);
-      if (from) play(target, from, preview.dock ? duration.snap : duration.lift);
+    if (target && previewPosition && preview?.kind === 'move') {
+      const from = before.preview ?? before.windows?.get(preview.session.id) ?? before.tabs.get(preview.session.id);
+      if (from) play(target, from, previewPosition, preview.dock ? duration.snap : duration.lift);
     }
   }, [layout, preview, visible]);
 
@@ -404,9 +491,7 @@ export function SessionCanvas({ controller, sessions, visible = true, tabHost, o
     for (const id of focusedElements.current.keys()) if (!live.has(id)) focusedElements.current.delete(id);
   }, [sessions]);
 
-  const begin = useCallback((event: ReactPointerEvent, next: Omit<MoveGesture, keyof GestureBase>
-    | Omit<Extract<Gesture, { kind: 'float-resize' }>, keyof GestureBase>
-    | Omit<Extract<Gesture, { kind: 'dock-resize' }>, keyof GestureBase>) => {
+  const begin = useCallback((event: ReactPointerEvent, next: GestureStart) => {
     if (event.button !== 0 || gesture.current || event.pointerType === 'touch') return;
     // Resize grips own the press even before the drag threshold is crossed.
     // A tab click still needs the native focus behavior.
@@ -603,6 +688,14 @@ export function SessionCanvas({ controller, sessions, visible = true, tabHost, o
     };
   }, [area, cancelGesture, current, pendingHandoffs, recordMotion, update, visible]);
 
+  const registerWindow = useCallback((id: string, node: HTMLElement | null) => {
+    if (node) windows.current.set(id, node); else windows.current.delete(id);
+  }, []);
+  const maximize = useCallback((id: string) => update(state => toggleMaximized(state, id, area.current)), [area, update]);
+  const doubleTitle = useCallback((id: string) => update(state =>
+    state.admitted.length > 1 && state.windows.get(id)?.mode === 'floating'
+      ? fillFreeDock(state, id, area.current) : toggleMaximized(state, id, area.current)), [area, update]);
+
   const byId = useMemo(() => new Map(sessions.map(session => [session.id, session])), [sessions]);
   const moving = preview?.kind === 'move' && preview.where === 'canvas' ? preview : null;
   const movingId = moving?.session.id;
@@ -611,30 +704,19 @@ export function SessionCanvas({ controller, sessions, visible = true, tabHost, o
   const dividers = useMemo(() => dockDividers(layout), [layout]);
   const dockChanges = preview?.kind === 'dock-resize' ? preview.regions : undefined;
 
+  const recall = useCallback((id: string) => update(state => placeWindow(state, id, area.current)), [area, update]);
+  const registerTab = useCallback((id: string, node: HTMLElement | null) => {
+    if (node) tabs.current.set(id, node); else tabs.current.delete(id);
+  }, []);
   const tabItems = useMemo(() => layout.tabs.map(id => {
     const session = byId.get(id);
     if (!session) return null;
-    const selected = layout.focusedId === id;
-    const placed = layout.admitted.includes(id);
-    const placementLabel = placed ? '在画布中' : '已收起';
-    return (
-      <div key={id} className="session-canvas__tab" data-selected={selected || undefined}
-        data-placed={placed || undefined}
-        ref={node => { if (node) tabs.current.set(id, node); else tabs.current.delete(id); }}>
-        <button type="button" className="session-canvas__tab-select" role="tab" aria-selected={selected}
-          aria-controls={id} aria-description={placementLabel} title={`${session.title} · ${placementLabel}`}
-          onClick={() => update(state => placeWindow(state, id, area.current))}
-          onPointerDown={event => begin(event, { kind: 'move', source: 'tab', session })}>
-          {session.pendingApproval ? <span className="session-canvas__approval" title="等待审批" aria-label="等待审批" />
-            : session.running && <LoaderCircle size={12} className="is-spinning" aria-label="正在处理" />}
-          <span className="session-canvas__tab-title">{session.title}</span>
-        </button>
-        <SessionTabClose title={session.title} request={closingTab?.id === id ? closingTab : undefined}
-          onClose={() => void onCloseSession(id)}
-          onReturnToForm={() => update(state => placeWindow(state, id, area.current))} />
-      </div>
-    );
-  }), [byId, layout.tabs, layout.admitted, layout.focusedId, closingTab, onCloseSession, update, begin, area]);
+    return <SessionCanvasTab key={id} id={id} title={session.title}
+      pendingApproval={session.pendingApproval} running={session.running}
+      selected={layout.focusedId === id} placed={layout.admitted.includes(id)}
+      closing={closingTab?.id === id ? closingTab : undefined}
+      begin={begin} recall={recall} onClose={onCloseSession} registerTab={registerTab} />;
+  }), [byId, layout.tabs, layout.admitted, layout.focusedId, closingTab, onCloseSession, begin, recall, registerTab]);
 
   const tabBar = visible && tabHost ? createPortal(
       <div className="session-canvas__tabs" data-dragging={preview ? true : undefined}>
@@ -658,21 +740,12 @@ export function SessionCanvas({ controller, sessions, visible = true, tabHost, o
           const floatSize = preview?.kind === 'float-resize' && preview.id === id ? preview.rect : undefined;
           const floating = isMoving ? moving?.rect : floatSize;
           const dock = dockChanges?.get(id) ?? item?.dock;
-          const rect = isMoving && floating
-            ? { left: 0, top: 0, width: floating.w, height: floating.h, translate: `${floating.x}px ${floating.y}px` }
-            : floating ? pixels(floating) : item?.mode === 'maximized' ? percentages(wholeCanvas)
-            : item?.mode === 'docked' && dock ? percentages(dock) : item ? pixels(reachableFloat(item.float, view)) : {};
-          return <SessionCanvasWindow key={id} session={session} mode={item?.mode}
+          return <SessionCanvasWindow key={id} id={id} title={session.title} content={session.content} item={item} view={view}
             shown={layout.admitted.includes(id)} focused={layout.focusedId === id} canvasVisible={visible}
-            rect={rect} z={isMoving ? 10 : (layout.stack.indexOf(id) + 1) * 2}
-            conflict={conflicts.includes(id)}
-            windowRef={node => { if (node) windows.current.set(id, node); else windows.current.delete(id); }}
-            activateWindow={focus} rememberFocus={rememberFocus} onMinimize={() => minimize(id)}
-            onMaximize={() => update(state => toggleMaximized(state, id, area.current))}
-            onDoubleTitle={() => update(state => state.windows.get(id)?.mode === 'floating'
-              ? fillFreeDock(state, id, area.current) : toggleMaximized(state, id, area.current))}
-            onTitle={event => { if (item) begin(event, { kind: 'move', source: 'title', session, origin: windowBox(item, view) }); }}
-            onResize={(event, edge) => { if (item) begin(event, { kind: 'float-resize', id, edge, origin: windowBox(item, view) }); }}
+            floating={floating} dock={dock} moving={isMoving} z={isMoving ? 10 : (layout.stack.indexOf(id) + 1) * 2}
+            conflict={conflicts.includes(id)} registerWindow={registerWindow}
+            activateWindow={focus} rememberFocus={rememberFocus} onMinimize={minimize}
+            onMaximize={maximize} onDoubleTitle={doubleTitle} begin={begin}
           />;
         })}
         {dividers.filter(divider => !divider.participants.some(part => part.id === movingId)).map(divider => {

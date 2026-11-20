@@ -68,6 +68,30 @@ describe('follow intent and actual visible tail', () => {
     expect(visible).toHaveBeenLastCalledWith(true);
     geometry.top = 556; controller.scroll(); frame(); expect(visible).toHaveBeenLastCalledWith(false);
   });
+  it('preserves the latest affordance and scroll intent through a scaled canvas recall', () => {
+    const {controller, root, geometry, visible, frame} = setup(30);
+    const end = root.querySelector<HTMLElement>('[data-thread-tail-end]')!;
+    controller.input('up');
+    geometry.top = 350;
+    controller.scroll(); frame();
+    expect(visible).toHaveBeenLastCalledWith(false);
+
+    const scale = 0.06, top = 50;
+    Object.defineProperty(root, 'offsetHeight', { get: () => geometry.viewport });
+    vi.mocked(root.getBoundingClientRect).mockImplementation(() => new DOMRect(0, top, 600, geometry.viewport * scale));
+    for (const article of root.querySelectorAll('article')) {
+      const offset = article.closest('[data-thread-tail="true"]') ? 850 : 700;
+      vi.mocked(article.getBoundingClientRect).mockImplementation(() =>
+        new DOMRect(0, top + (offset - geometry.top) * scale, 300, 24 * scale));
+    }
+    vi.mocked(end.getBoundingClientRect).mockImplementation(() =>
+      new DOMRect(0, top + (geometry.height - 30 - geometry.top) * scale, 1, 0));
+    controller.coordinate();
+    expect(visible).toHaveBeenLastCalledWith(false);
+    controller.input('down'); frame();
+    expect(controller.intent).toBe('read');
+    expect(geometry.top).toBe(350);
+  });
   it('never calls an old band latest even at its physical bottom', () => {
     const {controller, geometry, visible, frame} = setup(); geometry.latest = false;
     controller.input('down'); frame(); expect(controller.canFollow).toBe(false); expect(visible).toHaveBeenLastCalledWith(false);
@@ -127,11 +151,13 @@ describe('semantic detail protection and animation ownership', () => {
     const {controller, root, geometry, frame, frames} = setup();
     const drawer = root.querySelector('.animated-disclosure')!;
     let active = true;
-    Object.defineProperty(root, 'getAnimations', {configurable: true, value: () => active ? [{playState: 'running', effect: {target: drawer}}] : []});
-    controller.coordinate(); geometry.height += 40; frame(); expect(geometry.top).toBe(640); expect(frames.size).toBe(1);
+    const getAnimations = vi.fn(() => active ? [{playState: 'running', effect: {target: drawer}}] : []);
+    Object.defineProperty(root, 'getAnimations', {configurable: true, value: getAnimations});
+    controller.coordinate(); expect(getAnimations).not.toHaveBeenCalled();
+    controller.coordinate(true); geometry.height += 40; frame(); expect(geometry.top).toBe(640); expect(frames.size).toBe(1);
     active = false; frame(); expect(frames.size).toBe(0);
     Object.defineProperty(root, 'getAnimations', {configurable: true, value: () => [{playState: 'running', effect: {target: root.querySelector('p')}}]});
-    controller.coordinate(); expect(frames.size).toBe(0);
+    controller.coordinate(true); expect(frames.size).toBe(0);
   });
   it('selection retains intent, blocks streaming and restores after clearing even far from latest', () => {
     const {controller, root, geometry} = setup();

@@ -315,6 +315,8 @@ message ToolAttemptControl {
   string invocation_id = 6;
   string source_kind = 7;
   string source_exec_attempt_id = 8;
+  string turn_id = 9;
+  string tool_name = 10;
   string attempt_id = 1;
   string assistant_entry_id = 2;
   string tool_call_id = 3;
@@ -400,6 +402,9 @@ message HelloRequest {
   string host_session_id = 6;
   string session_id = 7;
   AttachmentRole requested_role = 8;
+  // This attachment only carries commands and reads. The polling attachment
+  // owns the live subscription and its initial baseline.
+  bool without_live_observation = 9;
 }
 
 message HelloAccepted {
@@ -421,6 +426,9 @@ message SnapshotRequest {
   uint64 attachment_generation = 3;
   uint32 maximum_entries = 4;
   uint32 maximum_control_items = 5;
+  // Optional starting size for interactive ROOT history. The reader may
+  // widen the contiguous suffix within maximum_entries to cover current work.
+  uint32 preferred_history_entries = 6;
 }
 
 message SnapshotResponse {

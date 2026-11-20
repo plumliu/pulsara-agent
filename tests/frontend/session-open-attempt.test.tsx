@@ -115,6 +115,7 @@ it.each(['takeover','reconnecting'] as const)('keeps an in-flight %s intent when
   const first = adapter.lastConnection!;
   const originalWindow = document.getElementById(initialSession.id);
   const originalTab = screen.getByRole('tab', {name:/准备发布/});
+  fireEvent.click(screen.getByRole('button', {name:'还原会话窗口'}));
   expect(originalWindow?.getAttribute('data-mode')).toBe('floating');
   const pending = deferred<void>(), native = adapter.connect.bind(adapter);
   const connect = vi.spyOn(adapter, 'connect').mockImplementation(async (...args) => {
@@ -129,7 +130,7 @@ it.each(['takeover','reconnecting'] as const)('keeps an in-flight %s intent when
   }
   await waitFor(() => expect(connect).toHaveBeenCalledTimes(1));
   selectSession();
-  expect(originalWindow?.getAttribute('data-mode')).toBe('floating');
+  expect(originalWindow?.getAttribute('data-mode')).toBe('maximized');
   expect(screen.getByRole('tab', {name:/准备发布/})).toBe(originalTab);
   expect(connect.mock.calls).toEqual([[initialSession.id,intent === 'takeover',false]]);
   await act(async () => pending.resolve());

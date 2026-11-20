@@ -93,6 +93,7 @@ class _RuntimeConnection:
         host_session_id: str,
         generation: int,
         role: str,
+        initial_reading_page: bool = False,
     ) -> "_RuntimeConnection":
         assert server is not None
         assert host_session_id == derive_id("host", "test-fixture", f"host:{session_id}")

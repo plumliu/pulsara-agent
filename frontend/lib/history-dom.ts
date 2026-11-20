@@ -61,18 +61,27 @@ export function hasHistorySelection(root: HTMLElement): boolean {
   return false;
 }
 
+/** Canvas motion scales the scrollport's rendered box. Scroll offsets and
+ * reading margins use layout pixels. Ignore rounding in the layout height. */
+export function historyViewportScale(root: HTMLElement, viewport: DOMRectReadOnly): number {
+  const layoutHeight = root.offsetHeight;
+  if (layoutHeight <= 0 || viewport.height <= 0 || Math.abs(viewport.height - layoutHeight) <= 0.5) return 1;
+  return viewport.height / layoutHeight;
+}
+
 /** Same 200px preparation margin as immutable-body hydration. Selection and
  * focus are browser-owned interactions and may temporarily span many pages. */
 export function collectHistoryResidence(root: HTMLElement): {visibleEntryIds: string[]; pinnedEntryIds: string[]} {
   const visible = new Set<string>(), pinned = new Set<string>();
   const viewport = root.getBoundingClientRect();
   if (!viewport.height || root.closest('[hidden], [inert]')) return {visibleEntryIds: [], pinnedEntryIds: []};
+  const margin = 200 * historyViewportScale(root, viewport);
   const selection = root.ownerDocument.getSelection();
   const ids = (node: HTMLElement) => [node.dataset.sourceEntry, ...node.dataset.sourceEntries?.split(' ') ?? [], node.dataset.resultEntry, node.dataset.historyEntry].filter((id): id is string => Boolean(id));
   for (const node of root.querySelectorAll<HTMLElement>('[data-source-entry], [data-result-entry], [data-history-entry]')) {
     if (node.closest('[hidden], [inert]')) continue;
     const rect = node.getBoundingClientRect();
-    if (rect.height && rect.bottom >= viewport.top - 200 && rect.top <= viewport.bottom + 200) for (const id of ids(node)) visible.add(id);
+    if (rect.height && rect.bottom >= viewport.top - margin && rect.top <= viewport.bottom + margin) for (const id of ids(node)) visible.add(id);
     if (!node.hasAttribute('data-process-toggle') && node.contains(root.ownerDocument.activeElement)) for (const id of ids(node)) pinned.add(id);
     if (selection && !selection.isCollapsed) for (let index = 0; index < selection.rangeCount; index++) {
       if (selection.getRangeAt(index).intersectsNode(node)) for (const id of ids(node)) pinned.add(id);
@@ -125,6 +134,7 @@ export function waitForHistoryEntry(root: HTMLElement, entryId: string, signal: 
 
 export function captureHistoryAnchor(root: HTMLElement): HistoryReadingAnchor | undefined {
   const viewport = root.getBoundingClientRect();
+  const scale = historyViewportScale(root, viewport);
   // Prefer a text/trace subanchor over the outer message whose height can change.
   for (const selector of ['[data-source-text]', '[data-result-entry]', '[data-source-entry]', '[data-history-entry]']) {
     for (const candidate of root.querySelectorAll<HTMLElement>(selector)) {
@@ -138,7 +148,7 @@ export function captureHistoryAnchor(root: HTMLElement): HistoryReadingAnchor | 
       const viewRole = candidate.closest<HTMLElement>('[data-source-entry]')?.dataset.viewRole;
       return { entryId, traceId: candidate.dataset.resultEntry, sourceOffset: mapping ? mapping[0]?.[0] : undefined,
         ...(viewRole === 'process' || viewRole === 'final' ? {viewRole} : {}),
-        ...(candidate.dataset.historyEntry ? {header: true, processEdge: candidate.dataset.processEdge} : {}), top: rect.top - viewport.top };
+        ...(candidate.dataset.historyEntry ? {header: true, processEdge: candidate.dataset.processEdge} : {}), top: (rect.top - viewport.top) / scale };
     }
   }
 }
@@ -182,7 +192,8 @@ export function restoreHistoryAnchor(root: HTMLElement, anchor: HistoryReadingAn
       return mapping.some(([start, end]) => start <= offset && offset < end);
     }) ?? node;
   }
-  const delta = node.getBoundingClientRect().top - root.getBoundingClientRect().top - anchor.top;
+  const viewport = root.getBoundingClientRect();
+  const delta = (node.getBoundingClientRect().top - viewport.top) / historyViewportScale(root, viewport) - anchor.top;
   if (Math.abs(delta) > 0.5) {
     const before = root.scrollTop;
     const requested = before + delta;

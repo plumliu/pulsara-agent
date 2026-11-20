@@ -306,6 +306,8 @@ class TerminalKernelProtocolServer:
         request = getattr(frame, kind) if kind else None
         if request is None or not self._attachment_matches(state, request):
             return _error(_request_id(frame), "STALE_ATTACHMENT")
+        if kind in ("observe", "live_control_snapshot") and not state.live_observer_id:
+            return _error(request.request_id, "INVALID_REQUEST")
         if kind == "snapshot":
             return await self._snapshot(state, request)
         if kind == "history_page":
@@ -409,13 +411,7 @@ class TerminalKernelProtocolServer:
         state.protocol_reader = CanonicalProtocolReader(
             session.repository.connection_provider
         )
-        state.live_observer_id, live_snapshot = (
-            session.live_bus.subscribe_with_snapshot()
-        )
-        state.live_epoch = live_snapshot.generation
-        state.live_revision = live_snapshot.through_revision
         state.granted_role = request.requested_role
-        state.authenticated = True
         accepted = wire.HelloAccepted(
             request_id=request.request_id,
             attachment_id=state.attachment_id,
@@ -423,10 +419,13 @@ class TerminalKernelProtocolServer:
             granted_role=request.requested_role,
             heartbeat_interval_ms=HEARTBEAT_INTERVAL_MS,
             maximum_frame_bytes=self._maximum_frame_bytes,
-            live_owner_epoch=state.live_epoch,
-            live_revision=state.live_revision,
-            live_snapshot=_live_snapshot_to_wire(live_snapshot),
         )
+        if not request.without_live_observation:
+            state.live_observer_id, live_snapshot = session.live_bus.subscribe_with_snapshot()
+            state.live_epoch = accepted.live_owner_epoch = live_snapshot.generation
+            state.live_revision = accepted.live_revision = live_snapshot.through_revision
+            accepted.live_snapshot.CopyFrom(_live_snapshot_to_wire(live_snapshot))
+        state.authenticated = True
         install_fingerprint(
             "terminal-v3-hello-accepted:v1", accepted, "result_fingerprint"
         )
@@ -441,6 +440,7 @@ class TerminalKernelProtocolServer:
                 session_id=state.host_session.session_id,
                 maximum_entries=request.maximum_entries,
                 maximum_control_items=request.maximum_control_items,
+                preferred_history_entries=request.preferred_history_entries,
                 deadline_monotonic=monotonic() + 10.0,
                 maximum_serialized_bytes=min(
                     MAXIMUM_SNAPSHOT_BYTES,

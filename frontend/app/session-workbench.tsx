@@ -2023,6 +2023,7 @@ export function SessionWorkbench({
           providerRetry={projection.providerRetry}
           isRunning={projection.isRunning}
           activeTurnId={projection.activeTurnId}
+          activeToolsOutsideHistory={projection.activeToolsOutsideHistory}
           manualCompactionCommandId={projection.manualCompactionCommandId}
           inspectorOpen={inspectorOpen}
           queuedCount={projection.queuedCount}

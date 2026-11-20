@@ -30,7 +30,9 @@
 4. `BrowserRuntimeConnection.open` 仍按顺序完成 controller／observer HELLO admission。
    两条独立 attachment 的 canonical snapshot 与 observer live-control snapshot 重叠读取；
    必须等二者完成才能返回连接。失败或取消时取消并 join 衍生任务，再关闭 attachment，
-   保留原错误种类。live-control 使用原 observer 订阅及自己的 epoch/revision。
+   保留原错误种类。浏览器的命令 attachment 在 HELLO 中声明无需实时观察，因此只建立
+   命令和读取权限，不订阅实时环。observer 建立流式和 live-control 两个基线，各自续用
+   原订阅及 epoch/revision。
 5. `RendererBridge.connect` 在 attachment 初始化后，以已恢复 Host 的实际 workspace root
    执行 `observe_workspace`，在同一响应返回 `workspace_availability`。前端安装该观察，
    移除连接成功后阻塞打开的第二次 GET／canonical session lookup。
@@ -44,12 +46,18 @@ PostgreSQL 继续拥有事务隔离、关系约束和当前事实；protobuf SDK
 
 - session-wide control 只读取一次。同一事务内只有 unresolved tool attempts 受正在扩大的
   entry window floor 影响，逐候选只更新这一 slice；不把窗口外的旧 attempts 混进首屏。
+  RUNNING 轮的未结算 attempts 已由初次 control 覆盖，候选入页时跳过这次重复读取。
+  读取未结算状态以既有的 session／invocation 索引定位结果，并核对精确 attempt，
+  避免对每个 attempt 扫描同一批已完成结果。
 - attempts 的总数和受既有显示边界约束的行由同一 SQL window count 返回，计数仍包含
   未展示的行。保持 ROOT 优先、开始时间和 ID 顺序。
 - 每个候选仍精确计算完整 wire 大小，包含固定宽度的 SHA-256 字段与真实 cursor、control、
   notices。只为最终选中 snapshot 计算原 namespace 下的 fingerprint；返回 bytes 和 digest
   与旧路径一致。超预算候选的 control 修改不能污染此前已接受的 snapshot。
-- 不删消息、不缩小原单页预算、不增总历史上限，不新增 durable 状态、缓存权威、表或事件。
+- 浏览器打开新的主会话标签时，在一次快照请求中携带 24 条首屏起始预算及原有条数、字节上限。空闲会话的尾页覆盖全部历史或最新主轮次完整回复时，可直接使用起始预算。其余空闲会话使用原快照预算。
+- 运行中的主会话在同一次快照事务中读取候选元数据。本轮过程能装入原条数预算时，连续尾页覆盖本轮和预算内最近的完整回复。本轮过程超出原条数预算时，使用 24 条起始尾页，按需扩大到原候选范围内最近一条含正文的本轮助手记录。若尾页开头是来源位于下一页的工具结果，且较新的尾部含请求或正文等记录，将这段结果和其来源一同留给上滚。条数选择不能绕过精确 wire 报价。
+- 当前控制携带未结算工具的实际轮次和工具名。源工具卡在阅读窗口内时沿用原卡；源卡尚未加载或未结算项为 Code Mode 子调用时，在最新视图显示具名状态。状态由原观察流维护，收到同 attempt 的 canonical result 时结束，翻页仍按原始工具调用、结果及 Code Mode 归属合并。
+- 尾页和同 cut 分组上下文准备完成后展示工作台。向上阅读时从原始 paired older cursor 继续，实时观察仍从原 event cut 续读。重连、接管和只读历史沿用各自原有的快照预算。
 
 ## 验证与测量
 

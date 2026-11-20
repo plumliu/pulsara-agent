@@ -1,4 +1,4 @@
-import { captureHistoryAnchor, hasHistorySelection, restoreHistoryAnchor, type HistoryReadingAnchor } from './history-dom';
+import { captureHistoryAnchor, hasHistorySelection, historyViewportScale, restoreHistoryAnchor, type HistoryReadingAnchor } from './history-dom';
 
 // Product return zone, in CSS pixels. Visibility has its own rounding tolerance.
 export const LATEST_FOLLOW_DISTANCE = 48;
@@ -45,7 +45,7 @@ export class ThreadFollowController {
     // marker falls back to the physical range until content is installed.
     const rect = end?.getBoundingClientRect();
     return viewport.height && rect && end!.getClientRects().length
-      ? rect.bottom - (viewport.top + root.clientTop + root.clientHeight)
+      ? (rect.bottom - viewport.top) / historyViewportScale(root, viewport) - root.clientTop - root.clientHeight
       : root.scrollHeight - root.scrollTop - root.clientHeight;
   }
 
@@ -71,15 +71,18 @@ export class ThreadFollowController {
       });
   }
 
-  coordinate = () => {
+  coordinate = (checkDisclosures = false) => {
     const root = this.root();
     if (!root || this.disposed) return;
-    const animations = this.animations(root);
+    // A disclosure transition or a protected close needs animation state.
+    // Ordinary scroll/layout updates only need geometry. Querying subtree
+    // animations forces style for the whole transcript when a pane is recalled.
+    const animating = (checkDisclosures || this.views.size > 0) && this.animations(root).length > 0;
     let settledProcess: HistoryReadingAnchor | undefined;
     for (const [key, view] of this.views) {
       const controls = this.controls(root, key);
       const missing = !controls.length || controls.every(node => node.closest('[hidden], [inert]'));
-      const closed = view.closing && controls.every(node => node.getAttribute('aria-expanded') === 'false') && !animations.length;
+      const closed = view.closing && controls.every(node => node.getAttribute('aria-expanded') === 'false') && !animating;
       if (!view.pending && (missing || closed)) {
         if (!missing && closed && view.anchor.processEdge) {
           // Apply the last zero-height frame before handing back to ordinary
@@ -108,10 +111,10 @@ export class ThreadFollowController {
       this.anchor = captureHistoryAnchor(root) ?? settledProcess;
     }
     this.publish();
-    if (animations.length && this.animationFrame === undefined) {
+    if (animating && this.animationFrame === undefined) {
       this.animationFrame = requestAnimationFrame(() => {
         this.animationFrame = undefined;
-        this.coordinate();
+        this.coordinate(true);
         this.onSettled();
       });
     }
@@ -234,10 +237,11 @@ export class ThreadFollowController {
     // Automatic completion still follows the tail because it has no gesture.
     if (process) { this.intent = 'read'; this.navigating = false; }
     const anchorNode = process && button.dataset.processEdge === 'top' && run ? run : button;
+    const viewport = root.getBoundingClientRect();
     this.views.delete(key);
     this.views.set(key, { key, closing: button.getAttribute('aria-expanded') === 'true', pending: false,
       anchor: { entryId, disclosureKey: key, processEdge: button.dataset.processEdge,
-        top: anchorNode.getBoundingClientRect().top - root.getBoundingClientRect().top } });
+        top: (anchorNode.getBoundingClientRect().top - viewport.top) / historyViewportScale(root, viewport) } });
     this.anchor ??= captureHistoryAnchor(root);
   }
 

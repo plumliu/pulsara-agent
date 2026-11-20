@@ -344,6 +344,7 @@ export interface RuntimeProjection {
   promptTransitions: LocalPromptSubmission[];
   planMode: boolean;
   activeTurnId?: string;
+  activeToolsOutsideHistory?: readonly { attemptId: string; name: string }[];
   manualCompactionCommandId?: string;
   hostSessionId?: string;
   control: ProtocolCanonicalControl;
@@ -954,6 +955,9 @@ interface ProtocolToolAttempt {
   tool_call_id?: string;
   result_state?: string;
   result_entry_id?: string;
+  source_kind?: string;
+  turn_id?: string;
+  tool_name?: string;
 }
 
 export interface ProtocolCanonicalControl {
@@ -3387,10 +3391,13 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     this.liveControl.manual_compaction_command_id = observation.manual_compaction_command_id || '';
     this.liveControl.active_root_turn_id = observation.active_root_turn_id || '';
     this.rememberQueueContent(this.control);
+    const settledAttempts = new Set<string>();
     for (const committed of observation.committed ?? []) {
       if (committed.interruption_notice) this.mergeInterruptionNotices([committed.interruption_notice]);
       if (committed.projection_kind === 'IMMUTABLE_ENTRY' && committed.entry) {
         this.mergeEntries([committed.entry], true);
+        const attemptId = committed.entry.tool_result?.attempt_id;
+        if (attemptId) settledAttempts.add(attemptId);
       }
       if (committed.current_control && compareSequence(committed.control_read_event_sequence ?? observation.through_event_sequence ?? 0, this.controlReadSequence) >= 0) {
         this.control = committed.current_control;
@@ -3402,6 +3409,18 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
         this.observeToolCompletion(committed.entry, decimal(committed.event_sequence));
     }
     this.applyLive(observation.live ?? [], observation.settlements ?? []);
+    // Tool results arrive as immutable entries. Retire their exact attempts
+    // even when this observation carries no replacement control projection.
+    const previousAttempts = this.control.tool_attempts;
+    if (settledAttempts.size && previousAttempts?.length) {
+      const toolAttempts = previousAttempts.filter(attempt => !settledAttempts.has(attempt.attempt_id ?? ''));
+      const settledCount = previousAttempts.length - toolAttempts.length;
+      if (settledCount) this.control = {
+        ...this.control,
+        tool_attempts: toolAttempts,
+        tool_attempt_total_count: Math.max(0, numeric(this.control.tool_attempt_total_count) - settledCount),
+      };
+    }
     for (const event of observation.live_control ?? []) {
       if (event.kind === 'LIVE_INTERACTION_CLOSED') {
         const previous = this.liveControl.current_interaction;
@@ -4462,10 +4481,21 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     const hasActiveDraft = visibleDrafts.length > 0;
     const manualCommandId = this.liveControl.manual_compaction_command_id;
     const activeTurn = manualCommandId ? undefined : this.control.active_turns?.[0];
+    const activeTurnId = this.liveControl.active_root_turn_id || activeTurn?.turn_id;
     const todo = projectTodo(this.liveControl, this.scopeKind);
     const interaction = projectInteraction(this.liveControl, this.control);
+    const reading = this.projectReading(history, messages);
+    const activeToolsOutsideHistory = activeTurnId && activeTurnIds.has(activeTurnId) && reading.history.atLatest
+      ? this.control.tool_attempts?.flatMap(attempt => {
+          if (attempt.turn_id !== activeTurnId || !attempt.attempt_id || !attempt.tool_name) return [];
+          const sourceVisible = attempt.source_kind !== 'CODE_MODE_CALL'
+            && reading.messages.some(message => !message.viewSource && message.id === attempt.assistant_entry_id
+              && message.traces?.some(trace => trace.id === attempt.tool_call_id));
+          return sourceVisible ? [] : [{ attemptId: attempt.attempt_id, name: attempt.tool_name }];
+        })
+      : undefined;
     return {
-      ...this.projectReading(history, messages),
+      ...reading,
       canonicalInputs: canonicalInputs(messages),
       canonicalTurnIds,
       presentationNotices: this.presentationNotices,
@@ -4481,7 +4511,8 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
         this.control.active_plan_workflow
         && Object.keys(this.control.active_plan_workflow).length,
       ),
-      activeTurnId: this.liveControl.active_root_turn_id || activeTurn?.turn_id,
+      activeTurnId,
+      activeToolsOutsideHistory,
       manualCompactionCommandId: manualCommandId || undefined,
       hostSessionId: this.liveControl.host_session_id || undefined,
       control: this.control,

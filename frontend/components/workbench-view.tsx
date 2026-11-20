@@ -95,6 +95,7 @@ import type {
   RuntimeInteractionContent,
   RuntimeInteractionResolution,
   RuntimeInteractionSummary,
+  RuntimeProjection,
   QueuedPrompt,
   QueuedPromptAction,
   LocalPromptSubmission,
@@ -187,6 +188,7 @@ interface WorkbenchViewProps {
   providerRetry?: import('../lib/runtime-adapter').ProviderRetry | null;
   isRunning: boolean;
   activeTurnId?: string;
+  activeToolsOutsideHistory?: RuntimeProjection['activeToolsOutsideHistory'];
   manualCompactionCommandId?: string;
   inspectorOpen: boolean;
   queuedCount: number;
@@ -2066,11 +2068,14 @@ function useConversationReading({ sessionId, visible = true, history, onLoadHist
     const mutations = new MutationObserver(restoreReadingPosition);
     mutations.observe(column, {childList: true, subtree: true, attributes: true, attributeFilter: ['aria-expanded', 'inert', 'hidden', 'data-source-entry']});
     const release = () => { if (follow.userScrolling) follow.endInput(); };
+    const trackTransition = (event: TransitionEvent) => {
+      follow.coordinate(event.target instanceof Element && event.target.matches('.animated-disclosure'));
+    };
     document.addEventListener('pointerup', release);
     document.addEventListener('pointercancel', release);
-    thread.addEventListener('transitionrun', restoreReadingPosition);
-    thread.addEventListener('transitionend', restoreReadingPosition);
-    thread.addEventListener('transitioncancel', restoreReadingPosition);
+    thread.addEventListener('transitionrun', trackTransition);
+    thread.addEventListener('transitionend', trackTransition);
+    thread.addEventListener('transitioncancel', trackTransition);
     thread.addEventListener('load', restoreReadingPosition, true);
     thread.addEventListener('focusin', follow.focusChanged);
     thread.addEventListener('focusout', follow.focusChanged);
@@ -2084,9 +2089,9 @@ function useConversationReading({ sessionId, visible = true, history, onLoadHist
       mutations.disconnect();
       document.removeEventListener('pointerup', release);
       document.removeEventListener('pointercancel', release);
-      thread.removeEventListener('transitionrun', restoreReadingPosition);
-      thread.removeEventListener('transitionend', restoreReadingPosition);
-      thread.removeEventListener('transitioncancel', restoreReadingPosition);
+      thread.removeEventListener('transitionrun', trackTransition);
+      thread.removeEventListener('transitionend', trackTransition);
+      thread.removeEventListener('transitioncancel', trackTransition);
       thread.removeEventListener('load', restoreReadingPosition, true);
       thread.removeEventListener('focusin', follow.focusChanged);
       thread.removeEventListener('focusout', follow.focusChanged);
@@ -2300,6 +2305,7 @@ export function WorkbenchView({
   isRunning,
   providerRetry,
   activeTurnId,
+  activeToolsOutsideHistory,
   manualCompactionCommandId,
   inspectorOpen,
   queuedCount,
@@ -3008,7 +3014,11 @@ export function WorkbenchView({
                           : '已送达'} />
             </div>
           ))}
-          {atLatestHistory && (preparingSubmission || awaitingFirstActivity) && (
+          {atLatestHistory && activeToolsOutsideHistory?.length ? (
+            <div className="assistant-progress" role="status" aria-label="正在执行的工具">
+              <i aria-hidden="true" />正在执行 {activeToolsOutsideHistory.map(tool => tool.name).join('、')}
+            </div>
+          ) : atLatestHistory && (preparingSubmission || awaitingFirstActivity) && (
             <article className="assistant-turn assistant-turn--operational assistant-turn--run-start" aria-label="Pulsara 处理状态">
               <AssistantHeading message={{ id: 'pending-preparation', role: 'assistant', time: '', body: '' }} response={false} />
               <div className="assistant-progress" role="status"><i aria-hidden="true" />

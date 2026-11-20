@@ -116,6 +116,7 @@ export function placeWindow(
 ): SessionCanvasLayout {
   const prior = layout.windows.get(id);
   const alreadyPlaced = layout.admitted.includes(id);
+  if (alreadyPlaced && prior?.mode === 'maximized' && placement.type === 'maximized') return focusWindow(layout, id);
   if (placement.type === 'open' && alreadyPlaced) {
     const focused = focusWindow(layout, id);
     return placement.tabIndex === undefined ? focused : reorderTabs(focused, id, placement.tabIndex);

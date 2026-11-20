@@ -8,7 +8,7 @@ import { DesktopTitlebar } from '../components/desktop-titlebar';
 import { desktopHost } from '../lib/desktop-host';
 import { UserAvatarProvider } from '../components/user-avatar';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityRail } from '../components/activity-rail';
 import { CapabilityView, type CapabilityTab } from '../components/capability-view';
 import { DatabaseSetupGuide } from '../components/database-setup-guide';
@@ -221,6 +221,9 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   }, [promptDraftStore]);
   const [theme, setTheme] = useState<'light' | 'dark'>(readSavedTheme);
   const [showBuiltinToolResults, setShowBuiltinToolResults] = useState(readSavedToolResultDisplay);
+  const toolResultDisplay = useMemo(() => ({
+    showBuiltinToolResults, onChange: setShowBuiltinToolResults,
+  }), [showBuiltinToolResults]);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const databaseState = bootstrap?.database_state;
   const databaseBlocked = databaseState !== undefined && databaseState !== 'ready';
@@ -391,18 +394,18 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   }, [notify, placeSession]);
 
   const requestOpenSession = useCallback((
-    id: string, placement: SessionCanvasPlacement = { type: 'open' },
+    id: string, placement: SessionCanvasPlacement = { type: 'maximized' },
   ): Promise<boolean> => {
     if (deletingSession.current === id || archivingSession.current === id) return Promise.resolve(false);
     const close = closeRequestRef.current;
     if (close?.id === id && close.completion) {
       return close.completion.then(() => requestOpenSession(id, placement));
     }
-    if (placement.type === 'open') {
+    if (placement.type === 'maximized') {
       // A newer sidebar selection supersedes an unfinished selection without a tab.
       // The current placement stays in view until a replacement is ready.
       for (const [other, pending] of pendingOpens.current) {
-        if (other !== id && pending.placement.type === 'open') removeMountedSession(other);
+        if (other !== id && pending.placement.type === 'maximized') removeMountedSession(other);
       }
     }
     const pending = pendingOpens.current.get(id);
@@ -799,7 +802,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     return () => window.removeEventListener('keydown', handleKey);
   }, [canCreateSession]);
 
-  const navigate = (view: AppView, settingsSection?: SettingsSection, highlightHome = false) => {
+  const navigate = useCallback((view: AppView, settingsSection?: SettingsSection, highlightHome = false) => {
     if (view === 'capabilities') setCapabilityTab('plugins');
     if (view === 'settings') {
       setSettingsInitialSection(settingsSection);
@@ -808,7 +811,19 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     setActiveView(view);
     setFocusScheduledTaskId(undefined);
     if (!window.matchMedia?.('(min-width: 1151px)').matches) setSidebarOpen(false);
-  };
+  }, []);
+
+  const openScheduledTask = useCallback((id: string) => {
+    navigate('scheduled');
+    setFocusScheduledTaskId(id);
+  }, [navigate]);
+  const openUserCapabilities = useCallback((kind?: CapabilityTab) => {
+    navigate('capabilities');
+    setCapabilityTab(kind ?? 'plugins');
+  }, [navigate]);
+  const openSettings = useCallback((section?: SettingsSection, highlightHome?: boolean) => {
+    navigate('settings', section, highlightHome);
+  }, [navigate]);
 
   const openNewSession = () => {
     if (!canCreateSession) return;
@@ -1057,13 +1072,13 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   const activeSessionId = canvas.layout.focusedId ?? '';
   const openingSession = sessionList.find(session => session.id === openingSessionId);
   const openingObservation = sessionObservations[openingSessionId];
-  const releaseSession = (id: string) => {
+  const releaseSession = useCallback((id: string) => {
     // A reopen queued on the close acknowledgement must mount a new reader,
     // even when React would batch both placements into the same render.
     flushSync(() => removeMountedSession(id));
     void readSessionList().catch(() => {});
-  };
-  const submitTabClose = (request: CloseRequest, confirmation: SessionTabCloseConfirmation) => {
+  }, [readSessionList, removeMountedSession]);
+  const submitTabClose = useCallback((request: CloseRequest, confirmation: SessionTabCloseConfirmation) => {
     const pending: CloseRequest = { ...request, error: undefined };
     const ownsRequest = () => closeRequestRef.current === pending;
     pending.completion = Promise.resolve().then(async () => {
@@ -1096,8 +1111,8 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
       return false;
     });
     publishCloseRequest(pending);
-  };
-  const closeSession = (id: string) => {
+  }, [adapter, notify, publishCloseRequest, releaseSession]);
+  const closeSession = useCallback((id: string) => {
     if (!mountedSessionIdsRef.current.includes(id)) return;
     const current = closeRequestRef.current;
     if (current) {
@@ -1111,7 +1126,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
       return;
     }
     submitTabClose({ id, connection }, { formIds: [], otherClients: false });
-  };
+  }, [dismissTabClose, notify, releaseSession, submitTabClose]);
   const confirmTabClose = () => {
     const request = closeRequestRef.current;
     if (request?.confirmation && !request.completion) {
@@ -1119,54 +1134,63 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
       submitTabClose(request, { formIds, otherClients });
     }
   };
-  const onBrowserShortcut = (command: 'search' | 'new-session') => {
+  const onBrowserShortcut = useCallback((command: 'search' | 'new-session') => {
     flushSync(() => {
       if (command === 'search') setSearchOpen(value => !value);
       else if (canCreateSession) setNewSessionOpen(true);
     });
-  };
-  const renderWorkbench = (session: SessionSummary) => <CanvasWorkbench
-    adapter={adapter}
-    session={session}
-    loaded={canvas.layout.windows.has(session.id)}
-    bootstrap={bootstrap}
-    userServiceStatus={userServiceStatus}
-    userServiceError={userServiceError}
-    userCapabilityMutation={userCapabilityMutation}
-    scheduledApi={scheduledApi}
-    promptDraftStore={promptDraftStore}
-    suggestionCache={suggestionCache}
-    toolDecisionStore={toolDecisionStore}
-    pendingTabClose={pendingTabClose}
-    changeSessionList={changeSessionList}
-    invalidateSessionList={invalidateSessionList}
-    readSessionList={readSessionList}
-    notify={notify}
-    runMcpAuthorization={runMcpAuthorization}
-    onObservation={onSessionObservation}
-    onConnection={onSessionConnection}
-    onPublishStatus={publishSessionStatus}
-    onSessionMissing={forgetSession}
-    onClose={closeSession}
-    onOpenSession={openSession}
-    onRenameSession={setRenameTarget}
-    onOpenScheduledTask={id => {
-      navigate('scheduled');
-      setFocusScheduledTaskId(id);
-    }}
-    onOpenUserCapabilities={kind => {
-      navigate('capabilities');
-      setCapabilityTab(kind ?? 'plugins');
-    }}
-    onOpenSettings={(section, highlightHome) => navigate('settings', section, highlightHome)}
-    onBrowserShortcut={onBrowserShortcut}
-  />;
-  const canvasSessions = mountedSessionIds.map(id => {
-    const session = sessionList.find(item => item.id === id) ?? { ...emptySession, id, title: '会话' };
-    const observation = sessionObservations[id];
-    return { id, title: session.title, pendingApproval: observation?.approvalPending,
-      running: observation?.running, content: renderWorkbench(session) };
-  });
+  }, [canCreateSession]);
+  // A minimized window still has a loaded tab. Geometry and focus can change independently.
+  const loadedSessionIds = canvas.layout.tabs;
+  const canvasContents = useMemo(() => {
+    const sessionsById = new Map(sessionList.map(session => [session.id, session]));
+    const loaded = new Set(loadedSessionIds);
+    return mountedSessionIds.map(id => {
+      const session = sessionsById.get(id) ?? { ...emptySession, id, title: '会话' };
+      return {
+        id,
+        title: session.title,
+        content: <CanvasWorkbench
+          adapter={adapter}
+          session={session}
+          loaded={loaded.has(id)}
+          bootstrap={bootstrap}
+          userServiceStatus={userServiceStatus}
+          userServiceError={userServiceError}
+          userCapabilityMutation={userCapabilityMutation}
+          scheduledApi={scheduledApi}
+          promptDraftStore={promptDraftStore}
+          suggestionCache={suggestionCache}
+          toolDecisionStore={toolDecisionStore}
+          pendingTabClose={pendingTabClose}
+          changeSessionList={changeSessionList}
+          invalidateSessionList={invalidateSessionList}
+          readSessionList={readSessionList}
+          notify={notify}
+          runMcpAuthorization={runMcpAuthorization}
+          onObservation={onSessionObservation}
+          onConnection={onSessionConnection}
+          onPublishStatus={publishSessionStatus}
+          onSessionMissing={forgetSession}
+          onClose={closeSession}
+          onOpenSession={openSession}
+          onRenameSession={setRenameTarget}
+          onOpenScheduledTask={openScheduledTask}
+          onOpenUserCapabilities={openUserCapabilities}
+          onOpenSettings={openSettings}
+          onBrowserShortcut={onBrowserShortcut}
+        />,
+      };
+    });
+  }, [adapter, bootstrap, changeSessionList, closeSession, forgetSession, invalidateSessionList, loadedSessionIds,
+    mountedSessionIds, notify, onBrowserShortcut, onSessionConnection, onSessionObservation, openScheduledTask,
+    openSession, openSettings, openUserCapabilities, pendingTabClose, promptDraftStore, publishSessionStatus,
+    readSessionList, runMcpAuthorization, scheduledApi, sessionList, suggestionCache, toolDecisionStore,
+    userCapabilityMutation, userServiceError, userServiceStatus]);
+  const canvasSessions = useMemo(() => canvasContents.map(session => {
+    const observation = sessionObservations[session.id];
+    return { ...session, pendingApproval: observation?.approvalPending, running: observation?.running };
+  }), [canvasContents, sessionObservations]);
   const sessionOpenErrors = Object.fromEntries(
     [...pendingOpens.current.keys()].map(id => [id, sessionObservations[id]?.error]),
   );
@@ -1215,7 +1239,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   return (
     <UserAvatarProvider adapter={adapter}>
     <McpAuthorizationContext.Provider value={mcpAuthorizationStatuses}>
-    <ToolResultDisplayContext.Provider value={{ showBuiltinToolResults, onChange: setShowBuiltinToolResults }}>
+    <ToolResultDisplayContext.Provider value={toolResultDisplay}>
     <main data-platform={desktopHost()?.platform} className={`pulsara-shell desktop-shell${sidebarOpen ? " sidebar-visible" : ""}${activeView === 'workbench' ? ' is-workbench' : ' is-surface'}`}>
       <DesktopTitlebar conversation={activeView === 'workbench'} onTabsHost={setCanvasTabHost}
         onToggleSidebar={showWorkbench ? () => setSidebarOpen(value => !value) : undefined} />
@@ -1369,7 +1393,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   );
 }
 
-function CanvasWorkbench(props: Omit<Parameters<typeof SessionWorkbench>[0], 'visible' | 'focused'>) {
+const CanvasWorkbench = memo(function CanvasWorkbench(props: Omit<Parameters<typeof SessionWorkbench>[0], 'visible' | 'focused'>) {
   const { visible, focused } = useSessionCanvasWindow();
   return <SessionWorkbench {...props} visible={visible} focused={focused} />;
-}
+});

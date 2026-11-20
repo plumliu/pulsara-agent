@@ -12,6 +12,18 @@
 .session-canvas-window[hidden] {
   display: none;
 }
+@supports (content-visibility: hidden) {
+  @layer base {
+    /* Tailwind hides [hidden] in this layer. Keep the frame's existing
+       layout box while Chromium skips the minimized pane's contents. */
+    .session-canvas-window[hidden][data-mode] {
+      display: flex !important;
+      content-visibility: hidden;
+      visibility: hidden;
+      pointer-events: none;
+    }
+  }
+}
 .session-canvas__tabs {
   position: relative;
   flex: none;
@@ -60,7 +72,8 @@
   text-align: left;
   user-select: none;
 }
-.session-canvas__tab[data-selected] .session-canvas__tab-select { font-weight: 600; }
+/* Keep each tab's measured width stable as focus moves. */
+.session-canvas__tab[data-selected] .session-canvas__tab-title { -webkit-text-stroke: .22px currentColor; }
 .session-canvas__tab-select svg { flex: none; }
 .session-canvas__tab-title,
 .session-canvas-window__identity > strong,

@@ -71,6 +71,35 @@ describe('production session canvas', () => {
     expect(screen.getByRole('button', { name: /另一会话.*当前会话/ })).toBeTruthy();
   });
 
+  it('opens sidebar sessions maximized above existing windows and lets tabs raise them at their current size', async () => {
+    const { first } = await start();
+    await userEvent.click(within(first).getByRole('button', { name: '还原会话窗口' }));
+    const floatingStyle = first.getAttribute('style');
+    const floatingWidth = first.style.width;
+
+    await userEvent.click(screen.getByRole('button', { name: /另一会话/ }));
+    await screen.findByRole('tab', { name: /另一会话/ });
+    const secondWindow = document.getElementById(second.id)!;
+    expect(secondWindow.dataset.mode).toBe('maximized');
+    expect(secondWindow.dataset.focused).toBe('true');
+    expect(first.hidden).toBe(false);
+    expect(first.dataset.mode).toBe('floating');
+    expect(first.getAttribute('style')).toBe(floatingStyle);
+
+    await userEvent.click(screen.getByRole('tab', { name: /准备发布/ }));
+    expect(first.dataset.focused).toBe('true');
+    expect(first.dataset.mode).toBe('floating');
+
+    const sidebar = screen.getByRole('region', { name: '会话目录' });
+    await userEvent.click(within(sidebar).getByRole('button', { name: /准备发布.*当前会话/ }));
+    expect(first.dataset.mode).toBe('maximized');
+    expect(secondWindow.hidden).toBe(false);
+    expect(secondWindow.dataset.mode).toBe('maximized');
+    await userEvent.click(within(first).getByRole('button', { name: '还原会话窗口' }));
+    expect(first.dataset.mode).toBe('floating');
+    expect(first.style.width).toBe(floatingWidth);
+  });
+
   it('keeps both streams and window DOM alive while another composer is composing and during user navigation', async () => {
     const { adapter, first, firstConnection } = await start();
     const firstComposer = within(first).getByLabelText('发送给 Pulsara');

@@ -2609,7 +2609,6 @@ describe('PulsaraApp', () => {
     renderWorkbench(<PulsaraApp adapter={new FakeAdapter()} />);
     const inspector = await openSessionWorkspace();
     const owner = inspector.closest<HTMLElement>('.session-canvas-window')!;
-    fireEvent.click(within(owner).getByRole('button', { name: '铺满会话窗口' }));
     fireEvent.click(within(owner).getByRole('button', { name: '还原会话窗口' }));
     expect(owner.dataset.mode).toBe('floating');
     expect(within(owner).getByRole('complementary', { name: '会话标签工作区' })).toBe(inspector);
@@ -4250,9 +4249,9 @@ describe('explicit runtime reopen owner', () => {
     const closed = deferred<Awaited<ReturnType<RuntimeAdapter['closeSessionTab']>>>();
     adapter.closeSessionTab.mockReturnValueOnce(closed.promise);
     renderWorkbench(<PulsaraApp adapter={adapter} />);
-    await screen.findByRole('heading', { name: '准备发布' });
+    const closeOriginal = await screen.findByRole('button', { name: '关闭会话 准备发布' });
     const original = adapter.lastConnection!;
-    fireEvent.click(screen.getByRole('button', { name: '关闭会话 准备发布' }));
+    fireEvent.click(closeOriginal);
     expect(original.closed).toBe(false);
     fireEvent.click(screen.getByRole('button', { name: /其他会话.*可恢复/ }));
     await screen.findByRole('heading', { name: '其他会话' });
