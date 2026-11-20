@@ -69,6 +69,15 @@ def test_closed_winner_persists_without_assistant_and_old_event_cut_excludes_fut
     first, _, _ = turn(repo, lease.guard, "first", finish=False)
     old = snapshot(reader, lease.guard.session_id)
     assert not old.interruption_notices
+    caught_up = reader.observe_committed(
+        session_id=lease.guard.session_id,
+        after_event_sequence=old.event_sequence_cut,
+        maximum_events=100,
+        maximum_bytes=100000,
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert caught_up.through_event_sequence == old.event_sequence_cut
+    assert not caught_up.projections and caught_up.gap_reason is None
     assert stop(
         repo, lease.guard, first, "PROVIDER_REQUEST_FAILED", "rate_limited: retry later"
     )

@@ -801,6 +801,7 @@ export interface RuntimeConnection {
   current(): RuntimeProjection;
   snapshot(): Promise<RuntimeProjection>;
   observe(signal?: AbortSignal): Promise<RuntimeProjection>;
+  observe(signal: AbortSignal, waitMs: number): Promise<RuntimeProjection | undefined>;
   submitPrompt(
     commandId: string,
     content: EditablePromptContent,
@@ -3354,10 +3355,12 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       return this.project();
     });
   }
-  observe(signal?: AbortSignal): Promise<RuntimeProjection> {
-    return this.ordered(() => this.observeNext(signal));
+  observe(signal?: AbortSignal): Promise<RuntimeProjection>;
+  observe(signal: AbortSignal, waitMs: number): Promise<RuntimeProjection | undefined>;
+  observe(signal?: AbortSignal, waitMs?: number): Promise<RuntimeProjection | undefined> {
+    return this.ordered(() => this.observeNext(signal, waitMs));
   }
-  private async observeNext(signal?: AbortSignal): Promise<RuntimeProjection> {
+  private async observeNext(signal?: AbortSignal, waitMs?: number): Promise<RuntimeProjection | undefined> {
     const frame = await this.post<{ observation?: ObservationPayload; error?: ProtocolError }>('observe', {
       after_event_sequence: this.eventSequenceCursor,
       live_owner_epoch: this.liveOwnerEpoch,
@@ -3366,13 +3369,19 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       after_live_control_revision: this.liveControlRevision,
       maximum_events: 128,
       maximum_bytes: 2 << 20,
-      wait_ms: 2000,
+      wait_ms: waitMs ?? 2000,
     }, signal);
     assertProtocolFrame(frame);
     if (!frame.observation) {
       throw new RuntimeApiError('PROTOCOL_RESPONSE_INVALID', '本地服务暂时没有返回更新。', true);
     }
     const observation = frame.observation;
+    if (waitMs !== undefined && this.unchangedObservation(observation)) {
+      // A sampled idle cut needs no transcript projection. Keep retries for
+      // any queued prompt body whose separate content read hasn't settled.
+      if (this.control.prompt_queue?.length) void this.hydrateQueuedPromptContent();
+      return undefined;
+    }
     this.providerRetry = observation.provider_retry ? { ...observation.provider_retry, observedAt: performance.now() } : null;
     const liveRingGap = observation.gap?.kind === 'LIVE_GAP'
       && observation.gap.reason === 'LIVE_RING_OVERFLOW';
@@ -3479,6 +3488,21 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     }
     void this.hydrateQueuedPromptContent();
     return this.project();
+  }
+
+  private unchangedObservation(observation: ObservationPayload): boolean {
+    return !observation.gap && !observation.committed?.length && !observation.live?.length
+      && !observation.settlements?.length && !observation.live_control?.length
+      && !observation.presentation_notices?.length && !this.presentationNotices.length
+      && !observation.provider_retry && !this.providerRetry && !this.mediaReadStarts.length
+      && decimal(observation.through_event_sequence ?? this.eventSequenceCursor) === this.eventSequenceCursor
+      && numeric(observation.live_owner_epoch ?? this.liveOwnerEpoch) === this.liveOwnerEpoch
+      && numeric(observation.through_live_revision ?? this.liveRevision) === this.liveRevision
+      && numeric(observation.live_control_owner_epoch ?? this.liveControlOwnerEpoch) === this.liveControlOwnerEpoch
+      && numeric(observation.through_live_control_revision ?? this.liveControlRevision) === this.liveControlRevision
+      && Boolean(observation.root_compaction_in_progress) === Boolean(this.liveControl.root_compaction_in_progress)
+      && (observation.manual_compaction_command_id || '') === (this.liveControl.manual_compaction_command_id || '')
+      && (observation.active_root_turn_id || '') === (this.liveControl.active_root_turn_id || '');
   }
 
   submitPrompt(

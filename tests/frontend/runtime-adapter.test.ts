@@ -371,6 +371,35 @@ it('carries the connected workspace observation without another workspace reques
   expect(fetchMock.mock.calls[0][0]).toBe('/api/sessions/session-1/connections');
 });
 
+it('skips empty observation projections while publishing changes at the same cursor', async () => {
+  const signal = new AbortController().signal;
+  const samples: Record<string, unknown>[] = [
+    {},
+    {active_root_turn_id: 'turn:running'},
+    {active_root_turn_id: 'turn:running'},
+    {presentation_notices: ['操作已完成']},
+    {},
+    {},
+  ];
+  const requests: Record<string, unknown>[] = [];
+  stubRuntimeFetch(vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).endsWith('/connections')) return new Response(JSON.stringify(connectPayload()));
+    expect(String(input)).toBe('/api/connections/connection-fidelity/observe');
+    requests.push(JSON.parse(String(init?.body)));
+    return new Response(JSON.stringify({observation: {through_event_sequence: '0', ...samples.shift()}}));
+  }));
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+
+  await expect(connection.observe(signal, 0)).resolves.toBeUndefined();
+  await expect(connection.observe(signal, 0)).resolves.toMatchObject({isRunning: true, activeTurnId: 'turn:running'});
+  await expect(connection.observe(signal, 2000)).resolves.toBeUndefined();
+  await expect(connection.observe(signal, 2000)).resolves.toMatchObject({isRunning: false, presentationNotices: ['操作已完成']});
+  await expect(connection.observe(signal, 0)).resolves.toMatchObject({presentationNotices: []});
+  await expect(connection.observe(signal, 0)).resolves.toBeUndefined();
+  expect(requests.map(({wait_ms}) => wait_ms)).toEqual([0, 0, 2000, 2000, 0, 0]);
+  expect(requests.every(({after_event_sequence}) => after_event_sequence === '0')).toBe(true);
+});
+
 it.each([
   ['STOP_ACTIVE_TURN', 'ROOT_TURN', 'stopActiveTurn'],
   ['STOP_CONTEXT_COMPACTION', 'MANUAL_COMPACTION', 'stopContextCompaction'],

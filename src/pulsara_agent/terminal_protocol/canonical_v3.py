@@ -1326,6 +1326,9 @@ class CanonicalProtocolReader:
                     projections=(),
                     gap_reason="CLIENT_CURSOR_AHEAD",
                 )
+            # The event query cannot produce rows beyond this transaction cut.
+            if after_event_sequence == high_water:
+                return CanonicalObservationBatch(through_event_sequence=high_water, projections=())
             events = connection.execute(
                 """
                 SELECT * FROM pulsara_v3.agent_events

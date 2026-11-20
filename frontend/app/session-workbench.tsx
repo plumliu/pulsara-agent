@@ -109,6 +109,14 @@ const emptyProjection: RuntimeProjection = {
   liveControlRevision: 0,
 };
 
+// The workbench shares the loopback HTTP/1.1 pool with commands, history and
+// other reads. Leave two of its six sockets free of blocking session polls.
+const maximumWaitingSessionObservations = 4;
+const backgroundObservationIntervalMs = 750;
+const visibleObservationIntervalMs = 250;
+const busyObservationIntervalMs = 75;
+let waitingSessionObservations = 0;
+
 const internalLanguage = /terminal(?:\s+protocol)?|protocol\s*v?\d*|kernel|canonical|generation|authority|projection|epoch|hostsession|runtime|attachment|owner|provider\s+prefix/i;
 
 export function productMessage(message: string | undefined, fallback: string): string {
@@ -227,6 +235,8 @@ export function SessionWorkbench({
   const foreground = visible && focused;
   const foregroundRef = useRef(foreground);
   foregroundRef.current = foreground;
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
   const notify = useCallback<SessionWorkbenchProps['notify']>((...message) => {
     if (foregroundRef.current) onNotify(...message);
   }, [onNotify]);
@@ -270,6 +280,14 @@ export function SessionWorkbench({
   const [runtimeReopenBusy, setRuntimeReopenBusy] = useState(false);
   const runtimeReopenOwner = useRef<RuntimeConnection | undefined>(undefined);
   const [localSubmissions, setLocalSubmissions] = useState<LocalPromptSubmission[]>([]);
+  const observationUrgent = projection.isRunning || Boolean(projection.manualCompactionCommandId)
+    || projection.queuedCount > 0 || localSubmissions.some(item => item.sessionId === sessionId && item.status === 'sending');
+  const observationUrgentRef = useRef(observationUrgent);
+  observationUrgentRef.current = observationUrgent;
+  const wakeObservation = useRef<(() => void) | undefined>(undefined);
+  useEffect(() => {
+    if (observationUrgent || visible) wakeObservation.current?.();
+  }, [observationUrgent, foreground, visible]);
   const [queueActions, setQueueActions] = useState<QueuedPromptAction[]>([]);
   const readToolDecisions = useCallback(() => toolDecisionStore.read(sessionId), [sessionId, toolDecisionStore]);
   const toolDecisions = useSyncExternalStore(toolDecisionStore.subscribe, readToolDecisions, readToolDecisions);
@@ -756,14 +774,37 @@ export function SessionWorkbench({
     let active = true;
     void (async () => {
       while (active && !abort.signal.aborted) {
+        const wasForeground = foregroundRef.current;
+        const wasVisible = visibleRef.current;
+        const urgent = observationUrgentRef.current;
+        const mayWait = urgent && waitingSessionObservations < maximumWaitingSessionObservations;
         try {
-          const next = await connection.observe(abort.signal);
+          let next: RuntimeProjection | undefined;
+          try {
+            if (mayWait) waitingSessionObservations += 1;
+            next = await connection.observe(abort.signal, mayWait ? 2000 : 0);
+          } finally {
+            if (mayWait) waitingSessionObservations -= 1;
+          }
           if (!active || connectionRef.current !== connection) return;
-          publishProjection(next, connection);
-          for (const notice of next.presentationNotices ?? []) {
-            notify(notice);
+          if (next) {
+            publishProjection(next, connection);
+            for (const notice of next.presentationNotices ?? []) notify(notice);
           }
           setRuntimeStatus('online');
+          if (mayWait || (!wasForeground && foregroundRef.current) || (!wasVisible && visibleRef.current)) continue;
+          const busy = urgent || observationUrgentRef.current || next?.isRunning || next?.manualCompactionCommandId || next?.queuedCount;
+          const interval = busy ? busyObservationIntervalMs
+            : visibleRef.current ? visibleObservationIntervalMs : backgroundObservationIntervalMs;
+          await new Promise<void>(resolve => {
+            const finish = () => {
+              clearTimeout(timer);
+              wakeObservation.current = undefined;
+              resolve();
+            };
+            const timer = window.setTimeout(finish, interval);
+            wakeObservation.current = finish;
+          });
         } catch (error) {
           const closing = pendingTabClose(connection);
           if (closing && await closing) return;
@@ -789,6 +830,7 @@ export function SessionWorkbench({
     return () => {
       active = false;
       abort.abort();
+      wakeObservation.current?.();
     };
   }, [connection, notify, openRuntimeSession, ownsConnection, pendingTabClose, publishProjection]);
 
@@ -1314,6 +1356,7 @@ export function SessionWorkbench({
       // The exact receipt can clear its submitted draft after detach. Only
       // the connection that sent it may publish workbench observations.
       if (!ownsConnection(active)) return accepted;
+      if (accepted) wakeObservation.current?.();
       const titleHost = active.current().hostSessionId;
       if (accepted && titleHost) observeTitle(active.sessionId, titleHost);
       setLocalSubmissions((current) => current.map((item) => item.commandId === commandId
@@ -1522,6 +1565,7 @@ export function SessionWorkbench({
       const receipt = await active.compactContext();
       if (!ownsConnection(active)) return;
       const alreadyCompact = receipt.status === 'succeeded' && receipt.publicCode === 'NOT_NEEDED';
+      if (receipt.status === 'pending') wakeObservation.current?.();
       notify(
         alreadyCompact ? '无需整理上下文' : receipt.status === 'rejected' ? '暂时无法整理上下文' : '上下文整理请求已提交',
         alreadyCompact
