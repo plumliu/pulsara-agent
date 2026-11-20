@@ -1,4 +1,4 @@
-import { act, fireEvent, screen, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { expect, it, vi } from 'vitest';
 import PulsaraApp from '../../frontend/app/pulsara-app';
 import { deriveIdentity } from '../../frontend/lib/identity';
@@ -30,14 +30,25 @@ it('isolates unaffected workbenches when switching tabs and recalling a minimize
   renderWorkbench(<PulsaraApp adapter={adapter} />);
   await screen.findByRole('tab', { name: /准备发布/ });
   const firstConnection = adapter.lastConnection!;
+  const firstWindow = sessionWindow(initialSession.id);
+  const firstThread = firstWindow.querySelector('.thread-scroll');
+  const firstEditor = firstWindow.querySelector('[contenteditable="true"]');
+  expect(firstThread).not.toBeNull();
+  expect(firstEditor).not.toBeNull();
   const sidebar = within(screen.getByRole('region', { name: '会话目录' }));
 
   for (const session of [second, third, fourth, fifth, sixth]) {
     await act(async () => fireEvent.click(sidebar.getByRole('button', { name: new RegExp(session.title) })));
     expect(tab(session.title).getAttribute('aria-selected')).toBe('true');
   }
-  expect(sessionWindow(initialSession.id).hidden).toBe(true);
+  expect(firstWindow.hidden).toBe(true);
   expect(sessionWindow(second.id).hidden).toBe(true);
+  await waitFor(() => {
+    expect(firstWindow.querySelector('[data-transcript-released]')).not.toBeNull();
+    expect(sessionWindow(second.id).querySelector('[data-transcript-released]')).not.toBeNull();
+  });
+  expect(firstWindow.querySelector('.thread-scroll')).toBe(firstThread);
+  expect(firstWindow.querySelector('[contenteditable="true"]')).toBe(firstEditor);
 
   workbenchRender.mockClear();
   await act(async () => fireEvent.click(tab(fourth.title)));
@@ -56,7 +67,10 @@ it('isolates unaffected workbenches when switching tabs and recalling a minimize
   expect(workbenchRender).not.toHaveBeenCalledWith(sixth.id);
 
   await act(async () => firstConnection.emit({ ...projection('收起后收到的输出'), eventSequence: 2 }));
+  expect(within(firstWindow).queryByText('收起后收到的输出')).toBeNull();
   await act(async () => fireEvent.click(tab(initialSession.title)));
+  expect(firstWindow.querySelector('.thread-scroll')).toBe(firstThread);
+  expect(firstWindow.querySelector('[contenteditable="true"]')).toBe(firstEditor);
   expect(within(sessionWindow(initialSession.id)).getByText('收起后收到的输出')).toBeTruthy();
   expect(adapter.connectCalls).toHaveLength(6);
 });

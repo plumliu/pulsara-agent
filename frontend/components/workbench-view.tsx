@@ -68,6 +68,7 @@ import {
 import {
   Fragment,
   memo,
+  startTransition,
   type ReactNode,
   createContext,
   useCallback,
@@ -1789,13 +1790,15 @@ interface ConversationReadingOptions extends Pick<WorkbenchViewProps,
   'history' | 'onLoadHistory' | 'onReadLatestHistory' | 'onReadProcessEnd' | 'onRetainHistory' | 'onLocateAnnotation' | 'onNotify' | 'messages' | 'activeTurnId'> {
   sessionId: string;
   visible?: boolean;
+  minimized?: boolean;
   savedState?: AgentReadingState;
 }
 
-function useConversationReading({ sessionId, visible = true, history, onLoadHistory, onReadLatestHistory,
+function useConversationReading({ sessionId, visible = true, minimized = false, history, onLoadHistory, onReadLatestHistory,
   onReadProcessEnd, onRetainHistory, onLocateAnnotation, onNotify, messages, activeTurnId,
   savedState }: ConversationReadingOptions) {
   const [latestVisible, setLatestVisible] = useState(true);
+  const [bodyReleased, setBodyReleased] = useState(false);
   const centeringEntryRef = useRef(false);
   const threadRef = useRef<HTMLDivElement>(null);
   const touchPosition = useRef<number | undefined>(undefined);
@@ -1907,7 +1910,7 @@ function useConversationReading({ sessionId, visible = true, history, onLoadHist
   useLayoutEffect(restoreReadingPosition);
   const loadOlderAtBoundary = useCallback(() => {
     const thread = threadRef.current, current = currentHistory.current;
-    if (!olderReadIntent.current || !thread || thread.clientHeight <= 0 || thread.scrollTop >= 160
+    if (!visibleRef.current || !olderReadIntent.current || !thread || thread.clientHeight <= 0 || thread.scrollTop >= 160
       || follow.intent === 'follow' || follow.hasViewProtection || locatingEntry.current || centeringEntryRef.current || loadRequests.current.size > 0
       || !current?.hasOlder || current.loading || current.error || current.windows.some(window => window.contextState && window.contextState !== 'ready')) return;
     const edge = { owner: current.readingOwner, windowId: current.windows[0]?.id, firstEntryId: current.windows[0]?.firstEntryId };
@@ -2011,6 +2014,43 @@ function useConversationReading({ sessionId, visible = true, history, onLoadHist
 
   const disclosureChoices = useMemo(() => savedState?.choices ?? new Map<string, boolean>(), [sessionId, savedState]);
   const locatingEntry = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!minimized) {
+      setBodyReleased(false);
+      return;
+    }
+    // Let the canvas paint the newly placed window before retiring the old
+    // transcript. Recall mounts the current projection immediately.
+    let releaseFrame = requestAnimationFrame(() => {
+      releaseFrame = requestAnimationFrame(() => {
+        const thread = threadRef.current;
+        if (!thread || locatingEntry.current || latestInstallCheck.current) return;
+        // Open output pages, customized code and live media have view state
+        // that belongs to the mounted widget. Keep those readers intact.
+        if (thread.querySelector([
+          '.tool-output-page.is-open', '.tool-output__trigger:disabled', '.trace-card.is-expanded',
+          '.code-card__body.is-expanded', '.code-card__body.is-wrapped',
+          '[data-process-toggle][aria-busy="true"]', 'iframe', 'video', 'audio',
+        ].join(', '))) return;
+        locateRequest.current?.abort();
+        locatingEntry.current = undefined;
+        olderReadIntent.current = false;
+        olderAutoRequest.current = undefined;
+        touchPosition.current = undefined;
+        follow.suspendBody();
+        // An implicitly open running process can finish while minimized.
+        // Keep it open if the reader's anchor belongs to it.
+        const entryId = follow.intent === 'read' ? follow.anchor?.entryId : undefined;
+        if (entryId) {
+          const edge = [...thread.querySelectorAll<HTMLElement>('[data-process-expanded="true"] [data-process-edge="top"]')]
+            .find(node => node.dataset.historyEntryAliases?.split(' ').includes(entryId));
+          if (edge?.dataset.processKey) disclosureChoices.set(edge.dataset.processKey, true);
+        }
+        startTransition(() => setBodyReleased(true));
+      });
+    });
+    return () => cancelAnimationFrame(releaseFrame);
+  }, [disclosureChoices, follow, minimized]);
   const residenceFrame = useRef<number | undefined>(undefined);
   const reportResidence = useCallback(() => {
     if (!visibleRef.current || !onRetainHistory || residenceFrame.current !== undefined || currentSessionRef.current !== sessionId) return;
@@ -2129,7 +2169,7 @@ function useConversationReading({ sessionId, visible = true, history, onLoadHist
     };
   }, [sessionId, savedState]);
 
-  return { latestVisible, centeringEntryRef, threadRef, touchPosition, locatedFocus,
+  return { mountTranscript: !minimized || !bodyReleased, latestVisible, centeringEntryRef, threadRef, touchPosition, locatedFocus,
     currentSessionRef, atLatestHistory, jumpingToLatest, revealEarlierProcess,
     setRevealEarlierProcess, olderReadIntent, checkOlderBoundary, follow, restoreReadingPosition,
     beginUserScroll, loadHistory, locateAnnotation, jumpToLatest, canAutoCollapse,
@@ -2368,7 +2408,7 @@ export function WorkbenchView({
   onNotify,
   onPermissionChange,
 }: WorkbenchViewProps) {
-  const { focused, visible, inCanvas } = useSessionCanvasWindow();
+  const { focused, visible, minimized, inCanvas } = useSessionCanvasWindow();
   const windowActive = focused && visible;
   const windowActiveRef = useRef(windowActive);
   windowActiveRef.current = windowActive;
@@ -2686,7 +2726,7 @@ export function WorkbenchView({
       document.removeEventListener('keydown', escape);
     };
   }, [addOpen, modelOpen, reasoningOpen, skillOpen, permissionOpen, windowActive]);
-  const reading = useConversationReading({ sessionId: session.id, visible, history,
+  const reading = useConversationReading({ sessionId: session.id, visible, minimized, history,
     onLoadHistory, onReadLatestHistory, onReadProcessEnd, onRetainHistory, onLocateAnnotation,
     onNotify, messages, activeTurnId });
   const { latestVisible, locatedFocus, currentSessionRef, atLatestHistory, jumpingToLatest,
@@ -2974,7 +3014,7 @@ export function WorkbenchView({
       </> : <header className="topbar">{titleIdentity}{titleActions}</header>}
 
       <ConversationScroll reading={reading}>
-        <div className="thread-column conversation-transcript">
+        <div className="thread-column conversation-transcript" data-transcript-released={!reading.mountTranscript || undefined}>
           {runtimeStatus !== 'online' && (
             <div className={`runtime-banner runtime-banner--${runtimeStatus}`}>
               <span role="status">{runtimeStatus === 'starting' ? '正在连接本地服务…' : runtimeStatus === 'reconnecting' ? '连接中断，正在恢复会话…' : '连接恢复未完成'}</span>
@@ -2992,13 +3032,13 @@ export function WorkbenchView({
             {history.loading ? '正在读取最近记录…' : history.error ?? '此区域有已保存记录，暂无主对话正文。'}
             {onLoadHistory && !history.windows.length && (history.hasOlder || history.error) && <button type="button" disabled={history.loading} onClick={() => { void loadHistory(history.windows[0]?.id).catch(() => {}); }}>{history.error ? '重试' : '加载更早记录'}</button>}
           </div>}
-          <ConversationMessages key={session.id} history={history} onLoadHistory={loadHistory} localSubmissions={localSubmissions} activeTurnId={activeTurnId} messages={messages} interruptionNotices={interruptionNotices} skills={skills} outputOwnerKey={outputOwnerKey} isRunning={isRunning}
+          {reading.mountTranscript && <ConversationMessages key={session.id} history={history} onLoadHistory={loadHistory} localSubmissions={localSubmissions} activeTurnId={activeTurnId} messages={messages} interruptionNotices={interruptionNotices} skills={skills} outputOwnerKey={outputOwnerKey} isRunning={isRunning}
             revealEarlierProcess={revealEarlierProcess} canAutoCollapse={canAutoCollapse} onReadProcessEnd={onReadProcessEnd ? readProcessEnd : undefined} onProcessLayout={restoreReadingPosition}
             onReadToolOutput={onReadToolOutput} onReadPromptImage={onReadPromptImage}
             onReadVisualization={onReadVisualization}
             onReadVisualizationThumbnail={onReadVisualizationThumbnail}
             onNotify={onNotify} onFork={onFork} canFork={canControl}
-            contextCompactionInProgress={atLatestHistory && contextCompactionInProgress} focusedEntry={locatedFocus?.sessionId === session.id ? locatedFocus : undefined} />
+            contextCompactionInProgress={atLatestHistory && contextCompactionInProgress} focusedEntry={locatedFocus?.sessionId === session.id ? locatedFocus : undefined} />}
           {atLatestHistory && <ProviderRetryStatus retry={providerRetry} />}
           {atLatestHistory && conversationSubmissions.map(item => (
             <div key={item.commandId} data-pending-message={item.commandId}

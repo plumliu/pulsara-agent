@@ -22,6 +22,11 @@
       visibility: hidden;
       pointer-events: none;
     }
+    /* A released transcript must also drop any cached hidden layout tree. */
+    .session-canvas-window[hidden][data-mode]:has([data-transcript-released]) {
+      display: none !important;
+      content-visibility: visible;
+    }
   }
 }
 .session-canvas__tabs {

@@ -281,9 +281,21 @@ export class ThreadFollowController {
     this.anchor = captureHistoryAnchor(root);
     this.publish();
   }
+  suspendBody() {
+    if (this.selecting || this.views.size || this.native) this.intent = 'read';
+    if (this.intent === 'read') this.anchor = this.residenceAnchor;
+    this.views.clear();
+    this.selecting = this.navigating = false;
+    this.native = undefined;
+    this.last = this.writtenTop = undefined;
+    this.cancelFrames();
+  }
   activate() { this.disposed = false; }
   dispose() {
     this.disposed = true;
+    this.cancelFrames();
+  }
+  private cancelFrames() {
     if (this.inputFrame !== undefined) cancelAnimationFrame(this.inputFrame);
     if (this.animationFrame !== undefined) cancelAnimationFrame(this.animationFrame);
     this.inputFrame = this.animationFrame = undefined;

@@ -207,7 +207,7 @@ export function ResponseAnnotations({ sessionId, store, canAnnotate, onLocate, o
   sessionId: string; store: PromptDraftStore; canAnnotate: boolean; children: ReactNode; onNotify: MarkdownNotify; skills?: readonly SkillCapability[]; completePaths?: CompleteWorkspacePaths;
   onLocate?: (entryId: string, signal: AbortSignal) => Promise<void>;
 }) {
-  const { focused, visible } = useSessionCanvasWindow();
+  const { focused, visible, minimized } = useSessionCanvasWindow();
   const windowActive = focused && visible;
   const windowActiveRef = useRef(windowActive);
   windowActiveRef.current = windowActive;
@@ -227,6 +227,13 @@ export function ResponseAnnotations({ sessionId, store, canAnnotate, onLocate, o
     setEditing(undefined); setHovered(undefined);
     if (focus) store.getEditor(sessionId).commands.focus('end', { scrollIntoView: false });
   }, [sessionId, store]);
+  useLayoutEffect(() => {
+    if (!minimized) return;
+    hideMenu();
+    closeEditor();
+    locateController.current = undefined;
+    sourceHighlight.current = undefined;
+  }, [closeEditor, hideMenu, minimized]);
   const edit = useCallback((id: string, anchor?: HTMLElement) => {
     if (!canAnnotate) return;
     hideMenu(); window.getSelection()?.removeAllRanges();

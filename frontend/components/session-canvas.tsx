@@ -26,6 +26,7 @@ export interface SessionCanvasSession extends SessionTitle {
 interface WindowContextValue {
   inCanvas: boolean;
   visible: boolean;
+  minimized: boolean;
   focused: boolean;
   activate?: () => void;
   identityHost?: HTMLElement | null;
@@ -33,7 +34,7 @@ interface WindowContextValue {
   showIdentity?: (show: boolean) => void;
 }
 
-const WindowContext = createContext<WindowContextValue>({ inCanvas: false, visible: true, focused: true });
+const WindowContext = createContext<WindowContextValue>({ inCanvas: false, visible: true, minimized: false, focused: true });
 export function useSessionCanvasWindow() { return useContext(WindowContext); }
 
 export function SessionCanvasTitleIdentity({ children }: { children: ReactNode }) {
@@ -180,10 +181,11 @@ const SessionCanvasWindow = memo(function SessionCanvasWindow({
   const [actionsHost, setActionsHost] = useState<HTMLDivElement | null>(null);
   const [hasIdentity, setHasIdentity] = useState(false);
   const activate = useCallback(() => { if (shown && canvasVisible) activateWindow(id); }, [activateWindow, canvasVisible, id, shown]);
+  const minimized = Boolean(item && !shown);
   const context = useMemo<WindowContextValue>(() => ({
-    inCanvas: true, visible: shown && canvasVisible, focused: focused && canvasVisible, activate,
+    inCanvas: true, visible: shown && canvasVisible, minimized, focused: focused && canvasVisible, activate,
     identityHost, actionsHost, showIdentity: setHasIdentity,
-  }), [shown, canvasVisible, focused, activate, identityHost, actionsHost]);
+  }), [minimized, shown, canvasVisible, focused, activate, identityHost, actionsHost]);
   const maximized = mode === 'maximized';
   return (
     <WindowContext.Provider value={context}>
@@ -296,6 +298,7 @@ type MotionSnapshot = {
   tabs: Map<string, CanvasRect>;
   animateTabs: boolean;
   flightRects: Map<string, CanvasRect>;
+  releasedTranscripts: Set<string>;
   preview?: CanvasRect;
   handoff?: Handoff;
 };
@@ -319,8 +322,8 @@ export function SessionCanvas({ controller, sessions, visible = true, tabHost, o
   const motions = useRef(new Map<HTMLElement, Animation>());
   const flights = useRef(new Map<string, { node: HTMLElement; animation: Animation }>());
   const lastFocus = useRef<string | null>(null);
-  const focusedElements = useRef(new Map<string, HTMLElement>());
-  const rememberFocus = useCallback((id: string, element: HTMLElement) => { focusedElements.current.set(id, element); }, []);
+  const focusedElements = useRef(new Map<string, WeakRef<HTMLElement>>());
+  const rememberFocus = useCallback((id: string, element: HTMLElement) => { focusedElements.current.set(id, new WeakRef(element)); }, []);
   const openSession = useRef(onOpenSession);
   useLayoutEffect(() => { openSession.current = onOpenSession; }, [onOpenSession]);
 
@@ -353,6 +356,7 @@ export function SessionCanvas({ controller, sessions, visible = true, tabHost, o
       tabs: new Map<string, CanvasRect>(),
       animateTabs: false,
       flightRects: new Map([...flights.current].map(([id, { node }]) => [id, fromDom(node.getBoundingClientRect())])),
+      releasedTranscripts: new Set(),
     };
     const previewNode = previewRef.current ?? cardRef.current;
     if (previewNode) before.preview ??= fromDom(previewNode.getBoundingClientRect());
@@ -368,7 +372,14 @@ export function SessionCanvas({ controller, sessions, visible = true, tabHost, o
       }
     }
     if (handoff) before.handoff = handoff;
-    if (animateWindows) before.windows ??= measure(windows.current);
+    if (animateWindows) {
+      before.windows ??= measure(windows.current);
+      for (const id of next?.admitted ?? []) {
+        if (!previous.admitted.includes(id) && windows.current.get(id)?.querySelector('[data-transcript-released]')) {
+          before.releasedTranscripts.add(id);
+        }
+      }
+    }
     snapshot.current = before;
   }, [current]);
 
@@ -434,8 +445,9 @@ export function SessionCanvas({ controller, sessions, visible = true, tabHost, o
       const tab = before.tabs.get(id) ?? tabPositions.get(id);
       const from = supplied ?? existing ?? before.flightRects.get(id) ?? (tab && inTabStrip(tab) ? tab : undefined);
       if (!from) continue;
-      if (node.dataset.mode === 'maximized' && !existing && !supplied && !before.tabs.has(id) && !before.flightRects.has(id)) {
-        // The first readable frame uses the final text size.
+      const newMaximized = node.dataset.mode === 'maximized' && !before.tabs.has(id);
+      if (!existing && !supplied && !before.flightRects.has(id) && (newMaximized || before.releasedTranscripts.has(id))) {
+        // Show rebuilt text at its readable size on the first frame.
         trackMotion(node, node.animate?.([{ opacity: .85 }, { opacity: 1 }], { duration: duration.lift, easing }));
       } else {
         play(node, from, windowPositions.get(id)!, existing || supplied ? duration.place : duration.open, existing || supplied ? {} : { opacity: .6 });
@@ -475,7 +487,7 @@ export function SessionCanvas({ controller, sessions, visible = true, tabHost, o
     lastFocus.current = layout.focusedId;
     if (!visible || old === layout.focusedId) return;
     const node = layout.focusedId ? windows.current.get(layout.focusedId) : undefined;
-    const previousElement = layout.focusedId ? focusedElements.current.get(layout.focusedId) : undefined;
+    const previousElement = layout.focusedId ? focusedElements.current.get(layout.focusedId)?.deref() : undefined;
     const active = document.activeElement;
     const prior = old ? windows.current.get(old) : undefined;
     if (node && !node.contains(active)
