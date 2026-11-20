@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -12,6 +13,7 @@ from time import monotonic
 from typing import Literal
 from uuid import uuid4
 
+from pulsara_agent import __version__
 from pulsara_agent.capability.pulsara_home import require_pulsara_home
 from pulsara_agent.capability.workspace_mcp_trust import workspace_mcp_server_approvals
 from pulsara_agent.conversation_kernel.host import (
@@ -385,7 +387,7 @@ class LocalSessionController(SessionCapabilities):
         return {
             "application": {
                 "name": "Pulsara",
-                "version": "0.2.0",
+                "version": re.split(r"a|b|rc", __version__, maxsplit=1)[0],
                 "transport": "localhost-http+terminal-v3",
             },
             "protocol": {"major": 3, "minor": 0},

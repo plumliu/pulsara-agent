@@ -2,13 +2,13 @@
 
 [简体中文](INSTALL.zh-CN.md) · [Build from source](DEVELOPMENT.md)
 
-## Download 0.2.0-alpha.1
+## Download 0.2.1-alpha.1
 
 | System | Installer |
 | --- | --- |
-| macOS 15+, Apple Silicon | [Download DMG](https://github.com/plumliu/pulsara-agent/releases/download/v0.2.0-alpha.1/Pulsara-0.2.0-alpha.1-macos-arm64.dmg) |
+| macOS 15+, Apple Silicon | [Download DMG](https://github.com/plumliu/pulsara-agent/releases/download/v0.2.1-alpha.1/Pulsara-0.2.1-alpha.1-macos-arm64.dmg) |
 
-The initial 0.2.0-alpha.1 release includes the macOS Apple Silicon DMG. Windows + WSL will be published after Windows-side testing; no Ubuntu installer is included. Source-build instructions for those platforms remain in the [development guide](DEVELOPMENT.md).
+The 0.2.1-alpha.1 release provides a macOS Apple Silicon DMG. For Windows + WSL and Ubuntu source builds, see the [development guide](DEVELOPMENT.md).
 
 ## macOS
 
@@ -16,13 +16,13 @@ The initial 0.2.0-alpha.1 release includes the macOS Apple Silicon DMG. Windows 
 2. Eject the DMG, then open Pulsara from Applications.
 3. If macOS blocks it, use System Settings → Privacy & Security → Open Anyway after checking the download source. This preview has an ad-hoc signature covering the app and bundled resources; it has no Developer ID distribution signature or Apple notarization. A valid ad-hoc signature does not establish Gatekeeper trust. [Apple instructions](https://support.apple.com/en-us/102445)
 
-If macOS reports that the application is damaged, do not disable Gatekeeper globally. Download the current DMG again; this version fixes the incomplete bundle signature in earlier packages. Include the output of `codesign --verify --deep --strict --verbose=2 /Applications/Pulsara.app` in an issue if verification still fails.
+If macOS reports that the application is damaged, download the current DMG again. Include the output of `codesign --verify --deep --strict --verbose=2 /Applications/Pulsara.app` in an issue if verification still fails.
 
 macOS separately controls access to Desktop, Documents and other protected folders. Choose the folders you need in System Settings → Privacy & Security → Files & Folders. [Apple file-access guidance](https://support.apple.com/guide/mac-help/mchld5a35146/mac). After re-signing, an existing Full Disk Access grant may no longer match the app. If system logs report a code-requirement mismatch, remove the old entry and add the current Pulsara app to renew that grant. Full Disk Access covers the entire disk; choose the scope you need.
 
 ## Windows + WSL2
 
-The Windows installer will be published after Windows-side testing. The following setup applies to a separately built Windows package.
+The following setup applies to a Windows package built from source.
 
 1. If needed, [install WSL2 and Ubuntu](https://learn.microsoft.com/windows/wsl/install). Restart when prompted, open Ubuntu once, and finish creating your Linux user.
 2. Run the EXE installer, then open Pulsara from the Start menu. The installer is unsigned; Windows may show an unknown-publisher warning.

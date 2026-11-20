@@ -2,13 +2,13 @@
 
 [English](INSTALL.md) · [从源码构建](DEVELOPMENT.zh-CN.md)
 
-## 下载 0.2.0-alpha.1
+## 下载 0.2.1-alpha.1
 
 | 系统 | 安装包 |
 | --- | --- |
-| macOS 15+，Apple Silicon | [下载 DMG](https://github.com/plumliu/pulsara-agent/releases/download/v0.2.0-alpha.1/Pulsara-0.2.0-alpha.1-macos-arm64.dmg) |
+| macOS 15+，Apple Silicon | [下载 DMG](https://github.com/plumliu/pulsara-agent/releases/download/v0.2.1-alpha.1/Pulsara-0.2.1-alpha.1-macos-arm64.dmg) |
 
-0.2.0-alpha.1 首先提供 macOS Apple Silicon DMG；Windows + WSL 版本将在 Windows 端测试后发布，不提供 Ubuntu 安装包。这些平台的源码构建方式保留在[开发指南](DEVELOPMENT.zh-CN.md)中。
+0.2.1-alpha.1 仅提供 macOS Apple Silicon DMG。Windows + WSL 和 Ubuntu 的源码构建方式见[开发指南](DEVELOPMENT.zh-CN.md)。
 
 ## macOS
 
@@ -16,13 +16,13 @@
 2. 推出 DMG，从“应用程序”打开 Pulsara。
 3. 若被系统拦截，确认下载来源后，进入“系统设置 → 隐私与安全性 → 仍要打开”。此预览版使用覆盖应用与随包资源的 ad-hoc 签名，没有 Apple Developer ID 分发签名，也未经过 Apple 公证；ad-hoc 签名有效不代表 Gatekeeper 会自动信任。[Apple 说明](https://support.apple.com/zh-cn/102445)
 
-若系统提示应用已损坏，请勿全局关闭 Gatekeeper。请重新下载当前 DMG；本版修正了早期安装包不完整的应用签名。若仍失败，请在反馈中附上 `codesign --verify --deep --strict --verbose=2 /Applications/Pulsara.app` 的输出。
+若系统提示应用已损坏，请重新下载当前 DMG。若仍失败，请在反馈中附上 `codesign --verify --deep --strict --verbose=2 /Applications/Pulsara.app` 的输出。
 
 桌面、文稿等目录由 macOS 单独授权，可在“系统设置 → 隐私与安全性 → 文件与文件夹”中按需要开启。[Apple 文件授权说明](https://support.apple.com/guide/mac-help/mchld5a35146/mac)。重新签名后，既有“完全磁盘访问”授权可能与新程序不匹配；若系统日志报告签名要求不匹配，需由用户移除旧条目、重新添加当前 Pulsara。“完全磁盘访问”允许访问整盘，请按实际需要选择授权范围。
 
 ## Windows + WSL2
 
-Windows 安装包将在 Windows 端测试后发布，以下步骤适用于 Windows 包。
+以下步骤适用于从源码构建的 Windows 安装包。
 
 1. 尚未安装时，先按 [Microsoft 说明](https://learn.microsoft.com/zh-cn/windows/wsl/install)安装 WSL2 和 Ubuntu。按提示重启，首次打开 Ubuntu 并完成 Linux 用户创建。
 2. 运行 EXE 安装包，再从开始菜单打开 Pulsara。安装包尚未签名，Windows 可能提示未知发布者。

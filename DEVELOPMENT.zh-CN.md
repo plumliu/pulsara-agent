@@ -1,6 +1,6 @@
 # 从源码构建 Pulsara
 
-[English](DEVELOPMENT.md) · [安装说明](INSTALL.zh-CN.md) · [下载 0.2.0-alpha.1](https://github.com/plumliu/pulsara-agent/releases/tag/v0.2.0-alpha.1)
+[English](DEVELOPMENT.md) · [安装说明](INSTALL.zh-CN.md) · [下载 0.2.1-alpha.1](https://github.com/plumliu/pulsara-agent/releases/tag/v0.2.1-alpha.1)
 
 修改代码前请阅读 [AGENTS.md](AGENTS.md)。原生资源在目标系统构建；Windows 使用 WSL2 Ubuntu 中构建的 Linux 资源，以及 Windows 中构建的 Electron 界面。
 
@@ -57,11 +57,11 @@ mise install
 mise run --jobs 1 desktop:windows-package
 ```
 
-EXE 位于 `desktop/release/Pulsara-<版本>-windows-x64.exe`。构建会校验 payload 版本与摘要，并编译 Windows helper。Windows 安装包将在 Windows 端测试后发布。安装和数据位置见 [INSTALL.zh-CN.md](INSTALL.zh-CN.md)。
+EXE 位于 `desktop/release/Pulsara-<版本>-windows-x64.exe`。构建会校验 payload 版本与摘要，并编译 Windows helper。安装和数据位置见 [INSTALL.zh-CN.md](INSTALL.zh-CN.md)。
 
 ## 原生 Ubuntu
 
-0.2.0-alpha.1 不发布 Ubuntu deb，原生 x64/arm64 桌面验收仍延期。本地构建先安装 mise，再以普通用户运行：
+0.2.1-alpha.1 不发布 Ubuntu deb，原生 x64/arm64 桌面验收仍延期。本地构建先安装 mise，再以普通用户运行：
 
 ```sh
 sudo apt update
@@ -72,7 +72,7 @@ mise install
 mise run desktop:bootstrap
 mise exec -- .venv/bin/python -m playwright install-deps chromium
 mise run --jobs 1 desktop:package
-sudo apt install ./desktop/release/Pulsara-0.2.0-alpha.1-linux-amd64.deb
+sudo apt install ./desktop/release/Pulsara-0.2.1-alpha.1-linux-amd64.deb
 ```
 
 ARM64 用户换用 arm64 文件名。容器构建使用同一任务图：
@@ -109,10 +109,10 @@ Electron 壳只打包启动页需要的 Inter、Noto Sans SC 和 Gelasio。工�
 
 ## 发布
 
-0.2.0-alpha.1 首次发布提供本地构建的 macOS ARM64 DMG；Windows + WSL 版本将在 Windows 端测试后发布。Python/CLI 版本为 `0.2.0a1`，桌面端与 npm 元数据使用 `0.2.0-alpha.1`，设置页显示 `0.2.0`；Python 包、运行时常量、npm 包及所有锁文件必须一致。新的数据库基线不兼容早期发行版数据，见[安装说明](INSTALL.zh-CN.md)。
+0.2.1-alpha.1 发布本地构建的 macOS ARM64 DMG。Python 和 CLI 版本为 `0.2.1a1`，桌面端与 npm 元数据使用 `0.2.1-alpha.1`。设置页根据 Python 运行时版本显示 `0.2.1`。Python 包、运行时常量、npm 包及锁文件需保持一致。
 
-GitHub Actions 仅手动触发。Native Desktop Packages 工作流与 `release_artifacts.py assemble/draft` 要求四个平台安装包，因此本次仅 macOS 发布使用本地 `desktop:package` 和 GitHub CLI：提交版本及文档、推送对应标签，使用 `--verify-tag` 创建草稿，仅上传 `Pulsara-0.2.0-alpha.1-macos-arm64.dmg`，核对远端文件名与大小后，以 `--prerelease=false --latest` 发布为普通 Release 并标记 Latest。已发布的标签与资产保持不变。首次发布不附带 Windows、Ubuntu、blockmap 或更新源资产；Windows 资产可在测试后添加。
+GitHub Actions 仅手动触发。Native Desktop Packages 工作流与 `release_artifacts.py assemble/draft` 要求四个平台安装包，因此本次 macOS 发布使用本地 `desktop:package` 和 GitHub CLI。提交版本及文档、推送对应标签后，使用 `--verify-tag` 创建草稿。仅上传 `Pulsara-0.2.1-alpha.1-macos-arm64.dmg`，核对远端文件名与大小，再以 `--prerelease=false --latest` 发布并标记 Latest。已发布的标签与资产保持不变。
 
-版本一致性检查：`mise exec -- uv run --no-sync python desktop/scripts/release_artifacts.py check --tag v0.2.0-alpha.1`。
+版本一致性检查：`mise exec -- uv run --no-sync python desktop/scripts/release_artifacts.py check --tag v0.2.1-alpha.1`。
 
 桌面重置与显式卸载遵循 [当前维护合同](archived_docs/DESKTOP_DATA_RESET_IMPLEMENTATION.zh.md)。启动页的 toast 复用工作台组件，`npm --prefix frontend run build:startup` 生成桌面启动资源；Windows 资源任务也会构建该入口。`mise exec -- .venv/bin/python desktop/scripts/smoke_reset.py` 使用临时 home 和随包 PostgreSQL 验证不兼容基线、重置与全新初始化，不读取个人配置。
