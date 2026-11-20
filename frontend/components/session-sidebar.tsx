@@ -1,9 +1,13 @@
 import { Archive, ChevronRight, Ellipsis, Pencil, Folder, FolderOpen, LoaderCircle, Plus, Search, SquarePen, Trash2 } from 'lucide-react';
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
-import { autoUpdate, computePosition, flip, hide, offset, shift } from '@floating-ui/dom';
+import {
+  useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent,
+} from 'react';
 import type { RuntimeStatus, SessionSummary, SessionWorkspaceSelection, Workspace } from '../lib/pulsara-types';
+import type { LocalScheduledTasksApi, ScheduledTask } from '../lib/scheduled-tasks-api';
 import { desktopHost } from '../lib/desktop-host';
 import { BrandMark } from './brand-mark';
+import { isContextMenuKey, useContextMenu, type MenuItem } from './context-menu';
 import {
   getSessionPresence,
   SessionPresenceGlyph,
@@ -32,7 +36,9 @@ interface SessionSidebarProps {
   onDeleteSession: (session: SessionSummary) => void;
   onArchiveSession: (session: SessionSummary) => void;
   onRenameSession: (session: SessionSummary) => void;
-  onRefreshSessions: () => void;
+  onRefreshSessions: () => Promise<SessionSummary[] | undefined>;
+  scheduledApi: LocalScheduledTasksApi;
+  onTaskNotice: (title: string, detail?: string, tone?: 'success' | 'warning') => void;
   onNewSession: () => void;
   onCreateSession: (selection: SessionWorkspaceSelection) => Promise<boolean>;
   onPickDirectory: (signal: AbortSignal) => Promise<string | null>;
@@ -90,6 +96,8 @@ function SessionItem({
   onArchiveSession,
   onRenameSession,
   onRefreshSessions,
+  scheduledApi,
+  onTaskNotice,
 }: {
   session: SessionSummary;
   activeSessionId: string;
@@ -100,76 +108,74 @@ function SessionItem({
   onDeleteSession: (session: SessionSummary) => void;
   onArchiveSession: (session: SessionSummary) => void;
   onRenameSession: (session: SessionSummary) => void;
-  onRefreshSessions: () => void;
+  onRefreshSessions: SessionSidebarProps['onRefreshSessions'];
+  scheduledApi: LocalScheduledTasksApi;
+  onTaskNotice: SessionSidebarProps['onTaskNotice'];
 }) {
   const presence = getSessionPresence(session, activeSessionId);
-  const [menuOpen, setMenuOpen] = useState(false);
-  const menuTrigger = useRef<HTMLElement>(null);
-  const menuActions = useRef<HTMLDivElement>(null);
-  useLayoutEffect(() => {
-    const reference = menuTrigger.current;
-    const floating = menuActions.current;
-    if (!menuOpen || !reference || !floating || !reference.closest('details')?.open
-      || reference.closest<HTMLElement>('main.pulsara-shell')?.inert) return;
-    floating.style.visibility = 'hidden';
-    floating.showPopover();
-    let disposed = false;
-    let positionRequest = 0;
-    const update = () => {
-      const request = ++positionRequest;
-      void computePosition(reference, floating, {
-        placement: 'bottom-end', strategy: 'fixed',
-        middleware: [offset(1), flip({ padding: 8 }), shift({ padding: 8, crossAxis: true }), hide({ strategy: 'referenceHidden' })],
-      }).then(({ x, y, middlewareData }) => {
-        if (disposed || request !== positionRequest) return;
-        if (middlewareData.hide?.referenceHidden) {
-          const details = reference.closest('details');
-          if (details) details.open = false;
-          return;
-        }
-        Object.assign(floating.style, { left: `${x}px`, top: `${y}px`, visibility: 'visible' });
-      });
-    };
-    const cleanup = autoUpdate(reference, floating, update);
-    return () => { disposed = true; cleanup(); if (floating.isConnected && floating.matches(':popover-open')) floating.hidePopover(); };
-  }, [menuOpen]);
+  const { open } = useContextMenu();
+  const menuItems = (target: SessionSummary, tasks: ScheduledTask[] = []): MenuItem[] => [
+    { label: '重命名', icon: Pencil, run: () => onRenameSession(target) },
+    {
+      label: '归档会话', icon: Archive, disabled: !target.canArchive,
+      title: target.canArchive ? '归档会删除绑定的定时任务，取消归档后需重新创建' : '会话仍有任务或待处理事项，暂时无法归档',
+      run: () => onArchiveSession(target),
+    },
+    ...tasks.map(task => ({
+      key: task.id,
+      label: tasks.length > 1 ? `删除定时任务 · ${task.name}` : '删除定时任务',
+      icon: Trash2,
+      danger: true,
+      run: () => {
+        void scheduledApi.action(task, 'delete').then(() => {
+          void onRefreshSessions();
+          onTaskNotice('定时任务已删除', task.name, 'success');
+        }, error => onTaskNotice('定时任务未删除', error instanceof Error ? error.message : '请重试。', 'warning'));
+      },
+    })),
+    { label: '删除会话…', icon: Trash2, danger: true, run: () => onDeleteSession(target) },
+  ];
+  const readTasks = async (signal: AbortSignal) => {
+    const tasks: ScheduledTask[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await scheduledApi.list('', cursor, signal, session.id);
+      tasks.push(...page.tasks.filter(task => task.session_id === session.id));
+      cursor = page.next_cursor ?? undefined;
+    } while (cursor && !signal.aborted);
+    return tasks;
+  };
+  const showMenu = (event: ReactMouseEvent<HTMLElement> | ReactKeyboardEvent<HTMLElement>) => {
+    if (event.defaultPrevented) return;
+    open(event, `${session.title} 更多操作`, menuItems(session), async signal => {
+      const [sessions, tasks] = await Promise.all([onRefreshSessions(), readTasks(signal).catch(() => [])]);
+      const refreshed = sessions?.find(item => item.id === session.id);
+      return sessions && !refreshed ? [] : menuItems(refreshed ?? session, tasks);
+    });
+  };
   return (
-    <div className="session-row">
-    <button
-      className={`session-item${presence === 'current' ? ' is-active' : ''}`}
-      aria-current={presence === 'current' ? 'page' : undefined}
-      onClick={event => { if (event.detail < 2) onSelectSession(session.id); }}
-      onDoubleClick={() => onRenameSession(session)}
-      onPointerDown={event => onSessionPointerDown?.(event, session)}
-    >
-      {opening ? <LoaderCircle size={11} className="session-item__loading" aria-hidden="true" /> : <SessionPresenceGlyph presence={presence} />}
-      <span className="session-item__copy">
-        <strong title={session.title}>{session.title}</strong>
-        <small title={openError}>{opening ? '正在载入' : openError || sessionPresenceLabels[presence]}</small>
-      </span>
-      {session.unread && <span className="unread-dot" aria-label="有新活动" />}
-    </button>
-    {session.status === 'running' && <span className="session-row__activity" role="img" aria-label={`${session.title} 正在处理`} title="正在处理">
-      <LoaderCircle size={14} className="is-spinning" aria-hidden="true" />
-    </span>}
-    <details className="session-row__menu" onToggle={event => { const open = event.currentTarget.open; setMenuOpen(open); if (open) onRefreshSessions(); }}>
-      <summary ref={menuTrigger} aria-label={`${session.title} 更多操作`}><Ellipsis size={15} /></summary>
-      <div ref={menuActions} className="session-row__menu-actions" popover="manual">
-      <button type="button" onClick={event => {
-        const menu = event.currentTarget.closest('details');
-        menu?.removeAttribute('open'); menu?.querySelector('summary')?.focus();
-        onRenameSession(session);
-      }}><Pencil size={13} />重命名</button>
-      <button type="button" disabled={!session.canArchive} title={session.canArchive ? '归档会删除绑定的定时任务，取消归档后需重新创建' : '会话仍有任务或待处理事项，暂时无法归档'} onClick={event => {
-        event.currentTarget.closest('details')?.removeAttribute('open');
-        onArchiveSession(session);
-      }}><Archive size={13} />归档会话</button>
-      <button type="button" onClick={event => {
-        event.currentTarget.closest('details')?.removeAttribute('open');
-        onDeleteSession(session);
-      }}><Trash2 size={13} />删除会话…</button>
+    <div className="session-row" onContextMenu={showMenu}
+      onKeyDown={event => { if (isContextMenuKey(event)) showMenu(event); }}>
+      <button
+        className={`session-item${presence === 'current' ? ' is-active' : ''}`}
+        aria-current={presence === 'current' ? 'page' : undefined}
+        onClick={event => { if (event.detail < 2) onSelectSession(session.id); }}
+        onDoubleClick={() => onRenameSession(session)}
+        onPointerDown={event => onSessionPointerDown?.(event, session)}
+      >
+        {opening ? <LoaderCircle size={11} className="session-item__loading" aria-hidden="true" /> : <SessionPresenceGlyph presence={presence} />}
+        <span className="session-item__copy">
+          <strong title={session.title}>{session.title}</strong>
+          <small title={openError}>{opening ? '正在载入' : openError || sessionPresenceLabels[presence]}</small>
+        </span>
+        {session.unread && <span className="unread-dot" aria-label="有新活动" />}
+      </button>
+      {session.status === 'running' && <span className="session-row__activity" role="img" aria-label={`${session.title} 正在处理`} title="正在处理">
+        <LoaderCircle size={14} className="is-spinning" aria-hidden="true" />
+      </span>}
+      <div className="session-row__menu">
+        <button type="button" aria-label={`${session.title} 更多操作`} aria-haspopup="menu" onClick={showMenu}><Ellipsis size={15} /></button>
       </div>
-    </details>
     </div>
   );
 }
@@ -189,6 +195,8 @@ export function SessionSidebar({
   onArchiveSession,
   onRenameSession,
   onRefreshSessions,
+  scheduledApi,
+  onTaskNotice,
   onNewSession,
   onCreateSession,
   onPickDirectory,
@@ -197,7 +205,6 @@ export function SessionSidebar({
   onOpenSearch,
 }: SessionSidebarProps) {
   const shortcutModifier = desktopHost()?.platform === 'darwin' ? '⌘' : 'Ctrl';
-  const sidebarRef = useRef<HTMLElement>(null);
   const [scrollbarNearby, setScrollbarNearby] = useState(false);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
   const [creatingGroup, setCreatingGroup] = useState<string | null>(null);
@@ -256,41 +263,6 @@ export function SessionSidebar({
         : selection ? <SquarePen size={13} /> : <FolderOpen size={13} />}
     </button>
   );
-  useEffect(() => {
-    const openMenus = () => sidebarRef.current?.querySelectorAll<HTMLDetailsElement>('.session-row__menu[open]');
-    const app = sidebarRef.current?.closest<HTMLElement>('main.pulsara-shell');
-    const closeForModal = () => {
-      if (!app?.inert) return;
-      openMenus()?.forEach(menu => {
-        const actions = menu.querySelector<HTMLElement>('.session-row__menu-actions');
-        if (actions?.isConnected && actions.matches(':popover-open')) actions.hidePopover();
-        menu.open = false;
-      });
-    };
-    const observer = new MutationObserver(closeForModal);
-    if (app) observer.observe(app, { attributes: true, attributeFilter: ['inert'] });
-    closeForModal();
-    const dismissOutside = (event: MouseEvent) => {
-      if (!(event.target instanceof Node)) return;
-      openMenus()?.forEach(menu => {
-        if (!menu.contains(event.target as Node)) menu.open = false;
-      });
-    };
-    const dismissOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      openMenus()?.forEach(menu => {
-        menu.open = false;
-        menu.querySelector('summary')?.focus();
-      });
-    };
-    document.addEventListener('click', dismissOutside, true);
-    document.addEventListener('keydown', dismissOnEscape);
-    return () => {
-      observer.disconnect();
-      document.removeEventListener('click', dismissOutside, true);
-      document.removeEventListener('keydown', dismissOnEscape);
-    };
-  }, []);
   const groupedSessions = useMemo(
     () => groupSessionsByWorkspace(sessions, workspace),
     [sessions, workspace],
@@ -314,7 +286,7 @@ export function SessionSidebar({
         aria-label="关闭会话侧栏"
         tabIndex={isOpen ? 0 : -1}
       />
-      <aside ref={sidebarRef} className="session-sidebar" inert={!isOpen}>
+      <aside className="session-sidebar" inert={!isOpen}>
         <header className="brand-row">
           <div className="brand-lockup">
             <BrandMark compact />
@@ -389,6 +361,7 @@ export function SessionSidebar({
                                 onSessionPointerDown={onSessionPointerDown}
                                 onSelectSession={onSelectSession}
                                 onDeleteSession={onDeleteSession} onArchiveSession={onArchiveSession} onRenameSession={onRenameSession} onRefreshSessions={onRefreshSessions}
+                                scheduledApi={scheduledApi} onTaskNotice={onTaskNotice}
                               />
                             ))}
                           </div>
@@ -425,6 +398,7 @@ export function SessionSidebar({
                       onSessionPointerDown={onSessionPointerDown}
                       onSelectSession={onSelectSession}
                       onDeleteSession={onDeleteSession} onArchiveSession={onArchiveSession} onRenameSession={onRenameSession} onRefreshSessions={onRefreshSessions}
+                      scheduledApi={scheduledApi} onTaskNotice={onTaskNotice}
                     />
                   ))}
                 </div>

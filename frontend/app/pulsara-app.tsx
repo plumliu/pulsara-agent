@@ -17,6 +17,7 @@ import { ScheduledTasksView } from '../components/scheduled-tasks-view';
 import { MemoryView } from '../components/memory-view';
 import { NewSessionDialog, ToastStack } from '../components/overlays';
 import { SessionSidebar } from '../components/session-sidebar';
+import { ContextMenuProvider } from '../components/context-menu';
 import { SessionOpeningView } from '../components/session-opening-view';
 import { SessionSearchDialog } from '../components/session-search-dialog';
 import { SessionRenameDialog } from '../components/session-rename-dialog';
@@ -1237,6 +1238,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   );
 
   return (
+    <ContextMenuProvider>
     <UserAvatarProvider adapter={adapter}>
     <McpAuthorizationContext.Provider value={mcpAuthorizationStatuses}>
     <ToolResultDisplayContext.Provider value={toolResultDisplay}>
@@ -1260,7 +1262,9 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           onDeleteSession={requestSessionDelete}
           onArchiveSession={session => void archiveSession(session)}
           onRenameSession={setRenameTarget}
-          onRefreshSessions={() => { void readSessionList().catch(() => {}); }}
+          onRefreshSessions={() => readSessionList().catch(() => undefined)}
+          scheduledApi={scheduledApi}
+          onTaskNotice={notify}
           onNewSession={openNewSession}
           onCreateSession={createSession}
           onPickDirectory={signal => adapter.pickWorkspaceDirectory(signal)}
@@ -1390,6 +1394,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     </ToolResultDisplayContext.Provider>
     </McpAuthorizationContext.Provider>
     </UserAvatarProvider>
+    </ContextMenuProvider>
   );
 }
 

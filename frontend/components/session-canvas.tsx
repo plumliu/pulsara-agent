@@ -1,8 +1,10 @@
-import { Copy, LoaderCircle, Minus, Square } from 'lucide-react';
+import { ArrowUpToLine, Copy, LoaderCircle, Minus, RotateCcw, Square, X } from 'lucide-react';
 import { SessionTabClose, type SessionTabCloseRequest } from './session-tab-close';
+import { isContextMenuKey, useContextMenu, type MenuItem } from './context-menu';
 import {
   createContext, memo, useCallback, useContext, useLayoutEffect, useMemo, useRef, useState,
-  type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode,
+  type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent, type ReactNode,
 } from 'react';
 import { createPortal } from 'react-dom';
 import { containOffscreenReplies } from '../lib/history-dom';
@@ -187,6 +189,13 @@ const SessionCanvasWindow = memo(function SessionCanvasWindow({
     identityHost, actionsHost, showIdentity: setHasIdentity,
   }), [minimized, shown, canvasVisible, focused, activate, identityHost, actionsHost]);
   const maximized = mode === 'maximized';
+  const { open } = useContextMenu();
+  const showMenu = (event: ReactMouseEvent<HTMLElement> | ReactKeyboardEvent<HTMLElement>) => {
+    open(event, `${title} 窗口操作`, [
+      { label: maximized ? '还原窗口' : '铺满窗口', icon: maximized ? Copy : Square, run: () => onMaximize(id) },
+      { label: '收起窗口', icon: Minus, run: () => onMinimize(id) },
+    ]);
+  };
   return (
     <WindowContext.Provider value={context}>
       <section
@@ -218,8 +227,10 @@ const SessionCanvasWindow = memo(function SessionCanvasWindow({
         }}
         onClickCapture={event => { if (isTitleGrip(event.target)) activate(); }}
         onDoubleClickCapture={event => { if (isTitleGrip(event.target)) onDoubleTitle(id); }}
+        onContextMenuCapture={event => { if (isTitleGrip(event.target)) showMenu(event); }}
       >
-        <header className="session-canvas-window__title">
+        <header className="session-canvas-window__title" tabIndex={0} aria-haspopup="menu"
+          onKeyDown={event => { if (event.target === event.currentTarget && isContextMenuKey(event)) showMenu(event); }}>
           <div className="session-canvas-window__identity">
             {!hasIdentity && <strong title={title}>{title}</strong>}
             <div className="session-canvas-window__identity-host" ref={setIdentityHost} />
@@ -247,7 +258,7 @@ const SessionCanvasWindow = memo(function SessionCanvasWindow({
 });
 
 const SessionCanvasTab = memo(function SessionCanvasTab({
-  id, title, selected, placed, pendingApproval, running, closing, begin, recall, onClose, registerTab,
+  id, title, selected, placed, pendingApproval, running, closing, begin, recall, minimize, onClose, registerTab,
 }: SessionTitle & {
   selected: boolean;
   placed: boolean;
@@ -256,16 +267,32 @@ const SessionCanvasTab = memo(function SessionCanvasTab({
   closing?: SessionTabCloseRequest;
   begin: (event: ReactPointerEvent, gesture: GestureStart) => void;
   recall: (id: string) => void;
+  minimize: (id: string) => void;
   onClose: (id: string) => unknown;
   registerTab: (id: string, node: HTMLElement | null) => void;
 }) {
   const tabRef = useCallback((node: HTMLElement | null) => registerTab(id, node), [id, registerTab]);
   const placementLabel = placed ? '在画布中' : '已收起';
+  const { open } = useContextMenu();
+  const showMenu = (event: ReactMouseEvent<HTMLElement> | ReactKeyboardEvent<HTMLElement>) => {
+    if (!(event.target instanceof Node) || !event.currentTarget.contains(event.target)) return;
+    const items: MenuItem[] = [{
+      label: placed ? '置于最前' : '召回窗口',
+      icon: placed ? ArrowUpToLine : RotateCcw,
+      disabled: placed && selected,
+      run: () => recall(id),
+    }];
+    if (placed) items.push({ label: '收起窗口', icon: Minus, run: () => minimize(id) });
+    items.push({ label: '关闭会话标签', icon: X, disabled: closing?.busy, run: () => { void onClose(id); } });
+    open(event, `${title} 标签操作`, items);
+  };
   return (
     <div className="session-canvas__tab" data-selected={selected || undefined}
-      data-placed={placed || undefined} ref={tabRef}>
+      data-placed={placed || undefined} ref={tabRef}
+      onContextMenu={showMenu}
+      onKeyDown={event => { if (isContextMenuKey(event)) showMenu(event); }}>
       <button type="button" className="session-canvas__tab-select" role="tab" aria-selected={selected}
-        aria-controls={id} aria-description={placementLabel} title={`${title} · ${placementLabel}`}
+        aria-controls={id} aria-description={placementLabel} aria-haspopup="menu" title={`${title} · ${placementLabel}`}
         onClick={() => recall(id)}
         onPointerDown={event => begin(event, { kind: 'move', source: 'tab', session: { id, title } })}>
         {pendingApproval ? <span className="session-canvas__approval" title="等待审批" aria-label="等待审批" />
@@ -727,8 +754,8 @@ export function SessionCanvas({ controller, sessions, visible = true, tabHost, o
       pendingApproval={session.pendingApproval} running={session.running}
       selected={layout.focusedId === id} placed={layout.admitted.includes(id)}
       closing={closingTab?.id === id ? closingTab : undefined}
-      begin={begin} recall={recall} onClose={onCloseSession} registerTab={registerTab} />;
-  }), [byId, layout.tabs, layout.admitted, layout.focusedId, closingTab, onCloseSession, begin, recall, registerTab]);
+      begin={begin} recall={recall} minimize={minimize} onClose={onCloseSession} registerTab={registerTab} />;
+  }), [byId, layout.tabs, layout.admitted, layout.focusedId, closingTab, onCloseSession, begin, recall, minimize, registerTab]);
 
   const tabBar = visible && tabHost ? createPortal(
       <div className="session-canvas__tabs" data-dragging={preview ? true : undefined}>

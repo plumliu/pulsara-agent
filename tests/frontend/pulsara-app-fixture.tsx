@@ -874,8 +874,11 @@ class FakeAdapter implements RuntimeAdapter {
   }
 }
 
+const sessionItemName = (title: RegExp) => (name: string, element: Element) =>
+  element.matches('.session-item') && title.test(name);
+
 function renderWorkbench(ui: Parameters<typeof render>[0]) {
   return render(ui);
 }
 
-export { focusedPane, isWelcomeHeading, deferred, textPrompt, stubClipboard, typeComposer, composerIsDisabled, bootstrap, initialSession, SOURCE_FIDELITY_MARKDOWN, SOURCE_FIDELITY_USER_TEXT, capabilitySnapshot, userCapabilitySnapshot, projection, FakeConnection, FakeAdapter, renderWorkbench, sessionMenuClipping };
+export { focusedPane, isWelcomeHeading, deferred, textPrompt, stubClipboard, typeComposer, composerIsDisabled, bootstrap, initialSession, SOURCE_FIDELITY_MARKDOWN, SOURCE_FIDELITY_USER_TEXT, capabilitySnapshot, userCapabilitySnapshot, projection, FakeConnection, FakeAdapter, renderWorkbench, sessionItemName, sessionMenuClipping };

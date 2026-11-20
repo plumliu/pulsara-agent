@@ -1,4 +1,5 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render as renderComponent, screen, waitFor, within } from '@testing-library/react';
+import type { ReactElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PromptDraftStore } from '../../frontend/lib/prompt-draft';
 import type { PromptAnnotationPart } from '../../frontend/lib/prompt-content';
@@ -6,12 +7,19 @@ import { MarkdownBody } from '../../frontend/components/markdown-body';
 import { PromptComposer } from '../../frontend/components/prompt-composer';
 import { PromptContentView } from '../../frontend/components/prompt-content-view';
 import { AnnotationBody, AnnotationCard, ResponseAnnotations } from '../../frontend/components/response-annotations';
+import { ContextMenuProvider } from '../../frontend/components/context-menu';
 
 vi.mock('@floating-ui/dom', async importOriginal => ({
   ...await importOriginal<typeof import('@floating-ui/dom')>(),
   computePosition: vi.fn(async () => ({ x: 100, y: 100, middlewareData: {} })),
   autoUpdate: (_reference: unknown, _floating: unknown, update: () => void) => { update(); return () => {}; },
 }));
+function render(element: ReactElement) {
+  return renderComponent(element, { wrapper: ContextMenuProvider });
+}
+function openSelectionMenu(target: HTMLElement) {
+  fireEvent.contextMenu(target, { button: 2, clientX: 110, clientY: 110 });
+}
 async function changeComment(input: HTMLElement, text: string) {
   await act(async () => { input.textContent = text; fireEvent.input(input, { inputType: 'insertText', data: text }); await new Promise(resolve => setTimeout(resolve, 0)); });
 }
@@ -45,12 +53,11 @@ describe('draft annotation UI', () => {
     const text = container.querySelector('[data-agent-reader] [data-source-text]')!.firstChild!;
     const range = document.createRange(); range.setStart(text, 0); range.setEnd(text, 8);
     window.getSelection()!.addRange(range);
-    fireEvent(document, new Event('selectionchange'));
-    fireEvent.pointerUp(text.parentElement!);
+    openSelectionMenu(text.parentElement!);
     const setData = vi.fn();
     fireEvent.copy(text.parentElement!, { clipboardData: { setData } });
     expect(setData).not.toHaveBeenCalled();
-    expect(screen.queryByRole('button', { name: '添加注释' })).toBeNull();
+    expect(screen.queryByRole('menuitem', { name: '添加注释' })).toBeNull();
     expect(store.annotations('one')).toEqual([]);
   });
 
@@ -67,8 +74,8 @@ describe('draft annotation UI', () => {
     const text = container.querySelector('[data-source-text]')!.firstChild!;
     const selection = window.getSelection()!;
     selection.setBaseAndExtent(reverse ? text : toggle, reverse ? 8 : 4, reverse ? toggle : text, reverse ? 4 : 8);
-    fireEvent.pointerUp(reverse ? toggle.parentElement! : text.parentElement!);
-    fireEvent.click(await screen.findByRole('button', { name: '添加注释' }));
+    openSelectionMenu(text.parentElement!);
+    fireEvent.click(await screen.findByRole('menuitem', { name: '添加注释' }));
     expect(store.annotations('one')[0].value).toEqual(first);
   });
 
@@ -85,30 +92,49 @@ describe('draft annotation UI', () => {
     const time = container.querySelector('time')!;
     const selection = window.getSelection()!;
     selection.setBaseAndExtent(time, 0, text, 0);
-    fireEvent.pointerUp(text.parentElement!);
-    const add = await screen.findByRole('button', { name: '添加注释' });
+    openSelectionMenu(text.parentElement!);
+    const add = await screen.findByRole('menuitem', { name: '添加注释' });
     fireEvent.click(add);
     expect(store.annotations('one')[0].value).toEqual(second);
     expect(await screen.findByRole('textbox', { name: '批注内容' })).toBeTruthy();
   });
 
-  it('retains an eligible selection when the drag ends in the gutter and hides after deselection', async () => {
+  it('opens only on request and refuses to annotate a stale selection', async () => {
     const { container } = render(<Harness />);
     const text = container.querySelector('[data-source-text]')!.firstChild!;
     const range = document.createRange(); range.setStart(text, 0); range.setEnd(text, 8);
     window.getSelection()!.addRange(range);
     fireEvent(document, new Event('selectionchange'));
-    await screen.findByRole('button', { name: '添加注释' });
     fireEvent.pointerUp(container.querySelector('.thread-scroll')!);
-    expect(screen.getByRole('button', { name: '添加注释' })).toBeTruthy();
+    expect(screen.queryByRole('menu')).toBeNull();
+    openSelectionMenu(text.parentElement!);
+    const add = await screen.findByRole('menuitem', { name: '添加注释' });
     window.getSelection()!.removeAllRanges();
-    fireEvent.pointerUp(container.querySelector('.thread-scroll')!);
-    expect(screen.queryByRole('button', { name: '添加注释' })).toBeNull();
+    fireEvent.click(add);
+    expect(store.annotations('one')).toEqual([]);
     window.getSelection()!.addRange(range);
-    fireEvent.pointerUp(container.querySelector('.thread-scroll')!);
-    fireEvent.click(await screen.findByRole('button', { name: '添加注释' }));
+    fireEvent.keyDown(text.parentElement!, { key: 'F10', shiftKey: true });
+    const menu = await screen.findByRole('menu', { name: '正文选区' });
+    fireEvent.keyDown(menu, { key: 'ArrowDown' });
+    fireEvent.keyDown(menu, { key: 'Enter' });
     await screen.findByRole('textbox', { name: '批注内容' });
     expect((await store.capture('one')).content.parts).toEqual([first]);
+  });
+
+  it('uses desktop paste in the focused composer without enabling empty-selection actions', async () => {
+    const editText = vi.fn(async () => {});
+    vi.stubGlobal('pulsaraDesktop', { editText });
+    const { container } = render(<Harness />);
+    const composer = container.querySelector<HTMLElement>('.composer-prosemirror')!;
+    openSelectionMenu(composer);
+    const menu = await screen.findByRole('menu', { name: '输入框编辑' });
+    for (const name of ['撤销', '重做', '剪切', '复制']) {
+      const item = within(menu).getByRole('menuitem', { name });
+      expect(item.matches(':disabled, [aria-disabled="true"]')).toBe(true);
+    }
+    fireEvent.click(within(menu).getByRole('menuitem', { name: '粘贴' }));
+    expect(editText).toHaveBeenCalledWith('paste');
+    expect(document.activeElement).toBe(composer);
   });
 
   it('copies and annotates CJK formatting using canonical text, then restores its highlight', async () => {
@@ -124,8 +150,13 @@ describe('draft annotation UI', () => {
     const setData = vi.fn();
     fireEvent.copy(deleted.parentElement!, { clipboardData: { setData } });
     expect(setData).toHaveBeenCalledWith('text/plain', quote);
-    fireEvent.pointerUp(deleted.parentElement!);
-    fireEvent.click(await screen.findByRole('button', { name: '添加注释' }));
+    const writeClipboardText = vi.fn(async () => {});
+    vi.stubGlobal('pulsaraDesktop', { writeClipboardText });
+    openSelectionMenu(deleted.parentElement!);
+    fireEvent.click(await screen.findByRole('menuitem', { name: '复制', exact: true }));
+    expect(writeClipboardText).toHaveBeenCalledWith(quote);
+    openSelectionMenu(deleted.parentElement!);
+    fireEvent.click(await screen.findByRole('menuitem', { name: '添加注释' }));
     await screen.findByRole('textbox', { name: '批注内容' });
     expect((await store.capture('one')).content.parts).toEqual([
       { type: 'annotation', quote, source: { entry_id: 'entry:a', start, end } },
@@ -142,8 +173,8 @@ describe('draft annotation UI', () => {
     const text = container.querySelector('[data-source-text]')!.firstChild!;
     const range = document.createRange(); range.setStart(text, 0); range.setEnd(text, 8);
     window.getSelection()!.addRange(range);
-    fireEvent.pointerUp(text.parentElement!);
-    fireEvent.click(await screen.findByRole('button', { name: '添加注释' }));
+    openSelectionMenu(text.parentElement!);
+    fireEvent.click(await screen.findByRole('menuitem', { name: '添加注释' }));
     const input = await screen.findByRole('textbox', { name: '批注内容' });
     expect(document.activeElement).toBe(input);
     expect(window.getSelection()!.isCollapsed).toBe(true);
@@ -271,14 +302,15 @@ describe('draft annotation UI', () => {
     const text = container.querySelector('[data-source-text]')!.firstChild!;
     const range = document.createRange(); range.setStart(text, 0); range.setEnd(text, 8);
     window.getSelection()!.removeAllRanges(); window.getSelection()!.addRange(range);
-    fireEvent.pointerUp(text.parentElement!);
-    expect(screen.queryByRole('button', { name: '添加注释' })).toBeNull();
+    openSelectionMenu(text.parentElement!);
+    expect(screen.getByRole('menuitem', { name: '复制', exact: true })).toBeTruthy();
+    expect(screen.queryByRole('menuitem', { name: '添加注释' })).toBeNull();
     const setData = vi.fn(); fireEvent.copy(text.parentElement!, { clipboardData: { setData } });
     expect(setData).toHaveBeenCalledWith('text/plain', first.quote);
     expect((await store.capture('one')).content).toEqual(before.content);
     rerender(<Harness />);
     expect(screen.queryByRole('dialog')).toBeNull();
-    expect(screen.queryByRole('button', { name: '添加注释' })).toBeNull();
+    expect(screen.queryByRole('menu')).toBeNull();
     expect(highlights.size).toBe(0);
   });
 });

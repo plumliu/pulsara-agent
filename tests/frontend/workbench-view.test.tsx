@@ -15,6 +15,7 @@ import type { QueuedPrompt, QueuedPromptAction, ToolOutputPage } from '../../fro
 import { PromptDraftStore } from '../../frontend/lib/prompt-draft';
 import { promptContentTextProjection } from '../../frontend/lib/prompt-content';
 import { ConversationMessages, WorkbenchView } from '../../frontend/components/workbench-view';
+import { ContextMenuProvider } from '../../frontend/components/context-menu';
 import { DesktopWorkspaceProvider, useDesktopWorkspace } from '../../frontend/components/desktop-workspace';
 import { agentCellApi } from '../../frontend/lib/agent-cell-api';
 import { WELCOME_TYPEWRITER_PHRASES } from '../../frontend/components/welcome-typewriter';
@@ -2837,7 +2838,7 @@ describe('selection and empty-space reading intent', () => {
     const base = props({ isRunning: false, messages: [
       { id: 'selection-answer', role: 'assistant', assistantKind: 'terminal', rootFinal: true, status: 'completed', time: '', body: '供选择的正文' },
     ], ...overrides });
-    const view = render(<WorkbenchView {...base} />);
+    const view = render(<WorkbenchView {...base} />, {wrapper: ContextMenuProvider});
     const thread = view.container.querySelector<HTMLElement>('.thread-scroll')!;
     const geometry = {height: 1000, top: 600};
     Object.defineProperties(thread, {
@@ -2888,19 +2889,18 @@ describe('selection and empty-space reading intent', () => {
     expect(screen.queryByRole('button', {name: '回到最新'})).toBeNull();
   });
   it.each(['success', 'failure'] as const)('returns to latest with selected response text after %s', async outcome => {
-    // Give Floating UI a visible viewport rather than JSDOM's zero-size layout.
-    vi.spyOn(document.documentElement, 'clientWidth', 'get').mockReturnValue(800);
-    vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(800);
     let resolve!: () => void, reject!: (error: Error) => void;
     const read = vi.fn(() => new Promise<void>((done, fail) => { resolve = done; reject = fail; }));
     const notify = vi.fn();
     const {geometry, select, resize} = setup({onReadLatestHistory: read, onNotify: notify});
-    const source = screen.getByText('供选择的正文').closest<HTMLElement>('[data-annotation-entry]')!;
-    vi.spyOn(source, 'getClientRects').mockReturnValue([new DOMRect(0, 20, 100, 20)] as unknown as DOMRectList);
-    vi.spyOn(Range.prototype, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 20, 100, 20));
+    const source = screen.getByText('供选择的正文');
     select(); geometry.height += 100; resize();
-    expect(await screen.findByRole('button', {name: '添加注释'})).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', {name: '回到最新'}));
+    expect(screen.queryByText('添加注释')).toBeNull();
+    fireEvent.contextMenu(source, {clientX: 30, clientY: 30});
+    expect(screen.getByRole('menuitem', {name: '添加注释'})).toBeTruthy();
+    const latest = screen.getByRole('button', {name: '回到最新'});
+    fireEvent.pointerDown(latest);
+    fireEvent.click(latest);
     expect(read).toHaveBeenCalledExactlyOnceWith(expect.any(AbortSignal));
     expect(document.getSelection()?.toString()).toBe('供选择的正文');
     expect(geometry.top).toBe(600);
@@ -2915,7 +2915,8 @@ describe('selection and empty-space reading intent', () => {
       expect(document.getSelection()?.isCollapsed).toBe(true);
       expect(geometry.top).toBe(700);
       fireEvent(document, new Event('selectionchange'));
-      expect(screen.queryByRole('button', {name: '添加注释'})).toBeNull();
+      fireEvent.contextMenu(source, {clientX: 30, clientY: 30});
+      expect(screen.queryByRole('menuitem', {name: '添加注释'})).toBeNull();
       geometry.height += 60; resize();
       expect(geometry.top).toBe(760);
       expect(screen.queryByRole('button', {name: '回到最新'})).toBeNull();

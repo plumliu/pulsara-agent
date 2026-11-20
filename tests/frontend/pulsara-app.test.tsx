@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
 import { LocalScheduledTasksApi } from '../../frontend/lib/scheduled-tasks-api';
+import { deriveIdentity } from '../../frontend/lib/identity';
 import { promptContentTextProjection } from '../../frontend/lib/prompt-content';
 import { RuntimeApiError } from '../../frontend/lib/runtime-adapter';
 import type { CommandReceipt, LocalPromptSubmission, RuntimeAdapter, RuntimeBootstrap, RuntimeConnection, RuntimeProjection, WorkspaceAvailability } from '../../frontend/lib/runtime-adapter';
@@ -13,13 +14,21 @@ import PulsaraApp from '../../frontend/app/pulsara-app';
 import { PROMPT_QUEUE_TRANSITION_MS } from '../../frontend/components/animated-prompt-queue';
 import { PromptDraftStore } from '../../frontend/lib/prompt-draft';
 
-import { focusedPane, isWelcomeHeading, deferred, textPrompt, stubClipboard, typeComposer, composerIsDisabled, bootstrap, initialSession, SOURCE_FIDELITY_MARKDOWN, SOURCE_FIDELITY_USER_TEXT, capabilitySnapshot, userCapabilitySnapshot, projection, FakeConnection, FakeAdapter, renderWorkbench, sessionMenuClipping } from './pulsara-app-fixture';
+import { focusedPane, isWelcomeHeading, deferred, textPrompt, stubClipboard, typeComposer, composerIsDisabled, bootstrap, initialSession, SOURCE_FIDELITY_MARKDOWN, SOURCE_FIDELITY_USER_TEXT, capabilitySnapshot, userCapabilitySnapshot, projection, FakeConnection, FakeAdapter, renderWorkbench, sessionItemName, sessionMenuClipping } from './pulsara-app-fixture';
 
 async function openSessionWorkspace() {
   const toggle = await waitFor(() => focusedPane().getByRole('button', { name: '切换检查器' }));
   if (toggle.getAttribute('aria-expanded') !== 'true') fireEvent.click(toggle);
   const owner = toggle.closest<HTMLElement>('.session-canvas-window')!;
   return within(owner).getByRole('complementary', { name: '会话标签工作区' });
+}
+
+async function sidebarMenuTrigger(title = initialSession.title) {
+  const trigger = await screen.findByLabelText(`${title} 更多操作`);
+  if (trigger.closest('aside')?.hasAttribute('inert')) {
+    fireEvent.click(screen.getByRole('button', { name: '切换会话侧栏' }));
+  }
+  return trigger;
 }
 
 describe('PulsaraApp', () => {
@@ -449,8 +458,8 @@ describe('PulsaraApp', () => {
     if (outcome === 'missing') {
       adapter.readSession.mockResolvedValueOnce(null);
     } else {
-      fireEvent.click(screen.getByLabelText('历史会话 更多操作'));
-      fireEvent.click((await screen.findAllByRole('button', { name: '删除会话…' })).at(-1)!);
+      fireEvent.click(await sidebarMenuTrigger('历史会话'));
+      fireEvent.click((await screen.findAllByRole('menuitem', { name: '删除会话…' })).at(-1)!);
       fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: /^(停止并删除|永久删除)$/ }));
       await screen.findByText('会话已删除');
     }
@@ -1137,7 +1146,7 @@ describe('PulsaraApp', () => {
     const inspector = await openSessionWorkspace();
     fireEvent.click(within(inspector).getByRole('button', { name: '能力' }));
     fireEvent.click(await within(inspector).findByRole('switch', { name: '关闭 project-review' }));
-    fireEvent.click(screen.getByRole('button', { name: /另一个会话/ }));
+    fireEvent.click(screen.getByRole('button', { name: sessionItemName(/另一个会话/) }));
     await screen.findByRole('heading', { name: '另一个会话' });
 
     await act(async () => {
@@ -1205,7 +1214,7 @@ describe('PulsaraApp', () => {
     fireEvent.click(await within(inspector).findByRole('switch', { name: '关闭 项目文档' }));
     await waitFor(() => expect(adapter.setProjectMcpEnabled).toHaveBeenCalled());
 
-    fireEvent.click(screen.getByRole('button', { name: /新的能力会话/ }));
+    fireEvent.click(screen.getByRole('button', { name: sessionItemName(/新的能力会话/) }));
     await screen.findByRole('heading', { name: '新的能力会话' });
     await waitFor(() => expect(adapter.inspectCapabilities).toHaveBeenCalledWith('session:hrluejkx3v2ajzf4ec6bb3ierm'));
     await act(async () => rejectOldMutation(new Error('项目能力已经变化。')));
@@ -1599,7 +1608,7 @@ describe('PulsaraApp', () => {
     fireEvent.click(screen.getByRole('button', { name: '查看完整输出' }));
     await waitFor(() => expect(first.readToolOutput).toHaveBeenCalledWith('result-shared', { line: 1, charOffset: 0 }));
 
-    fireEvent.click(screen.getByRole('button', { name: /另一个会话/ }));
+    fireEvent.click(screen.getByRole('button', { name: sessionItemName(/另一个会话/) }));
     await screen.findByRole('heading', { name: '另一个会话' });
     const processToggle = focusedPane().queryByRole('button', { name: '展开处理过程' });
     if (processToggle) fireEvent.click(processToggle);
@@ -1764,42 +1773,34 @@ describe('PulsaraApp', () => {
 
   it('dismisses a session menu outside the menu and with Escape while preserving its actions', async () => {
     const user = userEvent.setup();
-    const showPopover = vi.spyOn(HTMLElement.prototype, 'showPopover');
-    const hidePopover = vi.spyOn(HTMLElement.prototype, 'hidePopover');
     const adapter = new FakeAdapter();
     renderWorkbench(<PulsaraApp adapter={adapter} />);
-    const trigger = await screen.findByLabelText(`${initialSession.title} 更多操作`);
-    const menu = trigger.closest('details')!;
+    const name = `${initialSession.title} 更多操作`;
+    const trigger = await sidebarMenuTrigger();
     await user.click(trigger);
-    expect(menu.open).toBe(true);
-    await waitFor(() => expect(showPopover).toHaveBeenCalled());
-    expect(menu.querySelector('.session-row__menu-actions')).toBe(showPopover.mock.contexts.at(-1));
-    await user.click(menu.querySelector('.session-row__menu-actions')!);
-    expect(menu.open).toBe(true);
+    const menu = await screen.findByRole('menu', { name });
+    await user.click(menu);
+    expect(screen.getByRole('menu', { name })).toBe(menu);
     await user.click(screen.getByRole('heading', { name: '准备发布' }));
-    expect(menu.open).toBe(false);
-    await waitFor(() => expect(hidePopover).toHaveBeenCalled());
+    expect(screen.queryByRole('menu', { name })).toBeNull();
     await user.click(trigger);
     await user.keyboard('{Escape}');
-    expect(menu.open).toBe(false);
+    expect(screen.queryByRole('menu', { name })).toBeNull();
     expect(document.activeElement).toBe(trigger);
     await user.click(trigger);
-    await user.click(screen.getByRole('button', { name: '删除会话…' }));
-    expect(menu.open).toBe(false);
+    await user.click(screen.getByRole('menuitem', { name: '删除会话…' }));
+    expect(screen.queryByRole('menu', { name })).toBeNull();
     expect(await screen.findByRole('dialog')).toBeTruthy();
-    showPopover.mockRestore();
-    hidePopover.mockRestore();
   });
 
   it('closes the session menu when scrolling clips its anchor completely', async () => {
     renderWorkbench(<PulsaraApp adapter={new FakeAdapter()} />);
-    const trigger = await screen.findByLabelText(`${initialSession.title} 更多操作`);
-    const menu = trigger.closest('details')!;
-    fireEvent.click(trigger);
-    await waitFor(() => expect(menu.open).toBe(true));
+    const name = `${initialSession.title} 更多操作`;
+    fireEvent.click(await sidebarMenuTrigger());
+    await screen.findByRole('menu', { name });
     sessionMenuClipping.hidden = true;
     fireEvent.scroll(window);
-    await waitFor(() => expect(menu.open).toBe(false));
+    await waitFor(() => expect(screen.queryByRole('menu', { name })).toBeNull());
   });
 
   it.each([['n', '新建会话'], ['k', '搜索会话']])('closes the session menu when shortcut %s opens a modal', async (key, label) => {
@@ -1809,27 +1810,61 @@ describe('PulsaraApp', () => {
       get() { return this.hasAttribute('inert'); },
       set(value: boolean) { this.toggleAttribute('inert', value); },
     });
-    const hidePopover = vi.spyOn(HTMLElement.prototype, 'hidePopover');
     try {
       renderWorkbench(<PulsaraApp adapter={new FakeAdapter()} />);
-      const trigger = await screen.findByLabelText(`${initialSession.title} 更多操作`);
+      const name = `${initialSession.title} 更多操作`;
+      const trigger = await sidebarMenuTrigger();
       fireEvent.click(trigger);
-      const menu = trigger.closest('details')!;
-      const actions = menu.querySelector<HTMLElement>('.session-row__menu-actions')!;
-      await waitFor(() => expect(actions.style.visibility).toBe('visible'));
+      await screen.findByRole('menu', { name });
       trigger.focus();
       fireEvent.keyDown(trigger, { key, ctrlKey: true });
       const dialog = await screen.findByRole('dialog', { name: label });
-      await waitFor(() => expect(menu.open).toBe(false));
-      expect(hidePopover.mock.contexts).toContain(actions);
-      expect(actions.style.display).toBe('none');
+      await waitFor(() => expect(screen.queryByRole('menu', { name })).toBeNull());
       fireEvent.keyDown(dialog.querySelector('input, button')!, { key: 'Escape' });
       await waitFor(() => expect(screen.queryByRole('dialog', { name: label })).toBeNull());
       expect(document.activeElement).toBe(trigger);
     } finally {
-      hidePopover.mockRestore();
       if (inert) Object.defineProperty(HTMLElement.prototype, 'inert', inert);
       else Reflect.deleteProperty(HTMLElement.prototype, 'inert');
+    }
+  });
+
+  it('shares the sidebar menu between right-click and the button, and deletes only the task bound to the target session', async () => {
+    const adapter = new FakeAdapter();
+    const other = { ...initialSession, id: deriveIdentity('session', 'sidebar-menu'), title: '定时任务会话' };
+    adapter.sessions.push(other);
+    const task = {
+      id: deriveIdentity('schedule', 'sidebar-menu', 'target'), session_id: other.id, status: 'PAUSED' as const, revision: 2,
+      name: '提醒', prompt: '检查进展', next_run_at: null, timezone: 'Asia/Shanghai',
+      permission_mode: 'bypass-permissions' as const,
+      schedule: { kind: 'daily' as const, start_date: '2026-10-13', time: '08:00' },
+    };
+    const list = vi.spyOn(LocalScheduledTasksApi.prototype, 'list').mockImplementation(async (_status, _cursor, _signal, id) => ({
+      tasks: id === other.id ? [task, { ...task, id: deriveIdentity('schedule', 'sidebar-menu', 'foreign'), session_id: initialSession.id }] : [],
+      next_cursor: null,
+    }));
+    const action = vi.spyOn(LocalScheduledTasksApi.prototype, 'action').mockResolvedValue({task: null});
+    try {
+      renderWorkbench(<PulsaraApp adapter={adapter} />);
+      const name = `${other.title} 更多操作`;
+      const trigger = await sidebarMenuTrigger(other.title);
+      fireEvent.click(trigger);
+      await screen.findByRole('menuitem', { name: '删除定时任务' });
+      const actions = (menu: HTMLElement) => within(menu).getAllByRole('menuitem').map(item => item.textContent);
+      const buttonActions = actions(screen.getByRole('menu', { name }));
+      fireEvent.keyDown(screen.getByRole('menu', { name }), { key: 'Escape' });
+      fireEvent.contextMenu(trigger.closest('.session-row')!, { clientX: 15, clientY: 25 });
+      const removeTask = await screen.findByRole('menuitem', { name: '删除定时任务' });
+      expect(actions(screen.getByRole('menu', { name }))).toEqual(buttonActions);
+      expect(screen.getByRole('tab', { name: new RegExp(initialSession.title) }).getAttribute('aria-selected')).toBe('true');
+      fireEvent.click(removeTask);
+      expect(action).toHaveBeenCalledExactlyOnceWith(task, 'delete');
+      expect(await screen.findByText('定时任务已删除')).toBeTruthy();
+      expect(adapter.archiveSession).not.toHaveBeenCalled();
+      expect(adapter.deleteSession).not.toHaveBeenCalled();
+    } finally {
+      action.mockRestore();
+      list.mockRestore();
     }
   });
 
@@ -1837,13 +1872,14 @@ describe('PulsaraApp', () => {
     const adapter = new FakeAdapter();
     adapter.sessions = [{ ...initialSession, canArchive: false }];
     renderWorkbench(<PulsaraApp adapter={adapter} />);
-    fireEvent.click(await screen.findByLabelText(`${initialSession.title} 更多操作`));
-    expect(((await screen.findByRole('button', { name: '归档会话' })) as HTMLButtonElement).disabled).toBe(true);
+    const trigger = await sidebarMenuTrigger();
+    fireEvent.click(trigger);
+    expect(((await screen.findByRole('menuitem', { name: '归档会话' })) as HTMLButtonElement).disabled).toBe(true);
     adapter.sessions = [{ ...initialSession, canArchive: true }];
-    fireEvent.click(screen.getByLabelText(`${initialSession.title} 更多操作`));
-    fireEvent.click(screen.getByLabelText(`${initialSession.title} 更多操作`));
-    await waitFor(() => expect((screen.getByRole('button', { name: '归档会话' }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole('button', { name: '归档会话' }));
+    fireEvent.click(trigger);
+    fireEvent.click(trigger);
+    await waitFor(() => expect((screen.getByRole('menuitem', { name: '归档会话' }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole('menuitem', { name: '归档会话' }));
     await screen.findByText('会话已归档');
     expect(screen.getByText('可在设置中取消归档；绑定的定时任务已删除，需要重新创建。')).toBeTruthy();
     expect(adapter.archiveSession).toHaveBeenCalledExactlyOnceWith(initialSession.id);
@@ -1870,9 +1906,9 @@ describe('PulsaraApp', () => {
   it('permanently deletes the selected session without creating a replacement', async () => {
     const adapter = new FakeAdapter();
     renderWorkbench(<PulsaraApp adapter={adapter} />);
-    const menu = await screen.findByLabelText(`${initialSession.title} 更多操作`);
+    const menu = await sidebarMenuTrigger();
     fireEvent.click(menu);
-    fireEvent.click(await screen.findByRole('button', { name: '删除会话…' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: '删除会话…' }));
     const dialog = screen.getByRole('dialog', { name: '删除这条会话？' });
     expect(dialog.getAttribute('aria-describedby')).toBe('session-delete-description');
     expect(dialog.textContent).toContain('会话、记录及绑定的定时任务将永久删除，无法撤销');
@@ -1881,7 +1917,7 @@ describe('PulsaraApp', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: '取消' }));
     expect(adapter.deleteSession).not.toHaveBeenCalled();
     fireEvent.click(menu);
-    fireEvent.click(await screen.findByRole('button', { name: '删除会话…' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: '删除会话…' }));
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: /^(停止并删除|永久删除)$/ }));
     await screen.findByText('会话已删除');
     expect(adapter.deleteSession).toHaveBeenCalledExactlyOnceWith(initialSession.id);
@@ -1895,8 +1931,8 @@ describe('PulsaraApp', () => {
     let reject!: (error: Error) => void;
     adapter.deleteSession.mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail; }));
     renderWorkbench(<PulsaraApp adapter={adapter} />);
-    fireEvent.click(await screen.findByLabelText(`${initialSession.title} 更多操作`));
-    fireEvent.click(await screen.findByRole('button', { name: '删除会话…' }));
+    fireEvent.click(await sidebarMenuTrigger());
+    fireEvent.click(await screen.findByRole('menuitem', { name: '删除会话…' }));
     const button = within(screen.getByRole('dialog')).getByRole('button', { name: /^(停止并删除|永久删除)$/ });
     fireEvent.click(button); fireEvent.click(button);
     expect(adapter.deleteSession).toHaveBeenCalledTimes(1);
@@ -1914,8 +1950,8 @@ describe('PulsaraApp', () => {
     const adapter = new FakeAdapter();
     adapter.sessions.push({ ...initialSession, id: 'session:other', title: '待删除会话' });
     renderWorkbench(<PulsaraApp adapter={adapter} />);
-    fireEvent.click(await screen.findByLabelText('待删除会话 更多操作'));
-    fireEvent.click((await screen.findAllByRole('button', { name: '删除会话…' })).at(-1)!);
+    fireEvent.click(await sidebarMenuTrigger('待删除会话'));
+    fireEvent.click((await screen.findAllByRole('menuitem', { name: '删除会话…' })).at(-1)!);
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: /^(停止并删除|永久删除)$/ }));
     await screen.findByText('会话已删除');
     expect(adapter.deleteSession).toHaveBeenCalledExactlyOnceWith('session:other');
@@ -2728,7 +2764,7 @@ describe('PulsaraApp', () => {
     expect(container.querySelectorAll('.session-presence--loaded')).toHaveLength(0);
     expect(container.querySelectorAll('.session-presence--resumable')).toHaveLength(1);
 
-    fireEvent.click(screen.getByRole('button', { name: /继续检查/ }));
+    fireEvent.click(screen.getByRole('button', { name: sessionItemName(/继续检查/) }));
     await screen.findByRole('heading', { name: '继续检查' });
     expect(container.querySelector('.session-item.is-active')?.textContent).toBe('继续检查当前会话');
     expect(screen.getByText('已载入')).toBeTruthy();
@@ -3531,7 +3567,7 @@ describe('PulsaraApp', () => {
     await typeComposer('会话 A 的延迟输入');
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
     await waitFor(() => expect(first.submitPrompt).toHaveBeenCalledTimes(1));
-    fireEvent.click(screen.getByRole('button', { name: /另一个会话/ }));
+    fireEvent.click(screen.getByRole('button', { name: sessionItemName(/另一个会话/) }));
     await screen.findByRole('heading', { name: '另一个会话' });
 
     const commandId = first.submitPrompt.mock.calls[0]![0];
@@ -3562,7 +3598,7 @@ describe('PulsaraApp', () => {
     await typeComposer('会话 A 的失败输入');
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
     await waitFor(() => expect(first.submitPrompt).toHaveBeenCalledTimes(1));
-    fireEvent.click(screen.getByRole('button', { name: /另一个会话/ }));
+    fireEvent.click(screen.getByRole('button', { name: sessionItemName(/另一个会话/) }));
     await screen.findByRole('heading', { name: '另一个会话' });
 
     await act(async () => receipt.reject(
@@ -3594,7 +3630,7 @@ describe('PulsaraApp', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '取消本次审批' }));
     await waitFor(() => expect(first.resolveInteraction).toHaveBeenCalledTimes(1));
-    fireEvent.click(screen.getByRole('button', { name: /另一个会话/ }));
+    fireEvent.click(screen.getByRole('button', { name: sessionItemName(/另一个会话/) }));
     await screen.findByRole('heading', { name: '另一个会话' });
 
     await act(async () => decision.resolve({
@@ -4082,7 +4118,7 @@ it('PR05 late tool decision stays with A while B retains its draft and buttons',
   fireEvent.click(allow);
   const submitted = first.resolveInteraction.mock.calls[0][1];
   if (submitted.kind !== 'tool') throw new Error('expected tool');
-  fireEvent.click(screen.getByRole('button', { name: /另一个会话/ }));
+  fireEvent.click(screen.getByRole('button', { name: sessionItemName(/另一个会话/) }));
   await screen.findByRole('heading', { name: '另一个会话' });
   const composer = await typeComposer('B private draft', focusedPane());
   await act(async () => pending.resolve({ commandId: submitted.commandId, status: 'succeeded', publicCode: 'INTERACTION_ALLOW' }));
@@ -4183,10 +4219,10 @@ it.each(['sidebar', 'topbar', 'double-click'])('renames the session from %s and 
   renderWorkbench(<PulsaraApp adapter={adapter} />);
   await screen.findByLabelText(`${initialSession.title} 更多操作`);
   if (entry === 'double-click') fireEvent.doubleClick(screen.getByRole('button', { name: new RegExp(initialSession.title + '当前会话') }));
-  else if (entry === 'sidebar') fireEvent.click(screen.getByLabelText(`${initialSession.title} 更多操作`));
+  else if (entry === 'sidebar') fireEvent.click(await sidebarMenuTrigger());
   else fireEvent.click(await screen.findByRole('button', { name: '更多会话操作' }));
   if (entry !== 'double-click') {
-    fireEvent.click(await screen.findByRole('button', { name: entry === 'topbar' ? /重命名/ : '重命名' }));
+    fireEvent.click(await screen.findByRole(entry === 'topbar' ? 'button' : 'menuitem', { name: entry === 'topbar' ? /重命名/ : '重命名' }));
   }
   const dialog = await screen.findByRole('dialog', { name: '重命名会话' });
   fireEvent.change(within(dialog).getByLabelText('会话标题'), { target: { value: '新的会话标题' } });
@@ -4278,9 +4314,9 @@ describe('explicit runtime reopen owner', () => {
       return accepted.promise;
     });
     renderWorkbench(<PulsaraApp adapter={adapter} />);
-    await screen.findByRole('heading', {name:'准备发布'});
+    const actions = await screen.findByRole('button', {name:'更多会话操作'});
     const original = adapter.lastConnection!;
-    fireEvent.click(screen.getByRole('button', {name:'更多会话操作'}));
+    fireEvent.click(actions);
     fireEvent.click(screen.getByRole('button', {name:/重新加载会话/}));
     await waitFor(() => expect(reopen).toHaveBeenCalledOnce());
     await act(async () => {
@@ -4291,13 +4327,13 @@ describe('explicit runtime reopen owner', () => {
     await act(async () => accepted.resolve({status:'reopened'}));
     await waitFor(() => expect(adapter.connectCalls).toHaveLength(2));
     expect(original.closed).toBe(true);
-    expect((screen.getByRole('button', {name:'更多会话操作'}) as HTMLButtonElement).disabled).toBe(false);
+    await waitFor(() => expect((screen.getByRole('button', {name:'更多会话操作'}) as HTMLButtonElement).disabled).toBe(false));
   });
 });
 
 
-it('opens the unique ACTIVE schedule from the session header and hides the alarm after it pauses', async () => {
-  const task = { id: 'scheduled:header', session_id: initialSession.id, name: '会话活跃计划', prompt: '检查进展', status: 'ACTIVE' as const, revision: 1,
+it.each(['ACTIVE', 'PAUSED'] as const)('shows the title clock for an %s schedule and hides it when the session has no tasks', async (status) => {
+  const task = { id: deriveIdentity('schedule', 'session-header', status), session_id: initialSession.id, name: '会话定时计划', prompt: '检查进展', status, revision: 1,
     next_run_at: '2026-10-13T00:00:00Z', timezone: 'Asia/Shanghai', permission_mode: 'bypass-permissions' as const,
     schedule: { kind: 'daily' as const, start_date: '2026-10-13', time: '08:00' } };
   vi.spyOn(LocalScheduledTasksApi.prototype, 'listSessions').mockResolvedValue({sessions:[],next_cursor:null});
@@ -4305,15 +4341,17 @@ it('opens the unique ACTIVE schedule from the session header and hides the alarm
   try {
     const adapter = new FakeAdapter();
     renderWorkbench(<PulsaraApp adapter={adapter} />);
-    fireEvent.click(await screen.findByRole('button', { name: '查看此会话的活跃定时任务' }));
-    expect(list).toHaveBeenCalledWith('ACTIVE', undefined, expect.any(AbortSignal), initialSession.id);
+    const clock = await screen.findByRole('button', {name: '查看此会话的定时任务'});
+    expect(clock.previousElementSibling).toBe(screen.getByRole('heading', {name: initialSession.title}));
+    fireEvent.click(clock);
+    expect(list).toHaveBeenCalledWith('', undefined, expect.any(AbortSignal), initialSession.id);
     const row = (await screen.findByRole('heading', { name: task.name })).closest('article')!;
     await waitFor(() => expect(document.activeElement).toBe(row));
     expect(row.classList.contains('is-highlighted')).toBe(true);
     list.mockResolvedValue({tasks:[],next_cursor:null});
     fireEvent.click(within(row).getByRole('button', { name: initialSession.title }));
     await screen.findByRole('heading', { name: initialSession.title });
-    await waitFor(() => expect(screen.queryByRole('button', { name: '查看此会话的活跃定时任务' })).toBeNull());
+    await waitFor(() => expect(screen.queryByRole('button', { name: '查看此会话的定时任务' })).toBeNull());
   } finally { list.mockRestore(); }
 });
 
@@ -4424,7 +4462,7 @@ it('keeps the exact consumed-entry read alive while minimized and cancels it whe
   const signal = active.locateEntry.mock.calls[0][1]!;
   act(() => active.emit(projection('读取正文期间仍有实时进展')));
   expect(await screen.findByText('读取正文期间仍有实时进展')).toBeTruthy();
-  fireEvent.click(screen.getByRole('button', { name: /另一个会话/ }));
+  fireEvent.click(screen.getByRole('button', { name: sessionItemName(/另一个会话/) }));
   await screen.findByText('新会话的正文');
   expect(signal.aborted).toBe(false);
   fireEvent.click(screen.getByRole('button', { name: '关闭会话 准备发布' }));

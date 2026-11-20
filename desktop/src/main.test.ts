@@ -82,10 +82,16 @@ function fixture(options: {
     constructor(options: {titleBarStyle?: string; titleBarOverlay?: typeof composition.titleBarOverlay; autoHideMenuBar?: boolean}) {
       super(); Window.current = this; composition.titleBarStyle = options.titleBarStyle;
       composition.titleBarOverlay = options.titleBarOverlay; composition.autoHideMenuBar = options.autoHideMenuBar;
+      this.webContents.focusedFrame = this.webContents.mainFrame;
     }
     setTitleBarOverlay(options: typeof composition.titleBarOverlay) { composition.titleBarOverlay = options; }
     webContents = Object.assign(new EventEmitter(), {
       mainFrame: { url: workbenchUrl },
+      focusedFrame: null as { url: string } | null,
+      isFocused() { return true; },
+      cut() { calls.push('edit-cut'); },
+      copy() { calls.push('edit-copy'); },
+      paste() { calls.push('edit-paste'); },
       isDestroyed() { return false; },
       setWindowOpenHandler() {}, session: { async clearStorageData() { calls.push('clear-storage'); }, async clearCache() { calls.push('clear-cache'); }, async clearAuthCache() {}, async closeAllConnections() {}, setPermissionRequestHandler() {}, setPermissionCheckHandler() {} },
     });
@@ -529,6 +535,22 @@ test('workbench restart rejects startup and foreign renderer requests', async ()
   assert.throws(() => value.handlers.get('desktop:restart-workbench')!(event), /此页面不能调用桌面接口/);
   assert.equal(value.confirmations.length, 0);
   assert.equal(value.calls.includes('kernel-stopped'), false);
+});
+
+test('native text edits are limited to the trusted focused workbench', async () => {
+  const value = fixture();
+  value.previous.resolve(); value.database.resolve(); value.cover.resolve();
+  await value.ready;
+  const edit = value.handlers.get('desktop:edit-text')!;
+  const event = value.trustedEvent();
+  await edit(event, 'cut');
+  await edit(event, 'copy');
+  await edit(event, 'paste');
+  assert.throws(() => edit(event, 'selectAll'), /无效的文本编辑操作/);
+  assert.throws(() => edit({ ...event, senderFrame: {url: event.senderFrame.url} }, 'paste'), /无效的桌面请求来源/);
+  event.sender.focusedFrame = {url: 'https://untrusted.example/'};
+  assert.throws(() => edit(event, 'paste'), /工作台编辑区域已失去焦点/);
+  assert.deepEqual(value.calls.filter(call => call.startsWith('edit-')), ['edit-cut', 'edit-copy', 'edit-paste']);
 });
 
 test('workbench restart cannot reopen while the previous runtime remains active', async () => {

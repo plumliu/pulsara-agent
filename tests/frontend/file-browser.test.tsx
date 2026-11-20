@@ -1,6 +1,7 @@
 import { useContext, type ReactElement } from "react";
 import { deriveIdentity } from '../../frontend/lib/identity';
 import { FileMediaContext } from "../../frontend/components/file-link-context";
+import { ContextMenuProvider } from "../../frontend/components/context-menu";
 import {
   DesktopWorkspace,
   DesktopWorkspaceProvider,
@@ -33,7 +34,7 @@ function Harness({
   children: ReactElement<{ ownerKey?: string; sessionId?: string }>;
 }) {
   return (
-    <DesktopWorkspaceProvider
+    <ContextMenuProvider><DesktopWorkspaceProvider
       sessionId={children.props.sessionId ?? children.props.ownerKey ?? "one"}
       onShow={() => {}}
     >
@@ -44,7 +45,7 @@ function Harness({
         toolbar={null}
         renderTab={() => null}
       />
-    </DesktopWorkspaceProvider>
+    </DesktopWorkspaceProvider></ContextMenuProvider>
   );
 }
 function render(ui: ReactElement<{ ownerKey?: string; sessionId?: string }>) {
@@ -215,6 +216,13 @@ it("keeps file actions in one navigation row and copies the actual native path",
   await waitFor(() => expect(copy).toHaveBeenCalledExactlyOnceWith('/project/SKILL.md'));
   fireEvent.click(within(row).getByRole('button', { name: '打开所在文件夹' }));
   await waitFor(() => expect(reader.action).toHaveBeenCalledExactlyOnceWith('SKILL.md', 'reveal'));
+  const tab = screen.getByRole('tab', { name: 'SKILL.md' });
+  fireEvent.contextMenu(tab);
+  fireEvent.click(screen.getByRole('menuitem', { name: '复制路径' }));
+  expect(copy.mock.calls).toEqual([['/project/SKILL.md'], ['/project/SKILL.md']]);
+  fireEvent.contextMenu(tab);
+  fireEvent.click(screen.getByRole('menuitem', { name: '在文件管理器中显示' }));
+  expect(vi.mocked(reader.action).mock.calls).toEqual([['SKILL.md', 'reveal'], ['SKILL.md', 'reveal']]);
   fireEvent.click(screen.getByRole('button', { name: '关闭 SKILL.md' }));
   expect(reader.close).toHaveBeenCalledWith('SKILL.md');
 });

@@ -633,7 +633,7 @@ export function InspectorPanel({
             onOpenHomeSettings={onOpenHomeSettings}
           />;
   };
-  return <DesktopWorkspace isOpen={isOpen} onClose={onClose} renderTab={renderTab} sessionContentAvailable={sessionContentAvailable} toolbar={<nav aria-label="工作区入口">
+  return <DesktopWorkspace isOpen={isOpen} onClose={onClose} onNotify={onNotify} renderTab={renderTab} sessionContentAvailable={sessionContentAvailable} toolbar={<nav aria-label="工作区入口">
     <button type="button" aria-label="能力" title="能力" onClick={() => open('capabilities', '能力')}><Blocks size={13} /><span>能力</span></button>
 
     <button type="button" aria-label="进程" title="进程" onClick={() => open('background', '进程')}><TerminalSquare size={13} /><span>进程</span></button>

@@ -241,7 +241,7 @@ export function SessionWorkbench({
     if (foregroundRef.current) onNotify(...message);
   }, [onNotify]);
   const [activeSessionId, setActiveSessionId] = useState('');
-  const [activeSchedule, setActiveSchedule] = useState<{ sessionId: string; taskId: string }>();
+  const [scheduledTask, setScheduledTask] = useState<{ sessionId: string; taskId: string }>();
   const [projection, setProjection] = useState<RuntimeProjection>(emptyProjection);
   // These observations own only UI results, never the underlying execution.
   const stopObservations = useRef<StopObservation[]>([]);
@@ -1013,27 +1013,36 @@ export function SessionWorkbench({
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
     let reading = false;
+    let needsRefresh = false;
     const refresh = async () => {
-      if (reading || controller.signal.aborted) return;
+      if (controller.signal.aborted) return;
+      if (reading) { needsRefresh = true; return; }
       clearTimeout(timer);
       if (document.visibilityState === 'visible') {
         reading = true;
         try {
-          const page = await scheduledApi.list('ACTIVE', undefined, controller.signal, activeSessionId);
+          const page = await scheduledApi.list('', undefined, controller.signal, activeSessionId);
           if (!controller.signal.aborted) {
-            const task = page.tasks.find(item => item.status === 'ACTIVE' && item.session_id === activeSessionId);
-            setActiveSchedule(task ? { sessionId: activeSessionId, taskId: task.id } : undefined);
+            const task = page.tasks.find(item => item.status === 'ACTIVE' && item.session_id === activeSessionId)
+              ?? page.tasks.find(item => item.session_id === activeSessionId);
+            setScheduledTask(task ? { sessionId: activeSessionId, taskId: task.id } : undefined);
           }
         } catch {
-          if (!controller.signal.aborted) setActiveSchedule(undefined);
+          if (!controller.signal.aborted) setScheduledTask(undefined);
         } finally { reading = false; }
+      }
+      if (needsRefresh) {
+        needsRefresh = false;
+        return void refresh();
       }
       if (!controller.signal.aborted) timer = setTimeout(refresh, 30_000);
     };
+    const stopWatchingTasks = scheduledApi.onTasksChanged(activeSessionId, refresh);
     void refresh();
     window.addEventListener('focus', refresh);
     document.addEventListener('visibilitychange', refresh);
     return () => {
+      stopWatchingTasks();
       controller.abort(); clearTimeout(timer);
       window.removeEventListener('focus', refresh);
       document.removeEventListener('visibilitychange', refresh);
@@ -2124,8 +2133,8 @@ export function SessionWorkbench({
           } : undefined}
           onCompact={compact}
           onRenameSession={() => onRenameSession(activeSession)}
-          onOpenScheduledTask={runtimeStatus === 'online' && activeSchedule?.sessionId === activeSession.id
-            ? () => onOpenScheduledTask(activeSchedule.taskId) : undefined}
+          onOpenScheduledTask={runtimeStatus === 'online' && scheduledTask?.sessionId === activeSession.id
+            ? () => onOpenScheduledTask(scheduledTask.taskId) : undefined}
           onReopenRuntime={() => void reopenRuntime()}
           onCloseSession={sessionId ? () => onClose(sessionId) : undefined}
           runtimeReopenBusy={runtimeReopenBusy}

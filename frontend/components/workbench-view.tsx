@@ -1,3 +1,4 @@
+import { isContextMenuKey, useContextMenu } from './context-menu';
 import type { ListMcpPrompts, PreviewMcpPrompt } from '../lib/mcp-prompts';
 import { createPortal } from 'react-dom';
 import { usePromptHover } from '../lib/prompt-hover';
@@ -27,6 +28,7 @@ import {
   CircleAlert,
   ArrowLeft,
   AlarmClock,
+  Clock,
   Plus,
   FolderPlus,
   BookOpenText,
@@ -107,7 +109,7 @@ import type {
 import type { Message, PermissionMode, ReasoningBlock, RuntimeStatus, SessionSummary, SkillCapability, TodoRun, ToolTrace, Workspace } from '../lib/pulsara-types';
 import { permissionLabels, permissionModeOrder, messageSourceEntryId, messageViewKey } from '../lib/pulsara-types';
 import { MarkdownBody, MarkdownInline, type MarkdownNotify } from './markdown-body';
-import { AnnotationBody, AnnotationReader, ResponseAnnotations } from './response-annotations';
+import { AnnotationBody, AnnotationReader, ResponseAnnotations, selectionContainsPoint } from './response-annotations';
 import { PromptComposer } from './prompt-composer';
 import { PromptContentView } from './prompt-content-view';
 import { MediaEvidenceIndex } from './media-evidence-index';
@@ -1020,6 +1022,37 @@ function AssistantMessage({
   const hasNaturalLanguage = Boolean(message.body.trim());
   const isStreaming = message.status === 'running';
   const canCopyResponse = hasNaturalLanguage && responseActionEligible;
+  const { open: openReplyMenu } = useContextMenu();
+  const copyResponse = () => {
+    void writeClipboardText(message.body).then(
+      () => onNotify('已复制回复'),
+      () => onNotify('无法复制回复', '系统剪贴板暂时不可用，请重试'),
+    );
+  };
+  const forkResponse = () => {
+    if (!canFork || !sourceEntryId || forkInFlight.current) return;
+    forkInFlight.current = true;
+    setForking(true);
+    void onFork(sourceEntryId).finally(() => { forkInFlight.current = false; setForking(false); });
+  };
+  const showReplyMenu = (event: React.MouseEvent<HTMLElement> | React.KeyboardEvent<HTMLElement>) => {
+    if (!canCopyResponse || isStreaming) return;
+    const mouse = 'clientX' in event;
+    if (event.target instanceof Element && event.target.closest('a,button,input,textarea,[contenteditable],iframe,video,audio')
+      && (mouse || !event.target.closest('.response-actions'))) return;
+    const selection = window.getSelection();
+    if (selection?.rangeCount && !selection.isCollapsed) {
+      const range = selection.getRangeAt(0);
+      const thread = event.currentTarget.closest('.thread-scroll');
+      if (thread?.contains(range.startContainer) && thread.contains(range.endContainer)
+        && (!mouse || selectionContainsPoint(range, event.clientX, event.clientY))) return;
+    }
+    openReplyMenu(event, '完整回复操作', [
+      { label: '复制回复', icon: Copy, run: copyResponse },
+      ...(canFork && message.forkEligible && sourceEntryId ? [{ label: '从此处分叉', icon: GitFork, disabled: forking, run: forkResponse }] : []),
+    ]);
+  };
+
   const hasReasoning = Boolean(message.reasoning?.length);
   const hasOperationalContent = Boolean(
     hasReasoning || message.traces?.length,
@@ -1043,7 +1076,8 @@ function AssistantMessage({
 
       {hasNaturalLanguage && (
         <>
-          <div className="assistant-copy">
+          <div className="assistant-copy" tabIndex={canCopyResponse ? -1 : undefined}
+            onContextMenu={showReplyMenu} onKeyDown={event => { if (isContextMenuKey(event)) showReplyMenu(event); }}>
             <div className="assistant-markdown">
               <AnnotationBody entryId={!isStreaming && message.assistantKind !== 'live' ? sourceEntryId : undefined} body={message.body}>
                 <MarkdownBody assistantChat visualization={visualization} annotationSource={!isStreaming && message.assistantKind !== 'live'} body={message.body} onNotify={onNotify} streaming={isStreaming} />
@@ -1052,22 +1086,12 @@ function AssistantMessage({
             {(canCopyResponse || message.forkEligible) ? (
               <div className="response-actions">
                 <button
-                  onClick={() => {
-                    void writeClipboardText(message.body).then(
-                      () => onNotify('已复制回复'),
-                      () => onNotify('无法复制回复', '系统剪贴板暂时不可用，请重试'),
-                    );
-                  }}
+                  onClick={copyResponse}
                   aria-label="复制回复"
                 ><Copy size={13} /></button>
                 {canFork && message.forkEligible && sourceEntryId && (
                   <button aria-label="从此处分叉" title="从此处分叉" disabled={forking} aria-busy={forking}
-                    onClick={() => {
-                      if (!canFork || forkInFlight.current) return;
-                      forkInFlight.current = true;
-                      setForking(true);
-                      void onFork(sourceEntryId).finally(() => { forkInFlight.current = false; setForking(false); });
-                    }}
+                    onClick={forkResponse}
                   >{forking ? <LoaderCircle size={13} /> : <GitFork size={13} />}</button>
                 )}
                 <time className="response-time">{message.time}</time>
@@ -2939,20 +2963,19 @@ export function WorkbenchView({
   }, [latestVisible, interaction?.id, isObserver, queuedCount, session.id, todo?.id, updateJumpPosition, welcome]);
 
 
-  const scheduledTaskButton = onOpenScheduledTask && <button type="button" className="session-schedule-button" title="查看此会话的活跃定时任务" aria-label="查看此会话的活跃定时任务" onClick={onOpenScheduledTask}><AlarmClock size={16} aria-hidden="true" /></button>;
+  const scheduledTaskButton = onOpenScheduledTask && <button type="button" className="session-schedule-button" title="查看此会话的定时任务" aria-label="查看此会话的定时任务" onClick={onOpenScheduledTask}><Clock size={14} aria-hidden="true" /></button>;
   const titleIdentity = <div className={`session-title${inCanvas ? ' is-in-canvas' : ''}`}>
     {sessionStatusLabel && <span className={`live-badge live-badge--${readOnlyDock ? 'readonly' : session.status}`}>{sessionStatusLabel}</span>}
     <div>
       <div className="session-title-heading">
         <h2 title={session.title}>{session.title}</h2>
-        {!inCanvas && scheduledTaskButton}
+        {scheduledTaskButton}
       </div>
       {!inCanvas && <p>{workspace.kind === 'quick' ? '快速开始' : '指定目录'} · {workspace.path}</p>}
     </div>
   </div>;
   const titleActions = session.id ? <div className={`topbar-actions${inCanvas ? ' is-in-canvas' : ''}`} data-canvas-no-drag="">
     {queuedDisplayCount > 0 && <span className="queue-badge">{queuedDisplayCount} 条等待处理</span>}
-    {inCanvas && scheduledTaskButton}
     <div className="popover-anchor session-actions" ref={sessionActionsRef}>
       <button
         ref={sessionActionsTriggerRef}

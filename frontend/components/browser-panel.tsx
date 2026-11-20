@@ -5,6 +5,17 @@ import { desktopHost, writeClipboardText } from '../lib/desktop-host';
 import { browserAddressUrl, type BrowserTabRecord, type BrowserTabs } from '../lib/browser-tabs';
 import { useSessionCanvasWindow } from './session-canvas';
 
+export function browserAddressActions(record: BrowserTabRecord, notify: (error: string) => void) {
+  const url = record.state?.url;
+  const host = desktopHost();
+  if (!url || !host) return;
+  const report = (error: unknown) => notify(error instanceof Error ? error.message : String(error));
+  return {
+    copy: () => { if (record.state?.url === url) void writeClipboardText(url).catch(report); },
+    openExternal: () => { if (record.state?.url === url) void host.openExternal(url).catch(report); },
+  };
+}
+
 export function BrowserPanel({ record, tabs, isOpen }: { record: BrowserTabRecord; tabs: BrowserTabs; isOpen: boolean }) {
   const state = record.state;
   const [draft, setDraft] = useState(state?.pendingUrl || state?.url || record.requestedUrl || '');
@@ -14,6 +25,7 @@ export function BrowserPanel({ record, tabs, isOpen }: { record: BrowserTabRecor
   const address = useRef<HTMLInputElement>(null);
   const focusBlank = useRef(record.focusAddressOnOpen === true);
   const host = desktopHost();
+  const addressActions = browserAddressActions(record, setMessage);
   const actualUrl = state?.pendingUrl || state?.url || record.requestedUrl || '';
   const activate = useSessionCanvasWindow()?.activate;
   useEffect(() => { if (!editing) setDraft(actualUrl); }, [actualUrl, editing]);
@@ -40,8 +52,8 @@ export function BrowserPanel({ record, tabs, isOpen }: { record: BrowserTabRecor
       <button type="button" title="前进" aria-label="网页前进" disabled={!state?.canGoForward || state.crashed} onClick={() => command('forward')}><ArrowRight size={14} /></button>
       <button type="button" title={state?.loading ? '停止' : '刷新'} aria-label={state?.loading ? '停止网页加载' : '刷新网页'} disabled={!state || state.crashed} onClick={() => command(state?.loading ? 'stop' : 'reload')}>{state?.loading ? <X size={14} /> : <RotateCw size={14} />}</button>
       <input ref={address} aria-label="网页地址" spellCheck={false} value={editing ? draft : actualUrl || draft} onFocus={() => { setDraft(actualUrl || draft); setEditing(true); }} onChange={event => { setDraft(event.target.value); setEditing(true); }} onBlur={() => setEditing(false)} onKeyDown={event => { if (event.key === 'Escape') { setDraft(actualUrl); setEditing(false); event.currentTarget.blur(); } }} />
-      <button type="button" title="复制地址" aria-label="复制网页地址" disabled={!state?.url} onClick={() => { void writeClipboardText(state?.url || '').catch(error => setMessage(error.message)); }}><Copy size={14} /></button>
-      <button type="button" title="在系统浏览器打开" aria-label="在系统浏览器打开" disabled={!state?.url} onClick={() => { void host?.openExternal(state?.url || '').catch(error => setMessage(error.message)); }}><ExternalLink size={14} /></button>
+      <button type="button" title="复制地址" aria-label="复制网页地址" disabled={!addressActions} onClick={addressActions?.copy}><Copy size={14} /></button>
+      <button type="button" title="在系统浏览器打开" aria-label="在系统浏览器打开" disabled={!addressActions} onClick={addressActions?.openExternal}><ExternalLink size={14} /></button>
     </form>
     {notice && <div className="browser-notice" role="status">{notice}</div>}
     {record.popup && <div className="browser-notice"><button type="button" onClick={() => { const url = record.popup; record.popup = undefined; if (url) tabs.open(url, { newTab: true }); }}>有新页面，点击打开</button></div>}

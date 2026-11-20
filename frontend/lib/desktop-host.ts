@@ -2,6 +2,8 @@ import type { DesktopBrowser } from '../../desktop/src/browser-contract';
 import type { WorkspaceDirectoryCandidate } from '../../desktop/src/backend-paths';
 export type { BrowserState, BrowserEvent, BrowserCommand, DesktopBrowser } from '../../desktop/src/browser-contract';
 
+export type TextEditAction = 'cut' | 'copy' | 'paste';
+
 export interface CliStatus {
   state: 'ready' | 'missing' | 'outdated' | 'conflict' | 'error';
   path: string;
@@ -19,6 +21,7 @@ export interface PulsaraDesktop {
   readUiPreferences(): Promise<Record<string, string>>;
   writeUiPreference(input: { key: string; value: string | null }): Promise<void>;
   writeClipboardText(text: string): Promise<void>;
+  editText(action: TextEditAction): Promise<void>;
   minimize(): Promise<void>;
   toggleMaximize(): Promise<void>;
   closeWindow(): Promise<void>;

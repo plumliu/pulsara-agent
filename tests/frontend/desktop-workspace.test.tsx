@@ -5,6 +5,7 @@ import { useState } from 'react';
 import { createPortal } from 'react-dom';
 import { afterEach, expect, it, vi } from 'vitest';
 import { DesktopWorkspace, DesktopWorkspaceProvider, useDesktopWorkspace } from '../../frontend/components/desktop-workspace';
+import { ContextMenuProvider } from '../../frontend/components/context-menu';
 import { DesktopTitlebar } from '../../frontend/components/desktop-titlebar';
 import { PromptDraftStore } from '../../frontend/lib/prompt-draft';
 import { rejectDirectoryDrop } from '../../frontend/lib/file-drop';
@@ -371,6 +372,49 @@ function userBrowserHost() {
   window.pulsaraDesktop = { browser: {create, close, command: vi.fn(async () => {}), onEvent: () => () => {}} } as unknown as PulsaraDesktop;
   return {create, close};
 }
+
+it('uses the background webpage URL and closes only the other workspace tabs of its session', async () => {
+  const browser = userBrowserHost();
+  const copy = vi.fn(async () => {});
+  const openExternal = vi.fn(async () => {});
+  Object.assign(window.pulsaraDesktop!, { writeClipboardText: copy, openExternal });
+  const closeLocal = vi.fn();
+  const closeForeign = vi.fn();
+  const closeWorkspace = vi.fn();
+  render(<ContextMenuProvider><Host sessionId="a" onClose={closeWorkspace} /></ContextMenuProvider>);
+  const url = 'https://current.test/';
+  let record!: import('../../frontend/lib/browser-tabs').BrowserTabRecord;
+  await act(async () => { record = workspace.browserTabs.open(); });
+  record.state!.url = url;
+  record.state!.pendingUrl = 'https://pending.test/';
+  act(() => {
+    workspace.open({ id: 'foreign-file', sessionId: 'b', kind: 'file', title: 'foreign', onClose: closeForeign });
+    workspace.open({ id: 'local-file', sessionId: 'a', kind: 'file', title: 'local', onClose: closeLocal });
+  });
+
+  const webpage = screen.getByRole('tab', { name: '新网页' });
+  fireEvent.contextMenu(webpage);
+  expect(workspace.activeId).toBe('local-file');
+  fireEvent.click(screen.getByRole('menuitem', { name: '复制网址' }));
+  expect(copy).toHaveBeenCalledExactlyOnceWith(url);
+  fireEvent.contextMenu(webpage);
+  fireEvent.click(screen.getByRole('menuitem', { name: '在系统浏览器中打开' }));
+  expect(openExternal).toHaveBeenCalledExactlyOnceWith(url);
+
+  fireEvent.contextMenu(webpage);
+  fireEvent.click(screen.getByRole('menuitem', { name: '关闭其他标签' }));
+  expect(closeLocal).toHaveBeenCalledOnce();
+  expect(closeForeign).not.toHaveBeenCalled();
+  expect(workspace.tabs.map(tab => tab.id)).toEqual([record.id]);
+  expect(workspace.activeId).toBe(record.id);
+  expect(closeWorkspace).not.toHaveBeenCalled();
+
+  fireEvent.keyDown(webpage, { key: 'F10', shiftKey: true });
+  expect((screen.getByRole('menuitem', { name: '关闭其他标签' }) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(screen.getByRole('menuitem', { name: '关闭标签' }));
+  expect(browser.close).toHaveBeenCalledExactlyOnceWith(`native:${record.id}`);
+  expect(closeWorkspace).toHaveBeenCalledOnce();
+});
 
 it('inserts webpages and session tabs beside each other using the current selection', async () => {
   userBrowserHost();

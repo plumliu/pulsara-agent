@@ -5,7 +5,7 @@ import { RuntimeApiError, type RuntimeBootstrap } from '../../frontend/lib/runti
 import type { SessionSummary } from '../../frontend/lib/pulsara-types';
 import {
   bootstrap, deferred, FakeAdapter, initialSession, isWelcomeHeading,
-  renderWorkbench, typeComposer, focusedPane,
+  renderWorkbench, sessionItemName, typeComposer, focusedPane,
 } from './pulsara-app-fixture';
 
 async function openRetrievalSettings() {
@@ -113,7 +113,7 @@ it('an accepted restart cleanup cannot detach a new connection after its old clo
   await waitFor(() => expect(boot).toHaveBeenCalledTimes(3));
   fireEvent.click(screen.getByRole('button', { name: '会话', exact: true }));
   await screen.findByText('已连接本地服务');
-  fireEvent.click(screen.getByRole('button', { name: new RegExp(initialSession.title) }));
+  fireEvent.click(screen.getByRole('button', { name: sessionItemName(new RegExp(initialSession.title)) }));
   await screen.findByRole('heading', { name: initialSession.title });
   const replacement = adapter.lastConnection!;
   expect(replacement).not.toBe(old);
@@ -206,7 +206,7 @@ it('a canonical rename invalidates old lists across a later session selection', 
   fireEvent.change(within(dialog).getByLabelText('会话标题'), { target: { value: '新标题' } });
   fireEvent.click(within(dialog).getByRole('button', { name: '保存' }));
   await screen.findByRole('heading', { name: '新标题' });
-  fireEvent.click(screen.getByRole('button', { name: /^另一个会话/ }));
+  fireEvent.click(screen.getByRole('button', { name: sessionItemName(/^另一个会话/) }));
   await screen.findByRole('heading', { name: other.title });
   await act(async () => stale.resolve([initialSession, other]));
   expect(screen.getByLabelText('新标题 更多操作')).toBeTruthy();
@@ -222,8 +222,9 @@ it('a canonical archive cannot be undone by an older global list', async () => {
   const lists = vi.spyOn(adapter, 'listSessions').mockImplementationOnce(() => stale.promise);
   fireEvent.focus(window);
   await waitFor(() => expect(lists).toHaveBeenCalled());
+  fireEvent.click(screen.getByRole('button', { name: '切换会话侧栏' }));
   fireEvent.click(screen.getByLabelText(`${initialSession.title} 更多操作`));
-  fireEvent.click(await screen.findByRole('button', { name: '归档会话' }));
+  fireEvent.click(await screen.findByRole('menuitem', { name: '归档会话' }));
   await screen.findByText('会话已归档');
   await act(async () => stale.resolve([{ ...initialSession, canArchive: true }]));
   expect(screen.queryByLabelText(`${initialSession.title} 更多操作`)).toBeNull();

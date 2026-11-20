@@ -4,9 +4,10 @@ import type { SkillCapability } from '../lib/pulsara-types';
 import type { CompleteWorkspacePaths } from '../lib/file-reference';
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { autoUpdate, computePosition, flip, hide, offset, shift } from '@floating-ui/dom';
-import type { MappedSelection } from '../lib/response-selection';
 import { createPortal } from 'react-dom';
-import { MessageSquarePlus, CornerUpLeft, Trash2, X } from 'lucide-react';
+import { ClipboardPaste, Copy, CornerUpLeft, MessageSquarePlus, Redo2, ScanText, Scissors, Trash2, Undo2, X } from 'lucide-react';
+import { editText, isContextMenuKey, useContextMenu, type ContextMenuState } from './context-menu';
+import { writeClipboardText } from '../lib/desktop-host';
 import { closeHistory } from '@tiptap/pm/history';
 import type { PromptAnnotationPart, PromptAnnotationSource } from '../lib/prompt-content';
 import type { DraftAnnotation, PromptDraftStore } from '../lib/prompt-draft';
@@ -17,6 +18,11 @@ import { DraftAnnotationContext } from './annotation-interactions';
 import { useSessionCanvasWindow } from './session-canvas';
 
 const AnnotationContext = createContext<(source: PromptAnnotationSource | null) => void>(() => {});
+
+export function selectionContainsPoint(range: Range, x: number, y: number) {
+  return Array.from(range.getClientRects()).some(rect => rect.width > 0 && rect.height > 0
+    && x >= rect.left - 2 && x <= rect.right + 2 && y >= rect.top - 2 && y <= rect.bottom + 2);
+}
 
 /** Read-only reference navigation, scoped to the conversation that owns it. */
 export function AnnotationReader({ owner, onLocate, onNotify, children }: {
@@ -70,36 +76,6 @@ export function AnnotationCard({ value }: { value: PromptAnnotationPart }) {
     <AnnotationQuote quote={value.quote} />
     {value.comment && <p><UserReferenceText text={value.comment} /></p>}
   </div>;
-}
-
-function SelectionMenu({ selection, onAdd, onHide }: { selection: MappedSelection; onAdd: () => void; onHide: () => void }) {
-  const ref = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    const floating = ref.current;
-    if (!floating) return;
-    const boundary = selection.root.closest<HTMLElement>('.thread-scroll') ?? selection.root;
-    const reference = {
-      contextElement: selection.root,
-      getBoundingClientRect: () => selection.range.getBoundingClientRect(),
-      getClientRects: () => selection.range.getClientRects(),
-    };
-    let disposed = false;
-    const update = () => {
-      if (!selection.root.isConnected || !selection.range.getClientRects().length) { onHide(); return; }
-      void computePosition(reference, floating, {
-        placement: 'top', strategy: 'fixed',
-        middleware: [offset(7), flip({ boundary, padding: 8 }), shift({ boundary, padding: 8, crossAxis: true }), hide({ boundary })],
-      }).then(({ x, y, middlewareData }) => {
-        if (disposed) return;
-        // Keep a selected source available when scrolling it back into view.
-        Object.assign(floating.style, { left: `${x}px`, top: `${y}px`, visibility: middlewareData.hide?.referenceHidden ? 'hidden' : 'visible' });
-      });
-    };
-    const cleanup = autoUpdate(reference, floating, update);
-    return () => { disposed = true; cleanup(); };
-  }, [selection, onHide]);
-  return <button ref={ref} type="button" className="annotation-selection-menu" style={{ visibility: 'hidden' }}
-    onPointerDown={event => event.preventDefault()} onClick={onAdd}><MessageSquarePlus size={14} />添加注释</button>;
 }
 
 function sourceRoot(source: PromptAnnotationSource | null, owner: ParentNode | null): HTMLElement | undefined {
@@ -214,14 +190,19 @@ export function ResponseAnnotations({ sessionId, store, canAnnotate, onLocate, o
   useSyncExternalStore(store.subscribe, store.getVersion, store.getVersion);
   const items = store.annotations(sessionId);
   const owner = useRef<HTMLDivElement>(null);
-  const [menu, setMenu] = useState<{ sessionId: string; selection: MappedSelection }>();
+  const { show, hideOwned } = useContextMenu();
+  const setMenu = useCallback((menu: ContextMenuState) => {
+    if (owner.current) show(menu, owner.current);
+  }, [show]);
+  const hideMenu = useCallback(() => {
+    if (owner.current) hideOwned(owner.current);
+  }, [hideOwned]);
   const [editing, setEditing] = useState<{ sessionId: string; id: string; anchor?: HTMLElement }>();
   const [hovered, setHovered] = useState<string>();
   const active = canAnnotate && editing?.sessionId === sessionId ? items.find(item => item.id === editing.id) : undefined;
   const preview = canAnnotate ? items.find(item => item.id === hovered) : undefined;
   const locateController = useRef<AbortController | undefined>(undefined);
   const sourceHighlight = useRef<(() => void) | undefined>(undefined);
-  const hideMenu = useCallback(() => setMenu(undefined), []);
   const closeEditor = useCallback((focus = false) => {
     locateController.current?.abort(); sourceHighlight.current?.();
     setEditing(undefined); setHovered(undefined);
@@ -240,7 +221,6 @@ export function ResponseAnnotations({ sessionId, store, canAnnotate, onLocate, o
     setEditing({ sessionId, id, anchor });
   }, [sessionId, hideMenu, canAnnotate]);
   if (editing && (!active || editing.sessionId !== sessionId)) setEditing(undefined);
-  if (menu && (!canAnnotate || menu.sessionId !== sessionId)) setMenu(undefined);
   if (hovered && (!canAnnotate || !preview)) setHovered(undefined);
   // Hover and active edit have separate lifetimes. Leaving a marker must never
   // clear the persistent highlight of the annotation currently being edited.
@@ -279,21 +259,14 @@ export function ResponseAnnotations({ sessionId, store, canAnnotate, onLocate, o
     })();
   }, [onLocate, onNotify]);
   useEffect(() => {
-    const update = () => {
-      if (!canAnnotate || !windowActiveRef.current) { setMenu(undefined); return; }
-      const mapped = mapResponseSelection(window.getSelection());
-      if (!mapped || !owner.current?.contains(mapped.root)) { setMenu(undefined); return; }
-      setMenu({ sessionId, selection: mapped });
-    };
-    const hide = () => setMenu(undefined);
     const keydown = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && !event.defaultPrevented && !event.isComposing && windowActiveRef.current) {
-        hide(); closeEditor(); locateController.current?.abort(); sourceHighlight.current?.();
+        hideMenu(); closeEditor(); locateController.current?.abort(); sourceHighlight.current?.();
       }
     };
     const pointerdown = (event: PointerEvent) => {
       const target = event.target instanceof Element ? event.target : null;
-      if (windowActiveRef.current && !target?.closest('[data-annotation-ui], .annotation-chip, .annotation-selection-menu')) closeEditor();
+      if (windowActiveRef.current && !target?.closest('[data-annotation-ui], .annotation-chip')) closeEditor();
     };
     const copy = (event: ClipboardEvent) => {
       if (!windowActiveRef.current || event.defaultPrevented || !event.clipboardData) return;
@@ -303,25 +276,117 @@ export function ResponseAnnotations({ sessionId, store, canAnnotate, onLocate, o
       if (!mapped || !owner.current?.contains(mapped.root)) return;
       event.clipboardData.setData('text/plain', mapped.annotation.quote); event.preventDefault();
     };
-    const pointerup = (event: PointerEvent) => {
-      const target = event.target instanceof Element ? event.target : null;
-      if (target?.closest('.annotation-selection-menu')) return;
-      // A drag can end in the page gutter while its text range remains valid.
-      // Selection mapping, not the pointer release target, owns eligibility.
-      update();
+    const openMenu = (target: Element | null, keyboard: boolean, x = 0, y = 0) => {
+      const scope = owner.current;
+      if (!scope || !windowActiveRef.current) return false;
+      const composer = target?.closest<HTMLElement>('.composer-prosemirror[contenteditable="true"]');
+      const reportCopy = () => onNotify('已复制选中文本');
+      const reportFailure = () => onNotify('剪贴板操作未完成', '请重试。', 'warning');
+      if (composer && scope.contains(composer)) {
+        const editor = store.getEditor(sessionId);
+        const { doc, selection } = editor.state;
+        const nativeSelection = window.getSelection();
+        const caret = keyboard && nativeSelection?.rangeCount && composer.contains(nativeSelection.focusNode)
+          ? nativeSelection.getRangeAt(0).getBoundingClientRect() : undefined;
+        const box = composer.getBoundingClientRect();
+        const anchor = caret && (caret.width || caret.height) ? caret : undefined;
+        const restoreComposer = () => {
+          if (!windowActiveRef.current || !composer.isConnected || editor.isDestroyed || !editor.isEditable
+            || editor.state.doc !== doc) return false;
+          if (!editor.state.selection.eq(selection)) editor.view.dispatch(editor.state.tr.setSelection(selection));
+          editor.view.focus();
+          return true;
+        };
+        const perform = (action: 'copy' | 'cut' | 'paste') => {
+          if (restoreComposer()) void editText(action).catch(reportFailure);
+        };
+        setMenu({
+          name: '输入框编辑', keyboard,
+          x: keyboard ? (anchor?.left ?? box.left + 8) : x,
+          y: keyboard ? (anchor?.bottom ?? box.top + 22) : y,
+          items: [
+            {label: '撤销', icon: Undo2, disabled: !editor.can().undo(), run: () => { if (restoreComposer()) editor.commands.undo(); }},
+            {label: '重做', icon: Redo2, disabled: !editor.can().redo(), run: () => { if (restoreComposer()) editor.commands.redo(); }},
+            {label: '剪切', icon: Scissors, disabled: selection.empty, run: () => perform('cut')},
+            {label: '复制', icon: Copy, disabled: selection.empty, run: () => perform('copy')},
+            {label: '粘贴', icon: ClipboardPaste, run: () => perform('paste')},
+            {label: '全选', icon: ScanText, run: () => { if (restoreComposer()) editor.commands.selectAll(); }},
+          ],
+        });
+        return true;
+      }
+      if (target?.closest('input,textarea,[contenteditable="true"],iframe,[role="dialog"],[data-annotation-ui]')) return false;
+      const selection = window.getSelection();
+      if (selection?.rangeCount !== 1 || selection.isCollapsed) return false;
+      const range = selection.getRangeAt(0).cloneRange();
+      const element = (node: Node) => node instanceof Element ? node : node.parentElement;
+      const from = element(range.startContainer)?.closest('.thread-scroll');
+      const to = element(range.endContainer)?.closest('.thread-scroll');
+      if (!from || from !== to || !scope.contains(from) || (!keyboard && !from.contains(target))) return false;
+      if (keyboard && target && target !== document.body && !target.contains(scope) && !from.contains(target)) return false;
+      if (!keyboard && !selectionContainsPoint(range, x, y)) return false;
+      const anchor = keyboard ? Array.from(range.getClientRects()).find(rect => rect.width > 0 && rect.height > 0) : undefined;
+      if (keyboard && !anchor) return false;
+      const mapped = mapResponseSelection(selection);
+      const sameRange = () => {
+        const current = window.getSelection();
+        if (!windowActiveRef.current || !from.isConnected || current?.rangeCount !== 1 || current.isCollapsed) return false;
+        const now = current.getRangeAt(0);
+        return now.startContainer === range.startContainer && now.startOffset === range.startOffset
+          && now.endContainer === range.endContainer && now.endOffset === range.endOffset;
+      };
+      const annotationAtSelection = () => {
+        if (!canAnnotate || !mapped || !sameRange()) return;
+        const current = mapResponseSelection(window.getSelection());
+        if (current?.root === mapped.root && current.annotation.quote === mapped.annotation.quote
+          && current.annotation.source?.entry_id === mapped.annotation.source?.entry_id
+          && current.annotation.source?.start === mapped.annotation.source?.start
+          && current.annotation.source?.end === mapped.annotation.source?.end) return current;
+      };
+      const items: ContextMenuState['items'] = [{
+        label: '复制', icon: Copy,
+        run: () => {
+          if (!sameRange()) return;
+          const current = mapResponseSelection(window.getSelection());
+          void (current ? writeClipboardText(current.annotation.quote) : editText('copy')).then(reportCopy, reportFailure);
+        },
+      }];
+      if (canAnnotate && mapped) items.push({label: '添加注释', icon: MessageSquarePlus, run: () => {
+        const current = annotationAtSelection();
+        if (current) edit(store.addAnnotation(sessionId, current.annotation));
+      }});
+      setMenu({name: '正文选区', keyboard, preserveSelection: true, items,
+        x: anchor?.left ?? x, y: anchor?.bottom ?? y});
+      return true;
     };
-    document.addEventListener('selectionchange', update);
+    const context = (event: MouseEvent) => {
+      if (event.defaultPrevented) return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (openMenu(target, event.clientX === 0 && event.clientY === 0, event.clientX, event.clientY)) event.preventDefault();
+    };
+    const keyboard = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || !isContextMenuKey(event)) return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (openMenu(target, true)) { event.preventDefault(); event.stopPropagation(); }
+    };
+    document.addEventListener('contextmenu', context);
+    document.addEventListener('keydown', keyboard, true);
     document.addEventListener('pointerdown', pointerdown);
-    document.addEventListener('pointerup', pointerup);
     document.addEventListener('copy', copy);
     document.addEventListener('keydown', keydown);
     return () => {
-      document.removeEventListener('selectionchange', update); document.removeEventListener('pointerup', pointerup);
+      document.removeEventListener('contextmenu', context);
+      document.removeEventListener('keydown', keyboard, true);
       document.removeEventListener('pointerdown', pointerdown);
-      document.removeEventListener('copy', copy); document.removeEventListener('keydown', keydown);
+      document.removeEventListener('copy', copy);
+      document.removeEventListener('keydown', keydown);
       locateController.current?.abort();
     };
-  }, [sessionId, closeEditor, canAnnotate]);
+  }, [sessionId, closeEditor, canAnnotate, edit, hideMenu, onNotify, store, setMenu]);
+  useLayoutEffect(() => {
+    const scope = owner.current;
+    return () => { if (scope) hideOwned(scope); };
+  }, [canAnnotate, hideOwned, sessionId, windowActive]);
   return <AnnotationContext.Provider value={locate}><DraftAnnotationContext.Provider value={{ editable: canAnnotate, activeId: active?.id, edit, preview: setHovered }}>
     <div ref={owner} className="response-annotations-scope" style={{ display: 'contents' }}>{children}</div>
     {windowActive && typeof document !== 'undefined' && createPortal(<>
@@ -329,14 +394,6 @@ export function ResponseAnnotations({ sessionId, store, canAnnotate, onLocate, o
         siblings={items.filter(other => other.value.source?.entry_id === item.value.source!.entry_id).sort((a, b) => a.value.source!.start - b.value.source!.start || a.number - b.number)}
         active={item.id === active?.id} onEdit={id => edit(id)} onPreview={setHovered} owner={owner} />)}
       {active && <AnnotationEditor key={`${active.id}:${editing?.anchor ? 'preview' : 'inline'}`} item={active} anchor={editing?.anchor} store={store} sessionId={sessionId} onClose={closeEditor} owner={owner} skills={skills} completePaths={completePaths} />}
-      {canAnnotate && menu?.sessionId === sessionId && <SelectionMenu selection={menu.selection} onHide={hideMenu} onAdd={() => {
-        if (!canAnnotate) return;
-        const current = mapResponseSelection(window.getSelection());
-        if (!current || !owner.current?.contains(current.root) || current.root !== menu.selection.root || current.annotation.quote !== menu.selection.annotation.quote
-          || current.annotation.source?.start !== menu.selection.annotation.source?.start || current.annotation.source?.end !== menu.selection.annotation.source?.end) { hideMenu(); return; }
-        const id = store.addAnnotation(sessionId, current.annotation);
-        edit(id);
-      }} />}
     </>, document.body)}
   </DraftAnnotationContext.Provider></AnnotationContext.Provider>;
 }

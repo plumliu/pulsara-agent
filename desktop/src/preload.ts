@@ -25,6 +25,7 @@ if (process.isMainFrame) contextBridge.exposeInMainWorld('pulsaraDesktop', {
   readUiPreferences: () => ipcRenderer.invoke('desktop:read-ui-preferences'),
   writeUiPreference: (value: {key: string; value: string | null}) => ipcRenderer.invoke('desktop:write-ui-preference', value),
   writeClipboardText: (text: string) => ipcRenderer.invoke('desktop:write-clipboard-text', text),
+  editText: (action: 'cut' | 'copy' | 'paste') => ipcRenderer.invoke('desktop:edit-text', action),
   minimize: () => ipcRenderer.invoke('desktop:minimize'),
   toggleMaximize: () => ipcRenderer.invoke('desktop:maximize'),
   closeWindow: () => ipcRenderer.invoke('desktop:close'),

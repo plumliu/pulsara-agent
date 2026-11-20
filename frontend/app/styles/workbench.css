@@ -16,7 +16,7 @@
 .session-title h2 { font-size: var(--type-body); font-weight: 700; }
 .session-title.is-in-canvas h2 { font-size: 13px; font-weight: 600; }
 .session-title-heading { display: flex; align-items: center; min-width: 0; gap: 6px; }
-.session-schedule-button { display: grid; flex: none; place-items: center; width: 26px; height: 26px; padding: 0; border-radius: 6px; color: var(--muted); background: transparent; }
+.session-schedule-button { display: grid; flex: none; place-items: center; width: 22px; height: 22px; padding: 0; border-radius: 6px; color: var(--muted); background: transparent; }
 .session-schedule-button:hover { color: var(--amber); background: var(--amber-soft); }
 .session-schedule-button:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
 .session-title p { margin-top: 3px; color: var(--faint); font-family: var(--mono); font-size: var(--type-caption); }
@@ -868,12 +868,6 @@
 .workbench.is-file-dragging iframe { pointer-events: none; }
 
 /* Canonical response annotations share the composer document and undo history. */
-.annotation-selection-menu {
-  position: fixed; z-index: 120; display: flex; align-items: center; gap: 7px;
-  padding: 8px 12px; border: 1px solid var(--line); border-radius: 9px;
-  background: var(--paper-solid); color: var(--ink);
-  box-shadow: 0 4px 18px #0002; font: 12px var(--sans); cursor: pointer;
-}
 .prompt-annotation { border: 1px solid var(--line); border-radius: 9px; padding: 9px 11px; margin: 0 0 8px; font: 12px/1.5 var(--sans); background: var(--paper-solid); }
 .prompt-annotation button { display: inline-flex; gap: 5px; align-items: center; background: transparent; border: 0; color: var(--muted, #858279); cursor: pointer; padding: 0; font: inherit; }
 .prompt-annotation blockquote { white-space: pre-wrap; overflow-wrap: anywhere; margin: 7px 0; padding-left: 9px; border-left: 2px solid #c7b58f; max-height: 120px; overflow-y: auto; color: var(--muted, #77756e); }
@@ -927,11 +921,10 @@
 .annotation-editor--preview .annotation-comment-editor { min-height: 40px; }
 
 [data-annotation-entry] ::selection { background-color: color-mix(in srgb, var(--amber) 43%, transparent); }
-.annotation-selection-menu > svg { color: var(--annotation-accent); }
 .annotation-chip button:disabled { opacity: .55; cursor: default; }
 
 /* Short, one-shot feedback; positions still follow their source while scrolling. */
-.annotation-selection-menu, .annotation-editor { animation: annotation-reveal .18s cubic-bezier(.2, .7, .2, 1); transform-origin: bottom left; }
+.annotation-editor { animation: annotation-reveal .18s cubic-bezier(.2, .7, .2, 1); transform-origin: bottom left; }
 .annotation-chip { animation: annotation-reveal .2s cubic-bezier(.2, .7, .2, 1); transition: background-color .16s ease, border-color .16s ease; }
 .annotation-chip button, .annotation-editor button { transition: color .14s ease, background-color .14s ease; }
 .annotation-marker { animation: annotation-marker-reveal .2s ease-out; transition: scale .16s ease, box-shadow .16s ease; }

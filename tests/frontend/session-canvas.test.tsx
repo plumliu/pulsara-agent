@@ -1,6 +1,7 @@
 import { act, cleanup, createEvent, fireEvent, render, screen, within } from '@testing-library/react';
 import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ContextMenuProvider } from '../../frontend/components/context-menu';
 import {
   SessionCanvas, SessionCanvasTitleActions, SessionCanvasTitleIdentity, useSessionCanvas, type SessionCanvasPlacement,
 } from '../../frontend/components/session-canvas';
@@ -139,6 +140,29 @@ function CanvasHarness({ load, placements }: {
 }
 
 describe('session canvas windows', () => {
+  it('targets the right-clicked tab and portaled window title for layout commands', () => {
+    render(<ContextMenuProvider><CanvasHarness placements={{ 甲: floating, 乙: full }} /></ContextMenuProvider>);
+    fireEvent.click(screen.getByTestId('open-甲'));
+    fireEvent.click(screen.getByTestId('open-乙'));
+    const first = screen.getByRole('tab', { name: '甲' });
+    const second = screen.getByRole('tab', { name: /乙/ });
+
+    fireEvent.contextMenu(first, { clientX: 15, clientY: 25 });
+    const tabMenu = screen.getByRole('menu', { name: '甲 标签操作' });
+    expect(second.getAttribute('aria-selected')).toBe('true');
+    fireEvent.click(within(tabMenu).getByRole('menuitem', { name: '收起窗口' }));
+    expect(first.getAttribute('aria-description')).toBe('已收起');
+    fireEvent.contextMenu(first, { clientX: 15, clientY: 25 });
+    fireEvent.click(screen.getByRole('menuitem', { name: '召回窗口' }));
+    expect(first.getAttribute('aria-selected')).toBe('true');
+
+    const firstWindow = screen.getByRole('region', { name: '甲' });
+    fireEvent.contextMenu(within(firstWindow).getByText('甲 状态'), { clientX: 15, clientY: 25 });
+    const titleMenu = screen.getByRole('menu', { name: '甲 窗口操作' });
+    fireEvent.click(within(titleMenu).getByRole('menuitem', { name: '铺满窗口' }));
+    expect(firstWindow.dataset.mode).toBe('maximized');
+  });
+
   it('maximizes the only placed floating window and restores its bounds on another double-click', () => {
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, view.w, view.h));
     render(<CanvasHarness placements={{ 甲: floating }} />);

@@ -8,7 +8,7 @@ vi.mock('@floating-ui/dom', async importOriginal => {
   return { ...original, hide: (...args: Parameters<typeof original.hide>) => {
     const middleware = original.hide(...args);
     return { ...middleware, fn: (state: Parameters<typeof middleware.fn>[0]) =>
-      state.elements.reference instanceof HTMLElement && state.elements.reference.matches('.session-row__menu > summary')
+      state.elements.reference instanceof HTMLElement && state.elements.reference.matches('.session-row__menu > button')
         ? { data: { referenceHidden: sessionMenuClipping.hidden } } : middleware.fn(state) };
   } };
 });

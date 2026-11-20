@@ -461,6 +461,14 @@ else {
       if (typeof value !== 'string') throw new Error('剪贴板内容必须是文本。');
       return clipboard.writeText(value);
     });
+    handle('edit-text', action => {
+      if (action !== 'cut' && action !== 'copy' && action !== 'paste') throw new Error('无效的文本编辑操作。');
+      const contents = window!.webContents;
+      if (!contents.isFocused() || contents.focusedFrame !== contents.mainFrame) throw new Error('工作台编辑区域已失去焦点。');
+      if (action === 'cut') contents.cut();
+      else if (action === 'copy') contents.copy();
+      else contents.paste();
+    });
     handle('choose-files',async()=>{const result=await dialog.showOpenDialog(window!,{properties:['openFile','multiSelections']});return result.canceled?[]:result.filePaths.map(value => windowsHost ? toBackendPath(value, wslTarget!.distro) : value);});
     handle('choose-workspace-directory', async () => {
       if (!windowsHost || !wslTarget) throw new Error('请先连接 WSL 环境。');

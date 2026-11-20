@@ -2,7 +2,7 @@ import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { expect, it, vi } from 'vitest';
 import PulsaraApp from '../../frontend/app/pulsara-app';
 import { deriveIdentity } from '../../frontend/lib/identity';
-import { FakeAdapter, initialSession, projection, renderWorkbench } from './pulsara-app-fixture';
+import { FakeAdapter, initialSession, projection, renderWorkbench, sessionItemName } from './pulsara-app-fixture';
 
 const { workbenchRender } = vi.hoisted(() => ({ workbenchRender: vi.fn<(id: string) => void>() }));
 
@@ -38,7 +38,7 @@ it('isolates unaffected workbenches when switching tabs and recalling a minimize
   const sidebar = within(screen.getByRole('region', { name: '会话目录' }));
 
   for (const session of [second, third, fourth, fifth, sixth]) {
-    await act(async () => fireEvent.click(sidebar.getByRole('button', { name: new RegExp(session.title) })));
+    await act(async () => fireEvent.click(sidebar.getByRole('button', { name: sessionItemName(new RegExp(session.title)) })));
     expect(tab(session.title).getAttribute('aria-selected')).toBe('true');
   }
   expect(firstWindow.hidden).toBe(true);

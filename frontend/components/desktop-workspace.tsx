@@ -3,13 +3,15 @@ import { useAgentMetadata, type AgentMetadata } from '../lib/agent-metadata';
 import { deriveIdentity } from '../lib/identity';
 import { BrowserTabs, browserTitle, type BrowserTabRecord } from '../lib/browser-tabs';
 import { desktopHost } from '../lib/desktop-host';
-import { BrowserPanel } from './browser-panel';
+import { BrowserPanel, browserAddressActions } from './browser-panel';
 import { uiPreferences } from '../lib/ui-preferences';
 import type { BackgroundProcess, CommandReceipt, UserControlCommandRef } from '../lib/runtime-adapter';
 import type { AgentReadingState } from './agent-conversation-pane';
 import type { CellGraphReadingState } from './cell-graph-map';
-import { Blocks, Bot, ChevronLeft, ChevronRight, Globe, FileCode2, FileText, FolderKanban, ListChecks, PanelRightClose, Server, TerminalSquare, X } from 'lucide-react';
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
+import type { MarkdownNotify } from './markdown-body';
+import { isContextMenuKey, useContextMenu, type MenuItem } from './context-menu';
+import { Blocks, Bot, ChevronLeft, ChevronRight, Copy, ExternalLink, Globe, FileCode2, FileText, FolderKanban, FolderOpen, ListChecks, PanelRightClose, PanelsTopLeft, Server, TerminalSquare, X } from 'lucide-react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode, type RefObject } from 'react';
 
 export type WorkspaceTabKind = 'browser' | 'file' | 'visualization' | 'capabilities' | 'mcp' | 'background' | 'process' | 'subagents' | 'agent' | 'cells' | 'cells-unavailable' | 'cell' | 'cell-graph';
 export interface WorkspaceControl { forgetSession: (sessionId: string) => void; clear: () => void }
@@ -23,11 +25,12 @@ interface WorkspaceTabBase {
   render?: () => ReactNode;
   onClose?: () => void;
 }
-type StandardWorkspaceKind = 'file' | 'visualization' | 'capabilities' | 'background';
+type StandardWorkspaceKind = 'visualization' | 'capabilities' | 'background';
 type StandardWorkspaceTab = { [K in StandardWorkspaceKind]: { kind: K; entityId?: string; hostSessionId?: string } }[StandardWorkspaceKind];
 export type WorkspaceTab = WorkspaceTabBase & (
   | { kind: 'browser'; browser: BrowserTabRecord; sessionId: string; entityId?: never; hostSessionId?: never }
   | ({ sessionId: string; browser?: never } & (StandardWorkspaceTab
+  | { kind: 'file'; entityId?: string; hostSessionId?: string; fileActions?: { copyPath: () => void; reveal: () => void } }
   | { kind: 'mcp'; entityId?: string; hostSessionId?: string; mcpTargetRole: 'configuration' | 'runtime' }
   | { kind: 'process'; entityId?: string; hostSessionId?: string; initialProcess?: BackgroundProcess }
   | { kind: 'subagents'; entityId?: never; hostSessionId?: never }
@@ -68,6 +71,7 @@ interface WorkspaceContext {
   visible: boolean;
   update: (id: string, patch: Partial<WorkspaceTabBase>) => void;
   close: (id: string) => void;
+  closeOthers: (id: string) => void;
   activate: (id: string) => void;
 }
 function selectedTabId(tabs: WorkspaceTab[], sessionId: string, sessions: Record<string, string>) {
@@ -150,6 +154,16 @@ export function DesktopWorkspaceProvider({ sessionId, onShow, children, controlR
       setActive(current.current.active);
     }
   }, [install]);
+  const closeOthers = useCallback((id: string) => {
+    const session = current.current.sessionId;
+    const sessionTabs = tabsRef.current.filter(tab => tab.sessionId === session);
+    const target = sessionTabs.find(tab => tab.id === id);
+    if (!target) return;
+    interaction.current++;
+    for (const tab of sessionTabs) if (tab !== target) tab.onClose?.();
+    install(tabsRef.current.filter(tab => tab.sessionId !== session || tab.id === id));
+    select(target);
+  }, [install, select]);
   const forgetSession = useCallback((target: string) => {
     for (const tab of tabsRef.current.filter(tab => tab.sessionId === target)) tab.onClose?.();
     install(tabsRef.current.filter(tab => tab.sessionId !== target));
@@ -160,7 +174,7 @@ export function DesktopWorkspaceProvider({ sessionId, onShow, children, controlR
   if (controlRef) controlRef.current = { forgetSession, clear: () => { for (const target of new Set(tabsRef.current.map(tab => tab.sessionId))) forgetSession(target); backgroundControls.clear(); } };
   const visibleTabs = useMemo(() => tabs.filter(tab => tab.sessionId === sessionId), [tabs, sessionId]);
   const activeId = selectedTabId(tabs, sessionId, active);
-  const value = useMemo(() => ({ interact, interactionVersion, publish, sessionId, visible, browserTabs, backgroundControls, tabs: visibleTabs, activeId, open, update, close, activate }), [interact, interactionVersion, publish, backgroundControls, browserTabs, visible, visibleTabs, sessionId, activeId, open, update, close, activate]);
+  const value = useMemo(() => ({ interact, interactionVersion, publish, sessionId, visible, browserTabs, backgroundControls, tabs: visibleTabs, activeId, open, update, close, closeOthers, activate }), [interact, interactionVersion, publish, backgroundControls, browserTabs, visible, visibleTabs, sessionId, activeId, open, update, close, closeOthers, activate]);
   return <Context.Provider value={value}>{children}</Context.Provider>;
 }
 const icons = { browser: Globe, file: FileText, visualization: FileText, capabilities: Blocks, mcp: Server, background: TerminalSquare, process: TerminalSquare, subagents: Bot, agent: Bot, cells: FileCode2, 'cells-unavailable': FileCode2, cell: FileText, 'cell-graph': ListChecks };
@@ -169,8 +183,35 @@ function AgentTabMetadata({ tab, update }: { tab: WorkspaceTab & {kind:'agent'};
   useEffect(() => { update(tab.id, {agentMetadata:state}); }, [state, tab.id, update]);
   return null;
 }
-function WorkspaceTabStrip({ tabs, selectedId, activate, close }: { tabs: WorkspaceTab[]; selectedId?: string; activate: (id: string) => void; close: (id: string) => void }) {
+function WorkspaceTabStrip({ tabs, selectedId, activate, close, closeOthers, onNotify }: {
+  tabs: WorkspaceTab[];
+  selectedId?: string;
+  activate: (id: string) => void;
+  close: (id: string) => void;
+  closeOthers: (id: string) => void;
+  onNotify?: MarkdownNotify;
+}) {
   const list = useRef<HTMLDivElement>(null);
+  const { open } = useContextMenu();
+  const showMenu = (event: MouseEvent<HTMLElement> | KeyboardEvent<HTMLElement>, tab: WorkspaceTab) => {
+    const items: MenuItem[] = [
+      { label: '关闭标签', icon: X, run: () => close(tab.id) },
+      { label: '关闭其他标签', icon: PanelsTopLeft, disabled: tabs.length < 2, run: () => closeOthers(tab.id) },
+    ];
+    if (tab.kind === 'file' && tab.fileActions) {
+      items.push(
+        { label: '复制路径', icon: Copy, run: tab.fileActions.copyPath },
+        { label: '在文件管理器中显示', icon: FolderOpen, run: tab.fileActions.reveal },
+      );
+    } else if (tab.kind === 'browser') {
+      const actions = browserAddressActions(tab.browser, error => onNotify?.('网页地址操作未完成', error, 'warning'));
+      items.push(
+        { label: '复制网址', icon: Copy, disabled: !actions, run: () => actions?.copy() },
+        { label: '在系统浏览器中打开', icon: ExternalLink, disabled: !actions, run: () => actions?.openExternal() },
+      );
+    }
+    open(event, `${tab.title} 工作区标签操作`, items);
+  };
   const [edges, setEdges] = useState({ left: false, right: false });
   const [scrolling, setScrolling] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -229,7 +270,25 @@ function WorkspaceTabStrip({ tabs, selectedId, activate, close }: { tabs: Worksp
     <div ref={list} className="workspace-tabs" role="tablist" aria-label="打开的内容" onScroll={() => {
       measure(); setScrolling(true); clearTimeout(timer.current);
       timer.current = setTimeout(() => setScrolling(false), 700);
-    }}>{tabs.map(tab => { const Icon = icons[tab.kind]; return <div key={tab.id} className={`workspace-tab${selectedId === tab.id ? ' is-active' : ''}`}><button type="button" role="tab" aria-label={tab.title} aria-selected={selectedId === tab.id} onClick={() => { if (tab.id !== selectedId) activate(tab.id); }} title={tab.kind === 'agent' ? `${tab.title}\n${tab.entityId}\n${tab.agentMetadata?.agent ? agentTaskLabel(tab.agentMetadata.agent) : tab.agentMetadata?.unavailable ? '子代理已不可用' : '正在刷新'}` : tab.title}><Icon size={13} /><span>{tab.title}</span>{tab.kind === 'agent' && <i className={`agent-cell-indicator${tab.agentMetadata?.agent?.has_running_turn ? ' is-active' : ''}`} aria-hidden="true" title={tab.agentMetadata?.unavailable ? '子代理已不可用' : tab.agentMetadata?.agent ? agentActivity(tab.agentMetadata.agent) : '正在刷新'} />}</button><button type="button" aria-label={`关闭 ${tab.title}`} title="关闭视图" onClick={() => close(tab.id)}><X size={12} /></button></div>; })}</div>
+    }}>{tabs.map(tab => {
+      const Icon = icons[tab.kind];
+      const selected = selectedId === tab.id;
+      let title = tab.title;
+      if (tab.kind === 'agent') {
+        const status = tab.agentMetadata?.agent ? agentTaskLabel(tab.agentMetadata.agent) : tab.agentMetadata?.unavailable ? '子代理已不可用' : '正在刷新';
+        title = `${tab.title}\n${tab.entityId}\n${status}`;
+      }
+      return <div key={tab.id} className={`workspace-tab${selected ? ' is-active' : ''}`}
+        onContextMenu={event => showMenu(event, tab)} onKeyDown={event => { if (isContextMenuKey(event)) showMenu(event, tab); }}>
+        <button type="button" role="tab" aria-label={tab.title} aria-selected={selected}
+          onClick={() => { if (!selected) activate(tab.id); }} title={title}>
+          <Icon size={13} /><span>{tab.title}</span>
+          {tab.kind === 'agent' && <i className={`agent-cell-indicator${tab.agentMetadata?.agent?.has_running_turn ? ' is-active' : ''}`}
+            aria-hidden="true" title={tab.agentMetadata?.unavailable ? '子代理已不可用' : tab.agentMetadata?.agent ? agentActivity(tab.agentMetadata.agent) : '正在刷新'} />}
+        </button>
+        <button type="button" aria-label={`关闭 ${tab.title}`} title="关闭视图" onClick={() => close(tab.id)}><X size={12} /></button>
+      </div>;
+    })}</div>
     <button type="button" className="workspace-tab-edge is-left" aria-label="向左滚动标签页" title="向左滚动" disabled={!edges.left} onClick={() => scroll(-1)}><ChevronLeft size={14} /></button>
     <button type="button" className="workspace-tab-edge is-right" aria-label="向右滚动标签页" title="向右滚动" disabled={!edges.right} onClick={() => scroll(1)}><ChevronRight size={14} /></button>
   </div>;
@@ -242,12 +301,12 @@ function workspaceResizeLimit(handle: HTMLElement): number {
   const width = handle.closest<HTMLElement>('.session-workbench-body')?.clientWidth;
   return width === undefined ? window.innerWidth * .7 : Math.min(width * .7, width - 360);
 }
-type WorkspaceProps = { isOpen: boolean; onClose: () => void; toolbar: ReactNode; renderTab: (tab: WorkspaceTab) => ReactNode; sessionContentAvailable?: boolean };
+type WorkspaceProps = { isOpen: boolean; onClose: () => void; toolbar: ReactNode; renderTab: (tab: WorkspaceTab) => ReactNode; sessionContentAvailable?: boolean; onNotify?: MarkdownNotify };
 export function DesktopWorkspace(props: WorkspaceProps) {
   const workspace = useDesktopWorkspace();
   return workspace ? <WorkspacePane {...props} /> : null;
 }
-function WorkspacePane({ isOpen, onClose, toolbar, renderTab, sessionContentAvailable = true }: WorkspaceProps) {
+function WorkspacePane({ isOpen, onClose, toolbar, renderTab, sessionContentAvailable = true, onNotify }: WorkspaceProps) {
   const workspace = useDesktopWorkspace();
   const sessionId = workspace?.sessionId ?? '';
   const [width, setWidth] = useState(() => {
@@ -308,7 +367,8 @@ function WorkspacePane({ isOpen, onClose, toolbar, renderTab, sessionContentAvai
     <div className="workspace-toolbar">{toolbar}<button type="button" title="收起工作区" aria-label="收起工作区" onClick={onClose}><PanelRightClose size={15} /></button></div>
     </header>
     {isOpen && workspace.visible && sessionContentAvailable && workspace.tabs.filter((tab): tab is WorkspaceTab & {kind:'agent'} => tab.kind === 'agent').map(tab => <AgentTabMetadata key={tab.id} tab={tab} update={workspace.update} />)}
-    <WorkspaceTabStrip key={sessionId} tabs={workspace.tabs} selectedId={selected?.id} activate={workspace.activate} close={closeTab} />
+    <WorkspaceTabStrip key={sessionId} tabs={workspace.tabs} selectedId={selected?.id} activate={workspace.activate}
+      close={closeTab} closeOthers={workspace.closeOthers} onNotify={onNotify} />
     {workspace.tabs.filter(tab => tab.kind === 'browser').map(tab => <div className="workspace-content workspace-browser-content" role="tabpanel" key={tab.id} hidden={selected?.id !== tab.id} inert={!isOpen || !workspace.visible}>
       <BrowserPanel record={tab.browser} tabs={workspace.browserTabs} isOpen={isOpen && workspace.visible && selected?.id === tab.id} />
     </div>)}

@@ -384,7 +384,7 @@ export function FilePreviewProvider({
   }, [workspace?.activeId, touchMedia]);
   const describe = useCallback((tab: BrowserTab): WorkspaceTab => {
     const page = tab.history[tab.index];
-    return { id: tab.id, sessionId: tab.sessionId, kind: 'file', onClose: () => actions.current.close(tab),
+    return { id: tab.id, sessionId: tab.sessionId, kind: 'file', fileActions: previewFileActions(tab, onNotify), onClose: () => actions.current.close(tab),
         title:
           page?.title ||
           tab.file?.name ||
@@ -449,6 +449,22 @@ export function FilePreviewProvider({
   );
 }
 
+function previewFileActions(tab: BrowserTab, onNotify: MarkdownNotify) {
+  const { file, api } = tab;
+  if (!file || !api) return;
+  const isCurrent = () => tab.file === file && tab.api === api;
+  return {
+    copyPath: () => {
+      if (!isCurrent()) return;
+      void writeClipboardText(file.path).catch(() => onNotify("无法复制路径", undefined, "warning"));
+    },
+    reveal: () => {
+      if (!isCurrent()) return;
+      void api.action(file.read_token, "reveal").catch(error => onNotify("无法打开文件", detail(error), "warning"));
+    },
+  };
+}
+
 function FileBrowserView({
   tab,
   onNotify,
@@ -473,14 +489,7 @@ function FileBrowserView({
   const file = tab.file;
   const page = tab.history[tab.index];
   const api = tab.api;
-  const reveal = async () => {
-    if (!file || !api) return;
-    try {
-      await api.action(file.read_token, "reveal");
-    } catch (error) {
-      onNotify("无法打开文件", detail(error), "warning");
-    }
-  };
+  const fileActions = previewFileActions(tab, onNotify);
   return (
     <FilePreviewPanel
       label={`文件预览：${file?.name ?? page?.path ?? ""}`}
@@ -528,17 +537,14 @@ function FileBrowserView({
               <button
                 aria-label="复制路径"
                 title="复制路径"
-                onClick={() =>
-                  void writeClipboardText(file.path)
-                    .catch(() => onNotify("无法复制路径", undefined, "warning"))
-                }
+                onClick={fileActions?.copyPath}
               >
                 <Copy size={16} />
               </button>
               <button
                 aria-label="打开所在文件夹"
                 title="打开所在文件夹"
-                onClick={() => void reveal()}
+                onClick={fileActions?.reveal}
               >
                 <FolderOpen size={16} />
               </button>

@@ -5,7 +5,7 @@ import PulsaraApp from '../../frontend/app/pulsara-app';
 import type { PulsaraDesktop } from '../../frontend/lib/desktop-host';
 import { CanonicalHistoryView, RuntimeApiError, type CommandReceipt, type RuntimeAdapter, type SessionTabCloseOutcome } from '../../frontend/lib/runtime-adapter';
 import { deriveIdentity } from '../../frontend/lib/identity';
-import { deferred, FakeAdapter, initialSession, projection, renderWorkbench, textPrompt } from './pulsara-app-fixture';
+import { deferred, FakeAdapter, initialSession, projection, renderWorkbench, sessionItemName, textPrompt } from './pulsara-app-fixture';
 
 const second = {
   ...initialSession,
@@ -77,7 +77,7 @@ describe('production session canvas', () => {
     const floatingStyle = first.getAttribute('style');
     const floatingWidth = first.style.width;
 
-    await userEvent.click(screen.getByRole('button', { name: /另一会话/ }));
+    await userEvent.click(screen.getByRole('button', { name: sessionItemName(/另一会话/) }));
     await screen.findByRole('tab', { name: /另一会话/ });
     const secondWindow = document.getElementById(second.id)!;
     expect(secondWindow.dataset.mode).toBe('maximized');
@@ -105,7 +105,7 @@ describe('production session canvas', () => {
     const firstComposer = within(first).getByLabelText('发送给 Pulsara');
     await userEvent.type(firstComposer, 'first draft');
 
-    await userEvent.click(screen.getByRole('button', { name: /另一会话/ }));
+    await userEvent.click(screen.getByRole('button', { name: sessionItemName(/另一会话/) }));
     const secondTab = await screen.findByRole('tab', { name: /另一会话/ });
     expect(secondTab.closest('.desktop-titlebar')).toBeTruthy();
     const tabOrder = () => screen.getAllByRole('tab').map(tab => tab.getAttribute('aria-controls'));
@@ -164,11 +164,11 @@ describe('production session canvas', () => {
     await userEvent.type(composer, 'preserved');
     const opening = deferred<never>();
     vi.spyOn(adapter, 'connect').mockImplementationOnce(() => opening.promise);
-    await userEvent.click(screen.getByRole('button', { name: /另一会话/ }));
+    await userEvent.click(screen.getByRole('button', { name: sessionItemName(/另一会话/) }));
     expect(first.hidden).toBe(false);
     expect(screen.queryByRole('tab', { name: /另一会话/ })).toBeNull();
     await act(async () => opening.reject(new RuntimeApiError('TEST_OPEN_FAILED', '会话连接暂时不可用。', true)));
-    expect(within(screen.getByRole('button', { name: /另一会话/ })).getByText('会话连接暂时不可用。')).toBeTruthy();
+    expect(within(screen.getByRole('button', { name: sessionItemName(/另一会话/) })).getByText('会话连接暂时不可用。')).toBeTruthy();
     expect(screen.getByRole('tab', { name: /准备发布/ }).getAttribute('aria-selected')).toBe('true');
     expect(first.hidden).toBe(false);
     expect(firstConnection.closed).toBe(false);
@@ -182,7 +182,7 @@ describe('production session canvas', () => {
     await act(async () => firstConnection.emit({ ...projection('收起之前'), eventSequence: 2 }));
     await waitFor(() => expect(retainHistory).toHaveBeenCalled());
 
-    await userEvent.click(screen.getByRole('button', { name: /另一会话/ }));
+    await userEvent.click(screen.getByRole('button', { name: sessionItemName(/另一会话/) }));
     await screen.findByRole('tab', { name: /另一会话/ });
     await userEvent.click(within(first).getByRole('button', { name: '收起会话窗口' }));
     expect(first.hidden).toBe(true);
@@ -212,7 +212,7 @@ describe('production session canvas', () => {
     await waitFor(() => expect(first.isConnected).toBe(false));
     expect(firstConnection.closed).toBe(true);
 
-    await userEvent.click(screen.getByRole('button', { name: /准备发布/ }));
+    await userEvent.click(screen.getByRole('button', { name: sessionItemName(/准备发布/) }));
     await screen.findByRole('tab', { name: /准备发布/ });
     const reopened = document.getElementById(initialSession.id)!;
     expect(reopened).not.toBe(first);
@@ -266,7 +266,7 @@ describe('production session canvas', () => {
 
   it('returns to a minimized tab when choosing to keep its visible form', async () => {
     const { adapter, first } = await start();
-    await userEvent.click(screen.getByRole('button', { name: /另一会话/ }));
+    await userEvent.click(screen.getByRole('button', { name: sessionItemName(/另一会话/) }));
     await screen.findByRole('tab', { name: /另一会话/ });
     await userEvent.click(within(first).getByRole('button', { name: '收起会话窗口' }));
     expect(first.hidden).toBe(true);
@@ -338,7 +338,7 @@ describe('production session canvas', () => {
     const restartWorkbench = vi.fn(async () => {});
     window.pulsaraDesktop = { platform: 'darwin', restartWorkbench } as unknown as PulsaraDesktop;
     try {
-      await userEvent.click(screen.getByRole('button', { name: /准备发布/ }));
+      await userEvent.click(screen.getByRole('button', { name: sessionItemName(/准备发布/) }));
       expect(connect).toHaveBeenCalledExactlyOnceWith(initialSession.id, false, true);
       expect(screen.queryByRole('tab', { name: /准备发布/ })).toBeNull();
       const history = new CanonicalHistoryView(initialSession.id, { path: '/tmp/project', outcome: 'AVAILABLE', reason: null },
@@ -381,7 +381,7 @@ describe('production session canvas', () => {
     await waitFor(() => expect(first.isConnected).toBe(false));
 
     adapter.connectionValues.set(initialSession.id, approval);
-    await userEvent.click(screen.getByRole('button', { name: /准备发布/ }));
+    await userEvent.click(screen.getByRole('button', { name: sessionItemName(/准备发布/) }));
     await screen.findByRole('tab', { name: /准备发布/ });
     const reopened = adapter.lastConnection!;
     await waitFor(() => expect(reopened.queryCommand).toHaveBeenCalledWith(submitted.commandId));
@@ -407,7 +407,7 @@ describe('production session canvas', () => {
     };
 
     await openPicker(first);
-    await userEvent.click(screen.getByRole('button', { name: /另一会话/ }));
+    await userEvent.click(screen.getByRole('button', { name: sessionItemName(/另一会话/) }));
     await screen.findByRole('tab', { name: /另一会话/ });
     const secondWindow = document.getElementById(second.id)!;
     const secondComposer = within(secondWindow).getByLabelText('发送给 Pulsara');
@@ -422,7 +422,7 @@ describe('production session canvas', () => {
     await userEvent.click(screen.getByRole('button', { name: '关闭会话 准备发布' }));
     await waitFor(() => expect(first.isConnected).toBe(false));
     await act(async () => pickedAfterClose.resolve(['/tmp/project/after-close.txt']));
-    await userEvent.click(screen.getByRole('button', { name: /准备发布/ }));
+    await userEvent.click(screen.getByRole('button', { name: sessionItemName(/准备发布/) }));
     await screen.findByRole('tab', { name: /准备发布/ });
     const reopened = document.getElementById(initialSession.id)!;
     expect(within(reopened).getByLabelText('发送给 Pulsara').textContent).toContain('first-session.txt');
@@ -439,7 +439,7 @@ describe('production session canvas', () => {
     await userEvent.click(screen.getByRole('button', { name: '关闭会话 准备发布' }));
     await waitFor(() => expect(first.isConnected).toBe(false));
 
-    await userEvent.click(screen.getByRole('button', { name: /准备发布/ }));
+    await userEvent.click(screen.getByRole('button', { name: sessionItemName(/准备发布/) }));
     await screen.findByRole('tab', { name: /准备发布/ });
     const reopened = document.getElementById(initialSession.id)!;
     const composer = () => within(reopened).getByLabelText('发送给 Pulsara');
