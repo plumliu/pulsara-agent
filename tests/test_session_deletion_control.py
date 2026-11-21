@@ -325,19 +325,19 @@ def test_deletion_http_is_strict_and_old_close_has_separate_route(tmp_path):
 
 def test_core_deletion_waits_admitted_open_and_rejects_new_admission():
     from pulsara_agent.conversation_kernel.host import KernelHostCore
+    from pulsara_agent.identity import random_id
+    from tests.support.model_config import test_model_runtime
 
     async def run():
-        core = object.__new__(KernelHostCore)
-        core._lock = asyncio.Lock()
-        core._closing = False
-        core._open_attempts = {}
-        core._session_retirements = {}
-        admitted = await core._admit_session_open("parent", "child")
-        pending = asyncio.create_task(core.begin_session_retirement("child", "u_local"))
+        core = KernelHostCore(model_runtime=test_model_runtime())
+        parent = random_id("session")
+        child = random_id("session")
+        admitted = await core._admit_session_open(parent, child)
+        pending = asyncio.create_task(core.begin_session_retirement(child, core.memory_domain_id))
         await asyncio.sleep(0)
         assert not pending.done()
         with pytest.raises(SessionDeleteRejected):
-            await core._admit_session_open("child")
+            await core._admit_session_open(child)
         await core._settle_session_open(admitted)
         operation = await pending
         await core.finish_session_retirement(operation, quarantine=False)

@@ -36,6 +36,7 @@ from pulsara_agent.conversation_kernel.contracts import (
 )
 from pulsara_agent.conversation_kernel.tool_contracts import (
     KernelToolAuthorizationKind,
+    KernelToolResult,
 )
 from pulsara_agent.conversation_kernel.tool_runtime import (
     DirectKernelToolPort,
@@ -148,6 +149,16 @@ class _RecordingDeadlineFactory(KernelExecutionDeadlineFactory):
         return super().deadline(owner)
 
 
+async def _accept_terminal_observation(result: KernelToolResult) -> None:
+    # This fixture invokes the tool port directly, without the result writer.
+    assert result.acceptance_finished is not None
+    try:
+        assert result.acceptance_succeeded is not None
+        await asyncio.to_thread(result.acceptance_succeeded)
+    finally:
+        result.acceptance_finished()
+
+
 async def _start_background_process(
     port: DirectKernelToolPort,
     *,
@@ -184,6 +195,7 @@ async def _start_background_process(
         assistant_entry_id=entry_id,
     )
     payload = result.content.public_fields
+    await _accept_terminal_observation(result)
     assert payload["meta"]["process_status"] == "RUNNING"
     return str(payload["target"]["process_id"]), turn_id, entry_id
 
@@ -204,33 +216,32 @@ def test_stage2_terminal_handle_is_same_host_only_and_close_kills_and_joins(
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
             deadline_factory=deadlines,
         )
-        process_id, turn_id, entry_id = await _start_background_process(
-            port, session_id=session_id
-        )
-        assert deadlines.owners == [KernelWatchdogOwner.TERMINAL_FOREGROUND_DECISION]
-        poll = await invoke_direct_tool(
-            port,
-            session_id=session_id,
-            tool_name="manage_process",
-            arguments={
-                "action": "wait",
-                "timeout_seconds": 0,
-                "target": {"kind": "PROCESS", "process_id": process_id},
-            },
-            tool_call_id=_name("call"),
-            attempt_id=_name("attempt"),
-            turn_id=turn_id,
-            assistant_entry_id=entry_id,
-        )
-        assert poll.content.public_fields["target"]["process_id"] == process_id
-        assert deadlines.owners[-1] is KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION
-        assert (
-            port._terminal.live_process_count(  # noqa: SLF001
-                owner_host_session_id=owner
+        try:
+            process_id, turn_id, entry_id = await _start_background_process(
+                port, session_id=session_id
             )
-            == 1
-        )
-        await port.aclose(timeout_seconds=5.0)
+            assert deadlines.owners == [KernelWatchdogOwner.TERMINAL_FOREGROUND_DECISION]
+            async with asyncio.timeout(5):
+                poll = await invoke_direct_tool(
+                    port,
+                    session_id=session_id,
+                    tool_name="manage_process",
+                    arguments={
+                        "action": "wait",
+                        "timeout_seconds": 0,
+                        "target": {"kind": "PROCESS", "process_id": process_id},
+                    },
+                    tool_call_id=_name("call"),
+                    attempt_id=_name("attempt"),
+                    turn_id=turn_id,
+                    assistant_entry_id=entry_id,
+                )
+            await _accept_terminal_observation(poll)
+            assert poll.content.public_fields["target"]["process_id"] == process_id
+            assert deadlines.owners[-1] is KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION
+            assert port._terminal.live_process_count(owner_host_session_id=owner) == 1
+        finally:
+            await port.aclose(timeout_seconds=5.0)
         assert (
             port._terminal.live_process_count(  # noqa: SLF001
                 owner_host_session_id=owner

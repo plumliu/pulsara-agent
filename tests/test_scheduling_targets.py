@@ -53,7 +53,7 @@ def test_complete_query_targets_can_be_copied_into_management_without_public_rev
         owner._manage=AsyncMock(return_value=row(revision=8,prompt="updated"))
         updated=await invoke(owner,{"action":"update","target":record["target"],"values":{"prompt":"updated"}})
         owner._manage.assert_awaited_once_with("mutate_scheduled_task",session_id=SESSION,task_id=SOURCE,
-            expected_revision=7,action="update",values={"prompt":"updated"})
+            expected_revision=7,action="update",values={"prompt":"updated"},cancelled_candidates=[])
         assert updated.value.public_fields == {"target":schedule_target(SOURCE)}
         assert updated.result_facts == {"schedule_revisions":{SOURCE:8}}
     asyncio.run(run())

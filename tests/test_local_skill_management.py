@@ -486,21 +486,22 @@ def test_darwin_system_tmp_and_var_aliases_are_prepared_before_nofollow_walk(
         assert cli_validation["disposition"] == "VALID"
         assert cli_install["disposition"] == "INSTALLED"
 
-    physical_var_source = _source(tmp_path / "var-sources", "var-alias-skill")
     private_var = Path("/private/var")
-    assert physical_var_source.is_relative_to(private_var)
-    var_alias_source = Path("/var") / physical_var_source.relative_to(private_var)
-    var_validation = service.validate_local_skill_source(
-        ValidateLocalSkillSourceRequest(var_alias_source)
-    )
-    var_install = service.install_loose_local_skill(
-        _workspace_request(var_alias_source, workspace)
-    )
-
-    assert var_validation.disposition is LocalSkillValidationDisposition.VALID
-    assert var_install.disposition is LocalSkillInstallDisposition.INSTALLED
-    assert var_validation.source_path == physical_var_source
-    assert var_install.source_path == physical_var_source
+    with tempfile.TemporaryDirectory(
+        prefix="pulsara-skill-source-", dir=private_var / "tmp"
+    ) as raw_var:
+        physical_var_source = _source(Path(raw_var), "var-alias-skill")
+        var_alias_source = Path("/var") / physical_var_source.relative_to(private_var)
+        var_validation = service.validate_local_skill_source(
+            ValidateLocalSkillSourceRequest(var_alias_source)
+        )
+        var_install = service.install_loose_local_skill(
+            _workspace_request(var_alias_source, workspace)
+        )
+        assert var_validation.disposition is LocalSkillValidationDisposition.VALID
+        assert var_install.disposition is LocalSkillInstallDisposition.INSTALLED
+        assert var_validation.source_path == physical_var_source
+        assert var_install.source_path == physical_var_source
 
 
 def test_source_binding_preparation_never_follows_final_source_symlink(

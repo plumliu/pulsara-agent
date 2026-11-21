@@ -1466,8 +1466,9 @@ def test_empty_completed_cell_is_collected_without_any_model_acknowledgement():
                 while any(item['cell_id'] == cell for item in host.snapshot_cell_index()):
                     await asyncio.sleep(.001)
             assert not host.pending_output_cells()
-            with pytest.raises(CodeModeError, match='unavailable'):
+            with pytest.raises(CodeModeError) as caught:
                 await host.wait_state(cell, 0)
+            assert caught.value.code == "unavailable"
         finally:
             await host.aclose()
     asyncio.run(run())
@@ -1796,8 +1797,9 @@ def test_definite_output_rejection_is_a_local_readable_failure_not_an_ack_or_rec
             async with asyncio.timeout(5):
                 while any(item["cell_id"] == cell for item in host.snapshot_cell_index()):
                     await asyncio.sleep(.001)
-            with pytest.raises(CodeModeError, match="unavailable"):
+            with pytest.raises(CodeModeError) as caught:
                 host.capture_cell(cell)
+            assert caught.value.code == "unavailable"
             assert failure["error"]["code"] == "invalid_cell_content"
         finally:
             await host.aclose()
