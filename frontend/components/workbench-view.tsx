@@ -98,7 +98,6 @@ import type {
   RuntimeInteractionContent,
   RuntimeInteractionResolution,
   RuntimeInteractionSummary,
-  RuntimeProjection,
   QueuedPrompt,
   QueuedPromptAction,
   LocalPromptSubmission,
@@ -191,7 +190,6 @@ interface WorkbenchViewProps {
   providerRetry?: import('../lib/runtime-adapter').ProviderRetry | null;
   isRunning: boolean;
   activeTurnId?: string;
-  activeToolsOutsideHistory?: RuntimeProjection['activeToolsOutsideHistory'];
   manualCompactionCommandId?: string;
   inspectorOpen: boolean;
   queuedCount: number;
@@ -2369,7 +2367,6 @@ export function WorkbenchView({
   isRunning,
   providerRetry,
   activeTurnId,
-  activeToolsOutsideHistory,
   manualCompactionCommandId,
   inspectorOpen,
   queuedCount,
@@ -3077,11 +3074,7 @@ export function WorkbenchView({
                           : '已送达'} />
             </div>
           ))}
-          {atLatestHistory && activeToolsOutsideHistory?.length ? (
-            <div className="assistant-progress" role="status" aria-label="正在执行的工具">
-              <i aria-hidden="true" />正在执行 {activeToolsOutsideHistory.map(tool => tool.name).join('、')}
-            </div>
-          ) : atLatestHistory && (preparingSubmission || awaitingFirstActivity) && (
+          {atLatestHistory && (preparingSubmission || awaitingFirstActivity) && (
             <article className="assistant-turn assistant-turn--operational assistant-turn--run-start" aria-label="Pulsara 处理状态">
               <AssistantHeading message={{ id: 'pending-preparation', role: 'assistant', time: '', body: '' }} response={false} />
               <div className="assistant-progress" role="status"><i aria-hidden="true" />

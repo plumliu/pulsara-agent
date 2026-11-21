@@ -1,6 +1,6 @@
 # `tools.exec_process(args)`
 
-Start a shell command and observe its complete available public output. A PROCESS Target supports later metadata queries and wait/write/control. Initial wait does not limit process lifetime. Native NEXT reads a frozen result; JS returns the full observation.
+Start a shell command and observe its complete available public output. meta.status SUCCESS means the observation succeeded. Check meta.process_status and meta.exit_code for the command outcome. RUNNING has exit_code null. EXITED reports the exit code, with 0 indicating a successful exit. Interpret nonzero codes according to the command. A PROCESS Target supports later metadata queries and wait/write/control. Initial wait does not limit process lifetime. Native NEXT reads a frozen result. JS returns the full observation.
 
 ```ts
 export type ExecProcessSuccess =
@@ -9,6 +9,9 @@ export type ExecProcessSuccess =
       meta: {
         status: "SUCCESS";
         process_status: "RUNNING";
+        /**
+         * The process was still running at observation time.
+         */
         exit_code: null;
         cwd: string;
       };
@@ -19,6 +22,9 @@ export type ExecProcessSuccess =
       meta: {
         status: "SUCCESS";
         process_status: "EXITED";
+        /**
+         * Observed exit code. Zero indicates a successful exit.
+         */
         exit_code: number;
         cwd: string;
       };

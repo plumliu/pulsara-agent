@@ -158,6 +158,8 @@ class CapabilitySourceQuery:
                     return
                 raise CapabilityQueryError("NOT_FOUND", "未找到该技能；其说明文件或来源当前不可读取。")
         records.sort(key=lambda item: canonical_json_bytes(item["target"]))
+        if target is None and records:
+            self.content.insert(0, _text("技能列表按来源列出定义，范围包括已禁用和当前未选择的副本。\n"))
         self.content.extend(_object(item) for item in records)
         if not records:
             self.content.append(_text("没有找到符合条件的技能。"))
@@ -282,16 +284,21 @@ class CapabilitySourceQuery:
         return config if config is not None and config.runtime_source == server.runtime_source else None
 
     def _service_record(self, server):
-        status = {"READY": "已连接，目录已发现。", "DISABLED": "已禁用。", "CONNECTING": "连接中，目录未知。",
-            "DISCOVERING": "正在发现目录。", "FAILED_RETRYABLE": "连接暂不可用。", "FAILED_TERMINAL": "连接失败。"}.get(server.status.value, server.status.value)
+        config = self._matching_config(server)
+        state = "DISABLED" if config is not None and not config.enabled else server.status.value
+        status = {
+            "READY": "已连接，目录已发现。",
+            "DISABLED": "已配置，当前已禁用。",
+            "CONNECTING": "连接中，目录未知。",
+            "DISCOVERING": "正在发现目录。",
+            "FAILED_RETRYABLE": "连接暂不可用。",
+            "FAILED_TERMINAL": "连接失败。",
+        }.get(state, state)
         record = {"target": dict(server.connection_target), "name": server.display_name, "status": status}
         if server.sanitized_instructions:
             record["instructions"] = server.sanitized_instructions
-        config = self._matching_config(server)
         candidate = self._accepted_directory(server.server_id) if config is not None else None
-        if config is not None and not config.enabled:
-            record["status"] = "已禁用。"
-        elif server.status.value == "READY" and (candidate is None or self._current_candidate(server.server_id) is None):
+        if state == "READY" and (candidate is None or self._current_candidate(server.server_id) is None):
             record["status"] = "连接或目录暂不可用。"
         if candidate is not None:
             record["resource_count"] = len(candidate.discovery_snapshot.resources)

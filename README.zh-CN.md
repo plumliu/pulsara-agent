@@ -5,14 +5,14 @@
   <img src="assets/banner.png" alt="Pulsara — 持久会话、可审阅的工作记录、语义记忆" width="100%">
 </p>
 <p align="center">
-  <a href="https://github.com/plumliu/pulsara-agent/releases/tag/v0.2.1-alpha.1"><img src="https://img.shields.io/github/v/release/plumliu/pulsara-agent?include_prereleases&style=for-the-badge&color=b87b2d" alt="Latest release"></a>
+  <a href="https://github.com/plumliu/pulsara-agent/releases/tag/v0.2.0-alpha.2"><img src="https://img.shields.io/github/v/release/plumliu/pulsara-agent?style=for-the-badge&color=b87b2d" alt="Latest release"></a>
   <img src="https://img.shields.io/badge/Python-3.12%2B-111827?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.12+">
   <img src="https://img.shields.io/badge/Electron-44-47848F?style=for-the-badge&logo=electron&logoColor=white" alt="Electron 44">
   <img src="https://img.shields.io/badge/React-19-149ECA?style=for-the-badge&logo=react&logoColor=white" alt="React 19">
   <img src="https://img.shields.io/badge/PostgreSQL-17-336791?style=for-the-badge&logo=postgresql&logoColor=white" alt="PostgreSQL 17">
 </p>
 <p align="center">
-  <a href="https://github.com/plumliu/pulsara-agent/releases/tag/v0.2.1-alpha.1">下载桌面版</a> &nbsp; | &nbsp;
+  <a href="https://github.com/plumliu/pulsara-agent/releases/tag/v0.2.0-alpha.2">下载桌面版</a> &nbsp; | &nbsp;
   <a href="#demo">观看演示</a> &nbsp; | &nbsp;
   <a href="INSTALL.zh-CN.md">安装说明</a> &nbsp; | &nbsp;
   <a href="README.md">English</a>
@@ -75,11 +75,11 @@ Pulsara 也认真对待长上下文的开销。稳定的提示词前缀让支持
 
 ## 装好就能开工
 
-[下载 Pulsara 0.2.1-alpha.1](https://github.com/plumliu/pulsara-agent/releases/tag/v0.2.1-alpha.1)
+[下载 Pulsara 0.2.0-alpha.2](https://github.com/plumliu/pulsara-agent/releases/tag/v0.2.0-alpha.2)
 
 | 操作系统 | 快捷通道 |
 | --- | --- |
-| macOS 15+ (Apple Silicon) | [下载 DMG 🚀](https://github.com/plumliu/pulsara-agent/releases/download/v0.2.1-alpha.1/Pulsara-0.2.1-alpha.1-macos-arm64.dmg) |
+| macOS 15+ (Apple Silicon) | [下载 DMG 🚀](https://github.com/plumliu/pulsara-agent/releases/download/v0.2.0-alpha.2/Pulsara-0.2.0-alpha.2-macos-arm64.dmg) |
 
 本版仅提供 macOS Apple Silicon DMG。Windows + WSL 和 Ubuntu 的源码构建方式见[开发指南](DEVELOPMENT.zh-CN.md)。
 

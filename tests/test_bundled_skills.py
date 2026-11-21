@@ -593,7 +593,7 @@ def _example_records(value):
 
 
 @pytest.mark.parametrize("work_status", ["completed", "stopped", "running"])
-def test_code_mode_agent_guide_dispatches_dependencies_and_reads_exact_work(work_status):
+def test_code_mode_agent_guide_waits_for_unfinished_work_and_reads_b(work_status):
     from pulsara_agent.code_mode import CodeModeToolResult
     from pulsara_agent.identity import is_valid_id
 
@@ -607,13 +607,11 @@ def test_code_mode_agent_guide_dispatches_dependencies_and_reads_exact_work(work
             assert members[0]["parameters"]["materials"] == [
                 {"kind": "CONTEXT_MATERIAL", "turns": 1}
             ]
-            assert members[1]["parameters"]["depends_on"] == [
-                {"kind": "WORK", "work_id": members[0]["work_id"]}
-            ]
-            assert json.dumps(
-                {"kind": "AGENT", "agent_id": members[0]["agent_id"]},
-                separators=(",", ":"),
-            ) in members[1]["parameters"]["instruction"]
+            work_a = {"kind": "WORK", "work_id": members[0]["work_id"]}
+            assert members[1]["parameters"]["depends_on"] == [work_a]
+            assert json.dumps(work_a, separators=(",", ":")) in (
+                members[1]["parameters"]["instruction"]
+            )
             value = _accepted_agent_example(members)
             accepted.extend(_example_records(value))
             assert all(
@@ -622,30 +620,34 @@ def test_code_mode_agent_guide_dispatches_dependencies_and_reads_exact_work(work
                 for row in accepted
             )
         elif call.tool_name == "wait_agent":
+            wait_index = len(calls) - 2
+            assert wait_index in (0, 1)
+            rows = accepted[wait_index:]
             assert call.arguments == {
-                "works": [row["work"] for row in accepted],
-                "settle": "all",
+                "works": [row["work"] for row in rows],
+                "settle": "first",
                 "timeout_seconds": 60,
             }
+            statuses = ("completed", "running") if wait_index == 0 else (work_status,)
             value = {
                 "meta": {
                     "status": "SUCCESS",
-                    "wait_reason": "timeout" if work_status == "running" else "condition_met",
+                    "wait_reason": "timeout" if statuses == ("running",) else "condition_met",
                 },
                 "content": [
-                    {"type": "object", "value": {**row, "work_status": work_status}}
-                    for row in accepted
+                    {"type": "object", "value": {**row, "work_status": status}}
+                    for row, status in zip(rows, statuses, strict=True)
                 ],
             }
         else:
             assert call.tool_name == "query_agents"
-            assert call.arguments == {"target": accepted[0]["work"]}
+            work_b = accepted[1]
+            assert call.arguments == {"target": work_b["work"]}
             detail = {
-                "target": accepted[0]["work"],
-                "agent": accepted[0]["agent"],
-                "work_title": "Investigate parser",
+                "target": work_b["work"],
+                "agent": work_b["agent"],
+                "work_title": "B: Review the findings",
                 "work_status": work_status,
-                "instruction": "Investigate the parser and report evidence.",
             }
             if work_status == "completed":
                 detail["final"] = "Concrete evidence"
@@ -657,31 +659,31 @@ def test_code_mode_agent_guide_dispatches_dependencies_and_reads_exact_work(work
             }
         return CodeModeToolResult(value=value)
 
-    output = asyncio.run(
-        _execute_code_mode_example(
-            _code_mode_example("agent-orchestration/coordination.md", 0), invoke, False
-        )
-    )
-    assert [call.tool_name for call in calls] == [
-        "run_agent",
-        "wait_agent",
-        "query_agents",
-    ]
+    guide = "agent-orchestration/coordination.md"
+    output = asyncio.run(_execute_code_mode_example(
+        _code_mode_example(guide, 0), invoke, False,
+    ))
+    assert [call.tool_name for call in calls] == ["run_agent", "wait_agent", "wait_agent"]
     assert _example_records(output[0]) == accepted
-    assert output[1]["meta"]["wait_reason"] == (
+    assert output[1]["meta"]["wait_reason"] == "condition_met"
+    assert _example_records(output[1]) == [
+        {**accepted[0], "work_status": "completed"},
+        {**accepted[1], "work_status": "running"},
+    ]
+    assert output[2]["meta"]["wait_reason"] == (
         "timeout" if work_status == "running" else "condition_met"
     )
-    assert [row["work"] for row in _example_records(output[1])] == [
-        row["work"] for row in accepted
-    ]
-    assert [row["work_status"] for row in _example_records(output[1])] == [
-        work_status,
-        work_status,
-    ]
-    assert _example_records(output[2])[0]["target"] == accepted[0]["work"]
-    assert _example_records(output[2])[0].get(
-        "final", _example_records(output[2])[0].get("diagnostic")
-    ) == {"completed": "Concrete evidence", "stopped": "Stopped by user"}.get(work_status)
+    assert _example_records(output[2]) == [{**accepted[1], "work_status": work_status}]
+
+    source = _code_mode_example(guide, 1).replace("queue:<B>", accepted[1]["work"]["work_id"])
+    detail = asyncio.run(_execute_code_mode_example(source, invoke, False))
+    report, = _example_records(detail[0])
+    assert report["target"] == accepted[1]["work"]
+    assert report["work_status"] == work_status
+    assert report.get("final", report.get("diagnostic")) == {
+        "completed": "Concrete evidence",
+        "stopped": "Stopped by user",
+    }.get(work_status)
 
 
 def test_code_mode_examples_reuse_actual_agent_in_a_fresh_cell():
@@ -712,8 +714,8 @@ def test_code_mode_examples_reuse_actual_agent_in_a_fresh_cell():
         invoke, False,
     ))
     agent_id = _example_records(first[0])[0]["agent"]["agent_id"]
-    source = _code_mode_example("agent-orchestration/coordination.md", 1).replace(
-        "session:aaaaaaaaaaaaaaaaaaaaaaaaaa", agent_id
+    source = _code_mode_example("agent-orchestration/coordination.md", 2).replace(
+        "session:<copy the accepted agent_id>", agent_id
     )
     second = asyncio.run(_execute_code_mode_example(source, invoke, False))
     assert (

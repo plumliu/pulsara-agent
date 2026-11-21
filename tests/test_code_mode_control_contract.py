@@ -4,9 +4,15 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+
+from pulsara_agent.code_mode.contracts import CodeModeError
+from pulsara_agent.conversation_kernel import tool_runtime, tool_runtime_results
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
-from pulsara_agent.tools.builtins.filesystem import ReadFileTool
+from pulsara_agent.conversation_kernel.tool_surface import BuiltinExecutionPolicyRef
 from pulsara_agent.identity import random_id
+from pulsara_agent.model_input.contracts import ModelInputScopeKind
+from pulsara_agent.tools.builtins.filesystem import ReadFileTool
 
 
 def port(owner, **extra):
@@ -179,3 +185,70 @@ def test_manage_cell_reports_actual_terminal_state_and_unsettled_effect_count():
         )
     ).public_value()
     assert result["content"] == [{"type": "text", "value": "脚本已结束。"}]
+
+
+@pytest.mark.parametrize("expected_state", ["SUCCESS", "APPLICATION_ERROR"])
+def test_manage_cell_duration_includes_wait(monkeypatch, expected_state):
+    now = 10.0
+
+    def clock():
+        return now
+
+    monkeypatch.setattr(tool_runtime, "monotonic", clock)
+    monkeypatch.setattr(tool_runtime_results, "monotonic", clock)
+    target = {"kind": "CELL", "cell_id": random_id("cell")}
+
+    async def wait_state(cell_id, yield_time_ms):
+        nonlocal now
+        assert (cell_id, yield_time_ms) == (target["cell_id"], 1_000)
+        now += 0.125
+        if expected_state == "APPLICATION_ERROR":
+            raise CodeModeError("unavailable", "wait failed")
+        return {"state": "completed", "pending_calls": 0}
+
+    capture = SimpleNamespace(error=None)
+    owner = SimpleNamespace(
+        find_cell_snapshot=lambda _: capture,
+        capture_cell=lambda _: capture,
+        wait_state=wait_state,
+    )
+    binding = SimpleNamespace(
+        tool_name="manage_cell",
+        execution_policy=BuiltinExecutionPolicyRef("manage_cell", "fixture"),
+    )
+    scope = ModelInputScopeKind.ROOT
+    borrow = SimpleNamespace(
+        code_cell_id=None,
+        prepared=SimpleNamespace(access=SimpleNamespace(conversation_scope_kind=scope)),
+        execution_binding=lambda _: binding,
+    )
+    request = {
+        "tool_call_id": random_id("call"),
+        "attempt_id": random_id("attempt"),
+        "turn_id": random_id("turn"),
+        "assistant_entry_id": random_id("entry"),
+    }
+    context = SimpleNamespace(
+        **request,
+        session_id=random_id("session"),
+        attempt_permission_snapshot_fingerprint="permission",
+        permission_snapshot_fingerprint="permission",
+        conversation_scope_kind=scope.value,
+        surface_borrow=borrow,
+        cell_cancel_event=None,
+    )
+    surface = port(
+        owner,
+        _closed=False,
+        _session_id=context.session_id,
+        _validate_surface_borrow=lambda *_: None,
+    )
+    result = asyncio.run(surface.invoke(
+        tool_name="manage_cell",
+        arguments={"target": target, "action": "wait", "yield_time_ms": 1_000},
+        invocation_context=context,
+        **request,
+    ))
+    assert result.state == expected_state
+    assert result.physical_observation is not None
+    assert result.physical_observation.elapsed_microseconds == 125_000

@@ -23,8 +23,16 @@ def read_file_parameters_schema(*, native=True):
     path = _object(
         {
             "target": path_target_schema(),
-            "offset": {"type": "integer", "not": {"const": 0}},
-            "limit": {"type": "integer", "minimum": 1},
+            "offset": {
+                "type": "integer",
+                "not": {"const": 0},
+                "description": "Starting LF line (nonzero, default 1). Negative offsets count from the end. Reading proceeds forward.",
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Positive maximum number of lines selected by this call. Omit to read through the end of the file.",
+            },
         },
         ["target"],
     )
@@ -32,9 +40,11 @@ def read_file_parameters_schema(*, native=True):
         return path
     from pulsara_agent.ports.tool_output import next_target_schema
 
+    next_target = next_target_schema()
+    next_target["description"] = "NEXT Target returned by the native result page being continued."
     return {
         "type": "object",
-        "oneOf": [path, _object({"target": next_target_schema()}, ["target"])],
+        "oneOf": [path, _object({"target": next_target}, ["target"])],
     }
 
 
@@ -108,7 +118,11 @@ def file_tool_result_schema(name, *, output_mode=None):
     content = None
     if name == "read_file":
         meta = {
-            "total_lines": {"type": "integer", "minimum": 0},
+            "total_lines": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Total LF lines in the source file.",
+            },
             "file_size": {"type": "integer", "minimum": 0},
             "had_utf8_bom": {"type": "boolean"},
         }

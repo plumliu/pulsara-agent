@@ -1,6 +1,6 @@
 # Build Pulsara
 
-[简体中文](DEVELOPMENT.zh-CN.md) · [Installation](INSTALL.md) · [Downloads: 0.2.1-alpha.1](https://github.com/plumliu/pulsara-agent/releases/tag/v0.2.1-alpha.1)
+[简体中文](DEVELOPMENT.zh-CN.md) · [Installation](INSTALL.md) · [Downloads: 0.2.0-alpha.2](https://github.com/plumliu/pulsara-agent/releases/tag/v0.2.0-alpha.2)
 
 Read [AGENTS.md](AGENTS.md) before changing code. Build native resources on the target OS; Windows uses a Linux payload built in WSL2 Ubuntu and an Electron shell built on Windows.
 
@@ -61,7 +61,7 @@ The EXE is written to `desktop/release/Pulsara-<version>-windows-x64.exe`. The b
 
 ## Native Ubuntu
 
-No Ubuntu deb is published for 0.2.1-alpha.1. Native x64/arm64 desktop acceptance remains deferred. To build locally, install mise and run as a normal user:
+No Ubuntu deb is published for 0.2.0-alpha.2. Native x64/arm64 desktop acceptance remains deferred. To build locally, install mise and run as a normal user:
 
 ```sh
 sudo apt update
@@ -72,7 +72,7 @@ mise install
 mise run desktop:bootstrap
 mise exec -- .venv/bin/python -m playwright install-deps chromium
 mise run --jobs 1 desktop:package
-sudo apt install ./desktop/release/Pulsara-0.2.1-alpha.1-linux-amd64.deb
+sudo apt install ./desktop/release/Pulsara-0.2.0-alpha.2-linux-amd64.deb
 ```
 
 Use the arm64 filename on ARM64. A container build uses the same task graph:
@@ -109,10 +109,10 @@ The Electron archive includes only startup fonts (Inter, Noto Sans SC and Gelasi
 
 ## Releases
 
-The 0.2.1-alpha.1 release ships a locally built macOS ARM64 DMG. Python and the CLI use `0.2.1a1`. Desktop and npm metadata use `0.2.1-alpha.1`, and Settings derives its display version, `0.2.1`, from the Python runtime version. Keep the Python package, runtime constant, npm packages and lockfiles consistent.
+The 0.2.0-alpha.2 release ships a locally built macOS ARM64 DMG. Python and the CLI use `0.2.0a2`. Desktop and npm metadata use `0.2.0-alpha.2`, and Settings derives its display version, `0.2.0`, from the Python runtime version. Keep the Python package, runtime constant, npm packages and lockfiles consistent.
 
-GitHub Actions are manual. The Native Desktop Packages workflow and `release_artifacts.py assemble/draft` require all four platform installers, so this macOS-only release uses the local `desktop:package` task and GitHub CLI. Commit version metadata and documentation, push the matching tag, and create a draft with `--verify-tag`. Upload only `Pulsara-0.2.1-alpha.1-macos-arm64.dmg` and verify its remote name and size. Publish with `--prerelease=false --latest` to mark it Latest. Keep published tags and assets fixed.
+GitHub Actions are manual. The Native Desktop Packages workflow and `release_artifacts.py assemble/draft` require all four platform installers, so this macOS-only release uses a local electron-builder build and GitHub CLI. Commit version metadata and documentation, push the matching tag, and create a draft with `--verify-tag`. Upload only `Pulsara-0.2.0-alpha.2-macos-arm64.dmg` and verify its remote name and size. Publish with `--prerelease=false --latest` to mark it Latest. Keep published tags and assets fixed.
 
-Check version consistency with `mise exec -- uv run --no-sync python desktop/scripts/release_artifacts.py check --tag v0.2.1-alpha.1`.
+Check version consistency with `mise exec -- uv run --no-sync python desktop/scripts/release_artifacts.py check --tag v0.2.0-alpha.2`.
 
 Desktop reset and explicit uninstall follow the [current maintenance contract](archived_docs/DESKTOP_DATA_RESET_IMPLEMENTATION.zh.md). Startup notifications reuse the workbench toast component; `npm --prefix frontend run build:startup` builds that shell entry, including in the Windows resource task. Run `mise exec -- .venv/bin/python desktop/scripts/smoke_reset.py` to verify incompatible-baseline reset and fresh initialization with a temporary home and bundled PostgreSQL, without reading personal settings.

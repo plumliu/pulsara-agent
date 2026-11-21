@@ -1,6 +1,6 @@
 # `tools.wait_agent(args)`
 
-Wait with either works or agents. settle is all (default) or first; timeout_seconds is 0–300 (default 30). WORK waits for terminal state. AGENT waits for idle or a message from one of the specified Agents. Already satisfied targets count immediately. Check meta.wait_reason and the records, which cover all targets in input order.
+Wait with either works or agents. settle is all (default) or first; timeout_seconds is 0–300 (default 30). WORK waits for terminal state. AGENT waits for idle or a message from one of the specified Agents. Already satisfied targets count immediately. Check meta.wait_reason and the records, which cover all targets in input order. wait_reason:timeout ends this observation, and queued or running Work continues.
 
 ```ts
 export type WaitAgentArgs =

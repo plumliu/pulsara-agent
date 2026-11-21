@@ -41,7 +41,7 @@ interface ExecProcessArgs {
 | target | 本次命令的 PROCESS Target，用于后续查询、观察或交互；正常取得已退出结果时仍保留 |
 | meta.status | 工具调用状态：SUCCESS／ERROR／CANCELLED，与进程是否成功退出分开 |
 | meta.process_status | RUNNING 或 EXITED；退出码非零也属于 EXITED |
-| meta.exit_code | RUNNING 时为 null，EXITED 时为真实退出码，不用 -1 充当运行中占位 |
+| meta.exit_code | RUNNING 时为 null，EXITED 时为观察到的退出码。0 表示成功退出，非零值按命令的约定解释 |
 | meta.cwd | 实际解析后的工作目录，使用绝对路径 |
 | content | TextPart[]，仅保存本次实际取得的终端公开输出；没有输出为 [] |
 

@@ -243,14 +243,14 @@ async def execute_media(
         action, crop = arguments.get("action", "overview"), arguments.get("crop")
         description = {
             "detail": "首、中、终点之前三个时间目标",
-            "overview": "稀疏代表状态",
+            "overview": (
+                "稀疏代表状态。representative_range 是按代表帧时间划分的导航区间，"
+                "端点与分镜切点无关"
+            ),
             "motion": "按真实时间顺序观察",
         }[action]
-        parts.append(
-            ResultPart(
-                "text", f"{action}：请求 [{start:g}, {end:g}) 秒；{description}。\n"
-            )
-        )
+        heading = f"{action}：请求 [{start:g}, {end:g}) 秒；{description}。"
+        parts.append(ResultPart("text", heading + "\n"))
         # Selection/render batches bound the live raster working set only. They
         # never stop the request or create a source continuation for the model.
         budget = FrameBudget(
@@ -401,6 +401,15 @@ async def execute_media(
                 )
             window = following
         source.assert_unchanged()
+        if action == "motion":
+            frame_count = sum(
+                len(part.value["frames"]) for part in parts if part.type == "object"
+            )
+            parts[0] = ResultPart(
+                "text",
+                f"{heading}完整结果包含 {frame_count} 帧、{len(images)} 张拼图，"
+                f"最后一帧起于 {previous_t:.6f} 秒。\n",
+            )
         return finish("SUCCESS")
     except asyncio.CancelledError:
         if parts:

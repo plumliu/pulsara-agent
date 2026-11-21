@@ -208,6 +208,12 @@ def test_motion_runs_all_internal_windows_without_model_continuations(
     assert len(frames) == 21
     assert [cell["t"] for cell in frames] == pytest.approx([i / 10 for i in range(21)])
     assert len(indices) >= 3
+    summary = result.content.content[0]
+    assert summary.type == "text"
+    assert summary.value == (
+        "motion：请求 [0, 2.1) 秒；按真实时间顺序观察。"
+        f"完整结果包含 21 帧、{len(indices)} 张拼图，最后一帧起于 2.000000 秒。\n"
+    )
     assert all("cell_rect" in cell and "n" in cell for cell in frames)
     assert [p.type for p in result.content.content[1:]] == [
         kind for _ in indices for kind in ("object", "image")
@@ -227,6 +233,12 @@ def test_overview_is_collage_with_local_grid_index_and_requested_crop(tmp_path):
         )
     )
     assert result.state == "SUCCESS"
+    summary = result.content.content[0]
+    assert summary.type == "text"
+    assert summary.value == (
+        "overview：请求 [0, 2) 秒；稀疏代表状态。"
+        "representative_range 是按代表帧时间划分的导航区间，端点与分镜切点无关。\n"
+    )
     pairs = result.content.content[1:]
     assert all(
         pairs[i].type == "object" and pairs[i + 1].type == "image"

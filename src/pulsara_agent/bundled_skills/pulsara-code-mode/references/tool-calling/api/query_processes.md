@@ -35,6 +35,9 @@ export interface QueryProcessesSuccess {
               stdin_closed: boolean;
               duration_seconds: number;
               process_status: "RUNNING";
+              /**
+               * The process was still running at observation time.
+               */
               exit_code: null;
             }
           | {
@@ -44,6 +47,9 @@ export interface QueryProcessesSuccess {
               stdin_closed: boolean;
               duration_seconds: number;
               process_status: "EXITED";
+              /**
+               * Observed exit code. Zero indicates a successful exit.
+               */
               exit_code: number;
             };
       }

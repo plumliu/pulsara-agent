@@ -344,7 +344,6 @@ export interface RuntimeProjection {
   promptTransitions: LocalPromptSubmission[];
   planMode: boolean;
   activeTurnId?: string;
-  activeToolsOutsideHistory?: readonly { attemptId: string; name: string }[];
   manualCompactionCommandId?: string;
   hostSessionId?: string;
   control: ProtocolCanonicalControl;
@@ -4509,15 +4508,6 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     const todo = projectTodo(this.liveControl, this.scopeKind);
     const interaction = projectInteraction(this.liveControl, this.control);
     const reading = this.projectReading(history, messages);
-    const activeToolsOutsideHistory = activeTurnId && activeTurnIds.has(activeTurnId) && reading.history.atLatest
-      ? this.control.tool_attempts?.flatMap(attempt => {
-          if (attempt.turn_id !== activeTurnId || !attempt.attempt_id || !attempt.tool_name) return [];
-          const sourceVisible = attempt.source_kind !== 'CODE_MODE_CALL'
-            && reading.messages.some(message => !message.viewSource && message.id === attempt.assistant_entry_id
-              && message.traces?.some(trace => trace.id === attempt.tool_call_id));
-          return sourceVisible ? [] : [{ attemptId: attempt.attempt_id, name: attempt.tool_name }];
-        })
-      : undefined;
     return {
       ...reading,
       canonicalInputs: canonicalInputs(messages),
@@ -4536,7 +4526,6 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
         && Object.keys(this.control.active_plan_workflow).length,
       ),
       activeTurnId,
-      activeToolsOutsideHistory,
       manualCompactionCommandId: manualCommandId || undefined,
       hostSessionId: this.liveControl.host_session_id || undefined,
       control: this.control,

@@ -402,7 +402,7 @@ motion 以持续运动为主要场景，适用于体育、影视、自然拍摄�
 | meta.status | SUCCESS／ERROR／CANCELLED，沿共同状态规则 |
 | content | 简短范围／实际缺口说明，随后按顺序交错保存索引 object 和对应 image |
 
-meta 只保留 status，不重复 action、from／to、crop、显示尺寸或分析统计。范围说明写入解析后的本次请求范围，不将第一张图或当前页面的时刻当作整个业务范围。视频起止与请求存在真实缺口时在文字中明确，不制造画面，也不用 next:null 掩盖缺口。
+meta 只保留 status，不重复 action、from／to、crop、显示尺寸或分析统计。范围说明写入解析后的本次请求范围，不将第一张图或当前页面的时刻当作整个业务范围。motion 成功时在首条说明中给出完整结果的帧数、拼图数和末帧展示起点。视频起止与请求存在真实缺口时在文字中明确，不制造画面，也不用 next:null 掩盖缺口。
 
 detail 索引直接描述紧随其后的单张观察图片；overview／motion 的每个索引只包含紧随其后那张拼图的格子。图片配对来自有序出现，不并列保存全局图片编号清单，不新建分组或绑定字段。
 
@@ -469,7 +469,7 @@ type ReadVideoFramesResult =
 | dt | 视频 owner 已提供的适用相邻观察间隔，不按原生交付页重算 |
 | n | 拼图中实际显示的格子编号；不因交付分页重新编号或重绘 |
 | cell_rect | 拼图上的归一化 [left,top,right,bottom] 边界，基于该张完整拼图；与 crop 同为边界形式，但二者所指画布不同 |
-| representative_range | overview 的代表区间，适用时保留；不是逐帧连续观察的覆盖承诺 |
+| representative_range | overview 的导航区间，按代表帧时间划分。相邻代表帧的时刻中点划分内部区间，端点与分镜切点无关 |
 
 detail 不返回无必要的整图 cell_rect、拼图格子 n 或独立图片数字编号。各 action 的可选索引字段只在视频 owner 有对应实际事实时提供，不填空占位或从图像内容猜测。
 
@@ -497,13 +497,13 @@ detail 不返回无必要的整图 cell_rect、拼图格子 n 或独立图片数
   "target": {"kind": "PATH", "path": "videos/demo.mp4"},
   "meta": {"status": "SUCCESS"},
   "content": [
-    {"type": "text", "value": "overview：请求 [0,10) 秒，以下为稀疏代表画面。\n"},
+    {"type": "text", "value": "overview：请求 [0, 10) 秒；稀疏代表状态。representative_range 是按代表帧时间划分的导航区间，端点与分镜切点无关。\n"},
     {
       "type": "object",
       "value": {
         "frames": [
-          {"n": 1, "t": 0.0, "cell_rect": [0.0, 0.0, 0.5, 1.0], "representative_range": [0.0, 5.0]},
-          {"n": 2, "t": 5.0, "cell_rect": [0.5, 0.0, 1.0, 1.0], "representative_range": [5.0, 10.0]}
+          {"n": 1, "t": 0.0, "cell_rect": [0.0, 0.0, 0.5, 1.0], "representative_range": [0.0, 4.5]},
+          {"n": 2, "t": 9.0, "cell_rect": [0.5, 0.0, 1.0, 1.0], "representative_range": [4.5, 10.0]}
         ]
       }
     },
@@ -524,7 +524,7 @@ meta:
   status: SUCCESS
 
 content:
-  overview：请求 [0,10) 秒，以下为稀疏代表画面。
+  overview：请求 [0, 10) 秒；稀疏代表状态。representative_range 是按代表帧时间划分的导航区间，端点与分镜切点无关。
   {
     "frames": [
       {
@@ -538,12 +538,12 @@ content:
         ],
         "representative_range": [
           0.0,
-          5.0
+          4.5
         ]
       },
       {
         "n": 2,
-        "t": 5.0,
+        "t": 9.0,
         "cell_rect": [
           0.5,
           0.0,
@@ -551,7 +551,7 @@ content:
           1.0
         ],
         "representative_range": [
-          5.0,
+          4.5,
           10.0
         ]
       }
@@ -671,7 +671,7 @@ return {inspection: {evidence: result.content}};
 target: <本次视频 PATH>
 meta: {status: SUCCESS}
 content:
-  text：motion：请求 [20,21) 秒，按实际展示时间排列的连续观察。
+  text：motion：请求 [20, 21) 秒；按真实时间顺序观察。完整结果包含 30 帧、2 张拼图，最后一帧起于 20.966667 秒。
   object：{frames: [本张拼图的全部格子索引]}
   image：<拼图 A 的 IMAGE_REF>
   object：{frames: [下一张拼图的全部格子索引]}
@@ -690,7 +690,7 @@ meta:
   status: SUCCESS
 
 content:
-  motion：请求 [20,21) 秒，按实际展示时间排列的连续观察。
+  motion：请求 [20, 21) 秒；按真实时间顺序观察。完整结果包含 30 帧、2 张拼图，最后一帧起于 20.966667 秒。
   <本张拼图完整格子索引的 JSON 文字>
   图片引用：{"kind":"IMAGE_REF","image_ref":"image:<拼图A>"}
 

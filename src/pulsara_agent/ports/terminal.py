@@ -11,7 +11,15 @@ from pulsara_agent.identity import ID_PAYLOAD_PATTERN
 
 
 DEFAULT_WAIT_TIMEOUT_SECONDS = 30
-EXEC_PROCESS_TOOL_DESCRIPTION = "Start a shell command and observe its complete available public output. A PROCESS Target supports later metadata queries and wait/write/control. Initial wait does not limit process lifetime. Native NEXT reads a frozen result; JS returns the full observation."
+EXEC_PROCESS_TOOL_DESCRIPTION = (
+    "Start a shell command and observe its complete available public output. "
+    "meta.status SUCCESS means the observation succeeded. "
+    "Check meta.process_status and meta.exit_code for the command outcome. "
+    "RUNNING has exit_code null. EXITED reports the exit code, with 0 indicating a successful exit. "
+    "Interpret nonzero codes according to the command. "
+    "A PROCESS Target supports later metadata queries and wait/write/control. "
+    "Initial wait does not limit process lifetime. Native NEXT reads a frozen result. JS returns the full observation."
+)
 QUERY_PROCESSES_TOOL_DESCRIPTION = "Query this session's retained process metadata without reading or consuming logs. Omit target to list all current records, or provide one PROCESS Target."
 MANAGE_PROCESS_TOOL_DESCRIPTION = "Observe or control a process in this session. wait: target, optional timeout_seconds (0–30; default 30); write: target,data,optional yield_time_ms (0–30000; default 1000); close_stdin/kill: target only. wait/write return all pending public output and frozen process facts. Nonzero process exit is a successful observation. No action is rerun by NEXT."
 
@@ -155,15 +163,17 @@ def terminal_result_schema(name: str) -> dict[str, Any]:
     from pulsara_agent.ports.tool_execution import tool_business_value_schema
 
     target = _inline_schema_references(TypeAdapter(TerminalProcessTarget).json_schema())
+    process_outcomes = (
+        ("RUNNING", {"type": "null", "description": "The process was still running at observation time."}),
+        ("EXITED", {"type": "integer", "description": "Observed exit code. Zero indicates a successful exit."}),
+    )
     if name in {"exec_process", "manage_process"}:
         success = [tool_business_value_schema(
             fields={"target": target}, required_fields=("target",),
             meta={"process_status": {"const": state}, "exit_code": code,
                   "cwd": {"type": "string"}},
             required_meta=("process_status", "exit_code", "cwd"),
-        ) for state, code in (
-            ("RUNNING", {"type": "null"}), ("EXITED", {"type": "integer"}),
-        )]
+        ) for state, code in process_outcomes]
         return {"oneOf": [*success, tool_business_value_schema(
             fields={"target": target},
             required_fields=("target",) if name == "manage_process" else (),
@@ -178,7 +188,7 @@ def terminal_result_schema(name: str) -> dict[str, Any]:
     records = [{"type": "object", "properties": {
         **common, "process_status": {"const": state}, "exit_code": code,
     }, "required": [*common, "process_status", "exit_code"], "additionalProperties": False}
-        for state, code in (("RUNNING", {"type": "null"}), ("EXITED", {"type": "integer"}))]
+        for state, code in process_outcomes]
     content = {"type": "array", "items": {"oneOf": [
         {"type": "object", "properties": {"type": {"const": "text"}, "value": {"type": "string"}},
             "required": ["type", "value"], "additionalProperties": False},

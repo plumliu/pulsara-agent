@@ -69,7 +69,8 @@ def query_output_schema():
     ]}
     skill = _object({
         "target": capability_target_schema("SKILL"), "name": string,
-        "description": string, "source": source, "status": string,
+        "description": string, "source": source,
+        "status": {"type": "string", "description": "该定义的启用或选择状态。当前已选择表示当前来源解析选中的定义。"},
     }, ["target", "source", "status"])
     hook = _object({
         "target": capability_target_schema("HOOK_SOURCE"), "status": string,
@@ -85,7 +86,8 @@ def query_output_schema():
     }, ["target", "status", "components"])
     service = _object({
         "target": capability_target_schema("MCP_CONNECTION"), "name": string,
-        "status": string, "instructions": string,
+        "status": {"type": "string", "description": "该配置连接的启停、连接和目录发现状态。"},
+        "instructions": string,
         "resource_count": {"type": "integer", "minimum": 0},
         "resource_template_count": {"type": "integer", "minimum": 0},
     }, ["target", "name", "status"])

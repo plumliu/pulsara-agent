@@ -4,16 +4,15 @@ A tool resolves after its complete successful business value is saved. Each
 `content` item has `type` and `value`. Keep its order and use the declared fields.
 JS gets the complete value without native display timestamps or NEXT.
 
-Tool calls can throw a `ToolError` with `code` and `message`. Inspect `err.result`
-when present. It can contain a common error with `meta.status` set to `ERROR` or
-`CANCELLED` and text
-`content`, or the tool-specific failure on its API page. A save or delivery
-error may carry a known `SUCCESS` value. Failed and cancelled calls may have
-accepted effects. Check what happened before retrying.
+Tool calls can throw a `ToolError` with `code` and `message`. When present,
+`err.result` contains the available business value. Read its `meta.status` and
+`content` for failure, cancellation or usable results. A save or delivery error
+may carry a known `SUCCESS` value. Check the actual effects before retrying.
 
-Call `console.log` with the values ROOT needs. Actual image items are recognized
-inside objects and arrays. A bare IMAGE_REF remains text; a failed image lookup
-leaves a text explanation in place and preserves the surrounding output.
+Use `console.log` for progress and a top-level `return` for a final value.
+Pass typed image items as values, including inside an object or array.
+A bare IMAGE_REF or a JSON string is delivered as text. A failed image lookup
+leaves a text explanation and preserves the surrounding output.
 
 ```js
 const result = await tools.view_image({target:{kind:"PATH",path:"chart.png"}});
@@ -21,6 +20,6 @@ console.log({comparison:{selected:result.content.filter(p=>p.type==="image")}});
 ```
 
 Cell output arrives separately from tool results and has no continuation or
-export Target. Each call keeps ownership of accepted effects, even after the
-Cell stops. Use `Promise.all` for independent calls; an error in one leaves other
-submitted calls to settle.
+export Target. Use sequential `await` when one call needs another's result or
+effect. Use `Promise.all` for independent calls. If one rejects, the other
+submitted calls still settle and may have effects.

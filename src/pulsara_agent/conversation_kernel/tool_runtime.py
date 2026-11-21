@@ -144,10 +144,7 @@ from pulsara_agent.primitives.context import (
     thaw_json,
 )
 from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
-from pulsara_agent.primitives.tool_observation import (
-    ToolObservationOrigin,
-    TrustedToolObservationSupplement,
-)
+from pulsara_agent.primitives.tool_observation import TrustedToolObservationSupplement
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
 from pulsara_agent.conversation_kernel.tool_policy import (
@@ -1461,12 +1458,10 @@ class DirectKernelToolPort(
                         parts.append(ResultPart('text', str(error.get('message', error))))
                 business = ToolBusinessValue(public_fields={'target':target,
                     'meta':{'cell_status':state,'pending_calls':pending_calls}}, content=tuple(parts))
-            return KernelToolResult(state='SUCCESS', content=business,
-                physical_observation=_freeze_physical_observation(monotonic(), ToolObservationOrigin.BUILTIN))
+            return KernelToolResult(state='SUCCESS', content=business)
         except (CodeModeError, ValueError, OSError, UnicodeError, LookupError) as error:
             return KernelToolResult(state='APPLICATION_ERROR', content=ToolBusinessValue(
-                public_fields={} if target is None else {'target':target}, content=(ResultPart('text',str(error)),)),
-                physical_observation=_freeze_physical_observation(monotonic(), ToolObservationOrigin.BUILTIN))
+                public_fields={} if target is None else {'target':target}, content=(ResultPart('text',str(error)),)))
 
     def discard_tool_admission(
         self,
@@ -1543,7 +1538,12 @@ class DirectKernelToolPort(
                 invocation_context=invocation_context, invocation_started=invocation_started,
                 observation_origin=observation_origin)
         if tool_name in {"exec_cell", "query_cells", "manage_cell"}:
-            return await self._invoke_code_mode_control(tool_name, arguments, invocation_context)
+            return replace(
+                await self._invoke_code_mode_control(tool_name, arguments, invocation_context),
+                physical_observation=_freeze_physical_observation(
+                    invocation_started, observation_origin
+                ),
+            )
         if tool_name in SESSION_QUERY_TOOL_NAMES:
             return await self._invoke_session_query(
                 tool_name=tool_name,

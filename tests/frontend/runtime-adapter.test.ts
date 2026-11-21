@@ -1888,47 +1888,6 @@ describe('exact prompt projection', () => {
     });
   });
 
-  it('identifies active tools outside the reading window until their exact attempt settles', async () => {
-    const turnId = deriveIdentity('turn', 'tool-activity', 'root');
-    const loadedEntry = deriveIdentity('entry', 'tool-activity', 'loaded');
-    const olderEntry = deriveIdentity('entry', 'tool-activity', 'older');
-    const olderAttempt = deriveIdentity('attempt', 'tool-activity', 'older');
-    const loadedAttempt = deriveIdentity('attempt', 'tool-activity', 'loaded');
-    const childAttempt = deriveIdentity('attempt', 'tool-activity', 'child');
-    const loadedCall = deriveIdentity('call', 'tool-activity', 'loaded');
-    const olderCall = deriveIdentity('call', 'tool-activity', 'older');
-    const resultEntry = deriveIdentity('entry', 'tool-activity', 'result');
-    const responses = [connectPayload([{
-      entry_id: loadedEntry, turn_id: turnId, entry_sequence: '1',
-      entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
-      blocks: [{ block_id: deriveIdentity('block', 'tool-activity', 'loaded'),
-        block_kind: 'TOOL_CALL', tool_call_id: loadedCall, tool_name: 'read_file' }],
-    }], {
-      active_turns: [{ turn_id: turnId, status: 'RUNNING', scope_kind: 'ROOT' }],
-      tool_attempt_total_count: '3',
-      tool_attempts: [
-        { attempt_id: olderAttempt, tool_name: 'exec_process', turn_id: turnId,
-          source_kind: 'MODEL_TOOL_CALL', assistant_entry_id: olderEntry, tool_call_id: olderCall },
-        { attempt_id: loadedAttempt, tool_name: 'read_file', turn_id: turnId,
-          source_kind: 'MODEL_TOOL_CALL', assistant_entry_id: loadedEntry, tool_call_id: loadedCall },
-        { attempt_id: childAttempt, tool_name: 'search_content', turn_id: turnId, source_kind: 'CODE_MODE_CALL' },
-      ],
-    }), { observation: { through_event_sequence: '2', committed: [
-      { projection_kind: 'IMMUTABLE_ENTRY', entry: {
-        entry_id: resultEntry, turn_id: turnId, entry_sequence: '2', entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
-        tool_result: { attempt_id: olderAttempt, assistant_entry_id: olderEntry, tool_call_id: olderCall, result_state: 'SUCCESS' },
-      } },
-    ] } }];
-    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(responses.shift()), {status: 200})));
-    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
-    expect(connection.current().activeToolsOutsideHistory).toEqual([
-      { attemptId: olderAttempt, name: 'exec_process' }, { attemptId: childAttempt, name: 'search_content' },
-    ]);
-    const projection = await connection.observe();
-    expect(projection.isRunning).toBe(true);
-    expect(projection.activeToolsOutsideHistory).toEqual([{ attemptId: childAttempt, name: 'search_content' }]);
-  });
-
   it('reconciles one pending live result when its exact attempt mapping arrives later', async () => {
     const request = {
       entry_id: 'assistant-late', turn_id: 'turn-late', entry_sequence: '1',

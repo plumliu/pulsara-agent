@@ -1,6 +1,6 @@
 # `tools.query_capabilities(args)`
 
-Discover installed capabilities. kind is required: SKILL, HOOK, MCP, or PLUGIN. List SKILL, HOOK or MCP with kind, scope? and parent?; list PLUGIN with kind and scope?. Inspect with kind and target only. MCP also accepts query to search tool names, descriptions and services; do not combine query with target. Tool hits include input_schema and invocation.target for call_mcp_tool; a service hit does not expand its tools. Read Skill or Hook files when details are needed. Subagents may query MCP only. Omit unused fields; null is not omission.
+Inspect capability sources. kind is required (SKILL, HOOK, MCP, or PLUGIN). List SKILL, HOOK or MCP with kind, scope? and parent?. List PLUGIN with kind and scope?. Inspect with kind and target only. SKILL lists definitions by source, including disabled and unselected copies. Use each record's status to identify the currently selected definitions. MCP service records describe configured connections and their current connection or discovery status. MCP also accepts query to search tool names, descriptions and services. Use query separately from target. For callable MCP tools, pass invocation.target to call_mcp_tool with arguments matching input_schema. A service hit describes the connection itself. Read Skill or Hook files when details are needed. Subagents may query MCP only. Omit unused fields.
 
 ```ts
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
@@ -97,6 +97,9 @@ export interface QueryCapabilitiesSuccess {
                 | {
                     kind: "BUNDLED";
                   };
+              /**
+               * 该定义的启用或选择状态。当前已选择表示当前来源解析选中的定义。
+               */
               status: string;
             }
           | {
@@ -122,6 +125,9 @@ export interface QueryCapabilitiesSuccess {
           | {
               target: McpConnectionTarget;
               name: string;
+              /**
+               * 该配置连接的启停、连接和目录发现状态。
+               */
               status: string;
               instructions?: string;
               resource_count?: number;

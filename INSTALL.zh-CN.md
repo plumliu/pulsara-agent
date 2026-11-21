@@ -2,13 +2,13 @@
 
 [English](INSTALL.md) · [从源码构建](DEVELOPMENT.zh-CN.md)
 
-## 下载 0.2.1-alpha.1
+## 下载 0.2.0-alpha.2
 
 | 系统 | 安装包 |
 | --- | --- |
-| macOS 15+，Apple Silicon | [下载 DMG](https://github.com/plumliu/pulsara-agent/releases/download/v0.2.1-alpha.1/Pulsara-0.2.1-alpha.1-macos-arm64.dmg) |
+| macOS 15+，Apple Silicon | [下载 DMG](https://github.com/plumliu/pulsara-agent/releases/download/v0.2.0-alpha.2/Pulsara-0.2.0-alpha.2-macos-arm64.dmg) |
 
-0.2.1-alpha.1 仅提供 macOS Apple Silicon DMG。Windows + WSL 和 Ubuntu 的源码构建方式见[开发指南](DEVELOPMENT.zh-CN.md)。
+0.2.0-alpha.2 仅提供 macOS Apple Silicon DMG。Windows + WSL 和 Ubuntu 的源码构建方式见[开发指南](DEVELOPMENT.zh-CN.md)。
 
 ## macOS
 

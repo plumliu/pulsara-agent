@@ -60,6 +60,8 @@ def test_undiscovered_local_connection_is_one_model_visible_item(tmp_path,scope,
             root=service.workspace_root if scope=='WORKSPACE' else None
             assert row['target']=={'kind':'MCP_CONNECTION','config_path':str(service.mcp.path(LocalMcpTarget('firecrawl',root))),'server_id':'firecrawl'}
             assert 'resource_count' not in row
+            if state is McpServerState.DISABLED:
+                assert row['status'] == '已配置，当前已禁用。'
             detail=await query(service,runtime,{'target':row['target'],'kind':'MCP'})
             assert detail['meta']['status']=='ERROR'
             assert '目录未知' in detail['content'][0]['value']

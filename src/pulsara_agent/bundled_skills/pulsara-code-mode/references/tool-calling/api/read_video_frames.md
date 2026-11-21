@@ -1,6 +1,6 @@
 # `tools.read_video_frames(args)`
 
-Read local video frames. Pass target:PATH, from?, to?, action? and crop?. overview locates content across a range; detail reads text or objects within explicit from/to at most two seconds apart; motion examines changes and order. detail samples start, midpoint and just before the end. Decimal seconds and normalized crop are supported. Returned indices describe the images that follow them.
+Read local video frames. Pass target:PATH, from?, to?, action? and crop?. overview locates content across a range; detail reads text or objects within explicit from/to at most two seconds apart; motion examines changes and order. detail samples start, midpoint and just before the end. Decimal seconds and normalized crop are supported. Returned indices describe the images that follow them. In overview, representative_range is a navigation interval derived from representative frame times, independent of scene boundaries.
 
 ```ts
 export interface ReadVideoFramesArgs {

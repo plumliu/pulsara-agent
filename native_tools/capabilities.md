@@ -95,7 +95,7 @@ Skill 的 skill_path 必须是非空绝对路径；该 Target 不是 PATH Target
 
 ### 1.4 精简返回值与类型
 
-列表和精确查询均只使用 meta、content，不在顶层重复返回 target。二者使用同一个 SkillRecord，每条记录为 type:object/value，target 放在该记录内；列表返回多条匹配记录，精确查询返回目标的一条记录。
+列表和精确查询均只使用 meta、content，不在顶层重复返回 target。二者使用同一个 SkillRecord，每条记录为 type:object/value，target 放在该记录内；有匹配记录时，列表先说明查询范围，再返回各条记录。精确查询返回目标的一条记录。
 
 共同记录保留：
 
@@ -195,6 +195,7 @@ meta:
   status: SUCCESS
 
 content:
+  技能列表按来源列出定义，范围包括已禁用和当前未选择的副本。
   {
     "target": {
       "kind": "SKILL",
@@ -282,12 +283,13 @@ const skills = result.content
 console.log({skills});
 ```
 
-列表值使用 meta/content，记录始终是对象内容项，例如其中一项：
+列表值使用 meta/content。下面示意范围说明和一条记录：
 
 ```json
 {
   "meta": {"status": "SUCCESS"},
   "content": [
+    {"type": "text", "value": "技能列表按来源列出定义，范围包括已禁用和当前未选择的副本。\n"},
     {
       "type": "object",
       "value": {
@@ -695,7 +697,7 @@ MCP_TOOL 的 server_id 是当前调用范围中由 runtime 返回的实际服务
 
 resource_count 是已发现具体资源数量，resource_template_count 是已发现模板数量，不是模板能展开出的实例数。两项均为非负整数，分别只在有可靠目录依据时提供，未知时省略，确认没有才填 0，不填 null 或用 0 代替未知。计数与本次服务记录所用的已接纳目录快照一起冻结，不为取得数字额外请求 MCP，也不保证查询后远端状态始终不变；NEXT 不重算计数。不增加合计、已读数量或目录就绪布尔值。
 
-服务 status 简短说明连接、禁用或目录尚未发现等实际情况。工具目录的 status 说明当前是否可调用；这些是业务状态，不替代 meta.status 的查询状态。来源及运行身份由内部 owner 处理，不再并列返回 source、runtime_target、其他计数、多个状态布尔值或子项查询调用。
+服务 status 简短说明连接、禁用或目录尚未发现等实际情况。禁用的配置连接显示「已配置，当前已禁用。」工具目录的 status 说明当前是否可调用；这些是业务状态，不替代 meta.status 的查询状态。来源及运行身份由内部 owner 处理，不再并列返回 source、runtime_target、其他计数、多个状态布尔值或子项查询调用。
 
 ```typescript
 type McpQueryJsonValue =

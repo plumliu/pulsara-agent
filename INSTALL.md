@@ -2,13 +2,13 @@
 
 [简体中文](INSTALL.zh-CN.md) · [Build from source](DEVELOPMENT.md)
 
-## Download 0.2.1-alpha.1
+## Download 0.2.0-alpha.2
 
 | System | Installer |
 | --- | --- |
-| macOS 15+, Apple Silicon | [Download DMG](https://github.com/plumliu/pulsara-agent/releases/download/v0.2.1-alpha.1/Pulsara-0.2.1-alpha.1-macos-arm64.dmg) |
+| macOS 15+, Apple Silicon | [Download DMG](https://github.com/plumliu/pulsara-agent/releases/download/v0.2.0-alpha.2/Pulsara-0.2.0-alpha.2-macos-arm64.dmg) |
 
-The 0.2.1-alpha.1 release provides a macOS Apple Silicon DMG. For Windows + WSL and Ubuntu source builds, see the [development guide](DEVELOPMENT.md).
+The 0.2.0-alpha.2 release provides a macOS Apple Silicon DMG. For Windows + WSL and Ubuntu source builds, see the [development guide](DEVELOPMENT.md).
 
 ## macOS
 

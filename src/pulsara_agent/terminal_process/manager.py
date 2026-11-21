@@ -614,6 +614,7 @@ class ProcessRegistry:
             if tty:
                 master_fd, slave_fd = pty.openpty()
                 try:
+                    started_at = monotonic()
                     process = subprocess.Popen(
                         shell_argv,
                         cwd=cwd,
@@ -640,6 +641,7 @@ class ProcessRegistry:
                 )
                 mode = TerminalIOMode.PTY
             else:
+                started_at = monotonic()
                 process = subprocess.Popen(
                     shell_argv,
                     cwd=cwd,
@@ -672,7 +674,7 @@ class ProcessRegistry:
                 reader=reader,
                 watcher=None,
                 master_fd=master_fd,
-                started_at=monotonic(),
+                started_at=started_at,
                 interop_scope=scope,
             )
         except BaseException:

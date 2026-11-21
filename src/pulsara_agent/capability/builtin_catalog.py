@@ -135,7 +135,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     **{name: _descriptor(name=name, description=description,
         input_schema=media_parameters_schema(name), is_read_only=True,
         permission_category="filesystem_read") for name, description in (
-        ("read_video_frames", "Read local video frames. Pass target:PATH, from?, to?, action? and crop?. overview locates content across a range; detail reads text or objects within explicit from/to at most two seconds apart; motion examines changes and order. detail samples start, midpoint and just before the end. Decimal seconds and normalized crop are supported. Returned indices describe the images that follow them."),
+        ("read_video_frames", "Read local video frames. Pass target:PATH, from?, to?, action? and crop?. overview locates content across a range; detail reads text or objects within explicit from/to at most two seconds apart; motion examines changes and order. detail samples start, midpoint and just before the end. Decimal seconds and normalized crop are supported. Returned indices describe the images that follow them. In overview, representative_range is a navigation interval derived from representative frame times, independent of scene boundaries."),
         ("read_transcript", "Read timed original text from local video or audio. Pass target:PATH with optional from/to seconds. Embedded text subtitles are preferred; cached or configured ASR fills gaps. The complete requested range is acquired before display pagination. Transcription does not verify subtitles against speech or interpret music."),
         ("annotate_media", "ROOT direct only. As you review a local video or audio file, share your own observations and interpretations with the user as a timeline note on the relevant passage. The user can read it while you continue reviewing and click it to revisit that passage. Provide target, from/to seconds and nonblank plain text. Notes are append-only and leave playback and the source file unchanged."),
     )},
@@ -182,7 +182,15 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "query_capabilities": _descriptor(
         name="query_capabilities",
         description=(
-            'Discover installed capabilities. kind is required: SKILL, HOOK, MCP, or PLUGIN. List SKILL, HOOK or MCP with kind, scope? and parent?; list PLUGIN with kind and scope?. Inspect with kind and target only. MCP also accepts query to search tool names, descriptions and services; do not combine query with target. Tool hits include input_schema and invocation.target for call_mcp_tool; a service hit does not expand its tools. Read Skill or Hook files when details are needed. Subagents may query MCP only. Omit unused fields; null is not omission.'
+            "Inspect capability sources. kind is required (SKILL, HOOK, MCP, or PLUGIN). "
+            "List SKILL, HOOK or MCP with kind, scope? and parent?. List PLUGIN with kind and scope?. "
+            "Inspect with kind and target only. SKILL lists definitions by source, including disabled and unselected copies. "
+            "Use each record's status to identify the currently selected definitions. "
+            "MCP service records describe configured connections and their current connection or discovery status. "
+            "MCP also accepts query to search tool names, descriptions and services. Use query separately from target. "
+            "For callable MCP tools, pass invocation.target to call_mcp_tool with arguments matching input_schema. "
+            "A service hit describes the connection itself. Read Skill or Hook files when details are needed. "
+            "Subagents may query MCP only. Omit unused fields."
         ),
         input_schema=query_input_schema(),
         is_read_only=True,
@@ -253,7 +261,12 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "read_file": _descriptor(
         name="read_file",
         description=(
-            'Read a UTF-8 text file, or continue a saved tool result. PATH: target, offset?, limit?; offset is a nonzero LF line number, negative from the end, and limit is a positive number of lines. NEXT: target only, copied unchanged from a tool result. NEXT continues that frozen result without running its tool again; it cannot be used in Code Mode. Paths may be workspace-relative, absolute or ~ paths. Omit unused fields; null is invalid.'
+            "Read a UTF-8 file with a PATH Target or page through a frozen native tool result with a NEXT Target. "
+            "PATH selects file lines using offset and limit. meta.total_lines counts the whole file. "
+            "To select later file lines, make a new PATH call with offset. "
+            "For NEXT, pass only target, copied unchanged from the next value of the native result page you are continuing. "
+            "This reads the same frozen result within its original scope. On normal delivery, next:null ends that result. "
+            "Paths may be workspace-relative, absolute or ~ paths. Omit unused fields; null is invalid."
         ),
         input_schema=read_file_parameters_schema(),
         is_read_only=True,
@@ -420,7 +433,9 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "query_agents": _descriptor(
         name="query_agents",
         description=(
-            "Query collaborating agents and work. No target lists agents; target:AGENT lists that agent's work; target:WORK reads one work's submitted answer or stop explanation. Pass only target when selecting one object. A missing title does not establish that the agent is idle."
+            "Query collaborating agents and work. Omit target to list agents. Pass target:AGENT to list that agent's work. "
+            "Pass target:WORK for one assignment's work_status and any available final answer or stop explanation. "
+            "Pass only target when selecting one object. Check current_work and queued_work_count for agent activity."
         ),
         input_schema=query_agents_input_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
@@ -450,7 +465,12 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     ),
     "exec_cell": _descriptor(
         name="exec_cell",
-        description="Start a JavaScript Cell. Pass exactly one of code (inline JavaScript) or target:PATH (a UTF-8 source file). Read the needed tool interfaces before writing the business script. Tool calls return full saved business values. Use console.log to send selected values separately to the conversation. This tool's result reports the Cell start, not its eventual output.",
+        description=(
+            "Start a JavaScript Cell. Pass exactly one of code (inline JavaScript) or target:PATH (a UTF-8 source file). "
+            "Read the needed tool interfaces before writing the business script. Each successful tool call inside the Cell "
+            "resolves to its complete saved value in JavaScript. NEXT is reserved for native result pagination. "
+            "Use console.log to send selected values separately to the conversation. This tool's result reports the Cell start."
+        ),
         input_schema=exec_cell_parameters_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False, permission_category="subagent_runtime",
@@ -467,9 +487,10 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         description=(
             "Pass target:CELL and action. wait waits for a final state up to yield_time_ms "
             "(default 1000), or immediately returns a saved final state from this session. "
-            "Read meta.cell_status for the Cell outcome. stop stops further execution of a Cell "
-            "held by the current Host. Submitted tool calls settle separately. Use query_cells "
-            "to read source and status."
+            "Read meta.cell_status for script state and meta.pending_calls for the number of unsettled tool calls in the script. "
+            "Use query_agents with a WORK Target for assignment progress. "
+            "stop stops further execution of a Cell held by the current Host. Submitted tool calls settle separately. "
+            "Use query_cells to read source and status."
         ),
         input_schema=manage_cell_parameters_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
@@ -585,13 +606,18 @@ _SCRIPT_API_DESCRIPTORS["wait_agent"] = replace(
             "settle is all (default) or first; timeout_seconds is 0–300 (default 30). "
             "WORK waits for terminal state. AGENT waits for idle or a message from one of "
             "the specified Agents. Already satisfied targets count immediately. Check "
-            "meta.wait_reason and the records, which cover all targets in input order.")),
+            "meta.wait_reason and the records, which cover all targets in input order. "
+            "wait_reason:timeout ends this observation, and queued or running Work continues.")),
     is_model_callable=False,
 )
 _SCRIPT_API_DESCRIPTORS["read_file"] = replace(
     _BUILTIN_DESCRIPTORS["read_file"],
     input_schema=read_file_parameters_schema(native=False),
-    description="Read a local UTF-8 file. Pass target:PATH with optional nonzero offset and positive limit in lines. Omission reads the full file; negative offset locates from the tail while preserving original line order. Returns the complete saved business value without native pages or NEXT.",
+    description=(
+        "Read a local UTF-8 file with target:PATH and optional offset and limit in lines. "
+        "The complete selected range is returned in JavaScript. meta.total_lines counts the whole file. "
+        "To select later lines, make another PATH call with offset."
+    ),
     is_model_callable=False,
 )
 

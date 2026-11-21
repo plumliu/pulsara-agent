@@ -74,6 +74,10 @@ def test_root_lists_local_and_bundled_definitions_as_minimal_records(tmp_path):
         )
         target = installed.business_value.public_fields["target"]
         listing = await query(service, {"kind": "SKILL"})
+        assert listing["content"][0] == {
+            "type": "text",
+            "value": "技能列表按来源列出定义，范围包括已禁用和当前未选择的副本。\n",
+        }
         row = next(item for item in records(listing) if item["target"] == target)
         assert set(row) == {"target", "name", "description", "source", "status"}
         assert row["source"] == {"kind": "LOCAL", "scope": "WORKSPACE"}

@@ -33,6 +33,48 @@ def assert_closed(fd: int) -> None:
     assert caught.value.errno == errno.EBADF
 
 
+@pytest.mark.parametrize("tty", [False, True])
+def test_process_duration_includes_execution_before_popen_returns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tty: bool
+) -> None:
+    registry = M.ProcessRegistry()
+    owner = derive_id("host", "test-fixture", "process-launch-duration")
+    registry.activate_owner(owner)
+    argv = (sys.executable, "-c", "pass")
+    original_popen = M.subprocess.Popen
+    simulated_runtime_seconds = 2
+    clock_advance = 0
+
+    def wait_before_return(command, **kwargs):
+        nonlocal clock_advance
+        child = original_popen(command, **kwargs)
+        if command == argv:
+            # The child can finish while its launching thread is still in Popen.
+            child.wait(timeout=5)
+            clock_advance = simulated_runtime_seconds
+        return child
+
+    monkeypatch.setattr(M.subprocess, "Popen", wait_before_return)
+    monkeypatch.setattr(M, "monotonic", lambda: monotonic() + clock_advance)
+    try:
+        state, _ = launch(registry, owner, tmp_path, tty=tty, argv=argv)
+        result = registry.wait(
+            state.process_id,
+            timeout_seconds=5,
+            max_output_chars=1,
+            owner_host_session_id=owner,
+        )
+        info = registry.get_process_info(state.process_id, owner_host_session_id=owner)
+
+        assert result.exit_code == 0
+        assert result.trusted_process_duration_microseconds >= (
+            simulated_runtime_seconds * 1_000_000
+        )
+        assert info.duration_seconds >= simulated_runtime_seconds
+    finally:
+        registry.release_owner(owner, timeout_seconds=2)
+
+
 def test_foreground_timer_start_failure_releases_exact_admission(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

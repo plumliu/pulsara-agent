@@ -5,14 +5,14 @@
   <img src="assets/banner.png" alt="Pulsara — persistent sessions, auditable events, semantic memory" width="100%">
 </p>
 <p align="center">
-  <a href="https://github.com/plumliu/pulsara-agent/releases/tag/v0.2.1-alpha.1"><img src="https://img.shields.io/github/v/release/plumliu/pulsara-agent?include_prereleases&style=for-the-badge&color=b87b2d" alt="Latest release"></a>
+  <a href="https://github.com/plumliu/pulsara-agent/releases/tag/v0.2.0-alpha.2"><img src="https://img.shields.io/github/v/release/plumliu/pulsara-agent?style=for-the-badge&color=b87b2d" alt="Latest release"></a>
   <img src="https://img.shields.io/badge/Python-3.12%2B-111827?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.12+">
   <img src="https://img.shields.io/badge/Electron-44-47848F?style=for-the-badge&logo=electron&logoColor=white" alt="Electron 44">
   <img src="https://img.shields.io/badge/React-19-149ECA?style=for-the-badge&logo=react&logoColor=white" alt="React 19">
   <img src="https://img.shields.io/badge/PostgreSQL-17-336791?style=for-the-badge&logo=postgresql&logoColor=white" alt="PostgreSQL 17">
 </p>
 <p align="center">
-  <a href="https://github.com/plumliu/pulsara-agent/releases/tag/v0.2.1-alpha.1">Download</a> &nbsp; | &nbsp;
+  <a href="https://github.com/plumliu/pulsara-agent/releases/tag/v0.2.0-alpha.2">Download</a> &nbsp; | &nbsp;
   <a href="#demo">Watch the demo</a> &nbsp; | &nbsp;
   <a href="INSTALL.md">Installation</a> &nbsp; | &nbsp;
   <a href="README.zh-CN.md">简体中文</a>
@@ -75,11 +75,11 @@ For spoken material, Pulsara reads embedded text subtitles first. In Settings, c
 
 ## Install it and get to work
 
-[Download Pulsara 0.2.1-alpha.1](https://github.com/plumliu/pulsara-agent/releases/tag/v0.2.1-alpha.1)
+[Download Pulsara 0.2.0-alpha.2](https://github.com/plumliu/pulsara-agent/releases/tag/v0.2.0-alpha.2)
 
 | Operating system | Quick download |
 | --- | --- |
-| macOS 15+ (Apple Silicon) | [Download DMG 🚀](https://github.com/plumliu/pulsara-agent/releases/download/v0.2.1-alpha.1/Pulsara-0.2.1-alpha.1-macos-arm64.dmg) |
+| macOS 15+ (Apple Silicon) | [Download DMG 🚀](https://github.com/plumliu/pulsara-agent/releases/download/v0.2.0-alpha.2/Pulsara-0.2.0-alpha.2-macos-arm64.dmg) |
 
 This release provides the macOS Apple Silicon DMG. For Windows + WSL and Ubuntu source builds, see the [development guide](DEVELOPMENT.md).
 

@@ -1,6 +1,6 @@
 # `tools.query_agents(args)`
 
-Query collaborating agents and work. No target lists agents; target:AGENT lists that agent's work; target:WORK reads one work's submitted answer or stop explanation. Pass only target when selecting one object. A missing title does not establish that the agent is idle.
+Query collaborating agents and work. Omit target to list agents. Pass target:AGENT to list that agent's work. Pass target:WORK for one assignment's work_status and any available final answer or stop explanation. Pass only target when selecting one object. Check current_work and queued_work_count for agent activity.
 
 ```ts
 export interface QueryAgentsArgs {
