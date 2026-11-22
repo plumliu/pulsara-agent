@@ -2,13 +2,13 @@
 
 [简体中文](INSTALL.zh-CN.md) · [Build from source](DEVELOPMENT.md)
 
-## Download 0.2.0-alpha.2
+## Download 0.2.0-alpha.3
 
 | System | Installer |
 | --- | --- |
-| macOS 15+, Apple Silicon | [Download DMG](https://github.com/plumliu/pulsara-agent/releases/download/v0.2.0-alpha.2/Pulsara-0.2.0-alpha.2-macos-arm64.dmg) |
+| macOS 15+, Apple Silicon | [Download DMG](https://github.com/plumliu/pulsara-agent/releases/download/v0.2.0-alpha.3/Pulsara-0.2.0-alpha.3-macos-arm64.dmg) |
 
-The 0.2.0-alpha.2 release provides a macOS Apple Silicon DMG. For Windows + WSL and Ubuntu source builds, see the [development guide](DEVELOPMENT.md).
+The 0.2.0-alpha.3 release provides a macOS Apple Silicon DMG. For Windows + WSL and Ubuntu source builds, see the [development guide](DEVELOPMENT.md).
 
 ## macOS
 
@@ -34,6 +34,8 @@ Choose project folders under your Linux user's home directory. The Browse button
 
 Add a model connection in Settings, then start a quick session or open a project folder. Python, PostgreSQL, Chromium and search tools are bundled; you do not need uv, Docker or a separate database.
 
+MCP tool search uses BM25 out of the box. When Settings → Models has a complete Embedding connection, Pulsara sends search terms and the visible tools' public names and descriptions to that endpoint for semantic search. It stores tool vectors in its local database. Input suggestions and history search for recall default to off. You can enable either in Settings → Models.
+
 ## Data and updates
 
 | Data | Location |
@@ -45,6 +47,8 @@ Add a model connection in Settings, then start a quick session or open a project
 On Windows, these data paths belong to the Linux user. The Windows app-data directory holds host settings and logs; setting `PULSARA_HOME` in Windows does not select the Linux data home.
 
 Fully quit Pulsara before updating; closing its window leaves it running in the background. On macOS, replace the app in Applications. On Windows, run the new installer. The installer refuses to continue if tasks or database maintenance have not settled.
+
+**Upgrading from 0.2.0-alpha.2:** The MCP vector cache changes the database baseline. Existing databases initialized by the published alpha.2 build require a full local reset to use alpha.3. Save any data you need to keep before confirming the reset.
 
 The Windows uninstaller offers two choices. Both remove the app and its WSL runtime resources:
 

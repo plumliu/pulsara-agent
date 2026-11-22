@@ -2,13 +2,13 @@
 
 [English](INSTALL.md) · [从源码构建](DEVELOPMENT.zh-CN.md)
 
-## 下载 0.2.0-alpha.2
+## 下载 0.2.0-alpha.3
 
 | 系统 | 安装包 |
 | --- | --- |
-| macOS 15+，Apple Silicon | [下载 DMG](https://github.com/plumliu/pulsara-agent/releases/download/v0.2.0-alpha.2/Pulsara-0.2.0-alpha.2-macos-arm64.dmg) |
+| macOS 15+，Apple Silicon | [下载 DMG](https://github.com/plumliu/pulsara-agent/releases/download/v0.2.0-alpha.3/Pulsara-0.2.0-alpha.3-macos-arm64.dmg) |
 
-0.2.0-alpha.2 仅提供 macOS Apple Silicon DMG。Windows + WSL 和 Ubuntu 的源码构建方式见[开发指南](DEVELOPMENT.zh-CN.md)。
+0.2.0-alpha.3 仅提供 macOS Apple Silicon DMG。Windows + WSL 和 Ubuntu 的源码构建方式见[开发指南](DEVELOPMENT.zh-CN.md)。
 
 ## macOS
 
@@ -34,6 +34,8 @@
 
 在设置中添加模型连接，再创建快速开始会话或打开工程目录。应用自带 Python、PostgreSQL、Chromium 和搜索工具，无需另装 uv、Docker 或数据库。
 
+MCP 工具搜索开箱即用，默认按 BM25 匹配关键词。在“设置 → 模型”配好 Embedding 连接后，Pulsara 会将搜索词、可见工具的公开名称和描述发送到该端点做语义搜索，并把工具向量存在本地数据库。输入框建议和历史会话检索默认关闭，可以在“设置 → 模型”按需开启。
+
 ## 数据与更新
 
 | 数据 | 位置 |
@@ -45,6 +47,8 @@
 Windows 版的上述数据路径均属于 Linux 用户。Windows 应用数据目录保存宿主设置和日志；在 Windows 中设置 `PULSARA_HOME` 不会切换 Linux 数据目录。
 
 更新前请完全退出 Pulsara；只关闭窗口仍会在后台运行。macOS 替换“应用程序”中的旧应用，Windows 运行新版安装包。升级安装时，任务或数据库维护尚未结束，安装器会拒绝继续。
+
+**从 0.2.0-alpha.2 升级：** MCP 向量缓存改变了数据库基线。已发布的 alpha.2 初始化的数据库需要完整重置后才能使用 alpha.3。确认重置前，请先保存需要保留的数据。
 
 Windows 卸载器只有两个选项，两者都会删除应用和 WSL 运行资源：
 

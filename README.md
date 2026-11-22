@@ -5,14 +5,14 @@
   <img src="assets/banner.png" alt="Pulsara — persistent sessions, auditable events, semantic memory" width="100%">
 </p>
 <p align="center">
-  <a href="https://github.com/plumliu/pulsara-agent/releases/tag/v0.2.0-alpha.2"><img src="https://img.shields.io/github/v/release/plumliu/pulsara-agent?style=for-the-badge&color=b87b2d" alt="Latest release"></a>
+  <a href="https://github.com/plumliu/pulsara-agent/releases/tag/v0.2.0-alpha.3"><img src="https://img.shields.io/github/v/release/plumliu/pulsara-agent?style=for-the-badge&color=b87b2d" alt="Latest release"></a>
   <img src="https://img.shields.io/badge/Python-3.12%2B-111827?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.12+">
   <img src="https://img.shields.io/badge/Electron-44-47848F?style=for-the-badge&logo=electron&logoColor=white" alt="Electron 44">
   <img src="https://img.shields.io/badge/React-19-149ECA?style=for-the-badge&logo=react&logoColor=white" alt="React 19">
   <img src="https://img.shields.io/badge/PostgreSQL-17-336791?style=for-the-badge&logo=postgresql&logoColor=white" alt="PostgreSQL 17">
 </p>
 <p align="center">
-  <a href="https://github.com/plumliu/pulsara-agent/releases/tag/v0.2.0-alpha.2">Download</a> &nbsp; | &nbsp;
+  <a href="https://github.com/plumliu/pulsara-agent/releases/tag/v0.2.0-alpha.3">Download</a> &nbsp; | &nbsp;
   <a href="#demo">Watch the demo</a> &nbsp; | &nbsp;
   <a href="INSTALL.md">Installation</a> &nbsp; | &nbsp;
   <a href="README.zh-CN.md">简体中文</a>
@@ -57,7 +57,9 @@ Select part of a reply and annotate it directly. It beats repeatedly explaining 
 
 Skills and MCP prompts share the `/` menu. Select an MCP prompt, fill its parameters, preview the result, and insert it into your draft before sending.
 
-New sessions can get a title from your first message. After an answer finishes, the empty composer may suggest a follow-up question. Suggestions stay in memory: typing hides them, clearing the draft reveals them, and sending the next message clears them. Neither feature delays the answer.
+Pulsara searches tools on your connected MCP servers by keyword. With an Embedding connection configured, semantic matches are included, so a request can find the right tool without using the tool's exact wording. Tool vectors are cached locally and reused across restarts.
+
+New sessions can get a title from your first message. You can enable input suggestions in Settings → Models to see a follow-up question in the empty composer after an answer finishes. Suggestions stay in memory and clear when you send the next message.
 
 ## Pulsara keeps up as the work grows
 
@@ -65,7 +67,7 @@ Long commands can run in the background while agents move on to other work. Cont
 
 Pulsara also takes the cost of long conversations seriously. Stable prompt prefixes let compatible model services reuse input they have already processed. Cache hits can reduce costs and waiting time.
 
-Save preferences, project constraints, and decisions in memory for later tasks to retrieve. You can inspect, edit, or delete them on the memory page.
+Save preferences, project constraints, and decisions in memory for later tasks to retrieve. You can inspect, edit, or delete them on the memory page. History search for recall is optional and defaults to off in Settings → Models.
 
 ## Review local video and audio in a source build
 
@@ -75,11 +77,11 @@ For spoken material, Pulsara reads embedded text subtitles first. In Settings, c
 
 ## Install it and get to work
 
-[Download Pulsara 0.2.0-alpha.2](https://github.com/plumliu/pulsara-agent/releases/tag/v0.2.0-alpha.2)
+[Download Pulsara 0.2.0-alpha.3](https://github.com/plumliu/pulsara-agent/releases/tag/v0.2.0-alpha.3)
 
 | Operating system | Quick download |
 | --- | --- |
-| macOS 15+ (Apple Silicon) | [Download DMG 🚀](https://github.com/plumliu/pulsara-agent/releases/download/v0.2.0-alpha.2/Pulsara-0.2.0-alpha.2-macos-arm64.dmg) |
+| macOS 15+ (Apple Silicon) | [Download DMG 🚀](https://github.com/plumliu/pulsara-agent/releases/download/v0.2.0-alpha.3/Pulsara-0.2.0-alpha.3-macos-arm64.dmg) |
 
 This release provides the macOS Apple Silicon DMG. For Windows + WSL and Ubuntu source builds, see the [development guide](DEVELOPMENT.md).
 

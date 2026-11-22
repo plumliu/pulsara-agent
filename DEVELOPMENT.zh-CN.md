@@ -1,6 +1,6 @@
 # 从源码构建 Pulsara
 
-[English](DEVELOPMENT.md) · [安装说明](INSTALL.zh-CN.md) · [下载 0.2.0-alpha.2](https://github.com/plumliu/pulsara-agent/releases/tag/v0.2.0-alpha.2)
+[English](DEVELOPMENT.md) · [安装说明](INSTALL.zh-CN.md) · [下载 0.2.0-alpha.3](https://github.com/plumliu/pulsara-agent/releases/tag/v0.2.0-alpha.3)
 
 修改代码前请阅读 [AGENTS.md](AGENTS.md)。原生资源在目标系统构建；Windows 使用 WSL2 Ubuntu 中构建的 Linux 资源，以及 Windows 中构建的 Electron 界面。
 
@@ -61,7 +61,7 @@ EXE 位于 `desktop/release/Pulsara-<版本>-windows-x64.exe`。构建会校验 
 
 ## 原生 Ubuntu
 
-0.2.0-alpha.2 不发布 Ubuntu deb，原生 x64/arm64 桌面验收仍延期。本地构建先安装 mise，再以普通用户运行：
+0.2.0-alpha.3 不发布 Ubuntu deb，原生 x64/arm64 桌面验收仍延期。本地构建先安装 mise，再以普通用户运行：
 
 ```sh
 sudo apt update
@@ -72,7 +72,7 @@ mise install
 mise run desktop:bootstrap
 mise exec -- .venv/bin/python -m playwright install-deps chromium
 mise run --jobs 1 desktop:package
-sudo apt install ./desktop/release/Pulsara-0.2.0-alpha.2-linux-amd64.deb
+sudo apt install ./desktop/release/Pulsara-0.2.0-alpha.3-linux-amd64.deb
 ```
 
 ARM64 用户换用 arm64 文件名。容器构建使用同一任务图：
@@ -90,6 +90,17 @@ amd64 使用 `linux/amd64` 和独立输出目录。Docker 只用于构建，不�
 `src/pulsara_agent/desktop_app/static/` 由 Vite 生成，不受 Git 追踪，也不进入源码归档。`desktop:application` 依赖 `desktop:renderer`，桌面打包会先生成前端，再创建应用 wheel；Hatch 显式把生成目录加入 wheel，缺少前端时明确报错，避免生成没有界面的安装包。开发用 editable 安装可先于前端构建。单独构建 wheel 时，按原流程准备原生依赖，运行 `npm --prefix frontend ci` 和 `npm --prefix frontend run build:desktop`，再用 uv 构建 wheel。
 
 两次构建之间保留 `desktop/build`、`desktop/resources` 和 mise 缓存。应用修改会重建前端与 wheel，未变的原生依赖继续复用；构建脚本、工具、SDK 或系统库变化时，刷新对应资源。标准 `desktop:verify`、`desktop:package` 任务包含资源冒烟检查。
+
+在 macOS 上离线重建时，可以使用已准备好的 `node_modules` 和随包资源。先将 `ELECTRON_ZIP` 设为与 `desktop/package.json` 中版本匹配的本地 Electron ZIP 的绝对路径。随包 Python 依赖、PostgreSQL、Chromium、ripgrep 和 Code Mode 资源也需与锁定版本一致。
+
+```sh
+export UV_OFFLINE=1 npm_config_offline=true ELECTRON_BUILDER_OFFLINE=true
+npm --prefix frontend run build:desktop
+.venv/bin/python desktop/scripts/prepare_resources.py application
+.venv/bin/python desktop/scripts/prepare_resources.py validate
+.venv/bin/python desktop/scripts/smoke_resources.py
+npm --prefix desktop run package -- --mac dmg --arm64 --publish never --config.electronDist="${ELECTRON_ZIP:?请设置本地 Electron ZIP 路径}"
+```
 
 单项重建使用 `mise run --force desktop:postgres` 或 `mise run --force desktop:python-dependencies`。自定义 PostgreSQL 扩展使用 `mise run --force desktop:postgres -- --extension-lib /path/to/lib --extension-share /path/to/extension`，外部输入变化后重新运行。不要修改 SDK 缓存或更改 payload 摘要来复用旧资源。
 
@@ -109,10 +120,10 @@ Electron 壳只打包启动页需要的 Inter、Noto Sans SC 和 Gelasio。工�
 
 ## 发布
 
-0.2.0-alpha.2 发布本地构建的 macOS ARM64 DMG。Python 和 CLI 版本为 `0.2.0a2`，桌面端与 npm 元数据使用 `0.2.0-alpha.2`。设置页根据 Python 运行时版本显示 `0.2.0`。Python 包、运行时常量、npm 包及锁文件需保持一致。
+0.2.0-alpha.3 发布本地构建的 macOS ARM64 DMG。Python 和 CLI 版本为 `0.2.0a3`，桌面端与 npm 元数据使用 `0.2.0-alpha.3`。设置页根据 Python 运行时版本显示 `0.2.0`。Python 包、运行时常量、npm 包及锁文件需保持一致。
 
-GitHub Actions 仅手动触发。Native Desktop Packages 工作流与 `release_artifacts.py assemble/draft` 要求四个平台安装包，因此本次 macOS 发布使用本地 electron-builder 构建和 GitHub CLI。提交版本及文档、推送对应标签后，使用 `--verify-tag` 创建草稿。仅上传 `Pulsara-0.2.0-alpha.2-macos-arm64.dmg`，核对远端文件名与大小，再以 `--prerelease=false --latest` 发布并标记 Latest。已发布的标签与资产保持不变。
+GitHub Actions 仅手动触发。Native Desktop Packages 工作流与 `release_artifacts.py assemble/draft` 要求四个平台安装包，因此本次 macOS 发布使用本地 electron-builder 构建和 GitHub CLI。提交版本及文档、推送对应标签后，使用 `--verify-tag` 创建草稿。仅上传 `Pulsara-0.2.0-alpha.3-macos-arm64.dmg`，核对远端文件名与大小，再以 `--prerelease=false --latest` 发布并标记 Latest。已发布的标签与资产保持不变。
 
-版本一致性检查：`mise exec -- uv run --no-sync python desktop/scripts/release_artifacts.py check --tag v0.2.0-alpha.2`。
+版本一致性检查：`mise exec -- uv run --no-sync python desktop/scripts/release_artifacts.py check --tag v0.2.0-alpha.3`。
 
 桌面重置与显式卸载遵循 [当前维护合同](archived_docs/DESKTOP_DATA_RESET_IMPLEMENTATION.zh.md)。启动页的 toast 复用工作台组件，`npm --prefix frontend run build:startup` 生成桌面启动资源；Windows 资源任务也会构建该入口。`mise exec -- .venv/bin/python desktop/scripts/smoke_reset.py` 使用临时 home 和随包 PostgreSQL 验证不兼容基线、重置与全新初始化，不读取个人配置。

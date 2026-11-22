@@ -5,14 +5,14 @@
   <img src="assets/banner.png" alt="Pulsara — 持久会话、可审阅的工作记录、语义记忆" width="100%">
 </p>
 <p align="center">
-  <a href="https://github.com/plumliu/pulsara-agent/releases/tag/v0.2.0-alpha.2"><img src="https://img.shields.io/github/v/release/plumliu/pulsara-agent?style=for-the-badge&color=b87b2d" alt="Latest release"></a>
+  <a href="https://github.com/plumliu/pulsara-agent/releases/tag/v0.2.0-alpha.3"><img src="https://img.shields.io/github/v/release/plumliu/pulsara-agent?style=for-the-badge&color=b87b2d" alt="Latest release"></a>
   <img src="https://img.shields.io/badge/Python-3.12%2B-111827?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.12+">
   <img src="https://img.shields.io/badge/Electron-44-47848F?style=for-the-badge&logo=electron&logoColor=white" alt="Electron 44">
   <img src="https://img.shields.io/badge/React-19-149ECA?style=for-the-badge&logo=react&logoColor=white" alt="React 19">
   <img src="https://img.shields.io/badge/PostgreSQL-17-336791?style=for-the-badge&logo=postgresql&logoColor=white" alt="PostgreSQL 17">
 </p>
 <p align="center">
-  <a href="https://github.com/plumliu/pulsara-agent/releases/tag/v0.2.0-alpha.2">下载桌面版</a> &nbsp; | &nbsp;
+  <a href="https://github.com/plumliu/pulsara-agent/releases/tag/v0.2.0-alpha.3">下载桌面版</a> &nbsp; | &nbsp;
   <a href="#demo">观看演示</a> &nbsp; | &nbsp;
   <a href="INSTALL.zh-CN.md">安装说明</a> &nbsp; | &nbsp;
   <a href="README.md">English</a>
@@ -57,15 +57,17 @@ https://github.com/user-attachments/assets/f78ec29d-f18f-4f9a-b98d-4ce3638ed35f
 
 Skill 和 MCP Prompt 共用 `/` 菜单。选中 MCP Prompt 后，填写参数、查看预览，再插入草稿并发送。
 
+Pulsara 可以按关键词查找已连接的 MCP 工具。配置 Embedding 后也会匹配语义相近的工具，换一种说法也可能找到对应接口。工具向量缓存在本机，重启后可以复用。
+
 ## 工作再繁杂 Pulsara 也跟得上
 
-新会话会尝试根据第一份用户输入生成标题。回答结束后，空输入框可能显示一句追问建议。建议只缓存在内存中：输入文字时隐藏，清空草稿后重新显示，发送下一条消息时清除。标题和建议都在后台生成，不延迟正式回答。
+新会话会尝试根据第一份用户输入生成标题。在“设置 → 模型”开启输入框建议后，回答结束时，空输入框可能显示一句追问建议。建议只缓存在内存中，发送下一条消息时清除。
 
 耗时命令可以放到后台，Agent 继续推进别的工作。对话变长后可以压缩上下文，保存的会话让你下次回来仍有记录可查。
 
 Pulsara 也认真对待长上下文的开销。稳定的提示词前缀让支持缓存的模型服务复用已经处理过的输入，命中时能省下费用、缩短等待。
 
-你的偏好、项目约束和已有决策可以存进记忆，留给后续任务检索。在记忆页里能直接查看、修改或删除。
+你的偏好、项目约束和已有决策可以存进记忆，留给后续任务检索。在记忆页里能直接查看、修改或删除。“设置 → 模型”里的历史会话检索默认关闭，可以按需开启。
 
 ## 在源码构建中审看本地音视频
 
@@ -75,11 +77,11 @@ Pulsara 也认真对待长上下文的开销。稳定的提示词前缀让支持
 
 ## 装好就能开工
 
-[下载 Pulsara 0.2.0-alpha.2](https://github.com/plumliu/pulsara-agent/releases/tag/v0.2.0-alpha.2)
+[下载 Pulsara 0.2.0-alpha.3](https://github.com/plumliu/pulsara-agent/releases/tag/v0.2.0-alpha.3)
 
 | 操作系统 | 快捷通道 |
 | --- | --- |
-| macOS 15+ (Apple Silicon) | [下载 DMG 🚀](https://github.com/plumliu/pulsara-agent/releases/download/v0.2.0-alpha.2/Pulsara-0.2.0-alpha.2-macos-arm64.dmg) |
+| macOS 15+ (Apple Silicon) | [下载 DMG 🚀](https://github.com/plumliu/pulsara-agent/releases/download/v0.2.0-alpha.3/Pulsara-0.2.0-alpha.3-macos-arm64.dmg) |
 
 本版仅提供 macOS Apple Silicon DMG。Windows + WSL 和 Ubuntu 的源码构建方式见[开发指南](DEVELOPMENT.zh-CN.md)。
 
