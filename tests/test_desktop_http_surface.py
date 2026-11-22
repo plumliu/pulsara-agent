@@ -1869,9 +1869,9 @@ def test_memory_settings_http_errors_are_specific_and_confirmation_is_atomic(tmp
                 }
             ) as client:
                 base = server.origin + "/api/local-settings/memory-retrieval"
-                assert store.read().memory_retrieval.history_enabled is True
+                assert store.read().memory_retrieval.history_enabled is False
                 before = store.read().memory_retrieval
-                for enabled in (False, True):
+                for enabled in (True, False):
                     async with client.put(
                         base + "/history-enabled", json={"enabled": enabled}
                     ) as response:
@@ -2196,6 +2196,8 @@ def test_ephemeral_setting_is_user_level_and_validated(tmp_path, preference, rou
                 "X-Pulsara-Connection-Generation": "1",
             }) as client:
                 url = server.origin + "/api/local-settings/" + route
+                async with client.get(server.origin + "/api/local-settings") as response:
+                    assert (await response.json())["local_settings"][preference + "_enabled"] is False
                 for enabled in (False, True):
                     async with client.put(url, json={"enabled": enabled}) as response:
                         assert response.status == 200

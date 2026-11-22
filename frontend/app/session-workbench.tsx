@@ -555,7 +555,7 @@ export function SessionWorkbench({
 
   const { suggestion, observeTitle } = useSessionEphemeralResults({
     cache: suggestionCache, adapter, connection, projection,
-    suggestionsEnabled: bootstrap?.local_settings.input_suggestions_enabled ?? true,
+    suggestionsEnabled: bootstrap?.local_settings.input_suggestions_enabled ?? false,
     binding: activeSession.modelCallBinding,
     visible: visible,
     refreshSessions: readSessionList,

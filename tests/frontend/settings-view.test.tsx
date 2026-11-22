@@ -466,7 +466,11 @@ it('saves the user-level input suggestion toggle and retains the saved value on 
   expect(toggle.getAttribute('aria-checked')).toBe('true');
   expect(toggle.parentElement?.tagName).toBe('HEADER');
   fireEvent.click(toggle);
+  expect(toggle.getAttribute('aria-busy')).toBe('true');
+  expect(toggle).toHaveProperty('disabled', true);
+  expect(toggle.getAttribute('aria-checked')).toBe('true');
   await waitFor(() => expect(toggle.getAttribute('aria-checked')).toBe('false'));
+  await waitFor(() => expect(toggle.getAttribute('aria-busy')).toBe('false'));
   expect(setInputSuggestions).toHaveBeenCalledExactlyOnceWith(false);
   expect(refresh).toHaveBeenCalledTimes(1);
   setInputSuggestions.mockRejectedValueOnce(new Error('保存失败'));
@@ -490,7 +494,10 @@ it('keeps both optional toggles last and saves warming independently', async () 
   expect(screen.getByText('会话空闲后，已载入的会话会在接下来 20 分钟内，每 4 分钟尝试保活。会产生额外模型请求，效果取决于模型供应商。')).toBeTruthy();
   expect(warming.getAttribute('aria-checked')).toBe('false');
   fireEvent.click(warming);
+  expect(warming.getAttribute('aria-busy')).toBe('true');
+  expect(warming.getAttribute('aria-checked')).toBe('false');
   await waitFor(() => expect(warming.getAttribute('aria-checked')).toBe('true'));
+  await waitFor(() => expect(warming.getAttribute('aria-busy')).toBe('false'));
   expect(setCacheWarming).toHaveBeenCalledExactlyOnceWith(true);
   expect(setInputSuggestions).not.toHaveBeenCalled();
   expect(suggestion.getAttribute('aria-checked')).toBe('true');

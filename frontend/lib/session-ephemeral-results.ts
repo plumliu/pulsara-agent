@@ -127,14 +127,14 @@ export class SessionSuggestionCache {
 }
 
 /** Reads only existing Host state. Neither opening a page nor polling generates work. */
-export function useSessionEphemeralResults({ cache, adapter, connection, projection, binding, visible, suggestionsEnabled = true, refreshSessions }: {
+export function useSessionEphemeralResults({ cache, adapter, connection, projection, binding, visible, suggestionsEnabled, refreshSessions }: {
   cache: SessionSuggestionCache;
   adapter: RuntimeAdapter;
   connection: RuntimeConnection | undefined;
   projection: RuntimeProjection;
   binding: ModelCallBindingPayload | null | undefined;
   visible: boolean;
-  suggestionsEnabled?: boolean;
+  suggestionsEnabled: boolean;
   refreshSessions: () => Promise<unknown>;
 }) {
   const sessionId = connection?.sessionId;

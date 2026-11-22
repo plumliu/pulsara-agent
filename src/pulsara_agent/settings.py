@@ -86,7 +86,7 @@ class LocalModelApiKey:
 @dataclass(frozen=True, slots=True)
 class LocalSettings:
     postgres: LocalPostgresConfig | None = None
-    input_suggestions_enabled: bool = True
+    input_suggestions_enabled: bool = False
     cache_warming_enabled: bool = False
     model_connections: tuple[ModelConnectionConfig, ...] = ()
     model_api_keys: tuple[LocalModelApiKey, ...] = field(default=(), repr=False)
@@ -288,7 +288,7 @@ def local_settings_from_dict(value: object) -> LocalSettings:
         if api_key is not None:
             model_api_keys.append(LocalModelApiKey(connection.id, api_key))
     return LocalSettings(
-        input_suggestions_enabled=value.get("input_suggestions_enabled", True),
+        input_suggestions_enabled=value.get("input_suggestions_enabled", False),
         cache_warming_enabled=value.get("cache_warming_enabled", False),
         model_connections=tuple(connections),
         model_api_keys=tuple(model_api_keys),

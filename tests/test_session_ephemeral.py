@@ -1,6 +1,7 @@
 """Transient product lifecycles and their only permitted database mutation."""
 
 import asyncio
+from dataclasses import replace
 from time import monotonic
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -24,7 +25,9 @@ _WIRE_PLAN = object()
 
 
 def _host():
-    binding = model_binding(model_runtime())
+    runtime = model_runtime()
+    runtime.settings.value = replace(runtime.settings.read(), input_suggestions_enabled=True)
+    binding = model_binding(runtime)
 
     async def run(fn, *args, **kwargs):
         return fn(*args, **kwargs)
@@ -37,7 +40,7 @@ def _host():
         _lease=SimpleNamespace(guard=object()),
         _io=SimpleNamespace(run=run),
         _canonical_deadline=lambda: monotonic() + 30,
-        _model_runtime=model_runtime(),
+        _model_runtime=runtime,
         _model=SimpleNamespace(transport_timeout_policy=object()),
         _closing=False,
         _active_task=None,
@@ -296,8 +299,6 @@ def test_ephemeral_get_checks_user_scope_and_never_opens_host():
 
 @pytest.mark.parametrize("disable_at", ["completion", "preparation", "in_flight", "ready"])
 def test_disabled_suggestions_preserve_titles_and_reject_late_results(monkeypatch, disable_at):
-    from dataclasses import replace
-
     async def scenario():
         host, binding = _host()
         settings = host._model_runtime.settings.read()

@@ -152,7 +152,7 @@ async def run():
         with TemporaryDirectory(prefix="pulsara-latency-") as temporary:
             os.environ["PULSARA_HOME"] = temporary
             settings = _ReadOnlySettingsStore(
-                replace(saved, postgres=LocalPostgresConfig(runtime_dsn, admin))
+                replace(saved, postgres=LocalPostgresConfig(runtime_dsn, admin), input_suggestions_enabled=True)
             )
             catalog = ModelCatalogOwner(ModelsDevCatalogClient())
             await catalog.refresh()

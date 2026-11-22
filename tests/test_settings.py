@@ -567,11 +567,11 @@ def test_failed_embedding_confirmation_does_not_partially_save_or_enable(tmp_pat
     asyncio.run(exercise())
 
 
-@pytest.mark.parametrize("field,default", [("input_suggestions_enabled", True), ("cache_warming_enabled", False)])
-def test_ephemeral_preferences_default_and_round_trip(tmp_path, field, default):
+@pytest.mark.parametrize("field", ["input_suggestions_enabled", "cache_warming_enabled"])
+def test_ephemeral_preferences_default_and_round_trip(tmp_path, field):
     payload = local_settings_to_dict(LocalSettings())
     payload.pop(field)
-    assert getattr(local_settings_from_dict(payload), field) is default
+    assert getattr(local_settings_from_dict(payload), field) is False
     for invalid in (None, 0, 1, "false"):
         with pytest.raises(ValueError, match="boolean"):
             local_settings_from_dict({**payload, field: invalid})
@@ -579,6 +579,7 @@ def test_ephemeral_preferences_default_and_round_trip(tmp_path, field, default):
     async def scenario():
         store = LocalSettingsStore(tmp_path / "home" / "local-settings.yaml")
         before = store.read()
+        assert getattr(before, field) is False
         for enabled in (False, True):
             await getattr(store, "set_" + field)(enabled)
             assert LocalSettingsStore(store.path).read() == replace(

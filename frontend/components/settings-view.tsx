@@ -652,7 +652,7 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
           <section className="settings-group input-suggestions-settings" aria-labelledby="input-suggestions-title">
             <header><MessageSquare size={16} /><div><h2 id="input-suggestions-title">输入框建议</h2><p id="input-suggestions-detail">回答结束后，使用当前模型生成下一条提问建议。</p></div>
               <button type="button" role="switch" className="settings-switch" aria-labelledby="input-suggestions-title" aria-describedby="input-suggestions-detail"
-                aria-checked={settings?.local_settings.input_suggestions_enabled ?? true}
+                aria-checked={settings?.local_settings.input_suggestions_enabled ?? false} aria-busy={savingSuggestions || runtimeStatus === 'reconnecting'}
                 disabled={loading || !settings || settings.local_settings.state === 'unavailable' || savingSuggestions || runtimeStatus !== 'online'}
                 onClick={() => void setInputSuggestions(!settings?.local_settings.input_suggestions_enabled)}><span /></button>
             </header>
@@ -660,7 +660,7 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
           <section className="settings-group input-suggestions-settings" aria-labelledby="cache-warming-title">
             <header><RefreshCw size={16} /><div><h2 id="cache-warming-title">缓存保温（实验性）</h2><p id="cache-warming-detail">会话空闲后，已载入的会话会在接下来 20 分钟内，每 4 分钟尝试保活。会产生额外模型请求，效果取决于模型供应商。</p></div>
               <button type="button" role="switch" className="settings-switch" aria-labelledby="cache-warming-title" aria-describedby="cache-warming-detail"
-                aria-checked={settings?.local_settings.cache_warming_enabled ?? false}
+                aria-checked={settings?.local_settings.cache_warming_enabled ?? false} aria-busy={savingWarming || runtimeStatus === 'reconnecting'}
                 disabled={loading || !settings || settings.local_settings.state === 'unavailable' || savingWarming || runtimeStatus !== 'online'}
                 onClick={() => void setCacheWarming(!settings?.local_settings.cache_warming_enabled)}><span /></button>
             </header>

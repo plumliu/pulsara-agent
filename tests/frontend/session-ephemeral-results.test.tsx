@@ -24,7 +24,7 @@ function setup() {
   const read = vi.fn(async (_id: string, _signal?: AbortSignal): Promise<SessionEphemeralResults> => result());
   const cache = new SessionSuggestionCache();
   const props = { cache, adapter: { ephemeralResults: read } as unknown as RuntimeAdapter, connection,
-    projection: current, binding, visible: true, refreshSessions: vi.fn(async () => {}) };
+    projection: current, binding, visible: true, suggestionsEnabled: true, refreshSessions: vi.fn(async () => {}) };
   return { cache, read, props, setProjection: (next: RuntimeProjection) => { current = next; return { ...props, projection: next }; } };
 }
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });

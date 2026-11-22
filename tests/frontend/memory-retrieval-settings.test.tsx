@@ -6,7 +6,7 @@ import type { MemoryRetrievalSettings, RuntimeAdapter, RetrievalModelInput, Memo
 
 beforeEach(() => { Object.defineProperty(HTMLDialogElement.prototype, 'showModal', { configurable: true, value: function(this: HTMLDialogElement) { this.setAttribute('open', ''); } }); });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
-const empty: MemoryRetrievalSettings = { embedding: null, embedding_enabled: false, history_enabled: true, decision: null, rerank: null, ranking_mode: 'off' };
+const empty: MemoryRetrievalSettings = { embedding: null, embedding_enabled: false, history_enabled: false, decision: null, rerank: null, ranking_mode: 'off' };
 const conn = (slot: MemoryModelSlot) => ({ endpoint: `https://provider.example/${slot}`, model_id: `${slot}-fixture`, shape: slot === 'embedding' ? 'openai_embedding' as const : slot === 'decision' ? 'system_one' as const : 'flat_rerank' as const, authentication: 'none' as const, credential_configured: false });
 
 function setup(initial = empty) {
@@ -323,13 +323,18 @@ it('failed selection of a missing backend retains the previous actual path and s
 });
 
 
-it('history is independently enabled and toggles without configuring remote models', async () => {
+it('history starts off and toggles independently without configuring remote models', async () => {
   const { setHistory, setEmbedding, setRanking, save, saved } = setup();
   const toggle = screen.getByRole('switch', { name: '启用历史会话检索' });
-  expect(toggle.getAttribute('aria-checked')).toBe('true');
+  expect(toggle.getAttribute('aria-checked')).toBe('false');
+  const panel = toggle.closest('.retrieval-settings');
   fireEvent.click(toggle);
-  await waitFor(() => expect(saved().history_enabled).toBe(false));
-  expect(setHistory).toHaveBeenCalledWith(false);
+  expect(panel?.getAttribute('aria-busy')).toBe('true');
+  expect(toggle).toHaveProperty('disabled', true);
+  expect(toggle.getAttribute('aria-checked')).toBe('false');
+  await waitFor(() => expect(saved().history_enabled).toBe(true));
+  await waitFor(() => expect(panel?.getAttribute('aria-busy')).toBe('false'));
+  expect(setHistory).toHaveBeenCalledWith(true);
   expect(setEmbedding).not.toHaveBeenCalled(); expect(setRanking).not.toHaveBeenCalled(); expect(save).not.toHaveBeenCalled();
   expect(screen.queryByRole('dialog')).toBeNull();
 });

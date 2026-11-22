@@ -94,7 +94,7 @@ def connection_from_dict(slot: str, value: object, *, private: bool = False):
 class MemoryRetrievalSettings:
     embedding: RetrievalConnection | None = None
     embedding_enabled: bool = False
-    history_enabled: bool = True
+    history_enabled: bool = False
     rerank: RetrievalConnection | None = None
     decision: RetrievalConnection | None = None
     ranking_mode: str = "off"

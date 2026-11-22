@@ -216,7 +216,7 @@ async def run():
             workspace.mkdir()
             os.environ["PULSARA_HOME"] = str(isolated_home)
             settings = _ReadOnlySettingsStore(
-                replace(saved, postgres=LocalPostgresConfig(runtime_dsn, admin))
+                replace(saved, postgres=LocalPostgresConfig(runtime_dsn, admin), input_suggestions_enabled=True)
             )
             runtime = ModelRuntime.production(settings=settings, catalog=catalog)
             core = KernelHostCore.production(model_runtime=runtime)

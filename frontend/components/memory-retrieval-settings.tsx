@@ -105,8 +105,8 @@ export function MemoryRetrievalSettingsPanel({ adapter, value, onChanged, onNoti
       const activate = slot === 'embedding' ? embeddingOpen && !value.embedding_enabled : rankingOpen && preferredRanking === slot && value.ranking_mode !== slot;
       setEditor({ slot, activate });
     }} />;
-  return <section className="settings-group retrieval-settings">
-    <header><Brain size={16} /><div><h2>记忆检索</h2><p>配置记忆召回使用的语义检索与重排模型。</p></div>{busy && <span className="retrieval-spinner"><LoaderCircle size={15} /></span>}</header>
+  return <section className="settings-group retrieval-settings" aria-busy={busy}>
+    <header><Brain size={16} /><div><h2>记忆检索</h2><p>配置记忆召回使用的语义检索与重排模型。</p></div></header>
     <section className="retrieval-channel" aria-labelledby="retrieval-embedding-heading">
     <div className="retrieval-channel-heading"><h3 id="retrieval-embedding-heading">Embedding</h3>
       <div className="retrieval-channel-controls">
