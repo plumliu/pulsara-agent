@@ -1,5 +1,5 @@
 {
-  "observed_catalog_fingerprint": "sha256:cddf48d846bd44f17676cff61bd0e0983d08d4d82252cde86956e5e3d4abe0fa",
+  "observed_catalog_fingerprint": "sha256:5a772c430b5eb4409160839d8c6ba3b53264b969c1f6ca3f96304e12a0aef9da",
   "required_extensions": [
     {
       "extension_name": "vector",
@@ -46,6 +46,9 @@
     "agent_events",
     "history_search_documents",
     "asr_cache"
+  ],
+  "derived_relations": [
+    "mcp_tool_embeddings"
   ],
   "infrastructure_relations": [
     "public.pulsara_schema_migrations"

@@ -231,6 +231,7 @@ class _ToolSurfaceOperations:
                         self._prepared_surfaces.pop(key, None)
                 self._mcp_runtime_by_surface_generation.pop(previous_generation, None)
                 previous.release()
+            self._mcp_meta_refs.reconcile_directory(installed)
 
 
     def freeze_mcp_capability_source_snapshot_set(

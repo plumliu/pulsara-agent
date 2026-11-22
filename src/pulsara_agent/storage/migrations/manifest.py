@@ -39,7 +39,7 @@ CONVERSATION_KERNEL_RELATIONS = (
     "asr_cache",
 )
 
-CONVERSATION_KERNEL_RUNTIME_PRIVILEGES = {
+POSTGRES_RUNTIME_RELATION_PRIVILEGES = {
     "workspaces": ("SELECT", "INSERT", "DELETE"),
     "sessions": ("SELECT", "INSERT", "UPDATE", "DELETE"),
     "agent_known_sessions": ("SELECT", "INSERT"),
@@ -69,15 +69,13 @@ CONVERSATION_KERNEL_RUNTIME_PRIVILEGES = {
     "agent_events": ("SELECT", "INSERT"),
     "history_search_documents": ("SELECT", "INSERT", "UPDATE", "DELETE"),
     "asr_cache": ("SELECT", "INSERT", "UPDATE", "DELETE"),
+    "mcp_tool_embeddings": ("SELECT", "INSERT"),
 }
+POSTGRES_MANAGED_RELATIONS = tuple(POSTGRES_RUNTIME_RELATION_PRIVILEGES)
 CONVERSATION_KERNEL_RUNTIME_COLUMN_PRIVILEGES = {
     "content_parts": {"entry_id": ("UPDATE",), "queue_item_id": ("UPDATE",)},
     "tool_results": {"source_result_entry_id": ("UPDATE",), "native_projection": ("UPDATE",)},
 }
-
-if tuple(CONVERSATION_KERNEL_RUNTIME_PRIVILEGES) != CONVERSATION_KERNEL_RELATIONS:
-    raise RuntimeError("clean runtime grant catalog is not exhaustive")
-
 
 @dataclass(frozen=True, slots=True)
 class CleanPostgresSchemaManifest:
@@ -96,6 +94,8 @@ def build_postgres_schema_manifest() -> CleanPostgresSchemaManifest:
     relations = tuple(str(item) for item in payload["product_relations"])
     if relations != CONVERSATION_KERNEL_RELATIONS:
         raise RuntimeError("clean expected catalog relation order changed")
+    if (*relations, *payload["derived_relations"]) != POSTGRES_MANAGED_RELATIONS:
+        raise RuntimeError("clean expected catalog derived relations changed")
     extensions = tuple(dict(item) for item in payload["required_extensions"])
     functions = tuple(str(item) for item in payload["required_functions"])
     observed_catalog_fingerprint = str(payload["observed_catalog_fingerprint"])
@@ -179,8 +179,9 @@ PULSARA_LEGACY_PUBLIC_RELATION_NAMES = frozenset(
 
 __all__ = [
     "CONVERSATION_KERNEL_RELATIONS",
-    "CONVERSATION_KERNEL_RUNTIME_PRIVILEGES",
     "CONVERSATION_KERNEL_RUNTIME_COLUMN_PRIVILEGES",
+    "POSTGRES_MANAGED_RELATIONS",
+    "POSTGRES_RUNTIME_RELATION_PRIVILEGES",
     "PULSARA_LEGACY_PUBLIC_RELATION_NAMES",
     "CleanPostgresSchemaManifest",
     "build_postgres_schema_manifest",

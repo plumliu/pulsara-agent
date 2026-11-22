@@ -8,7 +8,7 @@ import pytest
 from pulsara_agent.conversation_kernel.memory_tools import KernelMemoryToolPort
 from pulsara_agent.retrieval.config import EmbeddingBackendConfig, RerankBackendConfig
 from pulsara_agent.settings import LocalSettingsStore
-from tests.retrieval_fixtures import save_model
+from tests.retrieval_fixtures import input_for, save_model
 from tests.test_memory_retrieval_adapters import VECTOR
 
 
@@ -46,6 +46,31 @@ def test_embedding_and_rerank_slots_are_independent_and_switches_keep_config(tmp
         assert await port._embedding_provider() is None
         assert await port._rerank_provider() is None
         await port.aclose()
+
+    asyncio.run(exercise())
+
+
+def test_shared_embedding_key_stays_at_its_saved_endpoint(tmp_path):
+    async def exercise():
+        settings = LocalSettingsStore(tmp_path / "settings.yaml")
+        old = (await save_model(settings, "embedding", "fixture-original")).memory_retrieval.embedding
+        draft = input_for("embedding", previous=old, model="another-model")
+        draft["connection"]["authentication"] = "bearer_api_key"
+        draft["key_action"] = "keep"
+        switched = await settings.save_retrieval_connection("embedding", draft)
+        assert switched.memory_retrieval.embedding.api_key == old.api_key
+
+        draft = input_for("embedding", previous=switched.memory_retrieval.embedding, model="another-model")
+        draft["connection"].update(endpoint="https://another.example/v1/embeddings", authentication="bearer_api_key")
+        draft["key_action"] = "keep"
+        with pytest.raises(ValueError, match="请重新填写 API key"):
+            await settings.save_retrieval_connection("embedding", draft)
+        assert settings.read() == switched
+
+        draft.update(key_action="replace", api_key="fixture-replacement")
+        updated = await settings.save_retrieval_connection("embedding", draft)
+        assert updated.memory_retrieval.embedding.api_key == "fixture-replacement"
+        assert updated.memory_retrieval.embedding.endpoint == draft["connection"]["endpoint"]
 
     asyncio.run(exercise())
 

@@ -8,7 +8,9 @@ from pulsara_agent.llm.adapters.openai.client import (
 from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
 
 
-def sdk_client(connection, *, timeout_seconds, maximum_response_bytes):
+def sdk_client(
+    connection, *, timeout_seconds, maximum_response_bytes, request_hooks=None
+):
     boundary = ProcessCredentialBoundary(connection.api_key or "")
 
     client = build_async_openai_client(
@@ -21,6 +23,7 @@ def sdk_client(connection, *, timeout_seconds, maximum_response_bytes):
         timeout_policy=OpenAITransportTimeoutPolicy(*([timeout_seconds] * 5)),
         credential_boundary=boundary,
         max_retries=0,
+        request_hooks=request_hooks,
         response_hooks=[bounded_json_response_hook(maximum_response_bytes)],
     )
     return client, boundary

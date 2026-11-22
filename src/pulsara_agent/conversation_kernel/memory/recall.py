@@ -12,9 +12,8 @@ from pulsara_agent.retrieval.config import (
     DenseRecallPurpose,
 )
 from pulsara_agent.retrieval.embedding.validation import freeze_v1_embedding_vector
+from pulsara_agent.retrieval.ranking import reciprocal_rank_score
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
-
-RRF_K = 60
 
 
 class MemoryRetrievalDisposition(StrEnum):
@@ -206,11 +205,7 @@ class PostgresMemoryQuery:
         scored = [
             replace(
                 item,
-                fused_score=sum(
-                    1 / (RRF_K + rank)
-                    for rank in (item.sparse_rank, item.dense_rank)
-                    if rank is not None
-                ),
+                fused_score=reciprocal_rank_score(item.sparse_rank, item.dense_rank),
             )
             for item in by_id.values()
         ]

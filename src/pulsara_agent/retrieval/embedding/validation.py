@@ -1,12 +1,24 @@
-"""Single physical validator for the sealed Round 8 vector space."""
+"""Physical validation shared by embedding callers and the provider."""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 import math
 
+from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV3
+from pulsara_agent.retrieval.errors import EmbeddingServiceError
+
 
 MEMORY_EMBEDDING_DIMENSIONS = 1024
+
+
+def validate_embedding_inputs(texts: Sequence[str]) -> None:
+    if not 1 <= len(texts) <= 10:
+        raise EmbeddingServiceError("embedding batch is outside 1..10 items")
+    estimator = PulsaraHeuristicTokenEstimatorV3()
+    estimates = [estimator.estimate_text(value) for value in texts]
+    if any(value < 1 or value > 8192 for value in estimates) or sum(estimates) > 81920:
+        raise EmbeddingServiceError("embedding input exceeds the local token boundary")
 
 
 def freeze_v1_embedding_vector(values: Sequence[float]) -> tuple[float, ...]:
@@ -35,4 +47,8 @@ def freeze_v1_embedding_vector(values: Sequence[float]) -> tuple[float, ...]:
     return frozen
 
 
-__all__ = ["MEMORY_EMBEDDING_DIMENSIONS", "freeze_v1_embedding_vector"]
+__all__ = [
+    "MEMORY_EMBEDDING_DIMENSIONS",
+    "freeze_v1_embedding_vector",
+    "validate_embedding_inputs",
+]

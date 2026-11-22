@@ -131,6 +131,33 @@ class ProcessLocalNewMcpToolRefOwner:
                 raise LookupError("MCP_TOOL_REF_NOT_ACCEPTED_OR_FOREIGN")
             return ref
 
+    def reconcile_directory(self, runtime) -> None:
+        """Retire issued references as each accepted directory is installed."""
+        with self._lock:
+            by_consumer = {}
+            for record in self._refs.values():
+                ref = record.ref
+                by_consumer.setdefault((ref.conversation_scope_kind, ref.session_id), set()).add(
+                    ref.capability_identity
+                )
+            for (scope, session_id), identities in by_consumer.items():
+                servers = runtime.catalog_for_scope(scope).servers
+                bindings = {}
+                for identity in identities:
+                    executor = runtime.executors.get((identity.source.stable_source_id, identity.stable_name))
+                    if executor is None:
+                        continue
+                    semantic = executor.semantic
+                    visible = semantic.root_visible if scope is ModelInputScopeKind.ROOT else semantic.subagent_visible
+                    if visible:
+                        bindings[identity] = executor_reference_basis(executor)
+                self.reconcile(
+                    conversation_scope_kind=scope, session_id=session_id,
+                    server_ids={s.server_id for s in servers},
+                    complete_server_ids={s.server_id for s in servers if s.status.value == "READY"},
+                    bindings=bindings,
+                )
+
     def reconcile(self, *, conversation_scope_kind, session_id, server_ids,
                   complete_server_ids, bindings) -> None:
         """Forget known removals/changes while preserving unknown directories.

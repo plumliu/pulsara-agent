@@ -576,6 +576,18 @@ class KernelHostSession(
         self._local_mcp_configs = local_mcp_configs
 
         from pulsara_agent.conversation_kernel.session_content import SessionContentQuery
+        from pulsara_agent.capability.mcp_embedding_cache import PostgresMcpToolEmbeddingCache
+        from pulsara_agent.conversation_kernel.mcp.tool_embeddings import McpToolEmbeddings
+
+        retrieval = RetrievalConfig()
+        embedding_gate = asyncio.Semaphore(retrieval.embedding.max_concurrent)
+
+        self._mcp_tool_embeddings = McpToolEmbeddings(
+            PostgresMcpToolEmbeddingCache(repository.connection_provider),
+            connection=lambda: model_runtime.settings.read().memory_retrieval.embedding,
+            requests=embedding_gate,
+            credential_scrub_set=lambda: model_runtime.settings.read().credential_scrub_set(),
+        )
 
         self._tools = DirectKernelToolPort(
             workspace_root=workspace.workspace_root,
@@ -606,6 +618,7 @@ class KernelHostSession(
             media_asr_runtime=media_asr_runtime,
             read_media_settings=model_runtime.settings.read,
             web_service=web_service,
+            mcp_tool_embeddings=self._mcp_tool_embeddings,
         )
         self._tools.bind_interaction_port(self._interactions)
         self._tools.bind_capability_reload_port(self)
@@ -645,7 +658,6 @@ class KernelHostSession(
             domain=workspace.memory_domain,
             host_workspace_id=workspace.workspace_key,
         )
-        retrieval = RetrievalConfig()
         from pulsara_agent.retrieval.decision import DecisionService
         self._decision_service = DecisionService()
         self._memory_tools = KernelMemoryToolPort(
@@ -653,6 +665,7 @@ class KernelHostSession(
             session_id=session_id,
             read_binding=memory_read_binding,
             embedding_config=retrieval.embedding,
+            embedding_gate=embedding_gate,
             rerank_config=retrieval.rerank,
             feature_config=retrieval.memory,
             io_owner=self._io,

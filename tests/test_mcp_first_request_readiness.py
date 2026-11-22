@@ -439,3 +439,39 @@ def test_new_child_provider_runs_while_its_connection_is_blocked(
             await core.shutdown()
 
     asyncio.run(scenario())
+
+
+@pytest.mark.postgres
+def test_host_mcp_search_follows_the_existing_embedding_connection(
+    tmp_path, monkeypatch, isolated_migrated_postgres_database,
+):
+    from dataclasses import replace
+
+    from tests.retrieval_fixtures import connection
+    from tests.test_round4_plan_host import _DetachedDraftModel, _open_test_session
+
+    async def scenario():
+        core, session = await _open_test_session(
+            tmp_path=tmp_path, monkeypatch=monkeypatch, model=_DetachedDraftModel(),
+            postgres_dsn=isolated_migrated_postgres_database.runtime_dsn,
+        )
+        try:
+            search = session._tools._mcp_tool_embeddings
+            settings = core.model_runtime.settings
+            saved = connection("embedding", "fixture-key")
+            initial = settings.read()
+            assert not initial.memory_retrieval.embedding_enabled
+            assert search.current_connection() is None
+            for configured, expected in (
+                (replace(saved, api_key=None), None),
+                (saved, saved),
+                (None, None),
+            ):
+                settings.value = replace(
+                    initial, memory_retrieval=replace(initial.memory_retrieval, embedding=configured),
+                )
+                assert search.current_connection() == expected
+        finally:
+            await core.shutdown()
+
+    asyncio.run(scenario())

@@ -95,7 +95,10 @@ from pulsara_agent.conversation_kernel.vocabulary import (
     LIVE_EVENT_TYPES,
     SUBJECT_SLOTS,
 )
-from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
+from pulsara_agent.storage.migrations.manifest import (
+    CONVERSATION_KERNEL_RELATIONS,
+    POSTGRES_MANAGED_RELATIONS,
+)
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.support.postgres import verified_postgres_provider
 from tests.support.model_config import (
@@ -854,7 +857,7 @@ def test_stage2_schema_and_descriptor_oracles_are_exact(
                 """
             ).fetchall()
         )
-        assert observed == tuple(sorted(CONVERSATION_KERNEL_RELATIONS))
+        assert observed == tuple(sorted(POSTGRES_MANAGED_RELATIONS))
         assert connection.execute(
             "SELECT to_regclass('public.sessions'), to_regclass('pulsara_v3.sessions')"
         ).fetchone() == (None, "pulsara_v3.sessions")

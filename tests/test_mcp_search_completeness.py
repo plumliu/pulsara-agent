@@ -242,7 +242,7 @@ def test_cancelled_source_query_is_saved_and_reported_as_cancelled(
     from tests.support.model_stream import _tool_call,_text
     async def cancelled_source(self,arguments):
         raise asyncio.CancelledError
-    monkeypatch.setattr(CapabilitySourceQuery,'_mcp_servers',cancelled_source)
+    monkeypatch.setattr(CapabilitySourceQuery,'_mcp_declarations',cancelled_source)
     observed=[]
     async def stream(request):
         if len(model.requests)==1:

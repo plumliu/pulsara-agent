@@ -70,6 +70,7 @@ from pulsara_agent.retrieval.config import (
 from pulsara_agent.retrieval.embedding.factory import build_embedding_provider
 from pulsara_agent.retrieval.embedding.protocol import EmbeddingProvider
 from pulsara_agent.retrieval.decision import DecisionService
+from pulsara_agent.retrieval.errors import EmbeddingServiceError
 from pulsara_agent.retrieval.rerank.factory import build_rerank_provider
 from pulsara_agent.retrieval.rerank.protocol import RerankProvider, RerankPurpose
 from pulsara_agent.settings import LocalSettingsStore, LocalSettingsUnavailable
@@ -104,6 +105,7 @@ class KernelMemoryToolPort:
         session_id: str,
         read_binding: FrozenMemoryReadContextBinding,
         embedding_config: EmbeddingBackendConfig,
+        embedding_gate: asyncio.Semaphore | None = None,
         rerank_config: RerankBackendConfig | None = None,
         feature_config: AdvisoryMemoryFeatureConfig | None = None,
         embedding_provider: EmbeddingProvider | None = None,
@@ -126,7 +128,7 @@ class KernelMemoryToolPort:
         self._embedding = embedding_provider
         self._rerank = rerank_provider
         self._decision_service = decision_service
-        self._embedding_gate = asyncio.Semaphore(embedding_config.max_concurrent)
+        self._embedding_gate = embedding_gate or asyncio.Semaphore(embedding_config.max_concurrent)
         self._rerank_gate = asyncio.Semaphore(self._rerank_config.max_concurrent)
         self._remote_tasks: set[asyncio.Task[object]] = set()
         self._write_opt_out = MemoryWriteOptOut()
@@ -206,12 +208,10 @@ class KernelMemoryToolPort:
         timeout_seconds: float,
         connection: RetrievalConnection,
     ) -> Sequence[Sequence[float]] | None:
-        provider = self._embedding or build_embedding_provider(
-            connection, config=self._embedding_config, semaphore=self._embedding_gate
-        )
-        if self.embedding_connection() != connection or not texts:
+        if not texts or self._closed or self.embedding_connection() != connection:
             return None
         try:
+            provider = self._embedding_provider_for(connection)
             return await self._run_remote_exact(
                 provider.embed_batch(tuple(texts)),
                 timeout_seconds=max(0.001, timeout_seconds),
@@ -237,10 +237,25 @@ class KernelMemoryToolPort:
         connection = self.embedding_connection()
         if connection is None or self._closed:
             return None
+        return self._embedding_provider_for(connection)
+
+    def _embedding_provider_for(
+        self, connection: RetrievalConnection
+    ) -> EmbeddingProvider:
         if self._embedding is not None:
             return self._embedding
+
+        def require_current(_texts: Sequence[str]) -> None:
+            if self._closed or self.embedding_connection() != connection:
+                raise EmbeddingServiceError(
+                    "memory embedding connection changed or closed"
+                )
+
         return build_embedding_provider(
-            connection, config=self._embedding_config, semaphore=self._embedding_gate
+            connection,
+            config=self._embedding_config,
+            semaphore=self._embedding_gate,
+            before_request=require_current,
         )
 
     async def _rerank_provider(self) -> RerankProvider | None:

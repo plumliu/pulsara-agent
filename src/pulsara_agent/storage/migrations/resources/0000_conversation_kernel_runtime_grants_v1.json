@@ -144,6 +144,10 @@
       "INSERT",
       "UPDATE",
       "DELETE"
+    ],
+    "mcp_tool_embeddings": [
+      "SELECT",
+      "INSERT"
     ]
   },
   "function_grants": {

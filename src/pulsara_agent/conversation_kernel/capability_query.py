@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from pulsara_agent.capability.local_skill_publisher import LocalSkillInstallScope
 from pulsara_agent.capability.source_query import CapabilityQueryError, parse_query
 from pulsara_agent.conversation_kernel.capability_targets import (plugin_hook_config_path, plugin_target_from_inspection, resolve_capability_target)
+from pulsara_agent.conversation_kernel.mcp.contracts import McpServerCatalogEntry
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.plugins.contracts import (InspectLocalPluginsRequest, PluginInspectionAbort,
     PluginInspectionDisposition, PluginScopeKind)
@@ -32,15 +33,19 @@ def _status(enabled, selected=None):
 
 
 class CapabilitySourceQuery:
-    def __init__(self, service, *, runtime, scope, inspect_tool, mcp_configs):
+    def __init__(self, service, *, runtime, scope, inspect_tool, mcp_configs,
+                 current_directory=None, tool_embeddings=None):
         self.service, self.runtime, self.scope = service, runtime, scope
         self.inspect_tool = inspect_tool
         self.mcp_configs = {config.server_id: config for config in mcp_configs}
+        self.current_directory = current_directory
+        self.tool_embeddings = tool_embeddings
         self.deadline = service.deadline() if service is not None else None
         self.cancellation = EventPluginCancellationPort()
         self.held = []
         self.content = []
         self.failed = False
+        self._scrub = None
 
     @property
     def root(self):
@@ -261,7 +266,7 @@ class CapabilitySourceQuery:
             return []
         result = []
         for server in self.runtime.catalog_for_scope(self.scope).servers:
-            config = self.mcp_configs.get(server.server_id)
+            config = self._matching_config(server)
             if config is None or (self.scope is ModelInputScopeKind.SUBAGENT
                     and config.scope_policy is not McpScopePolicy.ROOT_AND_SUBAGENTS):
                 continue
@@ -280,6 +285,8 @@ class CapabilitySourceQuery:
         return result
 
     def _matching_config(self, server):
+        if not isinstance(server, McpServerCatalogEntry):
+            return None
         config = self.mcp_configs.get(server.server_id)
         return config if config is not None and config.runtime_source == server.runtime_source else None
 
@@ -324,29 +331,18 @@ class CapabilitySourceQuery:
                 return candidate
         return None
 
-    async def _mcp_servers(self, arguments):
-        """Combine installed source declarations with the accepted runtime view.
-
-        Disabled Plugin components need no physical runtime but remain visible
-        as installed connections. Unknown discovery never becomes a zero count.
-        """
-        servers = self._visible_runtime_servers(arguments)
+    async def _mcp_declarations(self, arguments):
         if self.service is None:
-            return servers
-        seen = {canonical_json_bytes(item.connection_target) for item in servers}
-        declared = set()
+            return None
+        declared = {}
         parent = arguments.get("parent")
         if parent is not None and arguments.get("scope") not in {None, resolve_capability_target(self.service, parent)["scope"]}:
             raise CapabilityQueryError("INVALID_ARGUMENTS", "scope 与所选插件的归属不一致。")
 
-        def append(target, server_id, name, enabled, source):
+        def append(target, server_id, name, enabled):
             key = canonical_json_bytes(target)
-            declared.add(key)
-            if key in seen:
-                return
-            seen.add(key)
-            servers.append(SimpleNamespace(connection_target=target, server_id=server_id,
-                display_name=name, sanitized_instructions="", runtime_source=source,
+            declared.setdefault(key, SimpleNamespace(connection_target=target, server_id=server_id,
+                display_name=name, sanitized_instructions="", runtime_source=None,
                 status=SimpleNamespace(value="CONNECTING" if enabled else "DISABLED")))
 
         if parent is None:
@@ -358,7 +354,7 @@ class CapabilitySourceQuery:
                     if self.scope is ModelInputScopeKind.SUBAGENT and item.scope_policy.value != "ROOT_AND_SUBAGENTS":
                         continue
                     target = {"kind": "MCP_CONNECTION", "config_path": str(self.service.mcp.path(LocalMcpTarget(item.server_id, root))), "server_id": item.server_id}
-                    append(target, item.server_id, item.display_name, item.enabled, item.runtime_source)
+                    append(target, item.server_id, item.display_name, item.enabled)
         component = arguments.get("target")
         for plugin in await self._plugins(parent or component):
             if arguments.get("scope") not in {None, plugin.identity.scope.value}:
@@ -374,15 +370,133 @@ class CapabilitySourceQuery:
                     continue
                 target = {"kind": "MCP_CONNECTION", "config_path": str((plugin.package_root / "mcp.json").resolve(strict=False)), "server_id": item.local_server_id}
                 append(target, framed_plugin_mcp_server_id(plugin.identity.plugin_id, item.local_server_id),
-                    f"{plugin.summary.manifest.name}:{item.local_server_id}", plugin.enabled, None)
-        servers = [item for item in servers if canonical_json_bytes(item.connection_target) in declared]
-        servers.sort(key=lambda item: canonical_json_bytes(item.connection_target))
-        return servers
+                    f"{plugin.summary.manifest.name}:{item.local_server_id}", plugin.enabled)
+        return declared
+
+    def _mcp_servers(self, arguments, declared):
+        """Join declarations to the currently accepted runtime without yielding."""
+        visible = self._visible_runtime_servers(arguments)
+        if declared is None:
+            return visible
+        servers = dict(declared)
+        for server in visible:
+            key = canonical_json_bytes(server.connection_target)
+            if key in declared:
+                servers[key] = server
+        return [servers[key] for key in sorted(servers)]
+
+    def _refresh_directory(self):
+        if self.current_directory is None:
+            return False
+        runtime, configs = self.current_directory()
+        current = {config.server_id: config for config in configs}
+        changed = self.runtime is not runtime or self.mcp_configs != current
+        self.runtime, self.mcp_configs = runtime, current
+        return changed
+
+    def _searchable_tools(self, servers):
+        if self.runtime is None:
+            return []
+        ids = {
+            server.server_id for server in servers
+            if self._matching_config(server) is not None
+            and self._accepted_directory(server.server_id) is not None
+        }
+        specs = (self.runtime.root_tool_specs if self.scope is ModelInputScopeKind.ROOT
+                 else self.runtime.subagent_tool_specs)
+        return [tool for tool in specs if tool.server_id in ids]
+
+    async def _mcp_keyword_matches(self, arguments, declared):
+        from pulsara_agent.capability.mcp_search import mcp_tool_search_text, search_mcp
+
+        query = arguments["query"]
+        self._refresh_directory()
+        servers = self._mcp_servers(arguments, declared)
+        tools = self._searchable_tools(servers)
+        embeddings = self.tool_embeddings
+        connection = embeddings.current_connection() if embeddings is not None and tools else None
+        similarities = {}
+        if connection is not None:
+            # Plugin inspection pins package contents. Only the text is needed
+            # across network I/O. Reopen the declarations for ranking.
+            self._close_inspections()
+            scores = await embeddings.scores(
+                query,
+                connection=connection,
+                texts=[mcp_tool_search_text(tool) for tool in tools],
+                deadline_monotonic=self.deadline,
+            )
+            self._check()
+            self.content.clear()
+            self.failed = False
+            declared = await self._mcp_declarations(arguments)
+            self._refresh_directory()
+            servers = self._mcp_servers(arguments, declared)
+            tools = self._searchable_tools(servers)
+            if scores and embeddings.current_connection() == connection:
+                similarities = {
+                    (tool.server_id, tool.remote_tool_name): scores[text]
+                    for tool in tools if (text := mcp_tool_search_text(tool)) in scores
+                }
+        ranked_configs = self.mcp_configs
+        matches = await self._native(
+            search_mcp, query, tools=tools, servers=servers, dense_similarities=similarities
+        )
+        await self._capture_scrub()
+        if similarities and embeddings.current_connection() != connection:
+            self._refresh_directory()
+            servers = self._mcp_servers(arguments, declared)
+            tools = self._searchable_tools(servers)
+            ranked_configs = self.mcp_configs
+            matches = await self._native(search_mcp, query, tools=tools, servers=servers)
+            await self._capture_scrub()
+        if self._refresh_directory():
+            servers = self._mcp_servers(arguments, declared)
+            matches = self._confirmed_mcp_matches(query, matches, servers, ranked_configs)
+            self._failure("MCP 目录在搜索期间更新；本次搜索不完整，仅返回仍可确认的匹配。")
+        return matches, servers
+
+    def _confirmed_mcp_matches(self, query, matches, servers, ranked_configs):
+        from pulsara_agent.capability.mcp_search import mcp_tool_description_excerpt
+
+        # Keep confirmed matches when the directory moves again during ranking.
+        # Result construction reads the current schema after all awaited work.
+        by_target = {canonical_json_bytes(server.connection_target): server for server in servers}
+        current_tools = self._searchable_tools(servers)
+        tools = {
+            (tool.server_id, tool.remote_tool_name): tool
+            for tool in current_tools
+            if (previous := ranked_configs.get(tool.server_id)) is not None
+            and previous.runtime_source == self.mcp_configs[tool.server_id].runtime_source
+        }
+        confirmed = [
+            ("tool", tool, mcp_tool_description_excerpt(tool.description))
+            for tool in current_tools if tool.remote_tool_name == query
+        ]
+        for kind, item, excerpt in matches:
+            if kind == "tool":
+                tool = tools.get((item.server_id, item.remote_tool_name))
+                if tool is not None and tool.remote_tool_name != query and tool.description == item.description:
+                    confirmed.append((kind, tool, excerpt))
+            else:
+                server = by_target.get(canonical_json_bytes(item.connection_target))
+                if (server is not None and server.server_id == item.server_id
+                    and server.runtime_source == item.runtime_source
+                    and server.display_name == item.display_name
+                    and server.sanitized_instructions == item.sanitized_instructions):
+                    confirmed.append((kind, server, excerpt))
+        return confirmed
 
     async def _mcp(self, arguments):
         target = arguments.get("target")
-        servers = (self._visible_runtime_servers(arguments) if target is not None and target["kind"] == "MCP_TOOL"
-            else await self._mcp_servers(arguments))
+        declared = (None if target is not None and target["kind"] == "MCP_TOOL"
+            else await self._mcp_declarations(arguments))
+        if "query" in arguments:
+            matches, servers = await self._mcp_keyword_matches(arguments, declared)
+        else:
+            await self._capture_scrub()
+            self._refresh_directory()
+            servers = self._mcp_servers(arguments, declared)
         if target is None and "query" not in arguments:
             self.content.extend(_object(self._service_record(server)) for server in servers)
             if not servers:
@@ -406,12 +520,9 @@ class CapabilitySourceQuery:
             if not tools:
                 self.content.append(_text("该服务当前没有可见工具。"))
             return
-        ids = {server.server_id for server in servers if self._matching_config(server) is not None}
-        specs = (() if self.runtime is None else self.runtime.root_tool_specs
-            if self.scope is ModelInputScopeKind.ROOT else self.runtime.subagent_tool_specs)
-        tools = [tool for tool in specs if tool.server_id in ids and self._accepted_directory(tool.server_id) is not None]
         if target is not None:
-            tools = [tool for tool in tools if tool.server_id == target["server_id"] and tool.remote_tool_name == target["remote_tool_name"]]
+            tools = [tool for tool in self._searchable_tools(servers)
+                if tool.server_id == target["server_id"] and tool.remote_tool_name == target["remote_tool_name"]]
             if not tools:
                 raise CapabilityQueryError("NOT_FOUND", "未找到当前范围内的 MCP 工具。")
             executor = (self.runtime.executors.get((tools[0].server_id, tools[0].remote_tool_name))
@@ -422,8 +533,6 @@ class CapabilitySourceQuery:
             else:
                 self.content.append(_object(self.inspect_tool(executor)))
             return
-        from pulsara_agent.capability.mcp_search import search_mcp
-        matches = await self._native(search_mcp, arguments["query"], tools=tools, servers=servers)
         for kind, item, description in matches:
             if kind == "service":
                 self.content.append(_object(self._service_record(item)))
@@ -458,6 +567,15 @@ class CapabilitySourceQuery:
         elif not matches and not self.failed:
             self.content.append(_text("没有找到匹配的 MCP 工具或服务。"))
 
+    def _close_inspections(self):
+        while self.held:
+            self.held.pop().close()
+
+    async def _capture_scrub(self):
+        if self.service is not None:
+            self._scrub = await asyncio.to_thread(self.service.plugins._capture_scrub_set,
+                InspectLocalPluginsRequest(self.deadline))
+
     async def execute(self, arguments):
         status = "SUCCESS"
         try:
@@ -480,11 +598,8 @@ class CapabilitySourceQuery:
             status = "ERROR"
             self.content.insert(0, _text(str(exc)))
         finally:
-            for held in self.held:
-                held.close()
+            self._close_inspections()
         result = {"meta": {"status": status}, "content": self.content}
-        if self.service is not None:
-            scrub = await asyncio.to_thread(self.service.plugins._capture_scrub_set,
-                InspectLocalPluginsRequest(self.deadline))
-            result = scrub.scrub_json(result)
-        return result
+        if self._scrub is None:
+            await self._capture_scrub()
+        return self._scrub.scrub_json(result) if self._scrub is not None else result

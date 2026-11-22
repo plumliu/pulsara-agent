@@ -22,7 +22,7 @@ from pulsara_agent.storage.migrations.grants import (
     PostgresRuntimeGrantExecutor,
     build_postgres_runtime_grant_policy,
 )
-from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
+from pulsara_agent.storage.migrations.manifest import POSTGRES_MANAGED_RELATIONS
 from pulsara_agent.storage.migrations.registry import (
     POSTGRES_BASELINE,
 )
@@ -140,7 +140,7 @@ class PostgresMigrationRunner:
                     _validate_clean_ledger(rows, definition)
                     _verify_vector_capability(connection)
                     _verify_search_capability(connection)
-                    _verify_product_relations(connection)
+                    _verify_managed_relations(connection)
                     _verify_runtime_grants(
                         connection, runtime_identity.runtime_role
                     )
@@ -166,7 +166,7 @@ class PostgresMigrationRunner:
                     grants = self._grant_executor.reconcile(
                         connection, runtime_role=runtime_identity.runtime_role
                     )
-                    _verify_product_relations(connection)
+                    _verify_managed_relations(connection)
                     _verify_runtime_grants(
                         connection, runtime_identity.runtime_role
                     )
@@ -295,7 +295,7 @@ def classify_clean_baseline_confirmation(
             return BaselineCommitConfirmation.NONE
         _validate_clean_ledger(rows, POSTGRES_BASELINE)
         _verify_vector_capability(connection)
-        _verify_product_relations(connection)
+        _verify_managed_relations(connection)
         _verify_runtime_grants(connection, runtime_role)
     except BaseException:
         return BaselineCommitConfirmation.CONFLICT
@@ -392,7 +392,7 @@ def _verify_vector_capability(connection: Connection) -> None:
         )
 
 
-def _verify_product_relations(connection: Connection) -> None:
+def _verify_managed_relations(connection: Connection) -> None:
     observed = tuple(
         _cell(row, 0, "relname")
         for row in connection.execute(
@@ -404,18 +404,14 @@ def _verify_product_relations(connection: Connection) -> None:
             """
         ).fetchall()
     )
-    if observed != tuple(sorted(CONVERSATION_KERNEL_RELATIONS)):
+    if observed != tuple(sorted(POSTGRES_MANAGED_RELATIONS)):
         raise PostgresSchemaError(
             PostgresSchemaFailureCode.CATALOG_DRIFT,
-            "pulsara_v3 product relation catalog is not exact",
+            "pulsara_v3 managed relation catalog is not exact",
         )
 
 
 def _verify_runtime_grants(connection: Connection, runtime_role: str) -> None:
-    from pulsara_agent.storage.migrations.manifest import (
-        CONVERSATION_KERNEL_RUNTIME_PRIVILEGES,
-    )
-
     schema_expectations = (
         ("pulsara_v3", "USAGE", True),
         ("pulsara_v3", "CREATE", False),
@@ -432,7 +428,8 @@ def _verify_runtime_grants(connection: Connection, runtime_role: str) -> None:
                 "clean runtime schema grants are not exact",
             )
 
-    for relation, required in CONVERSATION_KERNEL_RUNTIME_PRIVILEGES.items():
+    policy = build_postgres_runtime_grant_policy()
+    for relation, required in policy.relation_privileges.items():
         for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE"):
             allowed_row = connection.execute(
                 "SELECT pg_catalog.has_table_privilege(%s, %s, %s) AS allowed",
@@ -444,7 +441,6 @@ def _verify_runtime_grants(connection: Connection, runtime_role: str) -> None:
                     PostgresSchemaFailureCode.PRIVILEGE_MISSING,
                     "clean runtime relation grants are not exact",
                 )
-    policy = build_postgres_runtime_grant_policy()
     for relation, columns in policy.column_privileges.items():
         observed_columns = connection.execute(
             "SELECT column_name FROM information_schema.columns "
@@ -474,8 +470,7 @@ def _verify_runtime_grants(connection: Connection, runtime_role: str) -> None:
                 "clean runtime migration-ledger grants are not exact",
             )
 
-    function_policy = build_postgres_runtime_grant_policy().function_privileges
-    for function_signature, required in function_policy.items():
+    for function_signature, required in policy.function_privileges.items():
         function_identity = f"pulsara_v3.{function_signature}"
         function_execute = connection.execute(
             "SELECT pg_catalog.has_function_privilege(%s, %s, 'EXECUTE') AS allowed",

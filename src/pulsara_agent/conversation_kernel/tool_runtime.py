@@ -582,6 +582,7 @@ class DirectKernelToolPort(
         read_media_settings=None,
         media_asr_runtime=None,
         web_service=None,
+        mcp_tool_embeddings=None,
         shared_terminal_owner: "DirectKernelToolPort | None" = None,
     ) -> None:
         root = workspace_root.expanduser().resolve()
@@ -599,6 +600,7 @@ class DirectKernelToolPort(
         self._media_asr_runtime = media_asr_runtime
         self._media_tasks = set()
         self._web_service = web_service
+        self._mcp_tool_embeddings = mcp_tool_embeddings
         self._web_tasks = set()
         self._deadlines = deadline_factory or KernelExecutionDeadlineFactory()
         self._image_validator = image_validator
@@ -1131,18 +1133,8 @@ class DirectKernelToolPort(
         with self._surface_lock:
             runtime = self._mcp_current
             if runtime is not None:
-                scope = borrow.prepared.access.conversation_scope_kind
-                servers = runtime.catalog_for_scope(scope).servers
-                specs = runtime.root_tool_specs if scope is ModelInputScopeKind.ROOT else runtime.subagent_tool_specs
-                executors = [runtime.executors[(item.server_id, item.remote_tool_name)] for item in specs
-                    if (item.server_id, item.remote_tool_name) in runtime.executors]
-                self._mcp_meta_refs.reconcile(
-                    conversation_scope_kind=scope, session_id=borrow.prepared.access.session_id,
-                    server_ids={item.server_id for item in servers},
-                    complete_server_ids={item.server_id for item in servers if item.status.value == "READY"},
-                    bindings={_mcp_executor_capability_version(item).identity: executor_reference_basis(item)
-                        for item in executors},
-                )
+                # Account facts can change even without another catalog install.
+                self._mcp_meta_refs.reconcile_directory(runtime)
             return runtime, borrow.prepared.access.surface_generation
 
 
@@ -1214,10 +1206,15 @@ class DirectKernelToolPort(
 
         try:
             values = parse_query(arguments, subagent=scope is ModelInputScopeKind.SUBAGENT)
-            runtime, _ = self._current_mcp_runtime_for_borrow(borrow)
+
+            def current_directory():
+                runtime, _ = self._current_mcp_runtime_for_borrow(borrow)
+                return runtime, self._mcp_supervisor.configs
+
             result = await CapabilitySourceQuery(self._capability_management,
-                runtime=runtime, scope=scope, inspect_tool=inspect_tool,
-                mcp_configs=self._mcp_supervisor.configs).execute(values)
+                runtime=None, scope=scope, inspect_tool=inspect_tool,
+                mcp_configs=(), current_directory=current_directory,
+                tool_embeddings=self._mcp_tool_embeddings).execute(values)
             token = None
             if prepared_refs:
                 token = ProcessLocalEffectSettlementToken(random_id("settlement"), tuple(prepared_refs))

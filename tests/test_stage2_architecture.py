@@ -19,7 +19,7 @@ from pulsara_agent.conversation_kernel.vocabulary import (
 )
 from pulsara_agent.storage.migrations.manifest import (
     CONVERSATION_KERNEL_RELATIONS,
-    CONVERSATION_KERNEL_RUNTIME_PRIVILEGES,
+    POSTGRES_RUNTIME_RELATION_PRIVILEGES,
 )
 from pulsara_agent.storage.migrations.registry import POSTGRES_BASELINE
 from pulsara_agent.storage.migrations.grants import (
@@ -54,7 +54,7 @@ def test_stage2_schema_runtime_grants_and_append_guard_have_single_owners() -> N
     assert APPEND_GUARDS == ("HostWriterGuard",)
 
     policy = build_postgres_runtime_grant_policy()
-    assert policy.relation_privileges == CONVERSATION_KERNEL_RUNTIME_PRIVILEGES
+    assert policy.relation_privileges == POSTGRES_RUNTIME_RELATION_PRIVILEGES
     assert build_postgres_schema_manifest().product_relations == (
         CONVERSATION_KERNEL_RELATIONS
     )

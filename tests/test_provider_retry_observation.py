@@ -167,6 +167,7 @@ def test_provider_cancellation_precedes_blocked_cell_join(operation):
             _hooks=SimpleNamespace(begin_host_close=lambda **kwargs: None),
             _ephemeral=SimpleNamespace(aclose=AsyncMock()),
             _decision_service=SimpleNamespace(stop_admission=lambda: None, aclose=AsyncMock()),
+            _mcp_tool_embeddings=SimpleNamespace(stop_admission=lambda: None, aclose=AsyncMock()),
             extensions=SimpleNamespace(stop_admission=lambda: None),
             _mcp_supervisor=SimpleNamespace(stop_admission=lambda: None, aclose=AsyncMock()),
             _delivery_task=None, _cell_output_task=None,

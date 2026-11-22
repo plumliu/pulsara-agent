@@ -8,7 +8,7 @@ from psycopg.rows import dict_row
 
 from pulsara_agent.storage.migrations.manifest import (
     CONVERSATION_KERNEL_RELATIONS,
-    CONVERSATION_KERNEL_RUNTIME_PRIVILEGES,
+    POSTGRES_RUNTIME_RELATION_PRIVILEGES,
 )
 from pulsara_agent.storage.postgres_connection_provider import (
     PostgresConnectionLane,
@@ -37,7 +37,7 @@ def require_stage2_runtime_privilege_boundary(
             raise RuntimeError("Stage 2 runtime role cannot use pulsara_v3")
         for relation in CONVERSATION_KERNEL_RELATIONS:
             expected = frozenset(
-                CONVERSATION_KERNEL_RUNTIME_PRIVILEGES[relation]
+                POSTGRES_RUNTIME_RELATION_PRIVILEGES[relation]
             )
             for privilege in _RELATION_PRIVILEGES:
                 allowed = connection.execute(

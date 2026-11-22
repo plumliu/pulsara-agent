@@ -2219,6 +2219,12 @@ CREATE INDEX idx_asr_cache_interval ON pulsara_v3.asr_cache USING gist
     (box(point(from_seconds, 0), point(to_seconds, 0)));
 REVOKE ALL ON pulsara_v3.asr_cache FROM PUBLIC;
 
+CREATE TABLE pulsara_v3.mcp_tool_embeddings (
+    cache_key bytea PRIMARY KEY CHECK (octet_length(cache_key) = 32),
+    embedding public.vector(1024) NOT NULL
+);
+REVOKE ALL ON pulsara_v3.mcp_tool_embeddings FROM PUBLIC;
+
 -- Content identity and payload are immutable; only the two owner columns are mutable.
 CREATE FUNCTION pulsara_v3.enforce_content_part_invariants()
 RETURNS trigger LANGUAGE plpgsql AS $$

@@ -786,6 +786,12 @@ class LocalSettingsStore:
         if (action == "replace") != ("api_key" in body):
             raise ValueError("替换密钥时请填写 API key。")
         previous = getattr(current.memory_retrieval, slot)
+        if (
+            slot == "embedding" and action == "keep"
+            and previous is not None and previous.api_key is not None
+            and previous.embedding_contract.endpoint != connection.embedding_contract.endpoint
+        ):
+            raise ValueError("请求地址已改变，请重新填写 API key。")
         key = (
             body.get("api_key")
             if action == "replace"

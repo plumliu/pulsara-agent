@@ -414,6 +414,7 @@ class _HostSessionLifecycleOperations:
             self._pending_workspace_recreated = None
             self._pending_process_controls.clear()
             self._decision_service.stop_admission()
+            self._mcp_tool_embeddings.stop_admission()
             self._tools.stop_local_process_admission()
             self._request_close_cancellation()
             self._presentation_notices.clear()
@@ -443,6 +444,7 @@ class _HostSessionLifecycleOperations:
             )
             self._closing = True
             self._decision_service.stop_admission()
+            self._mcp_tool_embeddings.stop_admission()
             self._tools.stop_local_process_admission()
             self._request_close_cancellation()
             close_error: BaseException | None = None
@@ -454,6 +456,10 @@ class _HostSessionLifecycleOperations:
             decision_close_task = asyncio.create_task(
                 self._decision_service.aclose(deadline_monotonic=deadline),
                 name=f"kernel-decision-close:{self.host_session_id}",
+            )
+            embedding_close_task = asyncio.create_task(
+                self._mcp_tool_embeddings.aclose(deadline_monotonic=deadline),
+                name=f"kernel-mcp-embedding-close:{self.host_session_id}",
             )
             terminal_stop_task = asyncio.create_task(
                 self._tools.stop_terminal_physical_owners(
@@ -660,6 +666,11 @@ class _HostSessionLifecycleOperations:
             self._hook_context.close()
             self._input_continuity.close()
             try:
+                if await _join_close_task(embedding_close_task, deadline_monotonic=deadline):
+                    close_error = close_error or TimeoutError("MCP embedding requests exited after close deadline")
+            except BaseException as exc:
+                close_error = close_error or exc
+            try:
                 await self._memory_embedding_maintainer.aclose(
                     deadline_monotonic=deadline
                 )
@@ -742,6 +753,7 @@ class _HostSessionLifecycleOperations:
                     self._hooks,
                     self._ephemeral,
                     self._memory_embedding_maintainer,
+                    self._mcp_tool_embeddings,
                     self._memory_tools,
                     self._decision_service,
                     self.extensions,

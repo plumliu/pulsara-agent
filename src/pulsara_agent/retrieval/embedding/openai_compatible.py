@@ -1,10 +1,9 @@
 """Minimal text embedding shape over the OpenAI SDK public POST entrypoint."""
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 import json
 
-from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV3
 from pulsara_agent.llm.adapters.openai.client import (
     admit_provider_request,
     openai_auth_request_options,
@@ -13,7 +12,10 @@ from pulsara_agent.llm.adapters.openai.client import (
 from pulsara_agent.retrieval.config import RetrievalConnection, EmbeddingBackendConfig
 from pulsara_agent.retrieval.http import sdk_client
 from pulsara_agent.retrieval.errors import EmbeddingServiceError
-from pulsara_agent.retrieval.embedding.validation import freeze_v1_embedding_vector
+from pulsara_agent.retrieval.embedding.validation import (
+    freeze_v1_embedding_vector,
+    validate_embedding_inputs,
+)
 
 MAXIMUM_EMBEDDING_REQUEST_BODY_BYTES = 16 * 1024 * 1024
 
@@ -25,6 +27,7 @@ class HttpEmbeddingProvider:
         *,
         config=EmbeddingBackendConfig(),
         semaphore=None,
+        before_request: Callable[[Sequence[str]], None] | None = None,
     ):
         if (
             connection.shape != "openai_embedding"
@@ -39,6 +42,7 @@ class HttpEmbeddingProvider:
         self.model_id = connection.model_id
         self.dimensions = 1024
         self._semaphore = semaphore or asyncio.Semaphore(config.max_concurrent)
+        self._before_request = before_request
 
     async def aclose(self):
         return None
@@ -55,7 +59,7 @@ class HttpEmbeddingProvider:
         return [vector for chunk in results for vector in chunk]
 
     async def _embed_chunk(self, texts):
-        _validate_embedding_inputs(texts)
+        validate_embedding_inputs(texts)
         payload = {"model": self.model_id, "input": texts}
         if (
             len(json.dumps(payload, ensure_ascii=False).encode())
@@ -67,10 +71,26 @@ class HttpEmbeddingProvider:
             import openai
             from openai.types import CreateEmbeddingResponse
 
+            request_hooks = []
+            if (before_request := self._before_request) is not None:
+
+                async def check_send(name, _info):
+                    if name.endswith("send_request_headers.started"):
+                        before_request(texts)
+
+                async def check_request(request):
+                    # HTTPX2 calls the hook for each redirect and for custom
+                    # transports. HTTPCore rechecks after the connection wait.
+                    before_request(texts)
+                    request.extensions["trace"] = check_send
+
+                request_hooks.append(check_request)
+
             client, boundary = sdk_client(
                 self.connection,
                 timeout_seconds=self.config.timeout_seconds,
                 maximum_response_bytes=MAXIMUM_EMBEDDING_REQUEST_BODY_BYTES,
+                request_hooks=request_hooks,
             )
             try:
                 async with client:
@@ -78,6 +98,7 @@ class HttpEmbeddingProvider:
                         options = openai_auth_request_options(
                             requires_api_key=self.connection.authentication != "none"
                         )
+
                         response = await admit_provider_request(
                             credential_boundary=boundary,
                             payload=payload,
@@ -114,12 +135,3 @@ class HttpEmbeddingProvider:
         except (TypeError, AttributeError, ValueError) as exc:
             raise EmbeddingServiceError(f"embedding response invalid: {exc}") from exc
         return vectors
-
-
-def _validate_embedding_inputs(texts):
-    if not 1 <= len(texts) <= 10:
-        raise EmbeddingServiceError("embedding batch is outside 1..10 items")
-    estimator = PulsaraHeuristicTokenEstimatorV3()
-    estimates = [estimator.estimate_text(value) for value in texts]
-    if any(value < 1 or value > 8192 for value in estimates) or sum(estimates) > 81920:
-        raise EmbeddingServiceError("embedding input exceeds the local token boundary")

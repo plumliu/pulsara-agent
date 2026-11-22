@@ -15,14 +15,14 @@ from pulsara_agent.storage.migrations.errors import (
 )
 from pulsara_agent.storage.migrations.grants import build_postgres_runtime_grant_policy
 from pulsara_agent.storage.migrations.manifest import (
-    CONVERSATION_KERNEL_RELATIONS,
+    POSTGRES_MANAGED_RELATIONS,
     build_postgres_schema_manifest,
 )
 from pulsara_agent.storage.migrations.registry import POSTGRES_BASELINE
 from pulsara_agent.storage.migrations.runner import (
     _read_identity_from_connection,
     _validate_clean_ledger,
-    _verify_product_relations,
+    _verify_managed_relations,
     _verify_runtime_grants,
     _verify_vector_capability,
     read_migration_ledger,
@@ -120,7 +120,7 @@ class PostgresSchemaVerifier:
         _verify_vector_capability(connection)
         from pulsara_agent.storage.migrations.runner import _verify_search_capability
         _verify_search_capability(connection)
-        _verify_product_relations(connection)
+        _verify_managed_relations(connection)
         _verify_runtime_grants(connection, identity.runtime_role)
 
         extension = connection.execute(
@@ -169,11 +169,15 @@ def _observed_catalog_fingerprint(connection: Connection) -> str:
         tuple(row)
         for row in connection.execute(
             """
-            SELECT table_name, ordinal_position, column_name, udt_schema, udt_name,
-                   is_nullable, COALESCE(column_default, '')
-            FROM information_schema.columns
-            WHERE table_schema = 'pulsara_v3'
-            ORDER BY table_name, ordinal_position
+            SELECT cols.table_name, cols.ordinal_position, cols.column_name,
+                   cols.udt_schema, cols.udt_name, cols.is_nullable,
+                   COALESCE(cols.column_default, ''), a.atttypmod
+            FROM information_schema.columns AS cols
+            JOIN pg_catalog.pg_namespace n ON n.nspname = cols.table_schema
+            JOIN pg_catalog.pg_class c ON c.relnamespace = n.oid AND c.relname = cols.table_name
+            JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum = cols.ordinal_position
+            WHERE cols.table_schema = 'pulsara_v3'
+            ORDER BY cols.table_name, cols.ordinal_position
             """
         ).fetchall()
     )
@@ -237,7 +241,7 @@ def _observed_catalog_fingerprint(connection: Connection) -> str:
     return postgres_schema_fingerprint(
         "pulsara:postgres-observed-catalog:v2",
         {
-            "relations": tuple(sorted(CONVERSATION_KERNEL_RELATIONS)),
+            "relations": tuple(sorted(POSTGRES_MANAGED_RELATIONS)),
             "columns": columns,
             "constraints": constraints,
             "indexes": indexes,

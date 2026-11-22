@@ -10,8 +10,8 @@ from psycopg import Connection, sql
 
 from pulsara_agent.storage.migrations.contracts import postgres_schema_fingerprint
 from pulsara_agent.storage.migrations.manifest import (
-    CONVERSATION_KERNEL_RUNTIME_PRIVILEGES,
     CONVERSATION_KERNEL_RUNTIME_COLUMN_PRIVILEGES,
+    POSTGRES_RUNTIME_RELATION_PRIVILEGES,
 )
 
 
@@ -33,7 +33,7 @@ def build_postgres_runtime_grant_policy() -> CleanRuntimeGrantPolicy:
         str(name): tuple(str(item) for item in privileges)
         for name, privileges in payload["relation_grants"].items()
     }
-    if relations != CONVERSATION_KERNEL_RUNTIME_PRIVILEGES:
+    if relations != POSTGRES_RUNTIME_RELATION_PRIVILEGES:
         raise RuntimeError("clean runtime grant artifact drifted")
     columns = {
         str(relation): {str(column): tuple(privileges) for column, privileges in grants.items()}

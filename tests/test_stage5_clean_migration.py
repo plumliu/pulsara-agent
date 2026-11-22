@@ -22,7 +22,7 @@ from pulsara_agent.storage.migrations.errors import (
     PostgresSchemaError,
     PostgresSchemaFailureCode,
 )
-from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
+from pulsara_agent.storage.migrations.manifest import POSTGRES_MANAGED_RELATIONS
 from pulsara_agent.storage.migrations.registry import POSTGRES_BASELINE
 from pulsara_agent.storage.migrations.runner import (
     BaselineCommitConfirmation,
@@ -187,7 +187,7 @@ def test_empty_install_second_migrate_and_verified_checkout() -> None:
                         """
                     ).fetchall()
                 )
-            assert observed == tuple(sorted(CONVERSATION_KERNEL_RELATIONS))
+            assert observed == tuple(sorted(POSTGRES_MANAGED_RELATIONS))
             assert repository.connection_provider is provider
 
 
