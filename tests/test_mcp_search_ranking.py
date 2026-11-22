@@ -24,7 +24,7 @@ def test_tool_search_text_preserves_public_text_and_excludes_schema():
     assert search_mcp("quasar", tools=[tool], servers=[]) == []
 
 
-def test_equal_rrf_scores_break_ties_by_directory_after_service_hits_are_removed():
+def test_weighted_tool_ranking_keeps_services_last_and_falls_back_to_bm25():
     sparse_one = _tool("alpha", "keyword")
     sparse_two = _tool("beta", "keyword extra words")
     dense_one = _tool("gamma", "Reproduce an existing page.")
@@ -40,13 +40,16 @@ def test_equal_rrf_scores_break_ties_by_directory_after_service_hits_are_removed
 
     matches = search_mcp("keyword", tools=directory, servers=[service])
     assert [item for _, item, _ in matches] == [sparse_one, sparse_two, both, service]
+    assert search_mcp(
+        "keyword", tools=directory, servers=[service], dense_similarities={("tools", "gamma"): 0.39}
+    ) == matches
 
     matches = search_mcp(
         "keyword", tools=directory, servers=[service], dense_similarities=dense_similarities
     )
 
-    # Rank three on both lists outranks rank one on either list alone.
-    assert [item for _, item, _ in matches] == [both, dense_one, sparse_one, sparse_two, dense_two, service]
+    # Rank three on both lists scores 1.1/63. Dense-only rank two beats BM25-only rank one.
+    assert [item for _, item, _ in matches] == [both, dense_one, dense_two, sparse_one, sparse_two, service]
     assert matches[1] == ("tool", dense_one, "Reproduce an existing page.")
     assert matches[-1] == ("service", service, None)
 
@@ -65,24 +68,34 @@ def test_exact_name_group_preserves_separate_tools_and_directory_order():
     assert [tool for _, tool, _ in hits] == [first, second, both]
 
 
+def test_bm25_first_place_bonus_can_lift_dense_rank_seven_but_not_eight():
+    directory = [_tool(f"tool_{i}", "") for i in range(8)]
+    similarities = {("tools", tool.remote_tool_name): 0.9 - i * 0.01 for i, tool in enumerate(directory)}
+    for index, expected_top in [(6, 6), (7, 0)]:
+        directory[index].description = "keyword"
+        matches = search_mcp("keyword", tools=directory, servers=[], dense_similarities=similarities)
+        assert matches[0][1] == directory[expected_top]
+        directory[index].description = ""
+
+
 def test_dense_cosine_admission_preserves_no_match_and_stable_similarity_ties():
     first = _tool("copy", "Create a duplicate.")
     second = _tool("duplicate", "Clone this page.")
     low = _tool("delete", "Remove an item.")
     bad = _tool("update", "Edit an item.")
     directory = [first, second, low, bad]
-    # 0.50 is the provisional MCP operating default pending calibration on tool samples.
+    # 0.40 is the provisional MCP operating default pending calibration on tool samples.
     similarities = {
-        ("tools", "duplicate"): 0.50,
-        ("tools", "copy"): 0.50,
-        ("tools", "delete"): 0.49,
+        ("tools", "duplicate"): 0.40,
+        ("tools", "copy"): 0.40,
+        ("tools", "delete"): 0.3999,
         ("tools", "update"): float("nan"),
         ("invisible", "copy"): 0.99,
     }
     hits = search_mcp("reproduce", tools=directory, servers=[], dense_similarities=similarities)
     assert [tool for _, tool, _ in hits] == [first, second]
     assert search_mcp("unrelated", tools=directory, servers=[], dense_similarities={
-        ("tools", "delete"): 0.49,
+        ("tools", "delete"): 0.3999,
         ("tools", "update"): float("inf"),
     }) == []
 

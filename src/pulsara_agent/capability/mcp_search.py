@@ -15,7 +15,7 @@ from pulsara_agent.retrieval.ranking import reciprocal_rank_score
 _TOKEN_PATTERN = r"[\u3400-\u9fff]|[^\W\u3400-\u9fff]+"
 
 # Operational default for MCP search, pending tool-sample calibration.
-_PROVISIONAL_MCP_DENSE_COSINE_FLOOR = 0.50
+_PROVISIONAL_MCP_DENSE_COSINE_FLOOR = 0.40
 
 
 def mcp_tool_search_text(tool) -> str:
@@ -99,11 +99,16 @@ def search_mcp(
     dense_ranks = {key: rank for rank, key in enumerate(dense_keys, 1)}
 
     exact_keys = [key for key in tool_keys if key[1] == query]
-    fused_keys = sorted(
-        (key for key in tool_keys if key[1] != query and (key in lexical_ranks or key in dense_ranks)),
-        key=lambda key: reciprocal_rank_score(lexical_ranks.get(key), dense_ranks.get(key)),
-        reverse=True,
-    )
+    if dense_ranks:
+        fused_keys = sorted(
+            (key for key in tool_keys if key[1] != query and (key in lexical_ranks or key in dense_ranks)),
+            key=lambda key: reciprocal_rank_score(
+                lexical_ranks.get(key), dense_ranks.get(key), first_weight=0.1, second_weight=1.0
+            ),
+            reverse=True,
+        )
+    else:
+        fused_keys = [key for key in lexical_ranks if key[1] != query]
     pattern = (
         re.compile("|".join(re.escape(term) for term in terms), re.IGNORECASE)
         if terms and (exact_keys or fused_keys)
